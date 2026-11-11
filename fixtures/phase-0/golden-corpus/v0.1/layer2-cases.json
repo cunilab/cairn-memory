@@ -1,0 +1,44 @@
+{
+  "corpusVersion": "cairn-golden/layer2-v0.1",
+  "description": "Layer 2 continuity checks for decision evidence, branch isolation, stale commits, contradictions, and repeat investigation.",
+  "cases": [
+    {
+      "id": "why-cache-change",
+      "query": "Redis default cache",
+      "expected": {
+        "decisionReason": true,
+        "relationship": "file_contains_symbol",
+        "evidence": true
+      }
+    },
+    {
+      "id": "branch-hypothesis-isolation",
+      "query": "Redis default cache",
+      "expected": {
+        "mainExcludesWorktree": true,
+        "matchingWorktreeIncludes": true
+      }
+    },
+    {
+      "id": "stale-commit-signal",
+      "query": "old cache benchmark",
+      "expected": {
+        "stale": true
+      }
+    },
+    {
+      "id": "contradictory-cache-decisions",
+      "query": "Redis default cache",
+      "expected": {
+        "contradictory": true,
+        "competingMemory": true
+      }
+    }
+  ],
+  "scoring": {
+    "firstInformedAction": "first why-changed response contains decision reason, source evidence, and a relationship",
+    "repeatedInvestigation": "repeating the same query returns the same memory IDs without duplication",
+    "scopePrecision": "main context excludes the worktree hypothesis",
+    "staleAndContradictionSignals": "results expose stale and contradictory state without silently selecting a winner"
+  }
+}
