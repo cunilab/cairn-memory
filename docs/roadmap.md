@@ -10,7 +10,7 @@ This roadmap turns AgentMemory's capture and retrieval foundation into Cairn Mem
 
 The project should ship in small, reviewable layers. **Every layer must produce a usable Cairn on its own.** A feature is not complete because it exists in code; it needs a clear boundary, a recovery story, and evidence that it behaves safely.
 
-**Current focus:** Layer 4 — Project Cairn and Evidence-Backed Promotion
+**Current focus:** Layer 5 — Collaborative Cairns
 
 ### ✅ Phase 0 — Product, contract, and memory-autopilot baseline
 
@@ -117,15 +117,15 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** Authorized people and agents can share selected project memory without exposing private personal memory.
 
-Explicit invite, share, read, and revoke of one already promoted project memory exists for an owner and one member. The file-backed CLI and MCP can invite, share, read, and revoke. Roles beyond owner and member, automatic sharing, and offline purge do not.
+> **Layer 5 status:** An owner and one member can invite, explicitly share, read, and revoke one promoted project memory. The default space policy is manual, so promotion creates no share. The owner can list explainable share candidates, dismiss one without sharing it, or accept it through the existing share method. The only automatic policy is `auto_nonsensitive_project_memory`: promoting a project memory that is not secret and not sensitive shares it with current members and writes the share audit. Secrets, sensitive memories, and private observations stay unshared. Turning the policy off does not revoke existing shares. Owner and member can read a conflict list that keeps both contradictory project memories. Shared reads include the share reason and source memory id when those values exist. The project inspection page shows current decisions, handoffs, stale memories, conflicts, and revocations. Delete, offline purge, encryption, federation, CRDTs, and roles beyond owner and member remain open.
 
 - [ ] Add project and team spaces, memberships, roles, and permission checks.
 - [ ] Add explicit promote, share, revoke, forget, and delete operations with audit entries.
-- [ ] Add explainable share candidates and reviewable exceptions.
-- [ ] Allow automatic sharing only when an explicit space policy matches and privacy checks pass.
-- [ ] Preserve source actors and trails when memories are summarized or merged.
-- [ ] Represent contradictions and competing versions instead of silently choosing a winner.
-- [ ] Add collaboration views for handoffs, decisions, stale facts, conflicts, and revocations.
+- [x] Add explainable share candidates and reviewable exceptions.
+- [x] Allow automatic sharing only when an explicit space policy matches and privacy checks pass.
+- [x] Preserve source actors and trails when memories are summarized or merged.
+- [x] Represent contradictions and competing versions instead of silently choosing a winner.
+- [x] Add collaboration views for handoffs, decisions, stale facts, conflicts, and revocations.
 
 **Gate:** Two collaborators and their agents can use a shared project cairn while private observations remain private and every shared memory is traceable.
 

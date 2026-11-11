@@ -25,7 +25,8 @@ revoked, and the grant has to stay inspectable.
    member can read.
 4. Revoke makes a later read by the member omit that memory. The memory stays
    stored for the owner. This slice does not implement offline-device purge,
-   encryption, delete, or automatic sharing.
+   encryption, or delete. Automatic sharing is limited to the explicit policy
+   in the follow-on below.
 
 A live successor that supersedes a shared memory is omitted from the member
 read. The grant stays on the original id, and the owner must share the
@@ -40,11 +41,34 @@ serde defaults. PostgreSQL stores membership and shares in
 `migrations/0008_layer5_project_shares.sql`. A share does not copy the memory
 into the member's personal memory list and does not add it to device sync pull.
 
+## Follow-on: explicit share policy
+
+The collaborative specification already required automatic sharing to fail
+closed unless an explicit policy matches. This follow-on does not add roles.
+
+1. The default project policy is `manual`. Manual promotion creates no share.
+2. The owner may set `auto_nonsensitive_project_memory`. Promoting a
+   project-scoped memory that is not secret and not sensitive then shares it
+   with each current member and writes `project_memory_shared`.
+3. Share candidates are promoted project memories that are not secrets, not
+   personal observations, and not actively shared with that member. Each
+   candidate explains why it is a candidate and why a manual policy does not
+   auto-share it. Dismissing a candidate does not share it. Accepting it uses
+   the existing share method.
+4. Turning the policy off does not revoke existing shares.
+5. Contradictory live project memories stay stored. The owner and the member
+   can read a conflict list of both ids. A member only sees conflicts among
+   memories shared with them.
+6. A shared read includes `share_reason` and `source_memory_id` when those
+   values exist. Session summaries keep source actors and source event ids.
+   Branch merge keeps `promoted_from` and `source_event_ids`.
+
 ## Consequences
 
 - The first Layer 5 slice is one owner, one invited member, and one explicit
-  memory grant. Roles beyond owner and member, automatic sharing, and offline
-  purge remain later work.
+  memory grant. Roles beyond owner and member, offline purge, encryption,
+  federation, CRDTs, and delete remain later work. Automatic sharing is only
+  the explicit nonsensitive project-memory policy above.
 - Repeating an invite, or an active share of the same memory to the same
   member, is idempotent. Unknown emails and self-invites fail closed.
 - Member correction and forget use the existing validation path. Where the
@@ -57,4 +81,5 @@ into the member's personal memory list and does not add it to device sync pull.
 - `crates/storage/src/lib.rs`
 - `crates/server/src/lib.rs`
 - `migrations/0008_layer5_project_shares.sql`
+- `migrations/0009_layer5_share_policy.sql`
 - `docs/contracts/share-layer5.md`

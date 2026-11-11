@@ -38,7 +38,7 @@ PAGE_HTML="$page" python3 - <<'PY'
 import os
 
 page = os.environ["PAGE_HTML"]
-for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "/shared"):
+for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
     assert marker in page, marker
 PY
 

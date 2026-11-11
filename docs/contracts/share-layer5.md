@@ -80,6 +80,75 @@ where that account is a member, so the member can open the shared read.
 `GET /cairn-memory/projects/{projectId}/memories` stays owner-only. Search and
 context for the member do not return the owner's private or unshared records.
 
+A shared memory object includes `share_reason` and `source_memory_id` when
+those values exist. `source_memory_id` is the promoted source memory.
+`share_reason` is `manual` for an owner share and
+`auto_nonsensitive_project_memory` for a policy share. The memory's existing
+`promoted_from` and `source_event_ids` stay on the object.
+
+## Share policy
+
+```http
+POST /cairn-memory/projects/{projectId}/policy
+Authorization: Bearer <owner-account-token>
+```
+
+```json
+{
+  "policy": "manual"
+}
+```
+
+The default policy is `manual`. Manual promotion creates no share. The only
+other policy is `auto_nonsensitive_project_memory`. While it is set, promoting
+a project-scoped memory that is not secret and not sensitive creates an active
+share to each current member and writes `project_memory_shared`. A private
+observation, a secret, or a sensitive memory does not match. Turning the
+policy back to `manual` does not revoke shares that already exist.
+
+## Share candidates
+
+```http
+GET /cairn-memory/projects/{projectId}/share-candidates?email=member@example.test
+Authorization: Bearer <owner-account-token>
+```
+
+The owner lists promoted project memories that are not currently shared with
+that member, are not secrets, and are not personal observations. Each item has
+`memory_id`, `reason`, and `not_auto_shared_reason`. Under the manual policy,
+`not_auto_shared_reason` says the space policy is manual.
+
+The owner accepts a candidate with the existing share route. Dismissing a
+candidate does not create a share:
+
+```http
+POST /cairn-memory/projects/{projectId}/share-candidates/{memoryId}/dismiss
+```
+
+```json
+{
+  "email": "member@example.test"
+}
+```
+
+A dismissed candidate leaves the list. A secret or private observation never
+appears there and never becomes shared.
+
+## Conflicts and revocations
+
+```http
+GET /cairn-memory/projects/{projectId}/conflicts
+GET /cairn-memory/projects/{projectId}/revocations
+```
+
+The owner and the member can read both routes. A conflict record has
+`memory_ids` for both live project memories the contradiction signal matches.
+The owner sees conflicts among live project memories. The member sees
+conflicts only among memories shared with that member. Neither memory is
+deleted or hidden because the other exists. Revocations are share records
+with `revoked_at` set. A member sees only their own revoked shares, with no
+memory content beyond the share record.
+
 ## Revoke
 
 ```http
@@ -129,9 +198,12 @@ MCP tools accept the camelCase fields below and the same names in snake_case.
 
 ## Viewer
 
-The `/viewer` Projects page keeps the account token used for project inspection. When `GET /cairn-memory/projects/{projectId}/memories` succeeds, the owner sees one member email field, **Invite member**, and **Share decision** and **Revoke share** on each current decision. Those buttons call the invite, share, and revoke routes and show an API error in the existing toast. When that memories request fails, the page loads `GET /cairn-memory/projects/{projectId}/shared` and renders those memories with scope, verified commit, freshness, and supersedes, without invite, share, or revoke controls. This viewer path does not finish the rest of Layer 5.
+The `/viewer` Projects page keeps the account token used for project inspection. When `GET /cairn-memory/projects/{projectId}/memories` succeeds, the owner sees one member email field, **Invite member**, and **Share decision** and **Revoke share** on each current decision. Those buttons call the invite, share, and revoke routes and show an API error in the existing toast. When that memories request fails, the page loads `GET /cairn-memory/projects/{projectId}/shared` and renders those memories with scope, verified commit, freshness, and supersedes, without invite, share, or revoke controls.
+
+The inspection page also shows **Current decisions**, **Handoffs**, **Stale memories**, **Conflicts**, and **Revocations**. A member still sees only shared memories and no owner controls. `api()` sends `Content-Type: application/json`.
 
 ## Out of scope
 
-Roles beyond owner and member, automatic sharing, offline-device purge,
-encryption, and delete are not part of this slice.
+Roles beyond owner and member, offline-device purge, encryption, federation,
+CRDTs, and delete remain out of this slice. Automatic sharing exists only for
+the explicit `auto_nonsensitive_project_memory` policy above.

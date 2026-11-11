@@ -454,6 +454,10 @@ struct StoreState {
     #[serde(default)]
     project_shares: Vec<ProjectShareRecord>,
     #[serde(default)]
+    project_policies: Vec<ProjectPolicyRecord>,
+    #[serde(default)]
+    dismissed_share_candidates: Vec<DismissedShareCandidate>,
+    #[serde(default)]
     audit_events: Vec<StoredAuditEvent>,
 }
 
@@ -495,6 +499,8 @@ impl Default for StoreState {
             memory_owners: Vec::new(),
             project_members: Vec::new(),
             project_shares: Vec::new(),
+            project_policies: Vec::new(),
+            dismissed_share_candidates: Vec::new(),
             audit_events: Vec::new(),
         }
     }
@@ -696,6 +702,65 @@ pub struct ProjectMembership {
     pub created_at: String,
 }
 
+pub const SHARE_REASON_MANUAL: &str = "manual";
+pub const SHARE_REASON_AUTO: &str = "auto_nonsensitive_project_memory";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSharePolicy {
+    #[default]
+    Manual,
+    AutoNonsensitiveProjectMemory,
+}
+
+impl ProjectSharePolicy {
+    pub fn parse(value: &str) -> Result<Self, StoreError> {
+        match value.trim() {
+            "manual" => Ok(Self::Manual),
+            SHARE_REASON_AUTO => Ok(Self::AutoNonsensitiveProjectMemory),
+            _ => Err(StoreError::Validation(
+                "project share policy must be manual or auto_nonsensitive_project_memory"
+                    .to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectSharePolicyRecord {
+    pub project_id: String,
+    pub policy: ProjectSharePolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectShareCandidate {
+    pub memory_id: String,
+    pub reason: String,
+    pub not_auto_shared_reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShareCandidateDismissal {
+    pub project_id: String,
+    pub memory_id: String,
+    pub dismissed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectConflict {
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedProjectMemory {
+    #[serde(flatten)]
+    pub memory: Memory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_memory_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectMemoryShare {
     pub project_id: String,
@@ -735,6 +800,21 @@ struct ProjectShareRecord {
     created_at: String,
     #[serde(default)]
     revoked_at: Option<String>,
+    #[serde(default)]
+    share_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectPolicyRecord {
+    project_id: String,
+    policy: ProjectSharePolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DismissedShareCandidate {
+    project_id: String,
+    memory_id: String,
+    member_person_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1616,6 +1696,7 @@ impl MemoryStore {
             ));
         }
 
+        let mut created_project_memory = false;
         let promoted = if let Some(existing) = self.state.memories.iter().find(|memory| {
             memory.project_id.as_deref() == Some(project_id)
                 && memory.promoted_from.as_deref() == Some(memory_id)
@@ -1640,6 +1721,7 @@ impl MemoryStore {
             promoted.lifecycle.expires_at = None;
             promoted.created_at = timestamp();
             self.state.memories.push(promoted.clone());
+            created_project_memory = true;
             promoted
         };
         let promoted_index = self
@@ -1687,6 +1769,9 @@ impl MemoryStore {
             }
         }
         self.record_memory_owner(&account.person_id, &memory.memory_id);
+        if created_project_memory {
+            self.auto_share_new_project_memory(&account.person_id, project_id, &memory);
+        }
         self.persist()?;
         Ok(ProjectMergeResult { branch, memory })
     }
@@ -1836,6 +1921,7 @@ impl MemoryStore {
                 Some(redact_sensitive_content(reason)),
             );
         }
+        self.auto_share_new_project_memory(&account.person_id, project_id, &promoted);
         self.persist()?;
         Ok(promoted)
     }
@@ -1921,25 +2007,7 @@ impl MemoryStore {
     ) -> Result<Vec<Memory>, StoreError> {
         let account = self.authenticate_account(account_token)?;
         self.require_project_owner(&account, project_id)?;
-        let mut memories = self
-            .state
-            .memories
-            .iter()
-            .filter(|memory| {
-                memory.project_id.as_deref() == Some(project_id)
-                    && !self.memory_is_forgotten(memory)
-                    && !is_expired(&memory.lifecycle)
-                    && !self.state.memories.iter().any(|candidate| {
-                        candidate.project_id.as_deref() == Some(project_id)
-                            && candidate.supersedes.as_deref() == Some(memory.memory_id.as_str())
-                            && !self.memory_is_forgotten(candidate)
-                            && !is_expired(&candidate.lifecycle)
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        memories.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        Ok(memories)
+        Ok(self.live_project_memories(project_id))
     }
 
     pub fn audit_events(
@@ -2029,61 +2097,22 @@ impl MemoryStore {
             ));
         }
         let memory = self.shareable_project_memory(project_id, memory_id)?;
-        if let Some(existing) = self.state.project_shares.iter().find(|share| {
-            share.project_id == project_id
-                && share.memory_id == memory.memory_id
-                && share.member_person_id == member.person_id
-                && share.revoked_at.is_none()
-        }) {
-            return Ok(share_view(existing));
-        }
-        let reactivated = self
-            .state
-            .project_shares
-            .iter_mut()
-            .find(|share| {
-                share.project_id == project_id
-                    && share.memory_id == memory.memory_id
-                    && share.member_person_id == member.person_id
-            })
-            .map(|share| {
-                share.revoked_at = None;
-                share_view(share)
-            });
-        if let Some(view) = reactivated {
-            self.record_share_audit(
-                &account.person_id,
-                "project_memory_shared",
-                Some(&view.memory_id),
-                share_audit_metadata(project_id, &member.person_id, &view.memory_id),
-            );
-            self.persist()?;
-            return Ok(view);
-        }
-        let record = ProjectShareRecord {
-            project_id: project_id.to_owned(),
-            memory_id: memory.memory_id.clone(),
-            owner_person_id: account.person_id.clone(),
-            member_person_id: member.person_id.clone(),
-            created_at: timestamp(),
-            revoked_at: None,
-        };
-        self.state.project_shares.push(record.clone());
-        self.record_share_audit(
+        let share = self.grant_project_share(
             &account.person_id,
-            "project_memory_shared",
-            Some(&record.memory_id),
-            share_audit_metadata(project_id, &member.person_id, &record.memory_id),
+            project_id,
+            &memory.memory_id,
+            &member.person_id,
+            SHARE_REASON_MANUAL,
         );
         self.persist()?;
-        Ok(share_view(&record))
+        Ok(share)
     }
 
     pub fn shared_project_memories(
         &self,
         account_token: &str,
         project_id: &str,
-    ) -> Result<Vec<Memory>, StoreError> {
+    ) -> Result<Vec<SharedProjectMemory>, StoreError> {
         let account = self.authenticate_account(account_token)?;
         validate_project_text(project_id, "project_id")?;
         if !self
@@ -2117,9 +2146,23 @@ impl MemoryStore {
                     && !is_expired(&memory.lifecycle)
                     && !self.memory_is_superseded(memory)
             })
-            .cloned()
+            .map(|memory| SharedProjectMemory {
+                share_reason: self
+                    .state
+                    .project_shares
+                    .iter()
+                    .find(|share| {
+                        share.project_id == project_id
+                            && share.memory_id == memory.memory_id
+                            && share.member_person_id == account.person_id
+                            && share.revoked_at.is_none()
+                    })
+                    .and_then(|share| share.share_reason.clone()),
+                source_memory_id: memory.promoted_from.clone(),
+                memory: memory.clone(),
+            })
             .collect::<Vec<_>>();
-        memories.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        memories.sort_by(|left, right| right.memory.created_at.cmp(&left.memory.created_at));
         Ok(memories)
     }
 
@@ -2156,6 +2199,183 @@ impl MemoryStore {
         );
         self.persist()?;
         Ok(revoked)
+    }
+
+    pub fn set_project_share_policy(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        policy: &str,
+    ) -> Result<ProjectSharePolicyRecord, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let policy = ProjectSharePolicy::parse(policy)?;
+        if let Some(record) = self
+            .state
+            .project_policies
+            .iter_mut()
+            .find(|record| record.project_id == project_id)
+        {
+            record.policy = policy.clone();
+        } else {
+            self.state.project_policies.push(ProjectPolicyRecord {
+                project_id: project_id.to_owned(),
+                policy: policy.clone(),
+            });
+        }
+        self.persist()?;
+        Ok(ProjectSharePolicyRecord {
+            project_id: project_id.to_owned(),
+            policy,
+        })
+    }
+
+    pub fn share_candidates(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<Vec<ProjectShareCandidate>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let member = self.member_account(project_id, email)?;
+        let policy = self.project_share_policy(project_id);
+        let mut candidates = Vec::new();
+        for memory in self.live_project_memories(project_id) {
+            if !candidate_memory(&memory, project_id) {
+                continue;
+            }
+            if self.share_is_active(project_id, &memory.memory_id, &member.person_id)
+                || self.candidate_dismissed(project_id, &memory.memory_id, &member.person_id)
+            {
+                continue;
+            }
+            candidates.push(ProjectShareCandidate {
+                memory_id: memory.memory_id.clone(),
+                reason: "promoted project memory is not shared with the member".to_owned(),
+                not_auto_shared_reason: not_auto_shared_reason(&policy, &memory),
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub fn dismiss_share_candidate(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        memory_id: &str,
+        email: &str,
+    ) -> Result<ShareCandidateDismissal, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let member = self.member_account(project_id, email)?;
+        let memory = self
+            .state
+            .memories
+            .iter()
+            .find(|memory| {
+                memory.memory_id == memory_id && memory.project_id.as_deref() == Some(project_id)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                StoreError::Validation(
+                    "personal observations and non-project memories cannot be shared".to_owned(),
+                )
+            })?;
+        if memory.scope != MemoryScope::Project {
+            return Err(StoreError::Validation(
+                "personal observations and non-project memories cannot be shared".to_owned(),
+            ));
+        }
+        if !self.candidate_dismissed(project_id, &memory.memory_id, &member.person_id) {
+            self.state
+                .dismissed_share_candidates
+                .push(DismissedShareCandidate {
+                    project_id: project_id.to_owned(),
+                    memory_id: memory.memory_id.clone(),
+                    member_person_id: member.person_id,
+                });
+            self.persist()?;
+        }
+        Ok(ShareCandidateDismissal {
+            project_id: project_id.to_owned(),
+            memory_id: memory.memory_id,
+            dismissed: true,
+        })
+    }
+
+    pub fn project_conflicts(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<Vec<ProjectConflict>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        validate_project_text(project_id, "project_id")?;
+        let memories =
+            if self.project_owner_id(project_id).as_deref() == Some(account.person_id.as_str()) {
+                self.live_project_memories(project_id)
+            } else if self.state.project_members.iter().any(|record| {
+                record.project_id == project_id && record.member_person_id == account.person_id
+            }) {
+                self.shared_project_memories(account_token, project_id)?
+                    .into_iter()
+                    .map(|shared| shared.memory)
+                    .collect()
+            } else if self
+                .state
+                .projects
+                .iter()
+                .any(|project| project.project_id == project_id)
+            {
+                return Err(StoreError::Validation(
+                    "account does not own the project".to_owned(),
+                ));
+            } else {
+                return Err(StoreError::Validation(format!(
+                    "unknown project: {project_id}"
+                )));
+            };
+        Ok(competing_project_memories(&memories))
+    }
+
+    pub fn project_revocations(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<Vec<ProjectMemoryShare>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        validate_project_text(project_id, "project_id")?;
+        if !self
+            .state
+            .projects
+            .iter()
+            .any(|project| project.project_id == project_id)
+        {
+            return Err(StoreError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        let is_owner =
+            self.project_owner_id(project_id).as_deref() == Some(account.person_id.as_str());
+        let is_member = self.state.project_members.iter().any(|record| {
+            record.project_id == project_id && record.member_person_id == account.person_id
+        });
+        if !is_owner && !is_member {
+            return Err(StoreError::Validation(
+                "account does not own the project".to_owned(),
+            ));
+        }
+        Ok(self
+            .state
+            .project_shares
+            .iter()
+            .filter(|share| {
+                share.project_id == project_id
+                    && share.revoked_at.is_some()
+                    && (is_owner || share.member_person_id == account.person_id)
+            })
+            .map(share_view)
+            .collect())
     }
 
     fn project_owner_id(&self, project_id: &str) -> Option<String> {
@@ -2266,6 +2486,11 @@ impl MemoryStore {
                 "forgotten or expired memories cannot be shared".to_owned(),
             ));
         }
+        if memory.lifecycle.sensitivity == Sensitivity::Secret {
+            return Err(StoreError::Validation(
+                "secret memories cannot be shared".to_owned(),
+            ));
+        }
         if memory.scope == MemoryScope::Project && memory.project_id.as_deref() == Some(project_id)
         {
             return Ok(memory);
@@ -2278,6 +2503,173 @@ impl MemoryStore {
         Err(StoreError::Validation(
             "personal observations and non-project memories cannot be shared".to_owned(),
         ))
+    }
+
+    fn live_project_memories(&self, project_id: &str) -> Vec<Memory> {
+        let mut memories = self
+            .state
+            .memories
+            .iter()
+            .filter(|memory| {
+                memory.project_id.as_deref() == Some(project_id)
+                    && !self.memory_is_forgotten(memory)
+                    && !is_expired(&memory.lifecycle)
+                    && !self.state.memories.iter().any(|candidate| {
+                        candidate.project_id.as_deref() == Some(project_id)
+                            && candidate.supersedes.as_deref() == Some(memory.memory_id.as_str())
+                            && !self.memory_is_forgotten(candidate)
+                            && !is_expired(&candidate.lifecycle)
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        memories.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        memories
+    }
+
+    fn member_account(&self, project_id: &str, email: &str) -> Result<Account, StoreError> {
+        let member = self.account_by_email(&normalize_email(email)?)?;
+        if !self.state.project_members.iter().any(|record| {
+            record.project_id == project_id && record.member_person_id == member.person_id
+        }) {
+            return Err(StoreError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        Ok(member)
+    }
+
+    fn project_share_policy(&self, project_id: &str) -> ProjectSharePolicy {
+        self.state
+            .project_policies
+            .iter()
+            .find(|record| record.project_id == project_id)
+            .map(|record| record.policy.clone())
+            .unwrap_or_default()
+    }
+
+    fn share_is_active(&self, project_id: &str, memory_id: &str, member_person_id: &str) -> bool {
+        self.state.project_shares.iter().any(|share| {
+            share.project_id == project_id
+                && share.memory_id == memory_id
+                && share.member_person_id == member_person_id
+                && share.revoked_at.is_none()
+        })
+    }
+
+    fn candidate_dismissed(
+        &self,
+        project_id: &str,
+        memory_id: &str,
+        member_person_id: &str,
+    ) -> bool {
+        self.state.dismissed_share_candidates.iter().any(|record| {
+            record.project_id == project_id
+                && record.memory_id == memory_id
+                && record.member_person_id == member_person_id
+        })
+    }
+
+    fn grant_project_share(
+        &mut self,
+        owner_person_id: &str,
+        project_id: &str,
+        memory_id: &str,
+        member_person_id: &str,
+        share_reason: &str,
+    ) -> ProjectMemoryShare {
+        if let Some(existing) = self.state.project_shares.iter().find(|share| {
+            share.project_id == project_id
+                && share.memory_id == memory_id
+                && share.member_person_id == member_person_id
+                && share.revoked_at.is_none()
+        }) {
+            return share_view(existing);
+        }
+        let reactivated = self
+            .state
+            .project_shares
+            .iter_mut()
+            .find(|share| {
+                share.project_id == project_id
+                    && share.memory_id == memory_id
+                    && share.member_person_id == member_person_id
+            })
+            .map(|share| {
+                share.revoked_at = None;
+                share.share_reason = Some(share_reason.to_owned());
+                share_view(share)
+            });
+        if let Some(view) = reactivated {
+            self.record_share_audit(
+                owner_person_id,
+                "project_memory_shared",
+                Some(&view.memory_id),
+                share_audit_metadata(project_id, member_person_id, &view.memory_id),
+            );
+            return view;
+        }
+        let record = ProjectShareRecord {
+            project_id: project_id.to_owned(),
+            memory_id: memory_id.to_owned(),
+            owner_person_id: owner_person_id.to_owned(),
+            member_person_id: member_person_id.to_owned(),
+            created_at: timestamp(),
+            revoked_at: None,
+            share_reason: Some(share_reason.to_owned()),
+        };
+        self.state.project_shares.push(record.clone());
+        self.record_share_audit(
+            owner_person_id,
+            "project_memory_shared",
+            Some(memory_id),
+            share_audit_metadata(project_id, member_person_id, memory_id),
+        );
+        share_view(&record)
+    }
+
+    fn auto_share_new_project_memory(
+        &mut self,
+        owner_person_id: &str,
+        project_id: &str,
+        memory: &Memory,
+    ) {
+        if self.project_owner_id(project_id).as_deref() != Some(owner_person_id) {
+            return;
+        }
+        if self.project_share_policy(project_id)
+            != ProjectSharePolicy::AutoNonsensitiveProjectMemory
+        {
+            return;
+        }
+        if memory.scope != MemoryScope::Project
+            || matches!(
+                memory.lifecycle.sensitivity,
+                Sensitivity::Secret | Sensitivity::Sensitive
+            )
+        {
+            return;
+        }
+        let members = self
+            .state
+            .project_members
+            .iter()
+            .filter(|record| record.project_id == project_id)
+            .map(|record| record.member_person_id.clone())
+            .collect::<Vec<_>>();
+        let memory_id = memory.memory_id.clone();
+        for member_person_id in members {
+            if self.candidate_dismissed(project_id, &memory_id, &member_person_id) {
+                continue;
+            }
+            self.grant_project_share(
+                owner_person_id,
+                project_id,
+                &memory_id,
+                &member_person_id,
+                SHARE_REASON_AUTO,
+            );
+        }
     }
 
     fn reject_member_mutation(&self, account: &Account, target_id: &str) -> Result<(), StoreError> {
@@ -3624,7 +4016,11 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
     let mut omitted = 0;
     let mut next_steps = Vec::new();
     let mut unresolved_work = Vec::new();
+    let mut source_actors = Vec::new();
     for observation in observations {
+        if !observation.source.trim().is_empty() {
+            push_unique(&mut source_actors, observation.source.clone());
+        }
         let normalized = observation
             .content
             .split_whitespace()
@@ -3684,6 +4080,7 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
     }
     append_digest_section(&mut content, "Next steps", &next_steps);
     append_digest_section(&mut content, "Unresolved work", &unresolved_work);
+    append_digest_section(&mut content, "Source actors", &source_actors);
     SessionDigest {
         content,
         next_steps,
@@ -3927,6 +4324,43 @@ fn stale_signal(memory: &Memory, filter: &RecallFilter) -> (bool, Option<String>
         );
     }
     (false, None)
+}
+
+pub fn competing_project_memories(memories: &[Memory]) -> Vec<ProjectConflict> {
+    let forgotten = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut conflicts = Vec::new();
+    for memory in memories
+        .iter()
+        .filter(|memory| memory.scope == MemoryScope::Project)
+    {
+        for other_id in contradiction_ids(memory, memories, &forgotten) {
+            let mut pair = [memory.memory_id.clone(), other_id];
+            pair.sort();
+            if seen.insert((pair[0].clone(), pair[1].clone())) {
+                conflicts.push(ProjectConflict {
+                    memory_ids: vec![pair[0].clone(), pair[1].clone()],
+                });
+            }
+        }
+    }
+    conflicts
+}
+
+fn candidate_memory(memory: &Memory, project_id: &str) -> bool {
+    memory.scope == MemoryScope::Project
+        && memory.project_id.as_deref() == Some(project_id)
+        && memory.lifecycle.sensitivity != Sensitivity::Secret
+}
+
+fn not_auto_shared_reason(policy: &ProjectSharePolicy, memory: &Memory) -> String {
+    if *policy == ProjectSharePolicy::Manual {
+        "space policy is manual".to_owned()
+    } else if memory.lifecycle.sensitivity == Sensitivity::Sensitive {
+        "memory is sensitive".to_owned()
+    } else {
+        "automatic policy did not match this memory".to_owned()
+    }
 }
 
 fn contradiction_ids(
@@ -5175,6 +5609,8 @@ mod tests {
         let summary = store.end_session("sess-compress")?;
         assert!(summary.content.contains("deterministically compressed"));
         assert!(summary.content.contains("1 repeated"));
+        assert!(summary.content.contains("Source actors"));
+        assert!(summary.content.contains("test"));
         assert_eq!(summary.source_event_ids.len(), 2);
         fs::remove_file(path)?;
         Ok(())

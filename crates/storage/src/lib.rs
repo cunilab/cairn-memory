@@ -8,11 +8,13 @@ use cairn_core::{
     AUTH_SESSION_SECONDS, Account, AccountStatus, AuditEvent, AuthSessionResult, ContextPack,
     Device, DeviceRegistration, DeviceStatus, ExportBundle, ImportResult, Lifecycle,
     LifecycleInput, LifecycleSummary, Memory, MemoryKind, MemoryScope, Observation,
-    ObservationInput, Project, ProjectBranch, ProjectEntity, ProjectEntityInput,
+    ObservationInput, Project, ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput,
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare,
-    ProjectMergeResult, ProjectWorktree, RecallFilter, RecallResult, Session, SyncDiagnostics,
-    SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
-    build_explicit_memory_record, derive_session_memory, memory_matches_filter, normalize_email,
+    ProjectMergeResult, ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord,
+    ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO, SHARE_REASON_MANUAL, Session,
+    ShareCandidateDismissal, SharedProjectMemory, SyncDiagnostics, SyncEvent, SyncPullResult,
+    SyncPushResult, WorkContext, build_context_pack, build_explicit_memory_record,
+    competing_project_memories, derive_session_memory, memory_matches_filter, normalize_email,
     normalize_export_bundle, normalize_observation, now_seconds, random_token, recall_result,
     redact_sensitive_content, validate_password,
 };
@@ -34,6 +36,8 @@ const REGISTRY_MAINTENANCE_MIGRATION: &str =
     include_str!("../../../migrations/0007_layer4_registry_maintenance.sql");
 const PROJECT_SHARE_MIGRATION: &str =
     include_str!("../../../migrations/0008_layer5_project_shares.sql");
+const SHARE_POLICY_MIGRATION: &str =
+    include_str!("../../../migrations/0009_layer5_share_policy.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 const MAX_SEARCH_RESULTS: i64 = 512;
 
@@ -133,6 +137,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(PROJECT_SHARE_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(SHARE_POLICY_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1366,6 +1373,7 @@ impl PostgresStore {
             .bind(memory_id)
             .fetch_optional(&mut *transaction)
             .await?;
+        let mut created_project_memory = false;
         let mut promoted = if let Some(row) = existing {
             memory_from_row(&row)?
         } else {
@@ -1387,6 +1395,7 @@ impl PostgresStore {
             promoted.lifecycle.expires_at = None;
             promoted.created_at = now_seconds().to_string();
             insert_memory(&mut transaction, &account.person_id, &promoted).await?;
+            created_project_memory = true;
             promoted
         };
         let previous_commit = promoted.verified_commit.clone();
@@ -1463,6 +1472,15 @@ impl PostgresStore {
             }),
         )
         .await?;
+        if created_project_memory {
+            auto_share_project_memory_tx(
+                &mut transaction,
+                &account.person_id,
+                project_id,
+                &promoted,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(ProjectMergeResult {
             branch: resolved_branch,
@@ -1695,7 +1713,7 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
         let reactivated = sqlx::query(
             "UPDATE cairn_project_shares
-             SET revoked_at = NULL
+             SET revoked_at = NULL, share_reason = $5
              WHERE owner_person_id = $1 AND project_id = $2 AND memory_id = $3
                AND member_person_id = $4 AND revoked_at IS NOT NULL
              RETURNING project_id, memory_id, member_person_id,
@@ -1706,6 +1724,7 @@ impl PostgresStore {
         .bind(project_id)
         .bind(memory_id)
         .bind(&member.person_id)
+        .bind(SHARE_REASON_MANUAL)
         .fetch_optional(&mut *transaction)
         .await?;
         let row = if let Some(row) = reactivated {
@@ -1713,8 +1732,8 @@ impl PostgresStore {
         } else {
             sqlx::query(
                 "INSERT INTO cairn_project_shares
-                    (owner_person_id, project_id, memory_id, member_person_id)
-                 VALUES ($1, $2, $3, $4)
+                    (owner_person_id, project_id, memory_id, member_person_id, share_reason)
+                 VALUES ($1, $2, $3, $4, $5)
                  RETURNING project_id, memory_id, member_person_id,
                            EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
                            EXTRACT(EPOCH FROM revoked_at)::bigint::text AS revoked_at",
@@ -1723,6 +1742,7 @@ impl PostgresStore {
             .bind(project_id)
             .bind(memory_id)
             .bind(&member.person_id)
+            .bind(SHARE_REASON_MANUAL)
             .fetch_one(&mut *transaction)
             .await?
         };
@@ -1747,7 +1767,7 @@ impl PostgresStore {
         &self,
         account_token: &str,
         project_id: &str,
-    ) -> Result<Vec<Memory>, PostgresError> {
+    ) -> Result<Vec<SharedProjectMemory>, PostgresError> {
         let account = self.authenticate_account(account_token).await?;
         validate_project_text(project_id, "project_id")?;
         let project_exists = sqlx::query_scalar::<_, bool>(
@@ -1793,7 +1813,7 @@ impl PostgresStore {
                      (m.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)
                 AND {}
               ORDER BY m.created_at DESC, m.memory_id",
-            memory_select_sql(),
+            shared_memory_select_sql(),
             not_superseded_by_live_memory_sql(true)
         );
         let rows = sqlx::query(&query)
@@ -1801,7 +1821,7 @@ impl PostgresStore {
             .bind(project_id)
             .fetch_all(&self.pool)
             .await?;
-        rows.iter().map(memory_from_row).collect()
+        rows.iter().map(shared_memory_from_row).collect()
     }
 
     pub async fn revoke_project_share(
@@ -1847,6 +1867,282 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         share_from_row(&row)
+    }
+
+    pub async fn set_project_share_policy(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        policy: &str,
+    ) -> Result<ProjectSharePolicyRecord, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let policy = ProjectSharePolicy::parse(policy)?;
+        sqlx::query(
+            "INSERT INTO cairn_project_share_policies (owner_person_id, project_id, policy)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (owner_person_id, project_id)
+             DO UPDATE SET policy = EXCLUDED.policy, updated_at = now()",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(policy_name(&policy))
+        .execute(&self.pool)
+        .await?;
+        Ok(ProjectSharePolicyRecord {
+            project_id: project_id.to_owned(),
+            policy,
+        })
+    }
+
+    pub async fn share_candidates(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<Vec<ProjectShareCandidate>, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let member = self.account_by_email(&normalize_email(email)?).await?;
+        let member_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_members
+                WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !member_exists {
+            return Err(PostgresError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        let policy = self
+            .load_share_policy(&account.person_id, project_id)
+            .await?;
+        let shared_ids = sqlx::query_scalar::<_, String>(
+            "SELECT memory_id FROM cairn_project_shares
+             WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3
+               AND revoked_at IS NULL",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let dismissed_ids = sqlx::query_scalar::<_, String>(
+            "SELECT memory_id FROM cairn_share_candidate_dismissals
+             WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let memories = self.project_memories(account_token, project_id).await?;
+        let mut candidates = Vec::new();
+        for memory in memories {
+            if memory.scope != MemoryScope::Project
+                || memory.project_id.as_deref() != Some(project_id)
+                || memory.lifecycle.sensitivity == cairn_core::Sensitivity::Secret
+                || shared_ids.iter().any(|id| id == &memory.memory_id)
+                || dismissed_ids.iter().any(|id| id == &memory.memory_id)
+            {
+                continue;
+            }
+            candidates.push(ProjectShareCandidate {
+                memory_id: memory.memory_id.clone(),
+                reason: "promoted project memory is not shared with the member".to_owned(),
+                not_auto_shared_reason: postgres_not_auto_shared_reason(&policy, &memory),
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub async fn dismiss_share_candidate(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        memory_id: &str,
+        email: &str,
+    ) -> Result<ShareCandidateDismissal, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let member = self.account_by_email(&normalize_email(email)?).await?;
+        let member_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_members
+                WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !member_exists {
+            return Err(PostgresError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        let project_memory = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_memories
+                WHERE person_id = $1 AND project_id = $2 AND memory_id = $3 AND scope = 'project'
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(memory_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !project_memory {
+            return Err(PostgresError::Validation(
+                "personal observations and non-project memories cannot be shared".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO cairn_share_candidate_dismissals
+                (owner_person_id, project_id, memory_id, member_person_id)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (owner_person_id, project_id, memory_id, member_person_id) DO NOTHING",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(memory_id)
+        .bind(&member.person_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(ShareCandidateDismissal {
+            project_id: project_id.to_owned(),
+            memory_id: memory_id.to_owned(),
+            dismissed: true,
+        })
+    }
+
+    pub async fn project_conflicts(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<Vec<ProjectConflict>, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        validate_project_text(project_id, "project_id")?;
+        let owns = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_projects WHERE person_id = $1 AND project_id = $2
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let memories = if owns {
+            self.project_memories(account_token, project_id).await?
+        } else {
+            self.shared_project_memories(account_token, project_id)
+                .await?
+                .into_iter()
+                .map(|shared| shared.memory)
+                .collect()
+        };
+        Ok(competing_project_memories(&memories))
+    }
+
+    pub async fn project_revocations(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<Vec<ProjectMemoryShare>, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        validate_project_text(project_id, "project_id")?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM cairn_projects WHERE project_id = $1)",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !exists {
+            return Err(PostgresError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        let owns = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_projects WHERE person_id = $1 AND project_id = $2
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let member = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_members
+                WHERE project_id = $1 AND member_person_id = $2
+             )",
+        )
+        .bind(project_id)
+        .bind(&account.person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !owns && !member {
+            return Err(PostgresError::Validation(
+                "account does not own the project".to_owned(),
+            ));
+        }
+        let rows = if owns {
+            sqlx::query(
+                "SELECT project_id, memory_id, member_person_id,
+                        EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
+                        EXTRACT(EPOCH FROM revoked_at)::bigint::text AS revoked_at
+                 FROM cairn_project_shares
+                 WHERE owner_person_id = $1 AND project_id = $2 AND revoked_at IS NOT NULL
+                 ORDER BY revoked_at DESC",
+            )
+            .bind(&account.person_id)
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT project_id, memory_id, member_person_id,
+                        EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
+                        EXTRACT(EPOCH FROM revoked_at)::bigint::text AS revoked_at
+                 FROM cairn_project_shares
+                 WHERE member_person_id = $1 AND project_id = $2 AND revoked_at IS NOT NULL
+                 ORDER BY revoked_at DESC",
+            )
+            .bind(&account.person_id)
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.iter().map(share_from_row).collect()
+    }
+
+    async fn load_share_policy(
+        &self,
+        owner_person_id: &str,
+        project_id: &str,
+    ) -> Result<ProjectSharePolicy, PostgresError> {
+        let policy = sqlx::query_scalar::<_, String>(
+            "SELECT policy FROM cairn_project_share_policies
+             WHERE owner_person_id = $1 AND project_id = $2",
+        )
+        .bind(owner_person_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match policy {
+            Some(value) => ProjectSharePolicy::parse(&value)?,
+            None => ProjectSharePolicy::Manual,
+        })
     }
 
     async fn require_project_owner(
@@ -1951,6 +2247,11 @@ impl PostgresStore {
         {
             return Err(PostgresError::Validation(
                 "forgotten or expired memories cannot be shared".to_owned(),
+            ));
+        }
+        if memory.lifecycle.sensitivity == cairn_core::Sensitivity::Secret {
+            return Err(PostgresError::Validation(
+                "secret memories cannot be shared".to_owned(),
             ));
         }
         if memory.scope == MemoryScope::Project && memory.project_id.as_deref() == Some(project_id)
@@ -2119,6 +2420,8 @@ impl PostgresStore {
             )
             .await?;
         }
+        auto_share_project_memory_tx(&mut transaction, &account.person_id, project_id, &promoted)
+            .await?;
         record_audit(
             &mut transaction,
             &account.person_id,
@@ -3191,6 +3494,16 @@ fn memory_select_sql() -> &'static str {
      FROM cairn_memories m"
 }
 
+fn shared_memory_select_sql() -> &'static str {
+    "SELECT s.share_reason, m.memory_id, m.person_id, m.session_id, m.content,
+            m.source_event_ids, m.context, m.lifecycle, m.kind, m.scope,
+            m.project_id, m.next_steps, m.unresolved_work, m.supersedes,
+            m.promoted_from, m.promotion_reason,
+            m.verified_commit,
+            EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
+     FROM cairn_memories m"
+}
+
 fn memory_search_select_sql() -> String {
     format!(
         "{} , ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score
@@ -3220,6 +3533,15 @@ fn observation_select_sql() -> &'static str {
             o.context AS observation_context,
             EXTRACT(EPOCH FROM o.captured_at)::bigint::text AS observation_captured_at
      FROM cairn_observations o"
+}
+
+fn shared_memory_from_row(row: &PgRow) -> Result<SharedProjectMemory, PostgresError> {
+    let memory = memory_from_row(row)?;
+    Ok(SharedProjectMemory {
+        source_memory_id: memory.promoted_from.clone(),
+        share_reason: row.try_get("share_reason")?,
+        memory,
+    })
 }
 
 fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
@@ -3296,6 +3618,133 @@ fn membership_from_row(row: &PgRow) -> Result<ProjectMembership, PostgresError> 
         email: row.try_get("email")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn policy_name(policy: &ProjectSharePolicy) -> &'static str {
+    match policy {
+        ProjectSharePolicy::Manual => "manual",
+        ProjectSharePolicy::AutoNonsensitiveProjectMemory => SHARE_REASON_AUTO,
+    }
+}
+
+fn postgres_not_auto_shared_reason(policy: &ProjectSharePolicy, memory: &Memory) -> String {
+    if *policy == ProjectSharePolicy::Manual {
+        "space policy is manual".to_owned()
+    } else if memory.lifecycle.sensitivity == cairn_core::Sensitivity::Sensitive {
+        "memory is sensitive".to_owned()
+    } else {
+        "automatic policy did not match this memory".to_owned()
+    }
+}
+
+async fn auto_share_project_memory_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    owner_person_id: &str,
+    project_id: &str,
+    memory: &Memory,
+) -> Result<(), PostgresError> {
+    if memory.scope != MemoryScope::Project
+        || matches!(
+            memory.lifecycle.sensitivity,
+            cairn_core::Sensitivity::Secret | cairn_core::Sensitivity::Sensitive
+        )
+    {
+        return Ok(());
+    }
+    let policy = sqlx::query_scalar::<_, String>(
+        "SELECT policy FROM cairn_project_share_policies
+         WHERE owner_person_id = $1 AND project_id = $2",
+    )
+    .bind(owner_person_id)
+    .bind(project_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if policy.as_deref() != Some(SHARE_REASON_AUTO) {
+        return Ok(());
+    }
+    let members = sqlx::query_scalar::<_, String>(
+        "SELECT member_person_id FROM cairn_project_members
+         WHERE owner_person_id = $1 AND project_id = $2",
+    )
+    .bind(owner_person_id)
+    .bind(project_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    for member_person_id in members {
+        let dismissed = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_share_candidate_dismissals
+                WHERE owner_person_id = $1 AND project_id = $2
+                  AND memory_id = $3 AND member_person_id = $4
+             )",
+        )
+        .bind(owner_person_id)
+        .bind(project_id)
+        .bind(&memory.memory_id)
+        .bind(&member_person_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if dismissed {
+            continue;
+        }
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_shares
+                WHERE owner_person_id = $1 AND project_id = $2 AND memory_id = $3
+                  AND member_person_id = $4 AND revoked_at IS NULL
+             )",
+        )
+        .bind(owner_person_id)
+        .bind(project_id)
+        .bind(&memory.memory_id)
+        .bind(&member_person_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if active {
+            continue;
+        }
+        let reactivated = sqlx::query(
+            "UPDATE cairn_project_shares
+             SET revoked_at = NULL, share_reason = $5
+             WHERE owner_person_id = $1 AND project_id = $2 AND memory_id = $3
+               AND member_person_id = $4 AND revoked_at IS NOT NULL",
+        )
+        .bind(owner_person_id)
+        .bind(project_id)
+        .bind(&memory.memory_id)
+        .bind(&member_person_id)
+        .bind(SHARE_REASON_AUTO)
+        .execute(&mut **transaction)
+        .await?;
+        if reactivated.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO cairn_project_shares
+                    (owner_person_id, project_id, memory_id, member_person_id, share_reason)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(owner_person_id)
+            .bind(project_id)
+            .bind(&memory.memory_id)
+            .bind(&member_person_id)
+            .bind(SHARE_REASON_AUTO)
+            .execute(&mut **transaction)
+            .await?;
+        }
+        record_audit(
+            transaction,
+            owner_person_id,
+            None,
+            "project_memory_shared",
+            Some(&memory.memory_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member_person_id,
+                "memory_id": memory.memory_id,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn share_from_row(row: &PgRow) -> Result<ProjectMemoryShare, PostgresError> {

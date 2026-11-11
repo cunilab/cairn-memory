@@ -459,6 +459,95 @@ try:
     assert "project_memory_shared" in share_actions
     assert "project_memory_share_revoked" in share_actions
 
+    _, candidate_source = call(
+        "/cairn-memory/remember",
+        {
+            "content": "manual policy keeps this project decision unshared",
+            "context": {"repository": "cairn", "commit": "abc1234"},
+        },
+        account_token,
+    )
+    _, candidate_promoted = call(
+        "/cairn-memory/promote",
+        {
+            "projectId": project["project_id"],
+            "memoryId": candidate_source["memory_id"],
+            "reason": "Manual policy must not share this decision",
+        },
+        account_token,
+    )
+    _, before_policy = call(
+        f"/cairn-memory/projects/{project['project_id']}/shared",
+        token=member_token,
+    )
+    assert all(
+        item["memory_id"] != candidate_promoted["memory_id"] for item in before_policy
+    )
+    _, candidates = call(
+        f"/cairn-memory/projects/{project['project_id']}/share-candidates?email=postgres-member%40example.test",
+        token=account_token,
+    )
+    candidate = next(
+        item for item in candidates if item["memory_id"] == candidate_promoted["memory_id"]
+    )
+    assert "not shared" in candidate["reason"]
+    assert "manual" in candidate["not_auto_shared_reason"]
+    call(
+        f"/cairn-memory/projects/{project['project_id']}/policy",
+        {"policy": "auto_nonsensitive_project_memory"},
+        account_token,
+    )
+    _, auto_source = call(
+        "/cairn-memory/remember",
+        {
+            "content": "nonsensitive repository decision is ready for collaborators",
+            "context": {"repository": "cairn", "commit": "def5678"},
+        },
+        account_token,
+    )
+    _, auto_promoted = call(
+        "/cairn-memory/promote",
+        {
+            "projectId": project["project_id"],
+            "memoryId": auto_source["memory_id"],
+            "reason": "Automatic policy shares this nonsensitive decision",
+        },
+        account_token,
+    )
+    _, private_note = call(
+        "/cairn-memory/remember",
+        {"content": "private observation stays on the owner account"},
+        account_token,
+    )
+    _, after_policy = call(
+        f"/cairn-memory/projects/{project['project_id']}/shared",
+        token=member_token,
+    )
+    shared_ids = {item["memory_id"] for item in after_policy}
+    assert auto_promoted["memory_id"] in shared_ids
+    assert private_note["memory_id"] not in shared_ids
+    auto_read = next(
+        item for item in after_policy if item["memory_id"] == auto_promoted["memory_id"]
+    )
+    assert auto_read["share_reason"] == "auto_nonsensitive_project_memory"
+    assert auto_read["source_memory_id"] == auto_source["memory_id"]
+    _, private_search = call(
+        "/cairn-memory/search",
+        {"query": "private observation", "limit": 5},
+        member_token,
+    )
+    assert private_search == []
+    call(
+        f"/cairn-memory/projects/{project['project_id']}/policy",
+        {"policy": "manual"},
+        account_token,
+    )
+    _, after_manual = call(
+        f"/cairn-memory/projects/{project['project_id']}/shared",
+        token=member_token,
+    )
+    assert any(item["memory_id"] == auto_promoted["memory_id"] for item in after_manual)
+
     _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}, token_a)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
     token_a = rotated["token"]

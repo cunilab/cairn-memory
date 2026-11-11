@@ -90,6 +90,14 @@ should include the reason they matter and the evidence that supports them.
 - **Reason:** A trusted-device memory system needs recovery, governance, and deletion behavior at the same boundary as authenticated replay.
 - **Evidence:** `crates/storage/src/lib.rs`; `migrations/0002_layer3_audit.sql`; `scripts/smoke_postgres.sh`; `scripts/smoke_layer3.sh`; `cargo test --workspace`
 
+### 2026-11-11 — Layer 5 policy, candidates, and visible conflicts
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** The default project share policy is `manual`, so promotion creates no share. `auto_nonsensitive_project_memory` shares a newly promoted project memory that is not secret and not sensitive with each current member and writes `project_memory_shared`. Share candidates are unshared promoted project memories; dismissing one does not share it, and accepting one uses the existing share method. Secrets and private observations never become shares. A conflict list keeps both contradictory memory ids. Turning the policy off does not revoke existing shares. Delete, offline purge, encryption, federation, CRDTs, and roles beyond owner and member remain open.
+- **Reason:** Automatic sharing has to fail closed unless the owner sets the one explicit policy the collaborative specification already allowed.
+- **Evidence:** `docs/roadmap.md`; `docs/contracts/share-layer5.md`; `docs/adr/0011-explicit-project-memory-share.md`; `migrations/0009_layer5_share_policy.sql`; `cargo test --workspace --all-targets`; `./scripts/smoke_layer5_cli.sh`; `./scripts/smoke_viewer.sh`; `./scripts/smoke_postgres.sh` on database `cairn_pg_layer5_policy_smoke`
+
 ### 2026-11-11 — Explicit invite and share is the first Layer 5 slice
 
 - **Type:** decision

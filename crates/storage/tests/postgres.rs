@@ -594,7 +594,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .await
         .expect("member reads shared memory");
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory_id, shared_promoted.memory_id);
+    assert_eq!(shared[0].memory.memory_id, shared_promoted.memory_id);
     let member_search = store
         .search(
             &member.token,
@@ -712,7 +712,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
     assert!(
         omitted
             .iter()
-            .all(|memory| memory.memory_id != shared_promoted.memory_id)
+            .all(|memory| memory.memory.memory_id != shared_promoted.memory_id)
     );
     store
         .share_project_memory(
@@ -730,6 +730,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
     assert!(
         successor_read
             .iter()
-            .any(|memory| memory.memory_id == successor.memory_id)
+            .any(|memory| memory.memory.memory_id == successor.memory_id)
     );
 }

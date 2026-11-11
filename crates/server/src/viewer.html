@@ -523,8 +523,19 @@
           return;
         }
       }
+      let conflicts = [];
+      let revocations = [];
+      try {
+        [conflicts, revocations] = await Promise.all([
+          api(`${projectPath}/conflicts`, auth),
+          api(`${projectPath}/revocations`, auth),
+        ]);
+      } catch (error) {
+        showToast(error.message, true);
+        return;
+      }
       if (member) {
-        state.projectData = { project, memories, branches: [], entities: [], freshness: [], member: true };
+        state.projectData = { project, memories, branches: [], entities: [], freshness: [], conflicts, revocations, member: true };
         renderProjects();
         renderProjectDetail(state.projectData);
         return;
@@ -535,7 +546,7 @@
           api(`${projectPath}/entities`, auth),
           api(`${projectPath}/freshness`, auth),
         ]);
-        state.projectData = { project, memories, branches, entities, freshness, member: false };
+        state.projectData = { project, memories, branches, entities, freshness, conflicts, revocations, member: false };
         renderProjects();
         renderProjectDetail(state.projectData);
       } catch (error) { showToast(error.message, true); }
@@ -659,8 +670,14 @@
         card.appendChild(eventFacts);
         history.appendChild(card);
       }
+      const handoffs = handoffItems(data);
+      const stale = (data.memories || []).filter((memory) => Number((memory.lifecycle || {}).freshness) < 50);
+      const handoffSection = namedSection("Handoffs", handoffs, (item) => item);
+      const staleSection = namedSection("Stale memories", stale, (memory) => memory.memory_id || "Untitled memory");
+      const conflictSection = namedSection("Conflicts", data.conflicts || [], (conflict) => (conflict.memory_ids || []).join(" · "));
+      const revocationSection = namedSection("Revocations", data.revocations || [], (share) => share.memory_id || "Revoked share");
       if (data.member) {
-        inner.append(eyebrow, title, content, decisions);
+        inner.append(eyebrow, title, content, decisions, handoffSection, staleSection, conflictSection, revocationSection);
       } else {
         const shareForm = document.createElement("form");
         shareForm.className = "search";
@@ -685,9 +702,37 @@
             data.project,
           );
         });
-        inner.append(eyebrow, title, content, shareForm, facts, evidence, decisions, history);
+        inner.append(eyebrow, title, content, shareForm, facts, evidence, decisions, handoffSection, staleSection, conflictSection, revocationSection, history);
       }
       detail.appendChild(inner);
+    }
+
+    function namedSection(title, items, labelFor) {
+      const section = document.createElement("section");
+      section.className = "inspection";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      section.appendChild(heading);
+      for (const item of items) {
+        const card = document.createElement("article");
+        card.className = "decision";
+        const summary = document.createElement("p");
+        summary.textContent = labelFor(item);
+        card.appendChild(summary);
+        section.appendChild(card);
+      }
+      return section;
+    }
+
+    function handoffItems(data) {
+      const items = [];
+      for (const memory of data.memories || []) {
+        for (const handoff of (memory.context && memory.context.handoffs) || []) items.push(handoff);
+      }
+      for (const entity of data.entities || []) {
+        if (entity.kind === "handoff") items.push(`${entity.kind}: ${entity.key}`);
+      }
+      return items;
     }
 
     function readShareEmail() {
