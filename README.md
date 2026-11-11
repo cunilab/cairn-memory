@@ -2,7 +2,7 @@
 
 > An AI-managed, person-owned memory layer that helps coding agents and people resume work without repeating context.
 
-**Status:** `Layer 3 complete` · **Target stack:** Rust · Next.js · shadcn/ui
+**Status:** Layer 5 implemented · `apps/web` is the first Next.js console · **Target stack:** Rust · Next.js · shadcn/ui
 
 This repository is the planning and implementation home for **Cairn Memory**. It is independently rebuilt and inspired by [AgentMemory](https://github.com/rohitg00/agentmemory) for capture, compression, retrieval, lifecycle, and agent integrations, and by [Graphify](https://github.com/Graphify-Labs/graphify) for deterministic, explainable code relationships. Cairn first makes one person's memory automatic and useful, then adds branch-aware project memory, cross-device continuity, and optional collaboration as layered capabilities.
 
@@ -41,7 +41,7 @@ Start with the [documentation index](docs/README.md). The documents are delibera
 
 ## Project status
 
-Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. Stale/superseded maintenance, team collaboration, and any future federation remain layered follow-up work.
+Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. Layer 5 project sharing, teams, membership, maintenance, and the `apps/web` console are implemented. Federation remains later work. File-store authorization and sync deletion behavior are covered by the focused tests for those paths; they are not a separate finished product claim.
 
 ## Layer 1 prototype
 
@@ -91,7 +91,14 @@ The first standalone MCP compatibility transport is also available over stdio:
 cargo run -p cairn-server -- mcp --store /tmp/cairn-memory.json
 ```
 
-It supports the Layer 1/2 memory tools over newline-delimited JSON-RPC, including session capture, consolidation, recall, resume, unresolved-work, why-changed, explicit save, lifecycle diagnostics, forget, correction, export, and import. The export format is versioned and idempotently restorable; a full Next.js product console remains later work.
+It supports the Layer 1/2 memory tools over newline-delimited JSON-RPC, including session capture, consolidation, recall, resume, unresolved-work, why-changed, explicit save, lifecycle diagnostics, forget, correction, export, and import. The export format is versioned and idempotently restorable. The first Next.js console is `apps/web`. The embedded viewer at `/viewer` remains.
+
+```bash
+cd apps/web
+CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
+```
+
+`CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and a member's shared read.
 
 For automatic hook capture, send one JSON object to the portable adapter:
 

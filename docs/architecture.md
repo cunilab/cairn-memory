@@ -9,7 +9,7 @@ status: draft
 | Field | Value |
 | --- | --- |
 | Scope | Server-authoritative Rust backend, optional edge client, Next.js console, persistence, retrieval, and compatibility boundaries |
-| Last updated | 2026-10-25 |
+| Last updated | 2026-11-11 |
 
 ## Overview
 
@@ -21,7 +21,9 @@ REST, MCP, hooks, web sessions, and optional edge replay use one application ser
 
 ### Layer 1 prototype boundary
 
-The current Layer 1 implementation is the `cairn-core` crate plus REST, MCP, and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, keyword recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter now provides the first server-authoritative PostgreSQL account, device, observation, and sync-event path; the full application repository and Next.js console remain later work.
+The current Layer 1 implementation is the `cairn-core` crate plus REST, MCP, and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, keyword recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter now provides the first server-authoritative PostgreSQL account, device, observation, and sync-event path.
+
+`apps/web` is the first Next.js App Router console. The browser calls same-origin Next.js routes, those routes proxy to the Rust API at `CAIRN_API_URL`, and the embedded `/viewer` remains.
 
 The first Layer 2 slice keeps the same boundary and adds deterministic memory
 scopes (`session`, `worktree`, `branch`, `project`, and `global`), structured

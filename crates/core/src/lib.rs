@@ -450,6 +450,10 @@ struct StoreState {
     #[serde(default)]
     memory_owners: Vec<MemoryOwnerRecord>,
     #[serde(default)]
+    observation_owners: Vec<ObservationOwnerRecord>,
+    #[serde(default)]
+    sync_deletions: Vec<SyncDeletionRecord>,
+    #[serde(default)]
     project_members: Vec<ProjectMemberRecord>,
     #[serde(default)]
     project_shares: Vec<ProjectShareRecord>,
@@ -501,6 +505,8 @@ impl Default for StoreState {
             freshness_events: Vec::new(),
             project_owners: Vec::new(),
             memory_owners: Vec::new(),
+            observation_owners: Vec::new(),
+            sync_deletions: Vec::new(),
             project_members: Vec::new(),
             project_shares: Vec::new(),
             project_policies: Vec::new(),
@@ -565,9 +571,19 @@ pub struct SyncPushResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncDeletion {
+    pub cursor: u64,
+    pub item_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncPullResult {
     pub cursor: u64,
     pub events: Vec<SyncEvent>,
+    /// Deletion instructions for items this device may already have stored.
+    /// A device that never pulls again is left unchanged.
+    #[serde(default)]
+    pub deletions: Vec<SyncDeletion>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -805,6 +821,19 @@ struct MemoryOwnerRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ObservationOwnerRecord {
+    event_id: String,
+    person_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SyncDeletionRecord {
+    cursor: u64,
+    person_id: String,
+    item_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectMemberRecord {
     project_id: String,
     owner_person_id: String,
@@ -943,9 +972,19 @@ impl MemoryStore {
     }
 
     pub fn sweep_expired(&mut self) -> Result<usize, StoreError> {
+        let protected_sources = self
+            .state
+            .memories
+            .iter()
+            .filter(|memory| keeps_expired_source(memory))
+            .filter(|memory| !self.state.forgotten_ids.contains(&memory.memory_id))
+            .flat_map(|memory| memory.source_event_ids.clone())
+            .collect::<HashSet<_>>();
         let mut expired_ids = Vec::new();
         for observation in &self.state.observations {
-            if is_expired(&observation.lifecycle) {
+            if is_expired(&observation.lifecycle)
+                && !protected_sources.contains(&observation.event_id)
+            {
                 expired_ids.push(observation.event_id.clone());
             }
         }
@@ -957,20 +996,8 @@ impl MemoryStore {
 
         let mut added = 0;
         for id in expired_ids {
-            if self.state.forgotten_ids.insert(id.clone()) {
+            if self.state.forgotten_ids.insert(id) {
                 added += 1;
-            }
-            if let Some(memory) = self
-                .state
-                .memories
-                .iter()
-                .find(|memory| memory.memory_id == id)
-            {
-                for event_id in &memory.source_event_ids {
-                    if self.state.forgotten_ids.insert(event_id.clone()) {
-                        added += 1;
-                    }
-                }
             }
         }
         if added > 0 {
@@ -1373,8 +1400,8 @@ impl MemoryStore {
         project_id: &str,
         input: ProjectEntityInput,
     ) -> Result<ProjectEntity, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
-        validate_project_text(project_id, "project_id")?;
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
         validate_project_text(&input.key, "entity key")?;
         validate_entity_kind(&input.kind)?;
         let project = self
@@ -1384,6 +1411,7 @@ impl MemoryStore {
             .find(|project| project.project_id == project_id)
             .ok_or_else(|| StoreError::Validation(format!("unknown project: {project_id}")))?;
         if let Some(memory_id) = &input.source_memory_id {
+            self.reject_other_owner(&account, memory_id)?;
             let memory = self
                 .state
                 .memories
@@ -1879,6 +1907,8 @@ impl MemoryStore {
         reason: &str,
     ) -> Result<Memory, StoreError> {
         let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        self.reject_other_owner(&account, memory_id)?;
         let reason = reason.trim();
         if project_id.trim().is_empty() || memory_id.trim().is_empty() || reason.is_empty() {
             return Err(StoreError::Validation(
@@ -2002,7 +2032,9 @@ impl MemoryStore {
         memory_id: &str,
         commit: &str,
     ) -> Result<Memory, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        self.reject_other_owner(&account, memory_id)?;
         let commit = commit.trim();
         if project_id.trim().is_empty() || memory_id.trim().is_empty() || commit.is_empty() {
             return Err(StoreError::Validation(
@@ -2624,6 +2656,62 @@ impl MemoryStore {
             .any(|record| record.memory_id == memory_id && record.person_id == person_id)
     }
 
+    fn record_observation_owner(&mut self, person_id: &str, event_id: &str) {
+        if self
+            .state
+            .observation_owners
+            .iter()
+            .any(|record| record.event_id == event_id)
+        {
+            return;
+        }
+        self.state.observation_owners.push(ObservationOwnerRecord {
+            event_id: event_id.to_owned(),
+            person_id: person_id.to_owned(),
+        });
+    }
+
+    fn observation_owned_by(&self, event_id: &str, person_id: &str) -> bool {
+        self.state
+            .observation_owners
+            .iter()
+            .any(|record| record.event_id == event_id && record.person_id == person_id)
+    }
+
+    fn item_owner(&self, item_id: &str) -> Option<String> {
+        self.state
+            .memory_owners
+            .iter()
+            .find(|record| record.memory_id == item_id)
+            .map(|record| record.person_id.clone())
+            .or_else(|| {
+                self.state
+                    .observation_owners
+                    .iter()
+                    .find(|record| record.event_id == item_id)
+                    .map(|record| record.person_id.clone())
+            })
+    }
+
+    fn reject_other_owner(&self, account: &Account, target_id: &str) -> Result<(), StoreError> {
+        let Some(owner) = self.item_owner(target_id) else {
+            return Ok(());
+        };
+        if owner == account.person_id {
+            return Ok(());
+        }
+        if self.state.project_shares.iter().any(|share| {
+            share.memory_id == target_id && share.member_person_id == account.person_id
+        }) {
+            return Err(StoreError::Validation(
+                "account does not own the memory".to_owned(),
+            ));
+        }
+        Err(StoreError::Validation(format!(
+            "unknown memory or event: {target_id}"
+        )))
+    }
+
     fn require_project_reader(
         &self,
         account: &Account,
@@ -2946,27 +3034,7 @@ impl MemoryStore {
     }
 
     fn reject_member_mutation(&self, account: &Account, target_id: &str) -> Result<(), StoreError> {
-        let Some(owner) = self
-            .state
-            .memory_owners
-            .iter()
-            .find(|record| record.memory_id == target_id)
-        else {
-            return Ok(());
-        };
-        if owner.person_id == account.person_id {
-            return Ok(());
-        }
-        if self.state.project_shares.iter().any(|share| {
-            share.memory_id == target_id && share.member_person_id == account.person_id
-        }) {
-            return Err(StoreError::Validation(
-                "account does not own the memory".to_owned(),
-            ));
-        }
-        Err(StoreError::Validation(format!(
-            "unknown memory or event: {target_id}"
-        )))
+        self.reject_other_owner(account, target_id)
     }
 
     fn record_share_audit(
@@ -3199,12 +3267,28 @@ impl MemoryStore {
             .state
             .sync_events
             .iter()
-            .filter(|event| event.person_id == device.person_id && event.cursor > cursor)
+            .filter(|event| {
+                event.person_id == device.person_id
+                    && event.cursor > cursor
+                    && !self.state.forgotten_ids.contains(&event.event_id)
+            })
             .cloned()
             .collect();
+        let deletions: Vec<SyncDeletion> = self
+            .state
+            .sync_deletions
+            .iter()
+            .filter(|deletion| deletion.person_id == device.person_id && deletion.cursor > cursor)
+            .map(|deletion| SyncDeletion {
+                cursor: deletion.cursor,
+                item_id: deletion.item_id.clone(),
+            })
+            .collect();
         let next_cursor = events
-            .last()
+            .iter()
             .map(|event| event.cursor)
+            .chain(deletions.iter().map(|deletion| deletion.cursor))
+            .max()
             .unwrap_or(cursor.max(device.cursor));
         if let Some(record) = self
             .state
@@ -3218,6 +3302,7 @@ impl MemoryStore {
         Ok(SyncPullResult {
             cursor: next_cursor,
             events,
+            deletions,
         })
     }
 
@@ -3288,13 +3373,56 @@ impl MemoryStore {
         })
     }
 
+    pub fn has_accounts(&self) -> bool {
+        !self.state.accounts.is_empty()
+    }
+
+    pub fn capture_for_account(
+        &mut self,
+        account_token: &str,
+        input: ObservationInput,
+    ) -> Result<CaptureResult, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let person_id = account.person_id.clone();
+        let result = self.capture_observation(input)?;
+        self.record_observation_owner(&person_id, &result.observation.event_id);
+        self.persist()?;
+        Ok(result)
+    }
+
     pub fn end_session(&mut self, session_id: &str) -> Result<Memory, StoreError> {
+        self.finish_session(None, session_id)
+    }
+
+    pub fn end_session_for_account(
+        &mut self,
+        account_token: &str,
+        session_id: &str,
+    ) -> Result<Memory, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let person_id = account.person_id;
+        self.finish_session(Some(person_id), session_id)
+    }
+
+    fn finish_session(
+        &mut self,
+        person_id: Option<String>,
+        session_id: &str,
+    ) -> Result<Memory, StoreError> {
         if session_id.trim().is_empty() {
             return Err(StoreError::Validation(
                 "session_id must not be empty".to_owned(),
             ));
         }
 
+        let owned_events = person_id.as_ref().map(|person_id| {
+            self.state
+                .observation_owners
+                .iter()
+                .filter(|record| record.person_id == *person_id)
+                .map(|record| record.event_id.clone())
+                .collect::<HashSet<_>>()
+        });
         let session = self
             .state
             .sessions
@@ -3313,6 +3441,9 @@ impl MemoryStore {
                 observation.session_id == session_id
                     && !self.state.forgotten_ids.contains(&observation.event_id)
                     && !is_expired(&observation.lifecycle)
+                    && owned_events
+                        .as_ref()
+                        .is_none_or(|events| events.contains(&observation.event_id))
             })
             .cloned()
             .collect();
@@ -3323,7 +3454,7 @@ impl MemoryStore {
             )));
         }
 
-        let memory_id = format!("memory-{session_id}");
+        let memory_id = session_memory_id(person_id.as_deref(), session_id);
         if let Some(memory) = self
             .state
             .memories
@@ -3334,8 +3465,16 @@ impl MemoryStore {
             return Ok(memory.clone());
         }
 
-        let memory = derive_session_memory(session_id, &session.context, &observations)?;
+        let memory = derive_session_memory(
+            person_id.as_deref(),
+            session_id,
+            &session.context,
+            &observations,
+        )?;
         self.state.memories.push(memory.clone());
+        if let Some(person_id) = person_id.as_deref() {
+            self.record_memory_owner(person_id, &memory.memory_id);
+        }
         self.persist()?;
         Ok(memory)
     }
@@ -3521,15 +3660,78 @@ impl MemoryStore {
     }
 
     pub fn export(&self) -> ExportBundle {
-        let mut forgotten_ids: Vec<String> = self.state.forgotten_ids.iter().cloned().collect();
+        self.export_owned(None)
+    }
+
+    pub fn export_for_account(&self, account_token: &str) -> Result<ExportBundle, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        Ok(self.export_owned(Some(account.person_id.as_str())))
+    }
+
+    fn export_owned(&self, person_id: Option<&str>) -> ExportBundle {
+        let observations = self
+            .state
+            .observations
+            .iter()
+            .filter(|observation| {
+                person_id.is_none_or(|person_id| {
+                    self.observation_owned_by(&observation.event_id, person_id)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let memories = self
+            .state
+            .memories
+            .iter()
+            .filter(|memory| {
+                person_id.is_none_or(|person_id| self.memory_owned_by(&memory.memory_id, person_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut session_ids = observations
+            .iter()
+            .map(|observation| observation.session_id.clone())
+            .collect::<HashSet<_>>();
+        for memory in &memories {
+            session_ids.insert(memory.session_id.clone());
+        }
+        let sessions = match person_id {
+            Some(_) => self
+                .state
+                .sessions
+                .iter()
+                .filter(|session| session_ids.contains(&session.session_id))
+                .cloned()
+                .collect(),
+            None => self.state.sessions.clone(),
+        };
+        let mut forgotten_ids = self
+            .state
+            .forgotten_ids
+            .iter()
+            .filter(|id| {
+                person_id.is_none_or(|person_id| {
+                    self.observation_owned_by(id, person_id)
+                        || self.memory_owned_by(id, person_id)
+                        || memories.iter().any(|memory| {
+                            memory.source_event_ids.iter().any(|source| source == *id)
+                        })
+                        || observations
+                            .iter()
+                            .any(|observation| observation.event_id == **id)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         forgotten_ids.sort();
         ExportBundle {
             format: EXPORT_FORMAT.to_owned(),
             version: EXPORT_VERSION,
             exported_at: timestamp(),
-            sessions: self.state.sessions.clone(),
-            observations: self.state.observations.clone(),
-            memories: self.state.memories.clone(),
+            sessions,
+            observations,
+            memories,
             forgotten_ids,
         }
     }
@@ -3541,6 +3743,54 @@ impl MemoryStore {
     pub fn import_json(&mut self, raw: &str) -> Result<ImportResult, StoreError> {
         let bundle: ExportBundle = serde_json::from_str(raw)?;
         self.import_bundle(bundle)
+    }
+
+    pub fn import_for_account(
+        &mut self,
+        account_token: &str,
+        bundle: ExportBundle,
+    ) -> Result<ImportResult, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let person_id = account.person_id.clone();
+        for observation in &bundle.observations {
+            if self
+                .item_owner(&observation.event_id)
+                .is_some_and(|owner| owner != person_id)
+            {
+                return Err(StoreError::Validation(
+                    "account does not own the memory".to_owned(),
+                ));
+            }
+        }
+        for memory in &bundle.memories {
+            if self
+                .item_owner(&memory.memory_id)
+                .is_some_and(|owner| owner != person_id)
+            {
+                return Err(StoreError::Validation(
+                    "account does not own the memory".to_owned(),
+                ));
+            }
+        }
+        let observation_ids = bundle
+            .observations
+            .iter()
+            .map(|observation| observation.event_id.clone())
+            .collect::<Vec<_>>();
+        let memory_ids = bundle
+            .memories
+            .iter()
+            .map(|memory| memory.memory_id.clone())
+            .collect::<Vec<_>>();
+        let result = self.import_bundle(bundle)?;
+        for event_id in observation_ids {
+            self.record_observation_owner(&person_id, &event_id);
+        }
+        for memory_id in memory_ids {
+            self.record_memory_owner(&person_id, &memory_id);
+        }
+        self.persist()?;
+        Ok(result)
     }
 
     pub fn import_bundle(&mut self, mut bundle: ExportBundle) -> Result<ImportResult, StoreError> {
@@ -3704,6 +3954,70 @@ impl MemoryStore {
         Ok(build_context_pack(query.to_owned(), &mut results, limit))
     }
 
+    pub fn resume_for_account(
+        &self,
+        account_token: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<ContextPack, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let mut results = self.resume_context(usize::MAX, filter)?;
+        results
+            .results
+            .retain(|result| self.memory_owned_by(&result.memory_id, &account.person_id));
+        Ok(build_context_pack(
+            "resume".to_owned(),
+            &mut results.results,
+            limit,
+        ))
+    }
+
+    pub fn unresolved_for_account(
+        &self,
+        account_token: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<ContextPack, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let mut results = self.unresolved_context(usize::MAX, filter)?;
+        results
+            .results
+            .retain(|result| self.memory_owned_by(&result.memory_id, &account.person_id));
+        Ok(build_context_pack(
+            "unresolved".to_owned(),
+            &mut results.results,
+            limit,
+        ))
+    }
+
+    pub fn why_changed_for_account(
+        &self,
+        account_token: &str,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<ContextPack, StoreError> {
+        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
+        results.sort_by(|left, right| {
+            right
+                .decision_reason
+                .is_some()
+                .cmp(&left.decision_reason.is_some())
+                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
+                .then_with(|| {
+                    right
+                        .score
+                        .partial_cmp(&left.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        Ok(build_context_pack(
+            format!("why changed: {query}"),
+            &mut results,
+            limit,
+        ))
+    }
+
     pub fn resume_context(
         &self,
         limit: usize,
@@ -3848,7 +4162,9 @@ pub fn build_context_pack(
 
 impl MemoryStore {
     pub fn forget(&mut self, id: &str) -> Result<(), StoreError> {
+        let sources = self.source_ids(id);
         self.hide_id(id)?;
+        self.note_sync_deletions(None, id, &sources);
         self.persist()
     }
 
@@ -3868,9 +4184,79 @@ impl MemoryStore {
     ) -> Result<(), StoreError> {
         let account = self.authenticate_account(account_token)?;
         self.reject_member_mutation(&account, id)?;
+        let sources = self.source_ids(id);
+        let person_id = account.person_id.clone();
         self.hide_id(id)?;
-        self.record_share_audit(&account.person_id, action, Some(id), serde_json::json!({}));
+        self.note_sync_deletions(Some(&person_id), id, &sources);
+        self.record_share_audit(&person_id, action, Some(id), serde_json::json!({}));
         self.persist()
+    }
+
+    fn source_ids(&self, id: &str) -> Vec<String> {
+        self.state
+            .memories
+            .iter()
+            .find(|memory| memory.memory_id == id)
+            .map(|memory| memory.source_event_ids.clone())
+            .unwrap_or_default()
+    }
+
+    fn note_sync_deletions(&mut self, person_id: Option<&str>, item_id: &str, sources: &[String]) {
+        let persons = match person_id {
+            Some(person_id) => vec![person_id.to_owned()],
+            None => {
+                let mut persons = self.persons_for_item(item_id);
+                for source in sources {
+                    for person in self.persons_for_item(source) {
+                        if !persons.contains(&person) {
+                            persons.push(person);
+                        }
+                    }
+                }
+                persons
+            }
+        };
+        for person in persons {
+            self.push_sync_deletion(&person, item_id);
+            for source in sources {
+                self.push_sync_deletion(&person, source);
+            }
+        }
+    }
+
+    fn persons_for_item(&self, item_id: &str) -> Vec<String> {
+        let mut persons = Vec::new();
+        for event in &self.state.sync_events {
+            if event.event_id == item_id && !persons.contains(&event.person_id) {
+                persons.push(event.person_id.clone());
+            }
+        }
+        if let Some(owner) = self.item_owner(item_id)
+            && !persons.contains(&owner)
+        {
+            persons.push(owner);
+        }
+        persons
+    }
+
+    fn push_sync_deletion(&mut self, person_id: &str, item_id: &str) {
+        if person_id.is_empty() || item_id.is_empty() {
+            return;
+        }
+        if self
+            .state
+            .sync_deletions
+            .iter()
+            .any(|deletion| deletion.person_id == person_id && deletion.item_id == item_id)
+        {
+            return;
+        }
+        self.state.next_sync_cursor = self.state.next_sync_cursor.saturating_add(1);
+        self.state.sync_deletions.push(SyncDeletionRecord {
+            cursor: self.state.next_sync_cursor,
+            person_id: person_id.to_owned(),
+            item_id: item_id.to_owned(),
+        });
     }
 
     fn hide_id(&mut self, id: &str) -> Result<(), StoreError> {
@@ -4380,7 +4766,30 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
     }
 }
 
+pub fn session_memory_id(person_id: Option<&str>, session_id: &str) -> String {
+    match person_id.filter(|person_id| !person_id.is_empty()) {
+        Some(person_id) => format!("memory-{person_id}-{session_id}"),
+        None => format!("memory-{session_id}"),
+    }
+}
+
+fn keeps_expired_source(memory: &Memory) -> bool {
+    if memory.lifecycle.retention != Retention::Durable || is_expired(&memory.lifecycle) {
+        return false;
+    }
+    matches!(
+        memory.kind,
+        MemoryKind::Explicit
+            | MemoryKind::Lesson
+            | MemoryKind::Correction
+            | MemoryKind::Decision
+            | MemoryKind::SessionSummary
+    ) || memory.project_id.is_some()
+        || memory.scope == MemoryScope::Project
+}
+
 pub fn derive_session_memory(
+    person_id: Option<&str>,
     session_id: &str,
     session_context: &WorkContext,
     observations: &[Observation],
@@ -4397,7 +4806,7 @@ pub fn derive_session_memory(
     }
     let digest = build_session_digest(observations);
     Ok(Memory {
-        memory_id: format!("memory-{session_id}"),
+        memory_id: session_memory_id(person_id, session_id),
         session_id: session_id.to_owned(),
         content: digest.content,
         source_event_ids: observations
@@ -5203,6 +5612,135 @@ mod tests {
         restored.logout_account(&login.token)?;
         assert!(restored.authenticate_account(&login.token).is_err());
 
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn two_accounts_keep_distinct_session_summaries_for_one_session_id() -> Result<(), StoreError> {
+        let path = temp_store_path("shared-session");
+        let mut store = MemoryStore::open(&path)?;
+        let owner =
+            store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+        let member =
+            store.register_account("member@example.test", "correct horse battery staple")?;
+        let session_id = "shared-session";
+        store.start_session(session_id, WorkContext::default())?;
+        store.capture_for_account(
+            &owner.token,
+            observation_for(session_id, "owner-evt", "alphaquux ownerfact"),
+        )?;
+        store.capture_for_account(
+            &member.token,
+            observation_for(session_id, "member-evt", "betazet memberfact"),
+        )?;
+        let owner_summary = store.end_session_for_account(&owner.token, session_id)?;
+        let member_summary = store.end_session_for_account(&member.token, session_id)?;
+        assert_ne!(owner_summary.memory_id, member_summary.memory_id);
+        assert_eq!(
+            owner_summary.memory_id,
+            format!("memory-{}-{session_id}", owner.account.person_id)
+        );
+        assert_eq!(
+            member_summary.memory_id,
+            format!("memory-{}-{session_id}", member.account.person_id)
+        );
+        assert!(owner_summary.content.contains("ownerfact"));
+        assert!(!owner_summary.content.contains("memberfact"));
+        let owner_hits =
+            store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
+        assert_eq!(owner_hits.len(), 1);
+        assert_eq!(owner_hits[0].memory_id, owner_summary.memory_id);
+        let member_hits =
+            store.search_for_account(&member.token, "ownerfact", 5, &RecallFilter::default())?;
+        assert!(member_hits.is_empty());
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn forget_reaches_a_later_pull_without_returning_the_observation() -> Result<(), StoreError> {
+        let path = temp_store_path("forget-sync");
+        let mut store = MemoryStore::open(&path)?;
+        let first = store.register_device("device-a", "person-forget", None, "First")?;
+        let second = store.register_device("device-b", "person-forget", None, "Second")?;
+        store.sync_push(
+            &first.token,
+            observation_for("forget-session", "forget-event", "forget me later"),
+        )?;
+        let pulled = store.sync_pull(&second.token, 0)?;
+        assert_eq!(pulled.events.len(), 1);
+        assert!(pulled.deletions.is_empty());
+        store.forget("forget-event")?;
+        let from_start = store.sync_pull(&second.token, 0)?;
+        assert!(
+            from_start
+                .events
+                .iter()
+                .all(|event| event.event_id != "forget-event")
+        );
+        let next = store.sync_pull(&second.token, pulled.cursor)?;
+        assert!(
+            next.events
+                .iter()
+                .all(|event| event.event_id != "forget-event")
+        );
+        assert!(
+            next.deletions
+                .iter()
+                .any(|deletion| deletion.item_id == "forget-event")
+        );
+        let exported = store.export();
+        assert!(
+            exported
+                .observations
+                .iter()
+                .any(|observation| observation.event_id == "forget-event")
+        );
+        assert!(exported.forgotten_ids.iter().any(|id| id == "forget-event"));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn durable_summary_survives_raw_observation_expiry_until_forget() -> Result<(), StoreError> {
+        let path = temp_store_path("durable-expiry");
+        let mut store = MemoryStore::open(&path)?;
+        store.start_session("durable-session", WorkContext::default())?;
+        store.capture_observation(ObservationInput {
+            event_id: "raw-evt".to_owned(),
+            session_id: "durable-session".to_owned(),
+            content: "durable summary source evidence".to_owned(),
+            role: "agent".to_owned(),
+            source: "test".to_owned(),
+            importance: None,
+            lifecycle: LifecycleInput {
+                retention: Some(Retention::Temporary),
+                expires_at: Some((now_seconds() + 3600).to_string()),
+                ..LifecycleInput::default()
+            },
+            context: WorkContext::default(),
+        })?;
+        let summary = store.end_session("durable-session")?;
+        assert_eq!(summary.lifecycle.retention, Retention::Durable);
+        store
+            .state
+            .observations
+            .iter_mut()
+            .find(|observation| observation.event_id == "raw-evt")
+            .unwrap()
+            .lifecycle
+            .expires_at = Some((now_seconds() - 1).to_string());
+        store.sweep_expired()?;
+        let recalled = store.search("durable summary source evidence", 5)?;
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].memory_id, summary.memory_id);
+        store.forget(&summary.memory_id)?;
+        assert!(
+            store
+                .search("durable summary source evidence", 5)?
+                .is_empty()
+        );
         fs::remove_file(path)?;
         Ok(())
     }

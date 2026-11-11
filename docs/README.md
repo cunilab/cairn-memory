@@ -8,6 +8,8 @@ status: draft
 
 These documents describe Cairn Memory, an AI-managed, person-owned memory layer built on the AgentMemory foundation with Graphify-inspired code relationships, as implementation proceeds. They are intentionally small enough to review and change. Detailed feature behavior belongs in `docs/specs/` documents when a feature is ready to build.
 
+`apps/web` is the first Next.js console. [Architecture](./architecture.md) names that console next to the Rust API and the embedded viewer.
+
 | Document | ID | What it owns |
 | --- | --- | --- |
 | [Product](./product.md) | CM-PRODUCT-001 | AI-managed personal memory, ownership model, users, boundaries, and success signals |

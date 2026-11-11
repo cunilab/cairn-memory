@@ -732,4 +732,129 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             .iter()
             .any(|memory| memory.memory.memory_id == successor.memory_id)
     );
+
+    let shared_session = "shared-session";
+    store
+        .start_session(&account.token, shared_session, WorkContext::default())
+        .await
+        .expect("owner shared session");
+    store
+        .start_session(&member.token, shared_session, WorkContext::default())
+        .await
+        .expect("member shared session");
+    let member_device = store
+        .register_device(
+            &member.token,
+            "device-member-shared",
+            &member.account.person_id,
+            None,
+            "Member",
+        )
+        .await
+        .expect("member device");
+    store
+        .sync_push(
+            &second.token,
+            ObservationInput {
+                event_id: "owner-shared-evt".to_owned(),
+                session_id: shared_session.to_owned(),
+                content: "alphaquux ownerfact".to_owned(),
+                role: "agent".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .expect("owner shared push");
+    store
+        .sync_push(
+            &member_device.token,
+            ObservationInput {
+                event_id: "member-shared-evt".to_owned(),
+                session_id: shared_session.to_owned(),
+                content: "betazet memberfact".to_owned(),
+                role: "agent".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .expect("member shared push");
+    let seen = store
+        .sync_pull(&second.token, 0)
+        .await
+        .expect("pull before forget")
+        .cursor;
+    let owner_summary = store
+        .end_session(&account.token, shared_session)
+        .await
+        .expect("owner session memory");
+    let member_summary = store
+        .end_session(&member.token, shared_session)
+        .await
+        .expect("member session memory");
+    assert_ne!(owner_summary.memory_id, member_summary.memory_id);
+    assert_eq!(
+        owner_summary.memory_id,
+        format!("memory-{}-{shared_session}", account.account.person_id)
+    );
+    assert_eq!(
+        member_summary.memory_id,
+        format!("memory-{}-{shared_session}", member.account.person_id)
+    );
+    assert!(owner_summary.content.contains("ownerfact"));
+    assert!(!owner_summary.content.contains("memberfact"));
+    let owner_hits = store
+        .search(&account.token, "ownerfact", 5, &RecallFilter::default())
+        .await
+        .expect("owner search");
+    assert!(
+        owner_hits
+            .iter()
+            .any(|hit| hit.memory_id == owner_summary.memory_id)
+    );
+    let member_hits = store
+        .search(&member.token, "ownerfact", 5, &RecallFilter::default())
+        .await
+        .expect("member search");
+    assert!(
+        member_hits
+            .iter()
+            .all(|hit| hit.memory_id != owner_summary.memory_id)
+    );
+
+    store
+        .forget(&account.token, "owner-shared-evt")
+        .await
+        .expect("forget synced observation");
+    let from_start = store
+        .sync_pull(&member_device.token, 0)
+        .await
+        .expect("member pull after owner forget");
+    assert!(
+        from_start
+            .events
+            .iter()
+            .all(|event| event.event_id != "owner-shared-evt")
+    );
+    let after = store
+        .sync_pull(&second.token, seen)
+        .await
+        .expect("pull tombstone");
+    assert!(
+        after
+            .events
+            .iter()
+            .all(|event| event.event_id != "owner-shared-evt")
+    );
+    assert!(
+        after
+            .deletions
+            .iter()
+            .any(|deletion| deletion.item_id == "owner-shared-evt")
+    );
 }

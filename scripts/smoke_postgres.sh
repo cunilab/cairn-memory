@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -18,7 +19,7 @@ root = os.getcwd()
 port = "3122"
 base = f"http://127.0.0.1:{port}"
 log_path = os.path.join(
-    "/private/var/folders/0q/vssmtzxj543g5v66d485tdrh0000gn/T",
+    tempfile.gettempdir(),
     f"cairn-postgres-smoke-{os.getpid()}.log",
 )
 log = open(log_path, "w+", encoding="utf-8")

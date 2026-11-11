@@ -111,10 +111,13 @@ purges the queued events for that credential. Operators can also run
 - Clients may cache only redacted, bounded outbox payloads and the last
   acknowledged cursor. They must not persist account tokens in the outbox or
   cache server memory responses without an explicit encrypted-cache policy.
-- A server forget creates a durable tombstone and removes the item from normal
-  recall/export; clients must delete matching cached memory/event IDs on the
-  next successful sync. A revoked device must discard its token and queued
-  outbox material, with repair requiring a newly authorized device token.
+- A server forget or retained delete keeps the record in storage. Export still
+  contains the forgotten record and its forgotten id. Normal recall hides it.
+- Sync pull does not return an observation or memory the person has forgotten.
+  A device that already pulled the item receives a deletion instruction on its
+  next pull. A device that never pulls again is not purged.
+- A revoked device must discard its token and queued outbox material, with
+  repair requiring a newly authorized device token.
 - The file-backed adapter proves local compatibility behavior. The PostgreSQL
   adapter provides the server-authoritative account, device, observation, and
   sync-event path.

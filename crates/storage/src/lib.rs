@@ -12,11 +12,12 @@ use cairn_core::{
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare,
     ProjectMergeResult, ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord,
     ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO,
-    SHARE_REASON_MANUAL, Session, ShareCandidateDismissal, SharedProjectMemory, SyncDiagnostics,
-    SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
+    SHARE_REASON_MANUAL, Session, ShareCandidateDismissal, SharedProjectMemory, SyncDeletion,
+    SyncDiagnostics, SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
     build_explicit_memory_record, competing_project_memories, derive_session_memory,
     memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
-    now_seconds, random_token, recall_result, redact_sensitive_content, validate_password,
+    now_seconds, random_token, recall_result, redact_sensitive_content, session_memory_id,
+    validate_password,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
@@ -39,6 +40,7 @@ const PROJECT_SHARE_MIGRATION: &str =
 const SHARE_POLICY_MIGRATION: &str =
     include_str!("../../../migrations/0009_layer5_share_policy.sql");
 const TEAM_SPACE_MIGRATION: &str = include_str!("../../../migrations/0010_layer5_team_space.sql");
+const SYNC_DELETION_MIGRATION: &str = include_str!("../../../migrations/0011_sync_deletions.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 const MAX_SEARCH_RESULTS: i64 = 512;
 
@@ -144,6 +146,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(TEAM_SPACE_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(SYNC_DELETION_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -491,9 +496,10 @@ impl PostgresStore {
         .await?
         .ok_or_else(|| PostgresError::Validation(format!("unknown session: {session_id}")))?;
         let session = session_from_row(&session_row)?;
-        let existing = sqlx::query(memory_select_sql())
+        let memory_id = session_memory_id(Some(&account.person_id), session_id);
+        let existing = sqlx::query(&session_memory_select_sql())
             .bind(&account.person_id)
-            .bind(format!("memory-{session_id}"))
+            .bind(&memory_id)
             .fetch_optional(&mut *transaction)
             .await?;
         if let Some(row) = existing {
@@ -521,7 +527,12 @@ impl PostgresStore {
             .iter()
             .map(observation_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        let memory = derive_session_memory(session_id, &session.context, &observations)?;
+        let memory = derive_session_memory(
+            Some(&account.person_id),
+            session_id,
+            &session.context,
+            &observations,
+        )?;
         insert_memory(&mut transaction, &account.person_id, &memory).await?;
         transaction.commit().await?;
         Ok(memory)
@@ -590,12 +601,14 @@ impl PostgresStore {
             )));
         }
         insert_forget(&mut transaction, &account.person_id, item_id).await?;
+        insert_sync_deletion(&mut transaction, &account.person_id, item_id).await?;
         if let Some(memory) = memory {
             let source_event_ids: Vec<String> = memory
                 .try_get::<Json<Vec<String>>, _>("source_event_ids")?
                 .0;
             for event_id in source_event_ids {
                 insert_forget(&mut transaction, &account.person_id, &event_id).await?;
+                insert_sync_deletion(&mut transaction, &account.person_id, &event_id).await?;
             }
         }
         record_audit(
@@ -3448,7 +3461,12 @@ impl PostgresStore {
         let device = self.authenticate_device(device_token).await?;
         let cursor_param = database_cursor(cursor)?;
         let query = format!(
-            "{} AND se.cursor > $2 ORDER BY se.cursor LIMIT {MAX_PULL_EVENTS}",
+            "{} AND se.cursor > $2
+               AND NOT EXISTS (
+                   SELECT 1 FROM cairn_forgotten_items f
+                   WHERE f.person_id = se.person_id AND f.item_id = se.event_id
+               )
+             ORDER BY se.cursor LIMIT {MAX_PULL_EVENTS}",
             sync_select_sql()
         );
         let rows = sqlx::query(&query)
@@ -3460,9 +3478,30 @@ impl PostgresStore {
             .iter()
             .map(sync_event_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let deletion_rows = sqlx::query(&format!(
+            "SELECT cursor, item_id FROM cairn_sync_deletions
+             WHERE person_id = $1 AND cursor > $2
+             ORDER BY cursor LIMIT {MAX_PULL_EVENTS}"
+        ))
+        .bind(&device.person_id)
+        .bind(cursor_param)
+        .fetch_all(&self.pool)
+        .await?;
+        let deletions = deletion_rows
+            .iter()
+            .map(|row| {
+                let deletion_cursor: i64 = row.try_get("cursor")?;
+                Ok(SyncDeletion {
+                    cursor: deletion_cursor.max(0) as u64,
+                    item_id: row.try_get("item_id")?,
+                })
+            })
+            .collect::<Result<Vec<_>, PostgresError>>()?;
         let next_cursor = events
-            .last()
+            .iter()
             .map(|event| event.cursor)
+            .chain(deletions.iter().map(|deletion| deletion.cursor))
+            .max()
             .unwrap_or(cursor.max(device.cursor));
         sqlx::query(
             "UPDATE cairn_devices SET pull_cursor = GREATEST(pull_cursor, $1), last_seen_at = now()
@@ -3475,6 +3514,7 @@ impl PostgresStore {
         Ok(SyncPullResult {
             cursor: next_cursor,
             events,
+            deletions,
         })
     }
 
@@ -3758,6 +3798,26 @@ async fn insert_observation(
     Ok(())
 }
 
+async fn insert_sync_deletion(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    item_id: &str,
+) -> Result<(), PostgresError> {
+    sqlx::query(
+        "INSERT INTO cairn_sync_deletions (person_id, item_id, cursor)
+         SELECT $1, $2, nextval(pg_get_serial_sequence('cairn_sync_events', 'cursor'))
+         WHERE NOT EXISTS (
+             SELECT 1 FROM cairn_sync_deletions
+             WHERE person_id = $1 AND item_id = $2
+         )",
+    )
+    .bind(person_id)
+    .bind(item_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_forget(
     transaction: &mut Transaction<'_, Postgres>,
     person_id: &str,
@@ -3804,6 +3864,13 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
                AND (newer.lifecycle->>'expiresAt' IS NULL OR
                     (newer.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)
          )"
+    )
+}
+
+fn session_memory_select_sql() -> String {
+    format!(
+        "{} WHERE m.person_id = $1 AND m.memory_id = $2",
+        memory_select_sql()
     )
 }
 
@@ -4359,5 +4426,21 @@ fn validate_entity_kind(kind: &str) -> Result<(), PostgresError> {
         _ => Err(PostgresError::Validation(
             "entity kind must be file, symbol, decision, handoff, or runbook".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_memory_select_sql;
+
+    #[test]
+    fn session_memory_select_sql_filters_by_person_and_memory() {
+        let sql = session_memory_select_sql();
+        assert!(
+            sql.contains("WHERE m.person_id = $1 AND m.memory_id = $2"),
+            "session lookup must not bind parameters to a statement without placeholders: {sql}"
+        );
+        assert_eq!(sql.matches("$1").count(), 1);
+        assert_eq!(sql.matches("$2").count(), 1);
     }
 }

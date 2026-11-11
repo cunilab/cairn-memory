@@ -70,7 +70,7 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - why-changed retrieval with decision reasons and source evidence;
 - bounded file/symbol/test/service relationships;
 - stale-commit and contradiction signals;
-- Layer 2 golden-corpus measurement for first-informed-action and repeated investigation;
+- Layer 2 golden-corpus structural regression (`scripts/measure_layer2.py`), which does not measure time or avoided investigation;
 - real-process acceptance coverage for scoped retrieval.
 
 ## Limitations
@@ -80,7 +80,7 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - Full upstream AgentMemory registry parity and the Next.js product console remain outside this local Layer 1 completion gate; PostgreSQL-derived Layer 2 retrieval is now covered by the Layer 3 checks.
 - `scripts/smoke_full_flow.sh` is the end-to-end acceptance check: it uses actual Cairn server processes, the real hook adapter, temporary stores, HTTP requests, restart recovery, correction, forget, and restore verification.
 - The same acceptance flow now creates project, worktree, and global cache memories and verifies that `main` context excludes the worktree hypothesis while the matching worktree can retrieve it.
-- `scripts/measure_layer2.py` passed the four-case `cairn-golden/layer2-v0.1` corpus: why-changed evidence/relationships, branch isolation, stale signal, contradiction signal, and stable repeated investigation.
+- `scripts/measure_layer2.py` is a structural regression. It passed the four-case `cairn-golden/layer2-v0.1` corpus: why-changed evidence/relationships, branch isolation, stale signal, contradiction signal, and stable repeated investigation. It does not measure time or avoided investigation.
 - `scripts/smoke_layer3.sh` passed the trusted-device slice: registration, authenticated outbox replay, secret redaction, duplicate push, cross-device pull, cursor resume, last-seen state, token rotation, revocation, and purge of queued material after a revoked credential.
 - `crates/storage/tests/postgres.rs` records the PostgreSQL account/device/sync, session-summary, explicit-memory, search, and forget flow; it passed against PostgreSQL 16 running in Colima with `CAIRN_TEST_DATABASE_URL`.
 - `scripts/smoke_postgres.sh` passed the PostgreSQL HTTP boundary against the same Colima-backed database, including account bootstrap, device lifecycle, sync replay, cursor pull, redaction, revocation, project registration, and explicit promotion.
@@ -96,4 +96,4 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](contracts/export-v1.md).
 - The golden corpus defines expected behavior but has not been scored against a running implementation.
 - Retention durations and the future encrypted-cache implementation remain policy-configurable follow-up work; the Layer 3 policy forbids unencrypted response caches and defines tombstone/revocation purge behavior. The first authentication model is resolved by ADR 0008.
-- Stale/superseded maintenance and cross-person project membership remain Layer 4/5 follow-up work; the project promotion and merge boundary is defined in [CM-CONTRACT-009](contracts/project-layer4.md) and [ADR 0009](adr/0009-explicit-project-promotion.md).
+- Project maintenance and cross-person membership are implemented: the maintenance report lists stale and superseded project memories, and an owner can invite a member, share a promoted memory, and keep a project team. The promotion and merge boundary is defined in [CM-CONTRACT-009](contracts/project-layer4.md) and [ADR 0009](adr/0009-explicit-project-promotion.md). Offline purge of a device that never syncs again, encryption, and federation remain unimplemented.

@@ -2209,9 +2209,17 @@ async fn start_session(
 
 async fn capture_observation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ObservationRequest>,
 ) -> Result<Json<CaptureResult>, ApiError> {
     let mut store = state.store.lock().await;
+    if let Some(token) = optional_auth_token(&headers) {
+        return Ok(Json(
+            store
+                .capture_for_account(token, observation_input(request))
+                .map_err(account_api_error)?,
+        ));
+    }
     Ok(Json(store.capture_observation(observation_input(request))?))
 }
 
@@ -2229,8 +2237,8 @@ async fn search(
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<RecallResult>>, ApiError> {
     let store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
-        return Ok(Json(
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
             store
                 .search_for_account(
                     token,
@@ -2239,25 +2247,38 @@ async fn search(
                     &request.recall_filter(),
                 )
                 .map_err(account_api_error)?,
-        ));
+        )),
+        None => Ok(Json(store.search_with_filter(
+            &request.query,
+            request.limit,
+            &request.recall_filter(),
+        )?)),
     }
-    Ok(Json(store.search_with_filter(
-        &request.query,
-        request.limit,
-        &request.recall_filter(),
-    )?))
 }
 
 async fn why_changed(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
     let store = state.store.lock().await;
-    Ok(Json(store.why_changed_context(
-        &request.query,
-        request.limit,
-        &request.recall_filter(),
-    )?))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .why_changed_for_account(
+                    token,
+                    &request.query,
+                    request.limit,
+                    &request.recall_filter(),
+                )
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(store.why_changed_context(
+            &request.query,
+            request.limit,
+            &request.recall_filter(),
+        )?)),
+    }
 }
 
 async fn context(
@@ -2266,8 +2287,8 @@ async fn context(
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
     let store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
-        return Ok(Json(
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
             store
                 .context_for_account(
                     token,
@@ -2276,34 +2297,49 @@ async fn context(
                     &request.recall_filter(),
                 )
                 .map_err(account_api_error)?,
-        ));
+        )),
+        None => Ok(Json(store.context_with_filter(
+            &request.query,
+            request.limit,
+            &request.recall_filter(),
+        )?)),
     }
-    Ok(Json(store.context_with_filter(
-        &request.query,
-        request.limit,
-        &request.recall_filter(),
-    )?))
 }
 
 async fn resume(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ContinuityRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
     let store = state.store.lock().await;
-    Ok(Json(
-        store.resume_context(request.limit, &request.recall_filter())?,
-    ))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .resume_for_account(token, request.limit, &request.recall_filter())
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(
+            store.resume_context(request.limit, &request.recall_filter())?,
+        )),
+    }
 }
 
 async fn unresolved(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ContinuityRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
     let store = state.store.lock().await;
-    Ok(Json(store.unresolved_context(
-        request.limit,
-        &request.recall_filter(),
-    )?))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .unresolved_for_account(token, request.limit, &request.recall_filter())
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(
+            store.unresolved_context(request.limit, &request.recall_filter())?,
+        )),
+    }
 }
 
 async fn forget(
@@ -2316,12 +2352,13 @@ async fn forget(
         .or(request.target_id)
         .ok_or_else(|| ApiError::from(StoreError::Validation("id is required".to_owned())))?;
     let mut store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
-        store
-            .forget_for_account(token, &id)
-            .map_err(account_api_error)?;
-    } else {
-        store.forget(&id)?;
+    match file_bearer(&store, &headers)? {
+        Some(token) => {
+            store
+                .forget_for_account(token, &id)
+                .map_err(account_api_error)?;
+        }
+        None => store.forget(&id)?,
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2336,9 +2373,14 @@ async fn delete_memory(
         .or(request.target_id)
         .ok_or_else(|| ApiError::from(StoreError::Validation("id is required".to_owned())))?;
     let mut store = state.store.lock().await;
-    store
-        .delete_for_account(auth_token(&headers)?, &id)
-        .map_err(account_api_error)?;
+    match file_bearer(&store, &headers)? {
+        Some(token) => {
+            store
+                .delete_for_account(token, &id)
+                .map_err(account_api_error)?;
+        }
+        None => store.forget(&id)?,
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2377,7 +2419,7 @@ async fn correct(
     Json(request): Json<CorrectRequest>,
 ) -> Result<Json<Memory>, ApiError> {
     let mut store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
+    if let Some(token) = file_bearer(&store, &headers)? {
         return Ok(Json(
             store
                 .correct_for_account(
@@ -2400,17 +2442,33 @@ async fn correct(
     )?))
 }
 
-async fn export(State(state): State<AppState>) -> Result<Json<ExportBundle>, ApiError> {
+async fn export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ExportBundle>, ApiError> {
     let store = state.store.lock().await;
-    Ok(Json(store.export()))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store.export_for_account(token).map_err(account_api_error)?,
+        )),
+        None => Ok(Json(store.export())),
+    }
 }
 
 async fn import(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ImportRequest>,
 ) -> Result<Json<ImportResult>, ApiError> {
     let mut store = state.store.lock().await;
-    Ok(Json(store.import_bundle(request.bundle)?))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .import_for_account(token, request.bundle)
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(store.import_bundle(request.bundle)?)),
+    }
 }
 
 async fn diagnose(State(state): State<AppState>) -> Result<Json<LifecycleSummary>, ApiError> {
@@ -2541,6 +2599,17 @@ fn observation_input(request: ObservationRequest) -> ObservationInput {
         importance: request.importance,
         lifecycle: request.lifecycle,
         context: request.context,
+    }
+}
+
+fn file_bearer<'a>(
+    store: &MemoryStore,
+    headers: &'a HeaderMap,
+) -> Result<Option<&'a str>, ApiError> {
+    if store.has_accounts() {
+        auth_token(headers).map(Some)
+    } else {
+        Ok(optional_auth_token(headers))
     }
 }
 
@@ -3188,7 +3257,7 @@ mod tests {
         assert_eq!(promoted["context"]["branch"], Value::Null);
         assert_eq!(promoted["context"]["files"][0], "src/cache.rs");
 
-        let (status, stale_results) = json_request(
+        let (status, stale_results) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/search",
@@ -3197,6 +3266,7 @@ mod tests {
                 "limit": 10,
                 "context": {"repository": "cairn-demo", "commit": "def5678"}
             }),
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3227,7 +3297,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(verified["verified_commit"], "def5678");
 
-        let (_, fresh_results) = json_request(
+        let (_, fresh_results) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/search",
@@ -3236,6 +3306,7 @@ mod tests {
                 "limit": 10,
                 "context": {"repository": "cairn-demo", "commit": "def5678"}
             }),
+            account_token,
         )
         .await;
         let fresh = fresh_results
@@ -3635,11 +3706,12 @@ mod tests {
                 .any(|id| id == promoted_id)
         );
 
-        let (status, _) = json_request(
+        let (status, _) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/forget",
             serde_json::json!({ "memoryId": promoted_id }),
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
@@ -3801,7 +3873,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let promoted_id = promoted["memory_id"].as_str().unwrap();
-        let (status, correction) = json_request(
+        let (status, correction) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/correct",
@@ -3809,6 +3881,7 @@ mod tests {
                 "targetId": promoted_id,
                 "content": "The cache decision was confirmed after review."
             }),
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -4738,11 +4811,12 @@ mod tests {
                 .iter()
                 .any(|memory| memory["memory_id"] == promoted_id)
         );
-        let (status, exported) = json_request(
+        let (status, exported) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/export",
             serde_json::json!({}),
+            owner_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5575,11 +5649,12 @@ mod tests {
             json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
         assert_eq!(status, StatusCode::OK);
         assert!(former_shared.as_array().unwrap().is_empty());
-        let (status, exported) = json_request(
+        let (status, exported) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/export",
             serde_json::json!({}),
+            owner_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5632,11 +5707,12 @@ mod tests {
                 .iter()
                 .all(|memory| memory["memory_id"] != promoted_id)
         );
-        let (status, after_delete) = json_request(
+        let (status, after_delete) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/export",
             serde_json::json!({}),
+            owner_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5683,6 +5759,95 @@ mod tests {
         assert!(!audit_text.contains(decision));
         assert!(!audit_text.contains(password));
         assert!(!audit_text.contains(owner_token));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn member_without_authorization_is_rejected_and_cannot_export_a_private_observation() {
+        let path = temp_store_path("file-auth");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({
+                "email": "owner@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap();
+        let (_, member) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({
+                "email": "member@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let member_token = member["token"].as_str().unwrap();
+        let (status, captured) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "owner-private-evt",
+                "sessionId": "owner-private-session",
+                "content": "owner private observation",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(captured["observation"]["event_id"], "owner-private-evt");
+
+        let (status, _) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/export",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, member_export) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/export",
+            serde_json::json!({}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            member_export["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|observation| observation["event_id"] != "owner-private-evt")
+        );
+
+        let (status, owner_export) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/export",
+            serde_json::json!({}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            owner_export["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|observation| observation["content"] == "owner private observation")
+        );
         let _ = std::fs::remove_file(path);
     }
 }

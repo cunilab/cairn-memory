@@ -11,7 +11,7 @@ status: draft
 | Status | Draft survey. This is a record of source reading. It is not an accepted design, and it does not change [CM-CONTRACT-004](../contracts/lifecycle-v1.md). |
 | Read on | 2026-11-11 |
 | Question | How do other memory systems score confidence, decide that a memory is related or unrelated, and keep or replace an old record when it is corrected? |
-| Cairn today | Confidence is stored as `0..100`. Observations default to `50`. Explicit memories default to `80`. `correct` writes a new memory with `supersedes` and tombstones the old item so normal recall hides it. The exportable record remains. |
+| Cairn today | Confidence is stored as `0..100`. Observations default to `50`. Explicit memories default to `80`. `correct` writes a new memory with `supersedes`, keeps the old record, and copies `project_id` when the target has one. Normal recall hides the old record while the correction is live. The exportable record remains. Forget, not correction, writes the tombstone. |
 
 No source below documents `75` as the line between a related memory and an unrelated memory. A missing cutoff in a source is left missing. It is not treated as `0` or as `75`.
 
@@ -36,11 +36,11 @@ Where the two passes describe the same AgentMemory function, the formula matches
 
 [CM-SPEC-002](../specs/memory-context-and-promotion.md) defines confidence as how strongly the evidence supports the memory. It is not importance, freshness, authority, or a search score. Authorization is never a score.
 
-The same lifecycle contract says a correction creates a durable `correction` memory whose `supersedes` field points at the old memory or observation. The old item is tombstoned and excluded from normal recall. Its exportable provenance is not destroyed.
+[ADR 0010](../adr/0010-correction-keeps-linked-history.md) is the current correction rule. `correct` inserts a durable `correction` memory whose `supersedes` field points at the old memory or observation. It does not tombstone the target and does not drop `project_id`. The old record stays in storage and export. Normal recall skips it while a live correction supersedes it. When the target memory has a `project_id`, the correction copies that `project_id`.
 
-The file-backed and PostgreSQL `correct` paths follow that contract: the replacement is inserted, the target is forgotten, and the replacement does not receive the target's `project_id`. A normal correction therefore does not leave a visible superseded project pair. `forget` adds a tombstone and leaves indexed project entities `active`. The SQL status `retired` exists in `migrations/0007_layer4_registry_maintenance.sql` and is not written by the Rust paths read for this survey.
+The file-backed and PostgreSQL `correct` paths follow that decision: the replacement is inserted, the target stays stored, and the replacement keeps the target's `project_id`. A normal correction therefore leaves the superseded project memory stored while project listing shows the live correction. `forget` adds a tombstone and leaves indexed project entities `active`. The SQL status `retired` exists in `migrations/0007_layer4_registry_maintenance.sql` and is not written by the Rust paths read for this survey.
 
-[CM-SPEC-003](../specs/graph-assisted-retrieval.md) already describes a memory-graph edge, "decision supersedes prior decision," with provenance, confidence, scope, actor, and created-at on the edge. That specification is still draft. The implemented correction path uses a tombstone plus a `supersedes` field, not that edge.
+[CM-SPEC-003](../specs/graph-assisted-retrieval.md) already describes a memory-graph edge, "decision supersedes prior decision," with provenance, confidence, scope, actor, and created-at on the edge. That specification is still draft. The implemented correction path keeps the old record, copies `project_id`, and stores `supersedes` on the new correction. It does not tombstone the target.
 
 ## AgentMemory
 
