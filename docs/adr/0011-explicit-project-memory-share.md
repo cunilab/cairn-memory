@@ -63,12 +63,38 @@ closed unless an explicit policy matches. This follow-on does not add roles.
    values exist. Session summaries keep source actors and source event ids.
    Branch merge keeps `promoted_from` and `source_event_ids`.
 
+## Amendment: project team space and retained delete
+
+The project cairn remains the shared space. A team space belongs to one
+project. The only roles are owner and member. The owner creates the team,
+names it, and adds or removes an existing project member. A member can list
+the team and its members. A person who is not a member cannot. Removing a
+member removes that project membership and revokes active shares for that
+project. A later shared read by the former member is empty. The memory stays
+stored for the owner.
+
+Delete is owner-only. It hides the memory from normal recall with the same
+tombstone as forget, keeps the stored record and the export copy, and writes
+`memory_delete_retained`. It does not purge other devices. A member delete
+fails with the existing not-owner error.
+
+Creating a team, adding a member, and removing a member write
+`project_team_created`, `project_team_member_added`, and
+`project_team_member_removed`. Account promote, share, revoke, and forget
+write `memory_promote`, `project_memory_shared`,
+`project_memory_share_revoked`, and `memory_forget`. Audit metadata may
+contain the project id, member person id, and memory id. It does not contain
+memory content or tokens.
+
+Offline purge, encryption, federation, and CRDTs stay unimplemented.
+
 ## Consequences
 
 - The first Layer 5 slice is one owner, one invited member, and one explicit
-  memory grant. Roles beyond owner and member, offline purge, encryption,
-  federation, CRDTs, and delete remain later work. Automatic sharing is only
-  the explicit nonsensitive project-memory policy above.
+  memory grant. The team space and retained delete are the amendment above.
+  Offline purge, encryption, federation, and CRDTs remain later work. Roles
+  beyond owner and member are not part of this model. Automatic sharing is
+  only the explicit nonsensitive project-memory policy above.
 - Repeating an invite, or an active share of the same memory to the same
   member, is idempotent. Unknown emails and self-invites fail closed.
 - Member correction and forget use the existing validation path. Where the
@@ -82,4 +108,5 @@ closed unless an explicit policy matches. This follow-on does not add roles.
 - `crates/server/src/lib.rs`
 - `migrations/0008_layer5_project_shares.sql`
 - `migrations/0009_layer5_share_policy.sql`
+- `migrations/0010_layer5_team_space.sql`
 - `docs/contracts/share-layer5.md`

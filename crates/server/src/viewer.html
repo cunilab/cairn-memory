@@ -504,24 +504,32 @@
       if (!state.projectData) renderProjectDetail(null);
     }
 
+    async function loadProjectMemories(projectPath, auth, member) {
+      if (member) {
+        return api(`${projectPath}/shared`, auth);
+      }
+      return api(`${projectPath}/memories`, auth);
+    }
+
     async function loadProject(project) {
       const token = sessionStorage.getItem("cairnAccountToken");
       if (!token) return;
       state.selectedId = project.project_id;
       const auth = { headers: { Authorization: `Bearer ${token}` } };
       const projectPath = `/cairn-memory/projects/${project.project_id}`;
+      const member = project.role === "member";
       let memories;
-      let member = false;
       try {
-        memories = await api(`${projectPath}/memories`, auth);
+        memories = await loadProjectMemories(projectPath, auth, member);
+      } catch (error) {
+        showToast(error.message, true);
+        return;
+      }
+      let team = null;
+      try {
+        team = await api(`${projectPath}/team`, auth);
       } catch (_) {
-        try {
-          memories = await api(`${projectPath}/shared`, auth);
-          member = true;
-        } catch (error) {
-          showToast(error.message, true);
-          return;
-        }
+        team = null;
       }
       let conflicts = [];
       let revocations = [];
@@ -532,10 +540,12 @@
         ]);
       } catch (error) {
         showToast(error.message, true);
-        return;
+        const previous = state.projectData && state.projectData.project.project_id === project.project_id ? state.projectData : null;
+        conflicts = previous ? previous.conflicts || [] : [];
+        revocations = previous ? previous.revocations || [] : [];
       }
       if (member) {
-        state.projectData = { project, memories, branches: [], entities: [], freshness: [], conflicts, revocations, member: true };
+        state.projectData = { project, memories, branches: [], entities: [], freshness: [], conflicts, revocations, member: true, team };
         renderProjects();
         renderProjectDetail(state.projectData);
         return;
@@ -546,7 +556,7 @@
           api(`${projectPath}/entities`, auth),
           api(`${projectPath}/freshness`, auth),
         ]);
-        state.projectData = { project, memories, branches, entities, freshness, conflicts, revocations, member: false };
+        state.projectData = { project, memories, branches, entities, freshness, conflicts, revocations, member: false, team };
         renderProjects();
         renderProjectDetail(state.projectData);
       } catch (error) { showToast(error.message, true); }
@@ -649,7 +659,14 @@
               data.project,
             );
           });
-          shareActions.append(share, revoke);
+          const deleteMemory = document.createElement("button");
+          deleteMemory.className = "button danger";
+          deleteMemory.type = "button";
+          deleteMemory.textContent = "Delete memory";
+          deleteMemory.addEventListener("click", () => {
+            postProjectShare("/cairn-memory/delete", { id: memory.memory_id }, data.project);
+          });
+          shareActions.append(share, revoke, deleteMemory);
           card.appendChild(shareActions);
         }
         decisions.appendChild(card);
@@ -676,8 +693,9 @@
       const staleSection = namedSection("Stale memories", stale, (memory) => memory.memory_id || "Untitled memory");
       const conflictSection = namedSection("Conflicts", data.conflicts || [], (conflict) => (conflict.memory_ids || []).join(" · "));
       const revocationSection = namedSection("Revocations", data.revocations || [], (share) => share.memory_id || "Revoked share");
+      const teamSection = renderTeam(data);
       if (data.member) {
-        inner.append(eyebrow, title, content, decisions, handoffSection, staleSection, conflictSection, revocationSection);
+        inner.append(eyebrow, title, content, teamSection, decisions, handoffSection, staleSection, conflictSection, revocationSection);
       } else {
         const shareForm = document.createElement("form");
         shareForm.className = "search";
@@ -702,9 +720,82 @@
             data.project,
           );
         });
-        inner.append(eyebrow, title, content, shareForm, facts, evidence, decisions, handoffSection, staleSection, conflictSection, revocationSection, history);
+        inner.append(eyebrow, title, content, shareForm, teamSection, facts, evidence, decisions, handoffSection, staleSection, conflictSection, revocationSection, history);
       }
       detail.appendChild(inner);
+    }
+
+    function renderTeam(data) {
+      const section = document.createElement("section");
+      section.className = "inspection";
+      const heading = document.createElement("h3");
+      heading.textContent = data.team ? data.team.name : "Team";
+      section.appendChild(heading);
+      for (const member of (data.team && data.team.members) || []) {
+        const card = document.createElement("article");
+        card.className = "decision";
+        const summary = document.createElement("p");
+        summary.textContent = member.email;
+        card.appendChild(summary);
+        section.appendChild(card);
+      }
+      if (!data.member) {
+        const form = document.createElement("form");
+        form.className = "search";
+        const name = document.createElement("input");
+        name.type = "text";
+        name.placeholder = "Team name";
+        name.autocomplete = "off";
+        const create = document.createElement("button");
+        create.className = "button";
+        create.type = "submit";
+        create.textContent = "Create team";
+        form.append(name, create);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const value = name.value.trim();
+          if (!value) {
+            showToast("A team name is required.", true);
+            return;
+          }
+          postProjectShare(
+            `/cairn-memory/projects/${data.project.project_id}/team`,
+            { name: value },
+            data.project,
+          );
+        });
+        const actions = document.createElement("div");
+        actions.className = "detail-actions";
+        const add = document.createElement("button");
+        add.className = "button";
+        add.type = "button";
+        add.textContent = "Add member";
+        add.addEventListener("click", () => {
+          const email = readShareEmail();
+          if (!email) return;
+          postProjectShare(
+            `/cairn-memory/projects/${data.project.project_id}/team/members`,
+            { email },
+            data.project,
+          );
+        });
+        const remove = document.createElement("button");
+        remove.className = "button danger";
+        remove.type = "button";
+        remove.textContent = "Remove member";
+        remove.addEventListener("click", () => {
+          const email = readShareEmail();
+          if (!email) return;
+          postProjectShare(
+            `/cairn-memory/projects/${data.project.project_id}/team/members/remove`,
+            { email },
+            data.project,
+          );
+        });
+        actions.append(add, remove);
+        section.append(form, actions);
+      }
+      return section;
     }
 
     function namedSection(title, items, labelFor) {

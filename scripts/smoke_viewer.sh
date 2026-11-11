@@ -38,8 +38,14 @@ PAGE_HTML="$page" python3 - <<'PY'
 import os
 
 page = os.environ["PAGE_HTML"]
-for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
+for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "Create team", "Add member", "Remove member", "Delete memory", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
     assert marker in page, marker
+loader = page.split("async function loadProjectMemories", 1)[1]
+member_at = loader.index("if (member)")
+shared_at = loader.index("/shared")
+owner_at = loader.index("/memories")
+assert member_at < shared_at < owner_at
+assert "/memories" not in loader[member_at:shared_at]
 PY
 
 diagnose="$(curl -fsS "http://127.0.0.1:${port}/cairn-memory/diagnose")"

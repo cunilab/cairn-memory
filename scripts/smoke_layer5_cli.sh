@@ -4,7 +4,8 @@ set -eu
 cd "$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 
 store="$(mktemp "${TMPDIR:-/tmp}/cairn-layer5.XXXXXX")"
-trap 'rm -f "$store"' EXIT
+export_path=""
+trap 'rm -f "$store" "$export_path"' EXIT
 rm -f "$store"
 
 cairn() {
@@ -68,6 +69,49 @@ import json
 import os
 
 assert json.loads(os.environ["AFTER_JSON"]) == []
+PY
+
+cairn project-share "$store" "$owner_token" "$project_id" "$promoted_id" member@example.test >/dev/null
+team="$(cairn project-team-create "$store" "$owner_token" "$project_id" Platform)"
+TEAM_JSON="$team" python3 - <<'PY'
+import json
+import os
+
+assert json.loads(os.environ["TEAM_JSON"])["name"] == "Platform"
+PY
+cairn project-team-add "$store" "$owner_token" "$project_id" member@example.test >/dev/null
+listed="$(cairn project-team "$store" "$member_token" "$project_id")"
+LISTED_JSON="$listed" python3 - <<'PY'
+import json
+import os
+
+team = json.loads(os.environ["LISTED_JSON"])
+assert team["name"] == "Platform"
+assert [member["email"] for member in team["members"]] == ["member@example.test"]
+PY
+if cairn project-team-create "$store" "$member_token" "$project_id" Other >/dev/null 2>&1; then
+  printf '%s\n' "member team create should fail" >&2
+  exit 1
+fi
+cairn project-team-remove "$store" "$owner_token" "$project_id" member@example.test >/dev/null
+former="$(cairn project-shared "$store" "$member_token" "$project_id")"
+FORMER_JSON="$former" python3 - <<'PY'
+import json
+import os
+
+assert json.loads(os.environ["FORMER_JSON"]) == []
+PY
+cairn delete-memory "$store" "$owner_token" "$promoted_id" >/dev/null
+export_path="$(mktemp "${TMPDIR:-/tmp}/cairn-layer5-export.XXXXXX")"
+cairn export "$store" "$export_path"
+EXPORT_PATH="$export_path" PROMOTED_ID="$promoted_id" python3 - <<'PY'
+import json
+import os
+
+bundle = json.load(open(os.environ["EXPORT_PATH"]))
+promoted_id = os.environ["PROMOTED_ID"]
+assert any(memory["memory_id"] == promoted_id for memory in bundle["memories"])
+assert promoted_id in bundle["forgottenIds"]
 PY
 
 echo "Layer 5 CLI smoke check passed"

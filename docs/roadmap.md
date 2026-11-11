@@ -10,7 +10,7 @@ This roadmap turns AgentMemory's capture and retrieval foundation into Cairn Mem
 
 The project should ship in small, reviewable layers. **Every layer must produce a usable Cairn on its own.** A feature is not complete because it exists in code; it needs a clear boundary, a recovery story, and evidence that it behaves safely.
 
-**Current focus:** Layer 5 — Collaborative Cairns
+**Current focus:** Layer 6 — Advanced Intelligence and Operations
 
 ### ✅ Phase 0 — Product, contract, and memory-autopilot baseline
 
@@ -117,10 +117,10 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** Authorized people and agents can share selected project memory without exposing private personal memory.
 
-> **Layer 5 status:** An owner and one member can invite, explicitly share, read, and revoke one promoted project memory. The default space policy is manual, so promotion creates no share. The owner can list explainable share candidates, dismiss one without sharing it, or accept it through the existing share method. The only automatic policy is `auto_nonsensitive_project_memory`: promoting a project memory that is not secret and not sensitive shares it with current members and writes the share audit. Secrets, sensitive memories, and private observations stay unshared. Turning the policy off does not revoke existing shares. Owner and member can read a conflict list that keeps both contradictory project memories. Shared reads include the share reason and source memory id when those values exist. The project inspection page shows current decisions, handoffs, stale memories, conflicts, and revocations. Delete, offline purge, encryption, federation, CRDTs, and roles beyond owner and member remain open.
+> **Layer 5 status:** An owner and one member can invite, explicitly share, read, and revoke one promoted project memory. The default space policy is manual, so promotion creates no share. The owner can list explainable share candidates, dismiss one without sharing it, or accept it through the existing share method. The only automatic policy is `auto_nonsensitive_project_memory`: promoting a project memory that is not secret and not sensitive shares it with current members and writes the share audit. Secrets, sensitive memories, and private observations stay unshared. Turning the policy off does not revoke existing shares. Owner and member can read a conflict list that keeps both contradictory project memories. Shared reads include the share reason and source memory id when those values exist. The project inspection page shows current decisions, handoffs, stale memories, conflicts, and revocations. The team space is project-scoped. The only roles are owner and member. The owner creates the team, names it, and adds or removes an existing project member. A member can list the team and its members. Removing a member removes that project membership and active shares. Delete retains the stored record: it hides the memory the same way forget does, keeps it in storage and export, and writes an audit event that the delete was retained. Offline purge, encryption, federation, and CRDTs remain unimplemented.
 
-- [ ] Add project and team spaces, memberships, roles, and permission checks.
-- [ ] Add explicit promote, share, revoke, forget, and delete operations with audit entries.
+- [x] Add project and team spaces, memberships, roles, and permission checks.
+- [x] Add explicit promote, share, revoke, forget, and delete operations with audit entries.
 - [x] Add explainable share candidates and reviewable exceptions.
 - [x] Allow automatic sharing only when an explicit space policy matches and privacy checks pass.
 - [x] Preserve source actors and trails when memories are summarized or merged.

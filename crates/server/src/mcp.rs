@@ -47,6 +47,11 @@ const TOOL_NAMES: &[&str] = &[
     "memory_project_share",
     "memory_project_shared",
     "memory_project_revoke",
+    "memory_project_team_create",
+    "memory_project_team",
+    "memory_project_team_add",
+    "memory_project_team_remove",
+    "memory_delete",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -455,6 +460,63 @@ impl McpServer {
                     .map_err(store_message)?;
                 serde_json::to_value(share).map_err(|error| error.to_string())
             }
+            "memory_project_team_create" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let name = required_string(args, "name")?;
+                let team = self
+                    .store
+                    .create_project_team(&account_token, &project_id, &name)
+                    .map_err(store_message)?;
+                serde_json::to_value(team).map_err(|error| error.to_string())
+            }
+            "memory_project_team" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let team = self
+                    .store
+                    .project_team(&account_token, &project_id)
+                    .map_err(store_message)?;
+                serde_json::to_value(team).map_err(|error| error.to_string())
+            }
+            "memory_project_team_add" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let email = required_string(args, "email")?;
+                let member = self
+                    .store
+                    .add_project_team_member(&account_token, &project_id, &email)
+                    .map_err(store_message)?;
+                serde_json::to_value(member).map_err(|error| error.to_string())
+            }
+            "memory_project_team_remove" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let email = required_string(args, "email")?;
+                let member = self
+                    .store
+                    .remove_project_team_member(&account_token, &project_id, &email)
+                    .map_err(store_message)?;
+                serde_json::to_value(member).map_err(|error| error.to_string())
+            }
+            "memory_delete" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let id = args
+                    .get("id")
+                    .or_else(|| args.get("targetId"))
+                    .or_else(|| args.get("target_id"))
+                    .or_else(|| args.get("memoryId"))
+                    .or_else(|| args.get("memory_id"))
+                    .or_else(|| args.get("eventId"))
+                    .or_else(|| args.get("event_id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "id is required".to_owned())?;
+                self.store
+                    .delete_for_account(&account_token, id)
+                    .map_err(store_message)?;
+                Ok(json!(null))
+            }
             _ => Err(format!("unsupported tool: {name}")),
         }
     }
@@ -717,6 +779,65 @@ fn tool_definitions() -> Vec<Value> {
                     ("email", string_schema()),
                 ],
                 &["accountToken", "projectId", "memoryId", "email"],
+            ),
+        ),
+        tool(
+            "memory_project_team_create",
+            "Create the project team space. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("name", string_schema()),
+                ],
+                &["accountToken", "projectId", "name"],
+            ),
+        ),
+        tool(
+            "memory_project_team",
+            "List the project team and its members. Requires an owner or member account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                ],
+                &["accountToken", "projectId"],
+            ),
+        ),
+        tool(
+            "memory_project_team_add",
+            "Add an existing project member to the team. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("email", string_schema()),
+                ],
+                &["accountToken", "projectId", "email"],
+            ),
+        ),
+        tool(
+            "memory_project_team_remove",
+            "Remove a team member and revoke that member's active shares. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("email", string_schema()),
+                ],
+                &["accountToken", "projectId", "email"],
+            ),
+        ),
+        tool(
+            "memory_delete",
+            "Hide a memory from normal recall while keeping it in storage and export. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("id", string_schema()),
+                    ("memoryId", string_schema()),
+                ],
+                &["accountToken", "id"],
             ),
         ),
     ]
@@ -1557,6 +1678,11 @@ mod tests {
             "memory_project_share",
             "memory_project_shared",
             "memory_project_revoke",
+            "memory_project_team_create",
+            "memory_project_team",
+            "memory_project_team_add",
+            "memory_project_team_remove",
+            "memory_delete",
         ] {
             assert!(names.contains(&name), "{name} missing from tools/list");
         }
@@ -1900,6 +2026,223 @@ mod tests {
                 .unwrap()
                 .len(),
             0
+        );
+
+        let missing_team_token = response(
+            &mut server,
+            request(
+                22,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team_create",
+                    "arguments":{"projectId": project_id, "name":"Platform"}
+                }),
+            ),
+        );
+        assert_eq!(missing_team_token["result"]["isError"], true);
+
+        let created = response(
+            &mut server,
+            request(
+                23,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team_create",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "name":"Platform"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(
+            created["result"]["isError"], false,
+            "{}",
+            created["result"]["content"]
+        );
+        assert_eq!(created["result"]["structuredContent"]["name"], "Platform");
+
+        let added = response(
+            &mut server,
+            request(
+                24,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team_add",
+                    "arguments":{
+                        "account_token": owner_token,
+                        "project_id": project_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(
+            added["result"]["isError"], false,
+            "{}",
+            added["result"]["content"]
+        );
+        assert_eq!(
+            added["result"]["structuredContent"]["email"],
+            "member@example.test"
+        );
+
+        let listed = response(
+            &mut server,
+            request(
+                25,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team",
+                    "arguments":{"accountToken": member_token, "projectId": project_id}
+                }),
+            ),
+        );
+        assert_eq!(
+            listed["result"]["isError"], false,
+            "{}",
+            listed["result"]["content"]
+        );
+        assert_eq!(listed["result"]["structuredContent"]["name"], "Platform");
+        assert_eq!(
+            listed["result"]["structuredContent"]["members"][0]["email"],
+            "member@example.test"
+        );
+
+        let member_create = response(
+            &mut server,
+            request(
+                26,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team_create",
+                    "arguments":{
+                        "accountToken": member_token,
+                        "projectId": project_id,
+                        "name":"Other"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(member_create["result"]["isError"], true);
+
+        let reshared = response(
+            &mut server,
+            request(
+                27,
+                "tools/call",
+                json!({
+                    "name":"memory_project_share",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "memoryId": promoted_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(
+            reshared["result"]["isError"], false,
+            "{}",
+            reshared["result"]["content"]
+        );
+
+        let member_delete = response(
+            &mut server,
+            request(
+                28,
+                "tools/call",
+                json!({
+                    "name":"memory_delete",
+                    "arguments":{"account_token": member_token, "memory_id": promoted_id}
+                }),
+            ),
+        );
+        assert_eq!(member_delete["result"]["isError"], true);
+
+        let removed = response(
+            &mut server,
+            request(
+                29,
+                "tools/call",
+                json!({
+                    "name":"memory_project_team_remove",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(
+            removed["result"]["isError"], false,
+            "{}",
+            removed["result"]["content"]
+        );
+
+        let former_shared = response(
+            &mut server,
+            request(
+                30,
+                "tools/call",
+                json!({
+                    "name":"memory_project_shared",
+                    "arguments":{"account_token": member_token, "project_id": project_id}
+                }),
+            ),
+        );
+        assert_eq!(former_shared["result"]["isError"], false);
+        assert_eq!(
+            former_shared["result"]["structuredContent"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let deleted = response(
+            &mut server,
+            request(
+                31,
+                "tools/call",
+                json!({
+                    "name":"memory_delete",
+                    "arguments":{"accountToken": owner_token, "id": promoted_id}
+                }),
+            ),
+        );
+        assert_eq!(
+            deleted["result"]["isError"], false,
+            "{}",
+            deleted["result"]["content"]
+        );
+
+        let exported = response(
+            &mut server,
+            request(
+                32,
+                "tools/call",
+                json!({"name":"memory_export","arguments":{}}),
+            ),
+        );
+        assert_eq!(exported["result"]["isError"], false);
+        let bundle = &exported["result"]["structuredContent"];
+        assert!(
+            bundle["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|memory| memory["memory_id"].as_str() == Some(promoted_id.as_str()))
+        );
+        assert!(
+            bundle["forgottenIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id.as_str() == Some(promoted_id.as_str()))
         );
 
         let _ = std::fs::remove_file(path);

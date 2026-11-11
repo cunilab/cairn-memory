@@ -458,6 +458,10 @@ struct StoreState {
     #[serde(default)]
     dismissed_share_candidates: Vec<DismissedShareCandidate>,
     #[serde(default)]
+    project_teams: Vec<ProjectTeamRecord>,
+    #[serde(default)]
+    project_team_members: Vec<ProjectTeamMemberRecord>,
+    #[serde(default)]
     audit_events: Vec<StoredAuditEvent>,
 }
 
@@ -501,6 +505,8 @@ impl Default for StoreState {
             project_shares: Vec::new(),
             project_policies: Vec::new(),
             dismissed_share_candidates: Vec::new(),
+            project_teams: Vec::new(),
+            project_team_members: Vec::new(),
             audit_events: Vec::new(),
         }
     }
@@ -771,6 +777,21 @@ pub struct ProjectMemoryShare {
     pub revoked_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectTeamMember {
+    pub person_id: String,
+    pub email: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectTeam {
+    pub project_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub members: Vec<ProjectTeamMember>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProjectOwnerRecord {
     project_id: String,
@@ -818,6 +839,20 @@ struct DismissedShareCandidate {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectTeamRecord {
+    project_id: String,
+    name: String,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectTeamMemberRecord {
+    project_id: String,
+    member_person_id: String,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredAuditEvent {
     person_id: String,
     audit_id: String,
@@ -855,6 +890,14 @@ fn share_view(record: &ProjectShareRecord) -> ProjectMemoryShare {
         member_person_id: record.member_person_id.clone(),
         created_at: record.created_at.clone(),
         revoked_at: record.revoked_at.clone(),
+    }
+}
+
+fn team_member_view(record: &ProjectTeamMemberRecord, email: &str) -> ProjectTeamMember {
+    ProjectTeamMember {
+        person_id: record.member_person_id.clone(),
+        email: email.to_owned(),
+        created_at: record.created_at.clone(),
     }
 }
 
@@ -1922,6 +1965,15 @@ impl MemoryStore {
             );
         }
         self.auto_share_new_project_memory(&account.person_id, project_id, &promoted);
+        self.record_share_audit(
+            &account.person_id,
+            "memory_promote",
+            Some(memory_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "promotion_id": promoted.memory_id,
+            }),
+        );
         self.persist()?;
         Ok(promoted)
     }
@@ -2128,6 +2180,12 @@ impl MemoryStore {
         if !self.state.project_members.iter().any(|record| {
             record.project_id == project_id && record.member_person_id == account.person_id
         }) {
+            let had_share = self.state.project_shares.iter().any(|share| {
+                share.project_id == project_id && share.member_person_id == account.person_id
+            });
+            if had_share {
+                return Ok(Vec::new());
+            }
             return Err(StoreError::Validation(
                 "account is not a project member".to_owned(),
             ));
@@ -2199,6 +2257,149 @@ impl MemoryStore {
         );
         self.persist()?;
         Ok(revoked)
+    }
+
+    pub fn create_project_team(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<ProjectTeam, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let name = name.trim();
+        validate_project_text(name, "name")?;
+        if let Some(existing) = self
+            .state
+            .project_teams
+            .iter()
+            .find(|team| team.project_id == project_id)
+            .cloned()
+        {
+            if existing.name == name {
+                return self.team_view(&existing);
+            }
+            return Err(StoreError::Validation(
+                "project already has a team space".to_owned(),
+            ));
+        }
+        let record = ProjectTeamRecord {
+            project_id: project_id.to_owned(),
+            name: name.to_owned(),
+            created_at: timestamp(),
+        };
+        self.record_share_audit(
+            &account.person_id,
+            "project_team_created",
+            Some(project_id),
+            serde_json::json!({ "project_id": project_id }),
+        );
+        self.state.project_teams.push(record.clone());
+        self.persist()?;
+        self.team_view(&record)
+    }
+
+    pub fn add_project_team_member(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<ProjectTeamMember, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        self.require_project_team(project_id)?;
+        let member = self.member_account(project_id, email)?;
+        if let Some(existing) = self
+            .state
+            .project_team_members
+            .iter()
+            .find(|record| {
+                record.project_id == project_id && record.member_person_id == member.person_id
+            })
+            .cloned()
+        {
+            return Ok(team_member_view(&existing, &member.email));
+        }
+        let record = ProjectTeamMemberRecord {
+            project_id: project_id.to_owned(),
+            member_person_id: member.person_id.clone(),
+            created_at: timestamp(),
+        };
+        self.record_share_audit(
+            &account.person_id,
+            "project_team_member_added",
+            Some(&member.person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member.person_id,
+            }),
+        );
+        self.state.project_team_members.push(record.clone());
+        self.persist()?;
+        Ok(team_member_view(&record, &member.email))
+    }
+
+    pub fn remove_project_team_member(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<ProjectTeamMember, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let member = self.account_by_email(&normalize_email(email)?)?;
+        let existing = self
+            .state
+            .project_team_members
+            .iter()
+            .find(|record| {
+                record.project_id == project_id && record.member_person_id == member.person_id
+            })
+            .cloned()
+            .ok_or_else(|| StoreError::Validation("account is not a team member".to_owned()))?;
+        let removed_at = timestamp();
+        for share in &mut self.state.project_shares {
+            if share.project_id == project_id
+                && share.member_person_id == member.person_id
+                && share.revoked_at.is_none()
+            {
+                share.revoked_at = Some(removed_at.clone());
+            }
+        }
+        self.state.project_members.retain(|record| {
+            record.project_id != project_id || record.member_person_id != member.person_id
+        });
+        self.state.project_team_members.retain(|record| {
+            record.project_id != project_id || record.member_person_id != member.person_id
+        });
+        self.record_share_audit(
+            &account.person_id,
+            "project_team_member_removed",
+            Some(&member.person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member.person_id,
+            }),
+        );
+        self.persist()?;
+        Ok(team_member_view(&existing, &member.email))
+    }
+
+    pub fn project_team(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<ProjectTeam, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_reader(&account, project_id)?;
+        let team = self
+            .state
+            .project_teams
+            .iter()
+            .find(|team| team.project_id == project_id)
+            .cloned()
+            .ok_or_else(|| StoreError::Validation("project has no team space".to_owned()))?;
+        self.team_view(&team)
     }
 
     pub fn set_project_share_policy(
@@ -2421,6 +2622,78 @@ impl MemoryStore {
             .memory_owners
             .iter()
             .any(|record| record.memory_id == memory_id && record.person_id == person_id)
+    }
+
+    fn require_project_reader(
+        &self,
+        account: &Account,
+        project_id: &str,
+    ) -> Result<(), StoreError> {
+        validate_project_text(project_id, "project_id")?;
+        if !self
+            .state
+            .projects
+            .iter()
+            .any(|project| project.project_id == project_id)
+        {
+            return Err(StoreError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        if self.project_owner_id(project_id).as_deref() == Some(account.person_id.as_str())
+            || self.state.project_members.iter().any(|record| {
+                record.project_id == project_id && record.member_person_id == account.person_id
+            })
+        {
+            return Ok(());
+        }
+        Err(StoreError::Validation(
+            "account is not a project member".to_owned(),
+        ))
+    }
+
+    fn require_project_team(&self, project_id: &str) -> Result<(), StoreError> {
+        if self
+            .state
+            .project_teams
+            .iter()
+            .any(|team| team.project_id == project_id)
+        {
+            return Ok(());
+        }
+        Err(StoreError::Validation(
+            "project has no team space".to_owned(),
+        ))
+    }
+
+    fn team_view(&self, team: &ProjectTeamRecord) -> Result<ProjectTeam, StoreError> {
+        let mut members = Vec::new();
+        for record in self
+            .state
+            .project_team_members
+            .iter()
+            .filter(|record| record.project_id == team.project_id)
+        {
+            let email = self
+                .state
+                .accounts
+                .iter()
+                .find(|account| account.account.person_id == record.member_person_id)
+                .map(|account| account.account.email.clone())
+                .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))?;
+            members.push(team_member_view(record, &email));
+        }
+        members.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then(left.person_id.cmp(&right.person_id))
+        });
+        Ok(ProjectTeam {
+            project_id: team.project_id.clone(),
+            name: team.name.clone(),
+            created_at: team.created_at.clone(),
+            members,
+        })
     }
 
     fn require_project_owner(&self, account: &Account, project_id: &str) -> Result<(), StoreError> {
@@ -3575,6 +3848,32 @@ pub fn build_context_pack(
 
 impl MemoryStore {
     pub fn forget(&mut self, id: &str) -> Result<(), StoreError> {
+        self.hide_id(id)?;
+        self.persist()
+    }
+
+    pub fn forget_for_account(&mut self, account_token: &str, id: &str) -> Result<(), StoreError> {
+        self.hide_for_account(account_token, id, "memory_forget")
+    }
+
+    pub fn delete_for_account(&mut self, account_token: &str, id: &str) -> Result<(), StoreError> {
+        self.hide_for_account(account_token, id, "memory_delete_retained")
+    }
+
+    fn hide_for_account(
+        &mut self,
+        account_token: &str,
+        id: &str,
+        action: &str,
+    ) -> Result<(), StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.reject_member_mutation(&account, id)?;
+        self.hide_id(id)?;
+        self.record_share_audit(&account.person_id, action, Some(id), serde_json::json!({}));
+        self.persist()
+    }
+
+    fn hide_id(&mut self, id: &str) -> Result<(), StoreError> {
         if id.trim().is_empty() {
             return Err(StoreError::Validation("id must not be empty".to_owned()));
         }
@@ -3600,14 +3899,7 @@ impl MemoryStore {
                 self.state.forgotten_ids.insert(event_id.clone());
             }
         }
-        self.persist()?;
         Ok(())
-    }
-
-    pub fn forget_for_account(&mut self, account_token: &str, id: &str) -> Result<(), StoreError> {
-        let account = self.authenticate_account(account_token)?;
-        self.reject_member_mutation(&account, id)?;
-        self.forget(id)
     }
 
     pub fn lifecycle_summary(&self) -> LifecycleSummary {

@@ -87,7 +87,7 @@ Every promoted or shared memory keeps:
 
 - **Correct** creates a new auditable state transition that supersedes the incorrect derived memory while preserving the source trail.
 - **Forget** removes an item from normal retrieval and records a tombstone or equivalent suppression state.
-- **Delete** removes the content and rebuildable indexes according to the retention and recovery policy; the exact guarantee for offline clients is a Phase 0 decision gap.
+- **Delete** uses the same tombstone as forget. The stored record and export copy stay. The audit action `memory_delete_retained` records that the delete was retained. Delete does not purge other devices. Offline purge remains open.
 - **Revoke** stops future access for the affected device, actor, or membership and records whether cached clients acknowledged the purge instruction.
 - A correction or forget action by the owner must outrank an automated relevance or promotion suggestion.
 

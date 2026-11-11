@@ -68,6 +68,16 @@ def expect_unauthorized(path, payload, token):
     raise AssertionError("request unexpectedly succeeded")
 
 
+def expect_error(path, payload, token, status):
+    try:
+        call(path, payload, token)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode()
+        assert error.code == status, (error.code, body)
+        return body
+    raise AssertionError(path + " unexpectedly succeeded")
+
+
 try:
     for _ in range(600):
         try:
@@ -547,6 +557,115 @@ try:
         token=member_token,
     )
     assert any(item["memory_id"] == auto_promoted["memory_id"] for item in after_manual)
+
+    _, stranger = call(
+        "/cairn-memory/auth/register",
+        {
+            "email": "postgres-stranger@example.test",
+            "password": "correct horse battery staple",
+        },
+    )
+    stranger_token = stranger["token"]
+    project_id = project["project_id"]
+    team = f"/cairn-memory/projects/{project_id}/team"
+    team_members = f"/cairn-memory/projects/{project_id}/team/members"
+    shared_path = f"/cairn-memory/projects/{project_id}/shared"
+    expect_error(team, None, stranger_token, 400)
+    expect_error(shared_path, None, stranger_token, 400)
+    expect_unauthorized(team, {"name": "Platform"}, member_token)
+    expect_unauthorized(
+        f"/cairn-memory/projects/{project_id}/shares",
+        {
+            "memoryId": auto_promoted["memory_id"],
+            "email": "postgres-member@example.test",
+        },
+        member_token,
+    )
+    expect_unauthorized(
+        f"/cairn-memory/projects/{project_id}/shares/{auto_promoted['memory_id']}/revoke",
+        {"email": "postgres-member@example.test"},
+        member_token,
+    )
+    expect_unauthorized(
+        "/cairn-memory/correct",
+        {
+            "targetId": auto_promoted["memory_id"],
+            "content": "A member must not rewrite the shared decision.",
+        },
+        member_token,
+    )
+    expect_unauthorized(
+        "/cairn-memory/forget",
+        {"id": auto_promoted["memory_id"]},
+        member_token,
+    )
+    expect_unauthorized(
+        "/cairn-memory/delete",
+        {"id": auto_promoted["memory_id"]},
+        member_token,
+    )
+    _, created_team = call(team, {"name": "Platform"}, account_token)
+    assert created_team["name"] == "Platform"
+    _, added_member = call(
+        team_members,
+        {"email": "postgres-member@example.test"},
+        account_token,
+    )
+    assert added_member["email"] == "postgres-member@example.test"
+    _, listed_team = call(team, token=member_token)
+    assert listed_team["members"][0]["email"] == "postgres-member@example.test"
+    expect_error(team, None, stranger_token, 400)
+    _, forgotten_note = call(
+        "/cairn-memory/remember",
+        {"content": "owner forget tombstone stays stored"},
+        account_token,
+    )
+    call("/cairn-memory/forget", {"id": forgotten_note["memory_id"]}, account_token)
+    call(
+        f"/cairn-memory/projects/{project_id}/team/members/remove",
+        {"email": "postgres-member@example.test"},
+        account_token,
+    )
+    _, former_shared = call(shared_path, token=member_token)
+    assert former_shared == []
+    _, before_delete = call("/cairn-memory/export", {}, account_token)
+    assert any(
+        memory["memory_id"] == auto_promoted["memory_id"]
+        for memory in before_delete["memories"]
+    )
+    call("/cairn-memory/delete", {"id": auto_promoted["memory_id"]}, account_token)
+    _, after_delete_memories = call(
+        f"/cairn-memory/projects/{project_id}/memories",
+        token=account_token,
+    )
+    assert all(
+        memory["memory_id"] != auto_promoted["memory_id"]
+        for memory in after_delete_memories
+    )
+    _, deleted_search = call(
+        "/cairn-memory/search",
+        {"query": "nonsensitive repository decision", "limit": 5},
+        account_token,
+    )
+    assert all(
+        item["memory_id"] != auto_promoted["memory_id"] for item in deleted_search
+    )
+    _, after_delete = call("/cairn-memory/export", {}, account_token)
+    assert any(
+        memory["memory_id"] == auto_promoted["memory_id"]
+        for memory in after_delete["memories"]
+    )
+    assert auto_promoted["memory_id"] in after_delete["forgottenIds"]
+    _, team_audit = call("/cairn-memory/auth/audit", token=account_token)
+    team_actions = {event["action"] for event in team_audit}
+    assert "project_team_created" in team_actions
+    assert "project_team_member_added" in team_actions
+    assert "project_team_member_removed" in team_actions
+    assert "memory_delete_retained" in team_actions
+    assert "memory_forget" in team_actions
+    audit_text = json.dumps(team_audit)
+    assert "nonsensitive repository decision is ready for collaborators" not in audit_text
+    assert "correct horse battery staple" not in audit_text
 
     _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}, token_a)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)

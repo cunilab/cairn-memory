@@ -30,7 +30,12 @@ fn usage() -> ! {
   cairn project-invite <store> <owner-token> <project-id> <email>\n\
   cairn project-share <store> <owner-token> <project-id> <memory-id> <email>\n\
   cairn project-shared <store> <member-token> <project-id>\n\
-  cairn project-revoke <store> <owner-token> <project-id> <memory-id> <email>"
+  cairn project-revoke <store> <owner-token> <project-id> <memory-id> <email>\n\
+  cairn project-team-create <store> <owner-token> <project-id> <name>\n\
+  cairn project-team <store> <account-token> <project-id>\n\
+  cairn project-team-add <store> <owner-token> <project-id> <email>\n\
+  cairn project-team-remove <store> <owner-token> <project-id> <email>\n\
+  cairn delete-memory <store> <owner-token> <memory-id>"
     );
     process::exit(2);
 }
@@ -327,6 +332,53 @@ fn main() {
                     store.revoke_project_share(&account_token, &project_id, &memory_id, &email)
                 })
                 .map(|share| print_json(&share))
+        }
+        "project-team-create" => {
+            let store = required(&args, 1, "store path");
+            let account_token = required(&args, 2, "owner token");
+            let project_id = required(&args, 3, "project id");
+            let name = required(&args, 4, "name");
+            MemoryStore::open(&store)
+                .and_then(|mut store| store.create_project_team(&account_token, &project_id, &name))
+                .map(|team| print_json(&team))
+        }
+        "project-team" => {
+            let store = required(&args, 1, "store path");
+            let account_token = required(&args, 2, "account token");
+            let project_id = required(&args, 3, "project id");
+            MemoryStore::open(&store)
+                .and_then(|store| store.project_team(&account_token, &project_id))
+                .map(|team| print_json(&team))
+        }
+        "project-team-add" => {
+            let store = required(&args, 1, "store path");
+            let account_token = required(&args, 2, "owner token");
+            let project_id = required(&args, 3, "project id");
+            let email = required(&args, 4, "email");
+            MemoryStore::open(&store)
+                .and_then(|mut store| {
+                    store.add_project_team_member(&account_token, &project_id, &email)
+                })
+                .map(|member| print_json(&member))
+        }
+        "project-team-remove" => {
+            let store = required(&args, 1, "store path");
+            let account_token = required(&args, 2, "owner token");
+            let project_id = required(&args, 3, "project id");
+            let email = required(&args, 4, "email");
+            MemoryStore::open(&store)
+                .and_then(|mut store| {
+                    store.remove_project_team_member(&account_token, &project_id, &email)
+                })
+                .map(|member| print_json(&member))
+        }
+        "delete-memory" => {
+            let store = required(&args, 1, "store path");
+            let account_token = required(&args, 2, "owner token");
+            let memory_id = required(&args, 3, "memory id");
+            MemoryStore::open(&store)
+                .and_then(|mut store| store.delete_for_account(&account_token, &memory_id))
+                .map(|_| print_json(&()))
         }
         _ => usage(),
     };

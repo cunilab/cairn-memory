@@ -11,12 +11,12 @@ use cairn_core::{
     ObservationInput, Project, ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput,
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare,
     ProjectMergeResult, ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord,
-    ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO, SHARE_REASON_MANUAL, Session,
-    ShareCandidateDismissal, SharedProjectMemory, SyncDiagnostics, SyncEvent, SyncPullResult,
-    SyncPushResult, WorkContext, build_context_pack, build_explicit_memory_record,
-    competing_project_memories, derive_session_memory, memory_matches_filter, normalize_email,
-    normalize_export_bundle, normalize_observation, now_seconds, random_token, recall_result,
-    redact_sensitive_content, validate_password,
+    ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO,
+    SHARE_REASON_MANUAL, Session, ShareCandidateDismissal, SharedProjectMemory, SyncDiagnostics,
+    SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
+    build_explicit_memory_record, competing_project_memories, derive_session_memory,
+    memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
+    now_seconds, random_token, recall_result, redact_sensitive_content, validate_password,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
@@ -38,6 +38,7 @@ const PROJECT_SHARE_MIGRATION: &str =
     include_str!("../../../migrations/0008_layer5_project_shares.sql");
 const SHARE_POLICY_MIGRATION: &str =
     include_str!("../../../migrations/0009_layer5_share_policy.sql");
+const TEAM_SPACE_MIGRATION: &str = include_str!("../../../migrations/0010_layer5_team_space.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 const MAX_SEARCH_RESULTS: i64 = 512;
 
@@ -140,6 +141,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(SHARE_POLICY_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(TEAM_SPACE_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -524,6 +528,25 @@ impl PostgresStore {
     }
 
     pub async fn forget(&self, account_token: &str, item_id: &str) -> Result<(), PostgresError> {
+        self.hide_owned_item(account_token, item_id, "memory_forget")
+            .await
+    }
+
+    pub async fn delete_memory(
+        &self,
+        account_token: &str,
+        item_id: &str,
+    ) -> Result<(), PostgresError> {
+        self.hide_owned_item(account_token, item_id, "memory_delete_retained")
+            .await
+    }
+
+    async fn hide_owned_item(
+        &self,
+        account_token: &str,
+        item_id: &str,
+        action: &str,
+    ) -> Result<(), PostgresError> {
         let account = self.authenticate_account(account_token).await?;
         if item_id.trim().is_empty() {
             return Err(PostgresError::Validation("id must not be empty".to_owned()));
@@ -579,7 +602,7 @@ impl PostgresStore {
             &mut transaction,
             &account.person_id,
             None,
-            "memory_forget",
+            action,
             Some(item_id),
             serde_json::json!({}),
         )
@@ -1792,6 +1815,19 @@ impl PostgresStore {
         .fetch_one(&self.pool)
         .await?;
         if !is_member {
+            let had_share = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                    SELECT 1 FROM cairn_project_shares
+                    WHERE project_id = $1 AND member_person_id = $2
+                 )",
+            )
+            .bind(project_id)
+            .bind(&account.person_id)
+            .fetch_one(&self.pool)
+            .await?;
+            if had_share {
+                return Ok(Vec::new());
+            }
             return Err(PostgresError::Validation(
                 "account is not a project member".to_owned(),
             ));
@@ -1867,6 +1903,189 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         share_from_row(&row)
+    }
+
+    pub async fn create_project_team(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<ProjectTeam, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let name = name.trim();
+        validate_project_text(name, "name")?;
+        if let Some(existing) = self.project_team_row(project_id).await? {
+            let existing_name: String = existing.try_get("name")?;
+            if existing_name == name {
+                return self.project_team_view(project_id).await;
+            }
+            return Err(PostgresError::Validation(
+                "project already has a team space".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO cairn_project_teams (owner_person_id, project_id, name)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(name)
+        .execute(&mut *transaction)
+        .await?;
+        record_audit(
+            &mut transaction,
+            &account.person_id,
+            None,
+            "project_team_created",
+            Some(project_id),
+            serde_json::json!({ "project_id": project_id }),
+        )
+        .await?;
+        transaction.commit().await?;
+        self.project_team_view(project_id).await
+    }
+
+    pub async fn add_project_team_member(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<ProjectTeamMember, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let team_exists = self.project_team_row(project_id).await?.is_some();
+        if !team_exists {
+            return Err(PostgresError::Validation(
+                "project has no team space".to_owned(),
+            ));
+        }
+        let member = self.account_by_email(&normalize_email(email)?).await?;
+        let member_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_members
+                WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3
+             )",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !member_exists {
+            return Err(PostgresError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        if let Some(row) = self.team_member_row(project_id, &member.person_id).await? {
+            return team_member_from_row(&row);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "INSERT INTO cairn_project_team_members
+                (owner_person_id, project_id, member_person_id)
+             VALUES ($1, $2, $3)
+             RETURNING member_person_id,
+                       EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at",
+        )
+        .bind(&account.person_id)
+        .bind(project_id)
+        .bind(&member.person_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        record_audit(
+            &mut transaction,
+            &account.person_id,
+            None,
+            "project_team_member_added",
+            Some(&member.person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member.person_id,
+            }),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ProjectTeamMember {
+            person_id: row.try_get("member_person_id")?,
+            email: member.email,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+
+    pub async fn remove_project_team_member(
+        &self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<ProjectTeamMember, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        let member = self.account_by_email(&normalize_email(email)?).await?;
+        let row = self
+            .team_member_row(project_id, &member.person_id)
+            .await?
+            .ok_or_else(|| PostgresError::Validation("account is not a team member".to_owned()))?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE cairn_project_shares
+             SET revoked_at = now()
+             WHERE project_id = $1 AND member_person_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(project_id)
+        .bind(&member.person_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM cairn_project_members
+             WHERE project_id = $1 AND member_person_id = $2",
+        )
+        .bind(project_id)
+        .bind(&member.person_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM cairn_project_team_members
+             WHERE project_id = $1 AND member_person_id = $2",
+        )
+        .bind(project_id)
+        .bind(&member.person_id)
+        .execute(&mut *transaction)
+        .await?;
+        record_audit(
+            &mut transaction,
+            &account.person_id,
+            None,
+            "project_team_member_removed",
+            Some(&member.person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member.person_id,
+            }),
+        )
+        .await?;
+        transaction.commit().await?;
+        team_member_from_row(&row)
+    }
+
+    pub async fn project_team(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<ProjectTeam, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_reader(&account.person_id, project_id)
+            .await?;
+        if self.project_team_row(project_id).await?.is_none() {
+            return Err(PostgresError::Validation(
+                "project has no team space".to_owned(),
+            ));
+        }
+        self.project_team_view(project_id).await
     }
 
     pub async fn set_project_share_policy(
@@ -2143,6 +2362,110 @@ impl PostgresStore {
             Some(value) => ProjectSharePolicy::parse(&value)?,
             None => ProjectSharePolicy::Manual,
         })
+    }
+
+    async fn project_team_row(&self, project_id: &str) -> Result<Option<PgRow>, PostgresError> {
+        Ok(sqlx::query(
+            "SELECT project_id, name,
+                    EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at
+             FROM cairn_project_teams WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn team_member_row(
+        &self,
+        project_id: &str,
+        member_person_id: &str,
+    ) -> Result<Option<PgRow>, PostgresError> {
+        Ok(sqlx::query(
+            "SELECT m.member_person_id, a.email,
+                    EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
+             FROM cairn_project_team_members m
+             JOIN cairn_accounts a ON a.person_id = m.member_person_id
+             WHERE m.project_id = $1 AND m.member_person_id = $2",
+        )
+        .bind(project_id)
+        .bind(member_person_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn project_team_view(&self, project_id: &str) -> Result<ProjectTeam, PostgresError> {
+        let team = self
+            .project_team_row(project_id)
+            .await?
+            .ok_or_else(|| PostgresError::Validation("project has no team space".to_owned()))?;
+        let rows = sqlx::query(
+            "SELECT m.member_person_id, a.email,
+                    EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
+             FROM cairn_project_team_members m
+             JOIN cairn_accounts a ON a.person_id = m.member_person_id
+             WHERE m.project_id = $1
+             ORDER BY m.created_at, m.member_person_id",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let members = rows
+            .iter()
+            .map(team_member_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ProjectTeam {
+            project_id: team.try_get("project_id")?,
+            name: team.try_get("name")?,
+            created_at: team.try_get("created_at")?,
+            members,
+        })
+    }
+
+    async fn require_project_reader(
+        &self,
+        person_id: &str,
+        project_id: &str,
+    ) -> Result<(), PostgresError> {
+        validate_project_text(project_id, "project_id")?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM cairn_projects WHERE project_id = $1)",
+        )
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !exists {
+            return Err(PostgresError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        let is_owner = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_projects WHERE person_id = $1 AND project_id = $2
+             )",
+        )
+        .bind(person_id)
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if is_owner {
+            return Ok(());
+        }
+        let is_member = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM cairn_project_members
+                WHERE project_id = $1 AND member_person_id = $2
+             )",
+        )
+        .bind(project_id)
+        .bind(person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if is_member {
+            return Ok(());
+        }
+        Err(PostgresError::Validation(
+            "account is not a project member".to_owned(),
+        ))
     }
 
     async fn require_project_owner(
@@ -3609,6 +3932,14 @@ fn append_filter_conditions(
 
 fn import_conflict(kind: &str, id: &str) -> PostgresError {
     PostgresError::Validation(format!("import conflicts with existing {kind}: {id}"))
+}
+
+fn team_member_from_row(row: &PgRow) -> Result<ProjectTeamMember, PostgresError> {
+    Ok(ProjectTeamMember {
+        person_id: row.try_get("member_person_id")?,
+        email: row.try_get("email")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 fn membership_from_row(row: &PgRow) -> Result<ProjectMembership, PostgresError> {
