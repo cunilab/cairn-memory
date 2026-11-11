@@ -509,4 +509,227 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .await
         .expect("revoke device");
     assert!(store.sync_pull(&rotated.token, 0).await.is_err());
+
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .expect("register member account");
+    let private_memory = store
+        .remember_with_kind(
+            &account.token,
+            "private observation stays on the owner account",
+            Vec::new(),
+            WorkContext::default(),
+            Default::default(),
+            cairn_core::MemoryKind::Explicit,
+        )
+        .await
+        .expect("remember private observation");
+    let repository_memory = store
+        .remember_with_kind(
+            &account.token,
+            "repository cache decision is ready for the project",
+            Vec::new(),
+            WorkContext {
+                repository: Some("cairn".to_owned()),
+                ..WorkContext::default()
+            },
+            Default::default(),
+            cairn_core::MemoryKind::Explicit,
+        )
+        .await
+        .expect("remember repository memory");
+    let shared_promoted = store
+        .promote_memory(
+            &account.token,
+            &project.project_id,
+            &repository_memory.memory_id,
+            "Share the promoted repository decision",
+        )
+        .await
+        .expect("promote repository memory");
+    assert!(
+        store
+            .invite_project_member(&account.token, &project.project_id, "owner@example.test",)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .invite_project_member(&account.token, &project.project_id, "missing@example.test",)
+            .await
+            .is_err()
+    );
+    let invited = store
+        .invite_project_member(&account.token, &project.project_id, "member@example.test")
+        .await
+        .expect("invite member");
+    let repeated_invite = store
+        .invite_project_member(&account.token, &project.project_id, "member@example.test")
+        .await
+        .expect("repeat invite");
+    assert_eq!(repeated_invite.person_id, invited.person_id);
+    assert!(
+        store
+            .share_project_memory(
+                &account.token,
+                &project.project_id,
+                &private_memory.memory_id,
+                "member@example.test",
+            )
+            .await
+            .is_err()
+    );
+    store
+        .share_project_memory(
+            &account.token,
+            &project.project_id,
+            &shared_promoted.memory_id,
+            "member@example.test",
+        )
+        .await
+        .expect("share promoted memory");
+    let shared = store
+        .shared_project_memories(&member.token, &project.project_id)
+        .await
+        .expect("member reads shared memory");
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].memory_id, shared_promoted.memory_id);
+    let member_search = store
+        .search(
+            &member.token,
+            "private observation",
+            10,
+            &RecallFilter::default(),
+        )
+        .await
+        .expect("member search");
+    assert!(member_search.is_empty());
+    let member_context = store
+        .context(
+            &member.token,
+            "private observation",
+            10,
+            &RecallFilter::default(),
+        )
+        .await
+        .expect("member context");
+    assert!(member_context.results.is_empty());
+    let member_project_memories = store
+        .project_memories(&member.token, &project.project_id)
+        .await
+        .expect_err("member project listing is owner-only");
+    assert!(member_project_memories.to_string().contains("does not own"));
+    let member_correct = store
+        .correct(
+            &member.token,
+            &shared_promoted.memory_id,
+            "A member must not rewrite the shared decision.",
+            Vec::new(),
+            WorkContext::default(),
+            Default::default(),
+        )
+        .await
+        .expect_err("member correction fails");
+    assert!(member_correct.to_string().contains("does not own"));
+    let member_forget = store
+        .forget(&member.token, &shared_promoted.memory_id)
+        .await
+        .expect_err("member forget fails");
+    assert!(member_forget.to_string().contains("does not own"));
+    store
+        .revoke_project_share(
+            &account.token,
+            &project.project_id,
+            &shared_promoted.memory_id,
+            "member@example.test",
+        )
+        .await
+        .expect("revoke share");
+    let after_revoke = store
+        .shared_project_memories(&member.token, &project.project_id)
+        .await
+        .expect("member read after revoke");
+    assert!(after_revoke.is_empty());
+    let owner_memories = store
+        .project_memories(&account.token, &project.project_id)
+        .await
+        .expect("owner still lists the memory");
+    assert!(
+        owner_memories
+            .iter()
+            .any(|memory| memory.memory_id == shared_promoted.memory_id)
+    );
+    let exported = store
+        .export_bundle(&account.token)
+        .await
+        .expect("owner still exports the memory");
+    assert!(
+        exported
+            .memories
+            .iter()
+            .any(|memory| memory.memory_id == shared_promoted.memory_id)
+    );
+    let share_audit = store
+        .audit_events(&account.token, 100)
+        .await
+        .expect("share audit");
+    assert!(
+        share_audit
+            .iter()
+            .any(|event| event.action == "project_memory_shared")
+    );
+    assert!(
+        share_audit
+            .iter()
+            .any(|event| event.action == "project_memory_share_revoked")
+    );
+
+    store
+        .share_project_memory(
+            &account.token,
+            &project.project_id,
+            &shared_promoted.memory_id,
+            "member@example.test",
+        )
+        .await
+        .expect("share again");
+    let successor = store
+        .correct(
+            &account.token,
+            &shared_promoted.memory_id,
+            "The successor repository decision replaces the shared one.",
+            Vec::new(),
+            WorkContext::default(),
+            Default::default(),
+        )
+        .await
+        .expect("owner corrects shared memory");
+    let omitted = store
+        .shared_project_memories(&member.token, &project.project_id)
+        .await
+        .expect("superseded share is omitted");
+    assert!(
+        omitted
+            .iter()
+            .all(|memory| memory.memory_id != shared_promoted.memory_id)
+    );
+    store
+        .share_project_memory(
+            &account.token,
+            &project.project_id,
+            &successor.memory_id,
+            "member@example.test",
+        )
+        .await
+        .expect("share successor");
+    let successor_read = store
+        .shared_project_memories(&member.token, &project.project_id)
+        .await
+        .expect("member reads successor");
+    assert!(
+        successor_read
+            .iter()
+            .any(|memory| memory.memory_id == successor.memory_id)
+    );
 }

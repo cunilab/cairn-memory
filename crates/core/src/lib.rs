@@ -445,6 +445,16 @@ struct StoreState {
     project_entities: Vec<ProjectEntity>,
     #[serde(default)]
     freshness_events: Vec<ProjectFreshnessEvent>,
+    #[serde(default)]
+    project_owners: Vec<ProjectOwnerRecord>,
+    #[serde(default)]
+    memory_owners: Vec<MemoryOwnerRecord>,
+    #[serde(default)]
+    project_members: Vec<ProjectMemberRecord>,
+    #[serde(default)]
+    project_shares: Vec<ProjectShareRecord>,
+    #[serde(default)]
+    audit_events: Vec<StoredAuditEvent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -481,6 +491,11 @@ impl Default for StoreState {
             project_worktrees: Vec::new(),
             project_entities: Vec::new(),
             freshness_events: Vec::new(),
+            project_owners: Vec::new(),
+            memory_owners: Vec::new(),
+            project_members: Vec::new(),
+            project_shares: Vec::new(),
+            audit_events: Vec::new(),
         }
     }
 }
@@ -674,6 +689,66 @@ pub struct ProjectMergeResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectMembership {
+    pub project_id: String,
+    pub person_id: String,
+    pub email: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectMemoryShare {
+    pub project_id: String,
+    pub memory_id: String,
+    pub member_person_id: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectOwnerRecord {
+    project_id: String,
+    person_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MemoryOwnerRecord {
+    memory_id: String,
+    person_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectMemberRecord {
+    project_id: String,
+    owner_person_id: String,
+    member_person_id: String,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProjectShareRecord {
+    project_id: String,
+    memory_id: String,
+    owner_person_id: String,
+    member_person_id: String,
+    created_at: String,
+    #[serde(default)]
+    revoked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredAuditEvent {
+    person_id: String,
+    audit_id: String,
+    action: String,
+    subject_id: Option<String>,
+    actor_device_id: Option<String>,
+    metadata: serde_json::Value,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct DeviceRecord {
     device: Device,
     token: String,
@@ -682,6 +757,44 @@ struct DeviceRecord {
 pub struct MemoryStore {
     path: PathBuf,
     state: StoreState,
+}
+
+fn membership_view(record: &ProjectMemberRecord, email: &str) -> ProjectMembership {
+    ProjectMembership {
+        project_id: record.project_id.clone(),
+        person_id: record.member_person_id.clone(),
+        email: email.to_owned(),
+        created_at: record.created_at.clone(),
+    }
+}
+
+fn share_view(record: &ProjectShareRecord) -> ProjectMemoryShare {
+    ProjectMemoryShare {
+        project_id: record.project_id.clone(),
+        memory_id: record.memory_id.clone(),
+        member_person_id: record.member_person_id.clone(),
+        created_at: record.created_at.clone(),
+        revoked_at: record.revoked_at.clone(),
+    }
+}
+
+fn share_audit_metadata(
+    project_id: &str,
+    member_person_id: &str,
+    memory_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "project_id": project_id,
+        "member_person_id": member_person_id,
+        "memory_id": memory_id,
+    })
+}
+
+fn owner_matches(owners: &[ProjectOwnerRecord], project_id: &str, person_id: &str) -> bool {
+    owners
+        .iter()
+        .find(|record| record.project_id == project_id)
+        .is_none_or(|record| record.person_id == person_id)
 }
 
 impl MemoryStore {
@@ -802,6 +915,43 @@ impl MemoryStore {
         Ok(session)
     }
 
+    pub fn register_account(
+        &mut self,
+        email: &str,
+        password: &str,
+    ) -> Result<AuthSessionResult, StoreError> {
+        if self.state.accounts.is_empty() {
+            return Err(StoreError::Validation(
+                "account bootstrap has not completed".to_owned(),
+            ));
+        }
+        let email = normalize_email(email)?;
+        validate_password(password)?;
+        if self
+            .state
+            .accounts
+            .iter()
+            .any(|record| record.account.email == email)
+        {
+            return Err(StoreError::Validation(
+                "account email is already registered".to_owned(),
+            ));
+        }
+        let account = Account {
+            person_id: format!("person-{}", timestamp_nanos()),
+            email,
+            status: AccountStatus::Active,
+            created_at: timestamp(),
+        };
+        self.state.accounts.push(AccountRecord {
+            account: account.clone(),
+            password_hash: hash_password(password)?,
+        });
+        let session = self.issue_auth_session(account)?;
+        self.persist()?;
+        Ok(session)
+    }
+
     pub fn login(&mut self, email: &str, password: &str) -> Result<AuthSessionResult, StoreError> {
         let email = normalize_email(email)?;
         let record = self
@@ -877,7 +1027,7 @@ impl MemoryStore {
         name: &str,
         default_branch: Option<String>,
     ) -> Result<Project, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
+        let account = self.authenticate_account(account_token)?;
         let repository = repository.trim();
         let name = name.trim();
         if repository.is_empty() || name.is_empty() {
@@ -885,13 +1035,23 @@ impl MemoryStore {
                 "repository and project name must not be empty".to_owned(),
             ));
         }
-        if let Some(project) = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.repository == repository)
-        {
-            return Ok(project.clone());
+        let existing = {
+            let owners = &self.state.project_owners;
+            self.state
+                .projects
+                .iter()
+                .find(|project| {
+                    project.repository == repository
+                        && owner_matches(owners, &project.project_id, &account.person_id)
+                })
+                .cloned()
+        };
+        if let Some(project) = existing {
+            if self.project_owner_id(&project.project_id).is_none() {
+                self.claim_project_owner(&account.person_id, &project.project_id);
+                self.persist()?;
+            }
+            return Ok(project);
         }
         let now = timestamp();
         let project = Project {
@@ -903,13 +1063,21 @@ impl MemoryStore {
             updated_at: now,
         };
         self.state.projects.push(project.clone());
+        self.claim_project_owner(&account.person_id, &project.project_id);
         self.persist()?;
         Ok(project)
     }
 
     pub fn projects(&self, account_token: &str) -> Result<Vec<Project>, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
-        Ok(self.state.projects.clone())
+        let account = self.authenticate_account(account_token)?;
+        let owners = &self.state.project_owners;
+        Ok(self
+            .state
+            .projects
+            .iter()
+            .filter(|project| owner_matches(owners, &project.project_id, &account.person_id))
+            .cloned()
+            .collect())
     }
 
     pub fn register_branch(
@@ -1355,7 +1523,7 @@ impl MemoryStore {
         commit: &str,
         reason: &str,
     ) -> Result<ProjectMergeResult, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
+        let account = self.authenticate_account(account_token)?;
         validate_project_text(project_id, "project_id")?;
         validate_project_text(branch_id, "branch_id")?;
         validate_project_text(memory_id, "memory_id")?;
@@ -1512,6 +1680,7 @@ impl MemoryStore {
                 worktree.updated_at = timestamp();
             }
         }
+        self.record_memory_owner(&account.person_id, &memory.memory_id);
         self.persist()?;
         Ok(ProjectMergeResult { branch, memory })
     }
@@ -1575,7 +1744,7 @@ impl MemoryStore {
         memory_id: &str,
         reason: &str,
     ) -> Result<Memory, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
+        let account = self.authenticate_account(account_token)?;
         let reason = reason.trim();
         if project_id.trim().is_empty() || memory_id.trim().is_empty() || reason.is_empty() {
             return Err(StoreError::Validation(
@@ -1620,7 +1789,10 @@ impl MemoryStore {
             memory.project_id.as_deref() == Some(project_id)
                 && memory.promoted_from.as_deref() == Some(memory_id)
         }) {
-            return Ok(existing.clone());
+            let existing = existing.clone();
+            self.record_memory_owner(&account.person_id, &existing.memory_id);
+            self.persist()?;
+            return Ok(existing);
         }
         let mut promoted = source;
         promoted.memory_id = format!(
@@ -1646,6 +1818,7 @@ impl MemoryStore {
         promoted.lifecycle.expires_at = None;
         promoted.created_at = timestamp();
         self.state.memories.push(promoted.clone());
+        self.record_memory_owner(&account.person_id, &promoted.memory_id);
         self.index_project_memory(project_id, &promoted);
         if let Some(commit) = promoted.verified_commit.clone() {
             self.record_freshness_event(
@@ -1740,18 +1913,8 @@ impl MemoryStore {
         account_token: &str,
         project_id: &str,
     ) -> Result<Vec<Memory>, StoreError> {
-        let _account = self.authenticate_account(account_token)?;
-        validate_project_text(project_id, "project_id")?;
-        if !self
-            .state
-            .projects
-            .iter()
-            .any(|project| project.project_id == project_id)
-        {
-            return Err(StoreError::Validation(format!(
-                "unknown project: {project_id}"
-            )));
-        }
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
         let mut memories = self
             .state
             .memories
@@ -1771,6 +1934,386 @@ impl MemoryStore {
             .collect::<Vec<_>>();
         memories.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         Ok(memories)
+    }
+
+    pub fn audit_events(
+        &self,
+        account_token: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        Ok(self
+            .state
+            .audit_events
+            .iter()
+            .rev()
+            .filter(|event| event.person_id == account.person_id)
+            .take(limit)
+            .map(|event| AuditEvent {
+                audit_id: event.audit_id.clone(),
+                action: event.action.clone(),
+                subject_id: event.subject_id.clone(),
+                actor_device_id: event.actor_device_id.clone(),
+                metadata: event.metadata.clone(),
+                created_at: event.created_at.clone(),
+            })
+            .collect())
+    }
+
+    pub fn invite_project_member(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        email: &str,
+    ) -> Result<ProjectMembership, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let email = normalize_email(email)?;
+        if email == account.email {
+            return Err(StoreError::Validation(
+                "project owner cannot invite themselves".to_owned(),
+            ));
+        }
+        let member = self.account_by_email(&email)?;
+        if let Some(existing) = self.state.project_members.iter().find(|record| {
+            record.project_id == project_id && record.member_person_id == member.person_id
+        }) {
+            return Ok(membership_view(existing, &member.email));
+        }
+        let record = ProjectMemberRecord {
+            project_id: project_id.to_owned(),
+            owner_person_id: account.person_id.clone(),
+            member_person_id: member.person_id.clone(),
+            created_at: timestamp(),
+        };
+        self.record_share_audit(
+            &account.person_id,
+            "project_member_invited",
+            Some(&member.person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": member.person_id,
+            }),
+        );
+        self.state.project_members.push(record.clone());
+        self.persist()?;
+        Ok(membership_view(&record, &member.email))
+    }
+
+    pub fn share_project_memory(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        memory_id: &str,
+        email: &str,
+    ) -> Result<ProjectMemoryShare, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let member = self.account_by_email(&normalize_email(email)?)?;
+        if member.person_id == account.person_id {
+            return Err(StoreError::Validation(
+                "project owner cannot invite themselves".to_owned(),
+            ));
+        }
+        if !self.state.project_members.iter().any(|record| {
+            record.project_id == project_id && record.member_person_id == member.person_id
+        }) {
+            return Err(StoreError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        let memory = self.shareable_project_memory(project_id, memory_id)?;
+        if let Some(existing) = self.state.project_shares.iter().find(|share| {
+            share.project_id == project_id
+                && share.memory_id == memory.memory_id
+                && share.member_person_id == member.person_id
+                && share.revoked_at.is_none()
+        }) {
+            return Ok(share_view(existing));
+        }
+        let reactivated = self
+            .state
+            .project_shares
+            .iter_mut()
+            .find(|share| {
+                share.project_id == project_id
+                    && share.memory_id == memory.memory_id
+                    && share.member_person_id == member.person_id
+            })
+            .map(|share| {
+                share.revoked_at = None;
+                share_view(share)
+            });
+        if let Some(view) = reactivated {
+            self.record_share_audit(
+                &account.person_id,
+                "project_memory_shared",
+                Some(&view.memory_id),
+                share_audit_metadata(project_id, &member.person_id, &view.memory_id),
+            );
+            self.persist()?;
+            return Ok(view);
+        }
+        let record = ProjectShareRecord {
+            project_id: project_id.to_owned(),
+            memory_id: memory.memory_id.clone(),
+            owner_person_id: account.person_id.clone(),
+            member_person_id: member.person_id.clone(),
+            created_at: timestamp(),
+            revoked_at: None,
+        };
+        self.state.project_shares.push(record.clone());
+        self.record_share_audit(
+            &account.person_id,
+            "project_memory_shared",
+            Some(&record.memory_id),
+            share_audit_metadata(project_id, &member.person_id, &record.memory_id),
+        );
+        self.persist()?;
+        Ok(share_view(&record))
+    }
+
+    pub fn shared_project_memories(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<Vec<Memory>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        validate_project_text(project_id, "project_id")?;
+        if !self
+            .state
+            .projects
+            .iter()
+            .any(|project| project.project_id == project_id)
+        {
+            return Err(StoreError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        if !self.state.project_members.iter().any(|record| {
+            record.project_id == project_id && record.member_person_id == account.person_id
+        }) {
+            return Err(StoreError::Validation(
+                "account is not a project member".to_owned(),
+            ));
+        }
+        let mut memories = self
+            .state
+            .memories
+            .iter()
+            .filter(|memory| {
+                self.state.project_shares.iter().any(|share| {
+                    share.project_id == project_id
+                        && share.memory_id == memory.memory_id
+                        && share.member_person_id == account.person_id
+                        && share.revoked_at.is_none()
+                }) && !self.memory_is_forgotten(memory)
+                    && !is_expired(&memory.lifecycle)
+                    && !self.memory_is_superseded(memory)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        memories.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(memories)
+    }
+
+    pub fn revoke_project_share(
+        &mut self,
+        account_token: &str,
+        project_id: &str,
+        memory_id: &str,
+        email: &str,
+    ) -> Result<ProjectMemoryShare, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        let member = self.account_by_email(&normalize_email(email)?)?;
+        let revoked = self
+            .state
+            .project_shares
+            .iter_mut()
+            .find(|share| {
+                share.project_id == project_id
+                    && share.memory_id == memory_id
+                    && share.member_person_id == member.person_id
+                    && share.revoked_at.is_none()
+            })
+            .map(|share| {
+                share.revoked_at = Some(timestamp());
+                share_view(share)
+            })
+            .ok_or_else(|| StoreError::Validation("unknown project share".to_owned()))?;
+        self.record_share_audit(
+            &account.person_id,
+            "project_memory_share_revoked",
+            Some(memory_id),
+            share_audit_metadata(project_id, &member.person_id, memory_id),
+        );
+        self.persist()?;
+        Ok(revoked)
+    }
+
+    fn project_owner_id(&self, project_id: &str) -> Option<String> {
+        self.state
+            .project_owners
+            .iter()
+            .find(|record| record.project_id == project_id)
+            .map(|record| record.person_id.clone())
+    }
+
+    fn claim_project_owner(&mut self, person_id: &str, project_id: &str) {
+        if self
+            .state
+            .project_owners
+            .iter()
+            .any(|record| record.project_id == project_id)
+        {
+            return;
+        }
+        self.state.project_owners.push(ProjectOwnerRecord {
+            project_id: project_id.to_owned(),
+            person_id: person_id.to_owned(),
+        });
+    }
+
+    fn record_memory_owner(&mut self, person_id: &str, memory_id: &str) {
+        if self
+            .state
+            .memory_owners
+            .iter()
+            .any(|record| record.memory_id == memory_id)
+        {
+            return;
+        }
+        self.state.memory_owners.push(MemoryOwnerRecord {
+            memory_id: memory_id.to_owned(),
+            person_id: person_id.to_owned(),
+        });
+    }
+
+    fn memory_owned_by(&self, memory_id: &str, person_id: &str) -> bool {
+        self.state
+            .memory_owners
+            .iter()
+            .any(|record| record.memory_id == memory_id && record.person_id == person_id)
+    }
+
+    fn require_project_owner(&self, account: &Account, project_id: &str) -> Result<(), StoreError> {
+        validate_project_text(project_id, "project_id")?;
+        if !self
+            .state
+            .projects
+            .iter()
+            .any(|project| project.project_id == project_id)
+        {
+            return Err(StoreError::Validation(format!(
+                "unknown project: {project_id}"
+            )));
+        }
+        if self
+            .project_owner_id(project_id)
+            .is_some_and(|owner| owner != account.person_id)
+        {
+            return Err(StoreError::Validation(
+                "account does not own the project".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn account_by_email(&self, email: &str) -> Result<Account, StoreError> {
+        self.state
+            .accounts
+            .iter()
+            .find(|record| record.account.email == email)
+            .map(|record| record.account.clone())
+            .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))
+    }
+
+    fn shareable_project_memory(
+        &self,
+        project_id: &str,
+        memory_id: &str,
+    ) -> Result<Memory, StoreError> {
+        let Some(memory) = self
+            .state
+            .memories
+            .iter()
+            .find(|memory| memory.memory_id == memory_id)
+            .cloned()
+        else {
+            if self
+                .state
+                .observations
+                .iter()
+                .any(|observation| observation.event_id == memory_id)
+            {
+                return Err(StoreError::Validation(
+                    "personal observations and non-project memories cannot be shared".to_owned(),
+                ));
+            }
+            return Err(StoreError::Validation(format!(
+                "unknown memory: {memory_id}"
+            )));
+        };
+        if self.memory_is_forgotten(&memory) || is_expired(&memory.lifecycle) {
+            return Err(StoreError::Validation(
+                "forgotten or expired memories cannot be shared".to_owned(),
+            ));
+        }
+        if memory.scope == MemoryScope::Project && memory.project_id.as_deref() == Some(project_id)
+        {
+            return Ok(memory);
+        }
+        if memory.scope == MemoryScope::Project && memory.project_id.is_some() {
+            return Err(StoreError::Validation(
+                "memory does not belong to the project".to_owned(),
+            ));
+        }
+        Err(StoreError::Validation(
+            "personal observations and non-project memories cannot be shared".to_owned(),
+        ))
+    }
+
+    fn reject_member_mutation(&self, account: &Account, target_id: &str) -> Result<(), StoreError> {
+        let Some(owner) = self
+            .state
+            .memory_owners
+            .iter()
+            .find(|record| record.memory_id == target_id)
+        else {
+            return Ok(());
+        };
+        if owner.person_id == account.person_id {
+            return Ok(());
+        }
+        if self.state.project_shares.iter().any(|share| {
+            share.memory_id == target_id && share.member_person_id == account.person_id
+        }) {
+            return Err(StoreError::Validation(
+                "account does not own the memory".to_owned(),
+            ));
+        }
+        Err(StoreError::Validation(format!(
+            "unknown memory or event: {target_id}"
+        )))
+    }
+
+    fn record_share_audit(
+        &mut self,
+        person_id: &str,
+        action: &str,
+        subject_id: Option<&str>,
+        metadata: serde_json::Value,
+    ) {
+        self.state.audit_events.push(StoredAuditEvent {
+            person_id: person_id.to_owned(),
+            audit_id: format!("audit-{}", &hash_token(&random_token("audit"))[..24]),
+            action: action.to_owned(),
+            subject_id: subject_id.map(str::to_owned),
+            actor_device_id: None,
+            metadata,
+            created_at: timestamp(),
+        });
     }
 
     fn issue_auth_session(&mut self, account: Account) -> Result<AuthSessionResult, StoreError> {
@@ -2182,6 +2725,22 @@ impl MemoryStore {
         Ok(memory)
     }
 
+    pub fn remember_for_account(
+        &mut self,
+        account_token: &str,
+        content: &str,
+        concepts: Vec<String>,
+        context: WorkContext,
+        lifecycle: LifecycleInput,
+        kind: MemoryKind,
+    ) -> Result<Memory, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let memory = self.remember_with_kind(content, concepts, context, lifecycle, kind)?;
+        self.record_memory_owner(&account.person_id, &memory.memory_id);
+        self.persist()?;
+        Ok(memory)
+    }
+
     pub fn correct(
         &mut self,
         target_id: &str,
@@ -2269,6 +2828,23 @@ impl MemoryStore {
             created_at: timestamp(),
         };
         self.state.memories.push(memory.clone());
+        self.persist()?;
+        Ok(memory)
+    }
+
+    pub fn correct_for_account(
+        &mut self,
+        account_token: &str,
+        target_id: &str,
+        content: &str,
+        concepts: Vec<String>,
+        context: WorkContext,
+        lifecycle: LifecycleInput,
+    ) -> Result<Memory, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.reject_member_mutation(&account, target_id)?;
+        let memory = self.correct(target_id, content, concepts, context, lifecycle)?;
+        self.record_memory_owner(&account.person_id, &memory.memory_id);
         self.persist()?;
         Ok(memory)
     }
@@ -2428,6 +3004,32 @@ impl MemoryStore {
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
         let mut results = self.search_with_filter(query, usize::MAX, filter)?;
+        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+    }
+
+    pub fn search_for_account(
+        &self,
+        account_token: &str,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<Vec<RecallResult>, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        let results = self.search_with_filter(query, limit, filter)?;
+        Ok(results
+            .into_iter()
+            .filter(|result| self.memory_owned_by(&result.memory_id, &account.person_id))
+            .collect())
+    }
+
+    pub fn context_for_account(
+        &self,
+        account_token: &str,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<ContextPack, StoreError> {
+        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
         Ok(build_context_pack(query.to_owned(), &mut results, limit))
     }
 
@@ -2602,6 +3204,12 @@ impl MemoryStore {
         }
         self.persist()?;
         Ok(())
+    }
+
+    pub fn forget_for_account(&mut self, account_token: &str, id: &str) -> Result<(), StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.reject_member_mutation(&account, id)?;
+        self.forget(id)
     }
 
     pub fn lifecycle_summary(&self) -> LifecycleSummary {

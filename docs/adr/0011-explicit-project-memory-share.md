@@ -1,0 +1,60 @@
+---
+id: CM-ADR-0011
+title: "Explicit project memory share"
+status: accepted
+---
+
+# ADR 0011 — Explicit project memory share
+
+## Context
+
+Layer 4 promotion creates a project-scoped decision that still belongs to one
+person. A second account must be able to read a chosen project memory without
+receiving the owner's private observations, personal memories, or unshared
+project memories. Sharing has to be an explicit owner action that can be
+revoked, and the grant has to stay inspectable.
+
+## Decision
+
+1. Share only a project memory the owner has already promoted. Sharing a
+   personal observation or a non-project memory fails.
+2. The owner invites another account by email. Any active account session of
+   that member can read the shared memory. The member cannot read the owner's
+   private observations, personal memories, or unshared project memories.
+3. Only the owner can share, revoke, correct, or forget that memory. The
+   member can read.
+4. Revoke makes a later read by the member omit that memory. The memory stays
+   stored for the owner. This slice does not implement offline-device purge,
+   encryption, delete, or automatic sharing.
+
+A live successor that supersedes a shared memory is omitted from the member
+read. The grant stays on the original id, and the owner must share the
+successor explicitly. Invite, share, and revoke write owner audit events
+`project_member_invited`, `project_memory_shared`, and
+`project_memory_share_revoked`. Those records may contain the project id,
+member person id, and memory id. They do not store memory content, tokens, or
+passwords.
+
+The file-backed store keeps `STORE_VERSION` 1 and loads the new vectors with
+serde defaults. PostgreSQL stores membership and shares in
+`migrations/0008_layer5_project_shares.sql`. A share does not copy the memory
+into the member's personal memory list and does not add it to device sync pull.
+
+## Consequences
+
+- The first Layer 5 slice is one owner, one invited member, and one explicit
+  memory grant. Roles beyond owner and member, automatic sharing, and offline
+  purge remain later work.
+- Repeating an invite, or an active share of the same memory to the same
+  member, is idempotent. Unknown emails and self-invites fail closed.
+- Member correction and forget use the existing validation path. Where the
+  server already maps a message containing "does not own" to 401, that status
+  stays in place.
+
+## Evidence
+
+- `crates/core/src/lib.rs`
+- `crates/storage/src/lib.rs`
+- `crates/server/src/lib.rs`
+- `migrations/0008_layer5_project_shares.sql`
+- `docs/contracts/share-layer5.md`

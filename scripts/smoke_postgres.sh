@@ -349,6 +349,112 @@ try:
     _, audit = call("/cairn-memory/auth/audit", token=account_token)
     assert any(event["action"] == "account_bootstrap" for event in audit)
 
+    _, member = call(
+        "/cairn-memory/auth/register",
+        {
+            "email": "postgres-member@example.test",
+            "password": "correct horse battery staple",
+        },
+    )
+    member_token = member["token"]
+    _, private_memory = call(
+        "/cairn-memory/remember",
+        {"content": "private observation stays on the owner account"},
+        account_token,
+    )
+    _, repository_memory = call(
+        "/cairn-memory/remember",
+        {
+            "content": "repository cache decision is ready for the project",
+            "context": {"repository": "cairn", "commit": "abc1234"},
+        },
+        account_token,
+    )
+    _, shared_promoted = call(
+        "/cairn-memory/promote",
+        {
+            "projectId": project["project_id"],
+            "memoryId": repository_memory["memory_id"],
+            "reason": "Share the promoted repository decision",
+        },
+        account_token,
+    )
+    _, invited = call(
+        f"/cairn-memory/projects/{project['project_id']}/members",
+        {"email": "postgres-member@example.test"},
+        account_token,
+    )
+    assert invited["person_id"] == member["account"]["person_id"]
+    try:
+        call(
+            f"/cairn-memory/projects/{project['project_id']}/shares",
+            {
+                "memoryId": private_memory["memory_id"],
+                "email": "postgres-member@example.test",
+            },
+            account_token,
+        )
+    except urllib.error.HTTPError as error:
+        assert error.code == 400, error.code
+    else:
+        raise AssertionError("private observation share unexpectedly succeeded")
+    call(
+        f"/cairn-memory/projects/{project['project_id']}/shares",
+        {
+            "memoryId": shared_promoted["memory_id"],
+            "email": "postgres-member@example.test",
+        },
+        account_token,
+    )
+    _, member_shared = call(
+        f"/cairn-memory/projects/{project['project_id']}/shared",
+        token=member_token,
+    )
+    assert [item["memory_id"] for item in member_shared] == [shared_promoted["memory_id"]]
+    _, member_search = call(
+        "/cairn-memory/search",
+        {"query": "private observation", "limit": 5},
+        member_token,
+    )
+    assert member_search == []
+    expect_unauthorized(
+        f"/cairn-memory/projects/{project['project_id']}/memories",
+        None,
+        member_token,
+    )
+    expect_unauthorized(
+        "/cairn-memory/correct",
+        {
+            "targetId": shared_promoted["memory_id"],
+            "content": "A member must not rewrite the shared decision.",
+        },
+        member_token,
+    )
+    expect_unauthorized(
+        "/cairn-memory/forget",
+        {"id": shared_promoted["memory_id"]},
+        member_token,
+    )
+    call(
+        f"/cairn-memory/projects/{project['project_id']}/shares/{shared_promoted['memory_id']}/revoke",
+        {"email": "postgres-member@example.test"},
+        account_token,
+    )
+    _, after_revoke = call(
+        f"/cairn-memory/projects/{project['project_id']}/shared",
+        token=member_token,
+    )
+    assert after_revoke == []
+    _, owner_memories = call(
+        f"/cairn-memory/projects/{project['project_id']}/memories",
+        token=account_token,
+    )
+    assert any(item["memory_id"] == shared_promoted["memory_id"] for item in owner_memories)
+    _, share_audit = call("/cairn-memory/auth/audit", token=account_token)
+    share_actions = {event["action"] for event in share_audit}
+    assert "project_memory_shared" in share_actions
+    assert "project_memory_share_revoked" in share_actions
+
     _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}, token_a)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
     token_a = rotated["token"]

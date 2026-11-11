@@ -24,6 +24,7 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [Layer 3 trusted device sync](./contracts/sync-layer3.md) | CM-CONTRACT-007 | Device identity, authenticated replay, cursors, rotation, revocation, and outbox |
 | [Layer 3 self-hosted account authentication](./contracts/auth-layer3.md) | CM-CONTRACT-008 | Account bootstrap, hashed sessions, logout, and device ownership |
 | [Layer 4 project promotion](./contracts/project-layer4.md) | CM-CONTRACT-009 | Project registration and explicit evidence-backed promotion |
+| [Layer 5 explicit project memory share](./contracts/share-layer5.md) | CM-CONTRACT-010 | Owner invite, explicit share, member read, and revoke |
 | [Documentation standards](./standards.md) | CM-STD-001 | Document lifecycle, ownership, review, and evidence rules |
 | [ADR 0001 — Compatibility-first rewrite](./adr/0001-compatibility-first-rewrite.md) | CM-ADR-0001 | Rationale for the migration strategy and major boundaries |
 | [ADR 0002 — Collaborative sync model](./adr/0002-collaborative-sync-model.md) | CM-ADR-0002 | Identity, spaces, permissions, synchronization, and conflict boundaries |
@@ -35,6 +36,7 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [ADR 0008 — Self-hosted account authentication](./adr/0008-self-hosted-account-authentication.md) | CM-ADR-0008 | Why the first server uses self-hosted accounts and hashed bearer sessions |
 | [ADR 0009 — Explicit project promotion](./adr/0009-explicit-project-promotion.md) | CM-ADR-0009 | Evidence-backed project registration and promotion |
 | [ADR 0010 — Correction keeps linked history](./adr/0010-correction-keeps-linked-history.md) | CM-ADR-0010 | A correction keeps the old memory stored and linked; normal recall returns the new memory |
+| [ADR 0011 — Explicit project memory share](./adr/0011-explicit-project-memory-share.md) | CM-ADR-0011 | Owner invite, one promoted memory grant, member read, and revoke |
 | [Collaborative memory specification](./specs/collaborative-memory.md) | CM-SPEC-001 | Cross-device and cross-person memory behavior |
 | [Memory context and promotion](./specs/memory-context-and-promotion.md) | CM-SPEC-002 | Scope escalation, branch/worktree context, and context packing |
 | [Graph-assisted retrieval](./specs/graph-assisted-retrieval.md) | CM-SPEC-003 | Graph RAG, embeddings, hybrid retrieval, and code context |

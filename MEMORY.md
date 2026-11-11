@@ -90,6 +90,14 @@ should include the reason they matter and the evidence that supports them.
 - **Reason:** A trusted-device memory system needs recovery, governance, and deletion behavior at the same boundary as authenticated replay.
 - **Evidence:** `crates/storage/src/lib.rs`; `migrations/0002_layer3_audit.sql`; `scripts/smoke_postgres.sh`; `scripts/smoke_layer3.sh`; `cargo test --workspace`
 
+### 2026-11-11 — Explicit invite and share is the first Layer 5 slice
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** An owner invites an existing account by email and shares one already promoted project memory. The member can read that memory through `GET /cairn-memory/projects/{projectId}/shared`. The member cannot list the owner's project memories, search private observations, or correct or forget the shared memory. Revoke hides it from the member and leaves it stored for the owner. A live successor is omitted until the owner shares that successor. Audit actions are `project_member_invited`, `project_memory_shared`, and `project_memory_share_revoked`.
+- **Reason:** Project memory must not become visible to another account through promotion alone, and a share must not copy the memory into personal recall or device sync.
+- **Evidence:** `docs/adr/0011-explicit-project-memory-share.md`; `docs/contracts/share-layer5.md`; `migrations/0008_layer5_project_shares.sql`; `cargo test --workspace --all-targets`; ignored `crates/storage/tests/postgres.rs`; `./scripts/smoke_postgres.sh`
+
 ### 2026-11-03 — Explicit project promotion is the first Layer 4 slice
 
 - **Type:** decision

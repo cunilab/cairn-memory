@@ -130,8 +130,9 @@ removed from the promoted project context. Repeating the same promotion
 returns the original promoted memory.
 
 Secret, forgotten, expired, or repository-mismatched memories are rejected.
-Project registration and promotion are person-scoped; shared memberships and
-cross-person access remain Layer 5.
+Project registration and promotion are person-scoped. Explicit cross-person
+read of one promoted memory is defined in
+[CM-CONTRACT-010](share-layer5.md).
 
 ## Freshness verification
 
