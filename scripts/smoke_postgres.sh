@@ -411,6 +411,10 @@ try:
         token=member_token,
     )
     assert [item["memory_id"] for item in member_shared] == [shared_promoted["memory_id"]]
+    _, member_projects = call("/cairn-memory/projects", token=member_token)
+    assert any(
+        item["project_id"] == project["project_id"] for item in member_projects
+    )
     _, member_search = call(
         "/cairn-memory/search",
         {"query": "private observation", "limit": 5},

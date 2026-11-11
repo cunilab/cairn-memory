@@ -3313,6 +3313,10 @@ mod tests {
         assert!(body.contains("supersedes"));
         assert!(body.contains("Supersedes"));
         assert!(body.contains("Freshness history"));
+        assert!(body.contains("Invite member"));
+        assert!(body.contains("Share decision"));
+        assert!(body.contains("Revoke share"));
+        assert!(body.contains("/shared"));
         assert!(body.contains("\"action\""));
         assert!(body.contains("\"commit\""));
         assert!(body.contains("\"memory_id\""));
@@ -4196,6 +4200,22 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(shared_memories.as_array().unwrap().len(), 1);
         assert_eq!(shared_memories[0]["memory_id"], promoted_id);
+        let (status, member_projects) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/projects",
+            Value::Null,
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            member_projects
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|project| project["project_id"] == project_id)
+        );
 
         let (status, member_search) = json_request_auth(
             router.clone(),

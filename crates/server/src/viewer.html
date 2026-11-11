@@ -331,7 +331,7 @@
   <div id="toast" hidden></div>
 
   <script>
-    const state = { bundle: null, diagnosis: null, sync: null, results: null, selectedId: null, view: "memories", projects: null, projectData: null, toastTimer: null };
+    const state = { bundle: null, diagnosis: null, sync: null, results: null, selectedId: null, view: "memories", projects: null, projectData: null, shareEmail: "", toastTimer: null };
 
     const $ = (id) => document.getElementById(id);
     const esc = (value) => String(value ?? "");
@@ -351,7 +351,8 @@
     const memoryId = (item) => item.memory_id || item.memoryId || item.event_id || item.eventId;
 
     async function api(path, options = {}) {
-      const response = await fetch(path, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+      const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+      const response = await fetch(path, { ...options, headers });
       if (!response.ok) {
         let message = `${response.status} ${response.statusText}`;
         try { message = (await response.json()).error || message; } catch (_) {}
@@ -507,17 +508,49 @@
       const token = sessionStorage.getItem("cairnAccountToken");
       if (!token) return;
       state.selectedId = project.project_id;
+      const auth = { headers: { Authorization: `Bearer ${token}` } };
+      const projectPath = `/cairn-memory/projects/${project.project_id}`;
+      let memories;
+      let member = false;
       try {
-        const auth = { headers: { Authorization: `Bearer ${token}` } };
-        const [memories, branches, entities, freshness] = await Promise.all([
-          api(`/cairn-memory/projects/${project.project_id}/memories`, auth),
-          api(`/cairn-memory/projects/${project.project_id}/branches`, auth),
-          api(`/cairn-memory/projects/${project.project_id}/entities`, auth),
-          api(`/cairn-memory/projects/${project.project_id}/freshness`, auth),
-        ]);
-        state.projectData = { project, memories, branches, entities, freshness };
+        memories = await api(`${projectPath}/memories`, auth);
+      } catch (_) {
+        try {
+          memories = await api(`${projectPath}/shared`, auth);
+          member = true;
+        } catch (error) {
+          showToast(error.message, true);
+          return;
+        }
+      }
+      if (member) {
+        state.projectData = { project, memories, branches: [], entities: [], freshness: [], member: true };
         renderProjects();
         renderProjectDetail(state.projectData);
+        return;
+      }
+      try {
+        const [branches, entities, freshness] = await Promise.all([
+          api(`${projectPath}/branches`, auth),
+          api(`${projectPath}/entities`, auth),
+          api(`${projectPath}/freshness`, auth),
+        ]);
+        state.projectData = { project, memories, branches, entities, freshness, member: false };
+        renderProjects();
+        renderProjectDetail(state.projectData);
+      } catch (error) { showToast(error.message, true); }
+    }
+
+    async function postProjectShare(path, body, project) {
+      const token = sessionStorage.getItem("cairnAccountToken");
+      if (!token) return;
+      try {
+        await api(path, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
+        await loadProject(project);
       } catch (error) { showToast(error.message, true); }
     }
 
@@ -537,7 +570,9 @@
       title.textContent = data.project.name;
       const content = document.createElement("p");
       content.className = "detail-content";
-      content.textContent = `${data.project.repository} · ${data.memories.length} decisions · ${data.entities.length} evidence entities`;
+      content.textContent = data.member
+        ? `${data.project.repository} · ${data.memories.length} shared decisions`
+        : `${data.project.repository} · ${data.memories.length} decisions · ${data.entities.length} evidence entities`;
       const facts = document.createElement("div");
       facts.className = "facts";
       addFact(facts, "Branches", String(data.branches.length));
@@ -574,6 +609,38 @@
         addFact(decisionFacts, "lifecycle.freshness", life.freshness == null ? "—" : String(life.freshness));
         if (memory.supersedes) addFact(decisionFacts, "supersedes", memory.supersedes);
         card.append(summary, decisionFacts);
+        if (!data.member) {
+          const shareActions = document.createElement("div");
+          shareActions.className = "detail-actions";
+          const share = document.createElement("button");
+          share.className = "button";
+          share.type = "button";
+          share.textContent = "Share decision";
+          share.addEventListener("click", () => {
+            const email = readShareEmail();
+            if (!email) return;
+            postProjectShare(
+              `/cairn-memory/projects/${data.project.project_id}/shares`,
+              { memoryId: memory.memory_id, email },
+              data.project,
+            );
+          });
+          const revoke = document.createElement("button");
+          revoke.className = "button danger";
+          revoke.type = "button";
+          revoke.textContent = "Revoke share";
+          revoke.addEventListener("click", () => {
+            const email = readShareEmail();
+            if (!email) return;
+            postProjectShare(
+              `/cairn-memory/projects/${data.project.project_id}/shares/${memory.memory_id}/revoke`,
+              { email },
+              data.project,
+            );
+          });
+          shareActions.append(share, revoke);
+          card.appendChild(shareActions);
+        }
         decisions.appendChild(card);
       }
       const history = document.createElement("section");
@@ -592,8 +659,41 @@
         card.appendChild(eventFacts);
         history.appendChild(card);
       }
-      inner.append(eyebrow, title, content, facts, evidence, decisions, history);
+      if (data.member) {
+        inner.append(eyebrow, title, content, decisions);
+      } else {
+        const shareForm = document.createElement("form");
+        shareForm.className = "search";
+        const email = document.createElement("input");
+        email.type = "email";
+        email.placeholder = "Member email";
+        email.autocomplete = "off";
+        email.value = state.shareEmail || "";
+        email.addEventListener("input", () => { state.shareEmail = email.value; });
+        const invite = document.createElement("button");
+        invite.className = "button";
+        invite.type = "submit";
+        invite.textContent = "Invite member";
+        shareForm.append(email, invite);
+        shareForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const value = readShareEmail();
+          if (!value) return;
+          postProjectShare(
+            `/cairn-memory/projects/${data.project.project_id}/members`,
+            { email: value },
+            data.project,
+          );
+        });
+        inner.append(eyebrow, title, content, shareForm, facts, evidence, decisions, history);
+      }
       detail.appendChild(inner);
+    }
+
+    function readShareEmail() {
+      const value = (state.shareEmail || "").trim();
+      if (!value) showToast("An email is required.", true);
+      return value;
     }
 
     function renderDetail(item) {

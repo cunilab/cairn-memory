@@ -1075,7 +1075,13 @@ impl MemoryStore {
             .state
             .projects
             .iter()
-            .filter(|project| owner_matches(owners, &project.project_id, &account.person_id))
+            .filter(|project| {
+                owner_matches(owners, &project.project_id, &account.person_id)
+                    || self.state.project_members.iter().any(|member| {
+                        member.project_id == project.project_id
+                            && member.member_person_id == account.person_id
+                    })
+            })
             .cloned()
             .collect())
     }

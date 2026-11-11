@@ -869,7 +869,12 @@ impl PostgresStore {
             "SELECT project_id, repository, name, default_branch,
                     EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
                     EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at
-             FROM cairn_projects WHERE person_id = $1 ORDER BY repository",
+             FROM cairn_projects
+             WHERE person_id = $1
+                OR project_id IN (
+                    SELECT project_id FROM cairn_project_members WHERE member_person_id = $1
+                )
+             ORDER BY repository",
         )
         .bind(&account.person_id)
         .fetch_all(&self.pool)

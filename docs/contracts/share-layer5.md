@@ -75,6 +75,8 @@ for that project. Forgotten, expired, and revoked memories are omitted. A
 shared memory that a live successor supersedes is omitted; the grant stays on
 the original id until the owner shares the successor.
 
+`GET /cairn-memory/projects` includes projects the account owns and projects
+where that account is a member, so the member can open the shared read.
 `GET /cairn-memory/projects/{projectId}/memories` stays owner-only. Search and
 context for the member do not return the owner's private or unshared records.
 
@@ -124,6 +126,10 @@ MCP tools accept the camelCase fields below and the same names in snake_case.
 - `memory_project_share` (`accountToken`, `projectId`, `memoryId`, `email`)
 - `memory_project_shared` (`accountToken`, `projectId`)
 - `memory_project_revoke` (`accountToken`, `projectId`, `memoryId`, `email`)
+
+## Viewer
+
+The `/viewer` Projects page keeps the account token used for project inspection. When `GET /cairn-memory/projects/{projectId}/memories` succeeds, the owner sees one member email field, **Invite member**, and **Share decision** and **Revoke share** on each current decision. Those buttons call the invite, share, and revoke routes and show an API error in the existing toast. When that memories request fails, the page loads `GET /cairn-memory/projects/{projectId}/shared` and renders those memories with scope, verified commit, freshness, and supersedes, without invite, share, or revoke controls. This viewer path does not finish the rest of Layer 5.
 
 ## Out of scope
 
