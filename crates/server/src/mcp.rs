@@ -42,6 +42,11 @@ const TOOL_NAMES: &[&str] = &[
     "memory_promote",
     "memory_project_memories",
     "memory_project_freshness",
+    "memory_account_register",
+    "memory_project_invite",
+    "memory_project_share",
+    "memory_project_shared",
+    "memory_project_revoke",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +405,56 @@ impl McpServer {
                     .map_err(store_message)?;
                 serde_json::to_value(events).map_err(|error| error.to_string())
             }
+            "memory_account_register" => {
+                let email = required_string(args, "email")?;
+                let password = required_string(args, "password")?;
+                let session = self
+                    .store
+                    .register_account(&email, &password)
+                    .map_err(store_message)?;
+                serde_json::to_value(session).map_err(|error| error.to_string())
+            }
+            "memory_project_invite" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let email = required_string(args, "email")?;
+                let membership = self
+                    .store
+                    .invite_project_member(&account_token, &project_id, &email)
+                    .map_err(store_message)?;
+                serde_json::to_value(membership).map_err(|error| error.to_string())
+            }
+            "memory_project_share" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let memory_id = required_string_alias(args, "memoryId", "memory_id")?;
+                let email = required_string(args, "email")?;
+                let share = self
+                    .store
+                    .share_project_memory(&account_token, &project_id, &memory_id, &email)
+                    .map_err(store_message)?;
+                serde_json::to_value(share).map_err(|error| error.to_string())
+            }
+            "memory_project_shared" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let memories = self
+                    .store
+                    .shared_project_memories(&account_token, &project_id)
+                    .map_err(store_message)?;
+                serde_json::to_value(memories).map_err(|error| error.to_string())
+            }
+            "memory_project_revoke" => {
+                let account_token = required_string_alias(args, "accountToken", "account_token")?;
+                let project_id = required_string_alias(args, "projectId", "project_id")?;
+                let memory_id = required_string_alias(args, "memoryId", "memory_id")?;
+                let email = required_string(args, "email")?;
+                let share = self
+                    .store
+                    .revoke_project_share(&account_token, &project_id, &memory_id, &email)
+                    .map_err(store_message)?;
+                serde_json::to_value(share).map_err(|error| error.to_string())
+            }
             _ => Err(format!("unsupported tool: {name}")),
         }
     }
@@ -605,6 +660,63 @@ fn tool_definitions() -> Vec<Value> {
                     ("projectId", string_schema()),
                 ],
                 &["accountToken", "projectId"],
+            ),
+        ),
+        tool(
+            "memory_account_register",
+            "Register an account after bootstrap and return its session token.",
+            object_schema(
+                &[("email", string_schema()), ("password", string_schema())],
+                &["email", "password"],
+            ),
+        ),
+        tool(
+            "memory_project_invite",
+            "Invite an existing account to a project. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("email", string_schema()),
+                ],
+                &["accountToken", "projectId", "email"],
+            ),
+        ),
+        tool(
+            "memory_project_share",
+            "Share one promoted project memory with an invited member. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("memoryId", string_schema()),
+                    ("email", string_schema()),
+                ],
+                &["accountToken", "projectId", "memoryId", "email"],
+            ),
+        ),
+        tool(
+            "memory_project_shared",
+            "List memories shared with the authenticated member for one project.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                ],
+                &["accountToken", "projectId"],
+            ),
+        ),
+        tool(
+            "memory_project_revoke",
+            "Revoke one member's share of a project memory. Requires the owner account token.",
+            object_schema(
+                &[
+                    ("accountToken", string_schema()),
+                    ("projectId", string_schema()),
+                    ("memoryId", string_schema()),
+                    ("email", string_schema()),
+                ],
+                &["accountToken", "projectId", "memoryId", "email"],
             ),
         ),
     ]
@@ -1422,6 +1534,373 @@ mod tests {
             memory["memory_id"].as_str() == Some(correction_id.as_str())
                 && memory["supersedes"].as_str() == Some(promoted_id.as_str())
         }));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn share_tools_invite_share_read_and_revoke() {
+        let path = temp_store_path("share-flow");
+        let mut server = McpServer::open(&path).unwrap();
+        initialize(&mut server);
+
+        let tools = response(&mut server, request(2, "tools/list", json!({})));
+        let names = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        for name in [
+            "memory_account_register",
+            "memory_project_invite",
+            "memory_project_share",
+            "memory_project_shared",
+            "memory_project_revoke",
+        ] {
+            assert!(names.contains(&name), "{name} missing from tools/list");
+        }
+
+        let missing_token = response(
+            &mut server,
+            request(
+                3,
+                "tools/call",
+                json!({
+                    "name":"memory_project_invite",
+                    "arguments":{"projectId":"project-missing","email":"member@example.test"}
+                }),
+            ),
+        );
+        assert_eq!(missing_token["result"]["isError"], true);
+
+        let bootstrap = response(
+            &mut server,
+            request(
+                4,
+                "tools/call",
+                json!({
+                    "name":"memory_account_bootstrap",
+                    "arguments":{"email":"owner@example.test","password":"correct horse battery staple"}
+                }),
+            ),
+        );
+        assert_eq!(bootstrap["result"]["isError"], false);
+        let owner_token = bootstrap["result"]["structuredContent"]["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let registered_member = response(
+            &mut server,
+            request(
+                5,
+                "tools/call",
+                json!({
+                    "name":"memory_account_register",
+                    "arguments":{"email":"member@example.test","password":"correct horse battery staple"}
+                }),
+            ),
+        );
+        assert_eq!(
+            registered_member["result"]["isError"], false,
+            "{}",
+            registered_member["result"]["content"]
+        );
+        let member_token = registered_member["result"]["structuredContent"]["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let project = response(
+            &mut server,
+            request(
+                6,
+                "tools/call",
+                json!({
+                    "name":"memory_project_register",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "repository":"cairn-demo",
+                        "name":"Cairn Demo"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(project["result"]["isError"], false);
+        let project_id = project["result"]["structuredContent"]["project_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let unknown_email = response(
+            &mut server,
+            request(
+                7,
+                "tools/call",
+                json!({
+                    "name":"memory_project_invite",
+                    "arguments":{
+                        "account_token": owner_token,
+                        "project_id": project_id,
+                        "email":"missing@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(unknown_email["result"]["isError"], true);
+
+        response(
+            &mut server,
+            request(
+                8,
+                "tools/call",
+                json!({
+                    "name":"memory_session_start",
+                    "arguments":{"sessionId":"private-session"}
+                }),
+            ),
+        );
+        response(
+            &mut server,
+            request(
+                9,
+                "tools/call",
+                json!({
+                    "name":"memory_observe",
+                    "arguments":{
+                        "eventId":"evt-private",
+                        "sessionId":"private-session",
+                        "content":"private observation stays on the owner account",
+                        "role":"agent",
+                        "source":"test"
+                    }
+                }),
+            ),
+        );
+        let private_ended = response(
+            &mut server,
+            request(
+                10,
+                "tools/call",
+                json!({"name":"memory_session_end","arguments":{"sessionId":"private-session"}}),
+            ),
+        );
+        assert_eq!(private_ended["result"]["isError"], false);
+        let private_id = private_ended["result"]["structuredContent"]["memory_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        response(
+            &mut server,
+            request(
+                11,
+                "tools/call",
+                json!({
+                    "name":"memory_session_start",
+                    "arguments":{
+                        "sessionId":"repo-session",
+                        "context":{"repository":"cairn-demo","commit":"abc1234"}
+                    }
+                }),
+            ),
+        );
+        response(
+            &mut server,
+            request(
+                12,
+                "tools/call",
+                json!({
+                    "name":"memory_observe",
+                    "arguments":{
+                        "eventId":"evt-repo",
+                        "sessionId":"repo-session",
+                        "content":"repository cache decision is ready for the project",
+                        "role":"agent",
+                        "source":"test"
+                    }
+                }),
+            ),
+        );
+        let repo_ended = response(
+            &mut server,
+            request(
+                13,
+                "tools/call",
+                json!({"name":"memory_session_end","arguments":{"sessionId":"repo-session"}}),
+            ),
+        );
+        assert_eq!(repo_ended["result"]["isError"], false);
+        let repo_id = repo_ended["result"]["structuredContent"]["memory_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let promoted = response(
+            &mut server,
+            request(
+                14,
+                "tools/call",
+                json!({
+                    "name":"memory_promote",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "memoryId": repo_id,
+                        "reason":"Share the promoted repository decision"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(
+            promoted["result"]["isError"], false,
+            "{}",
+            promoted["result"]["content"]
+        );
+        let promoted_id = promoted["result"]["structuredContent"]["memory_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let invited = response(
+            &mut server,
+            request(
+                15,
+                "tools/call",
+                json!({
+                    "name":"memory_project_invite",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(invited["result"]["isError"], false);
+
+        let member_share = response(
+            &mut server,
+            request(
+                16,
+                "tools/call",
+                json!({
+                    "name":"memory_project_share",
+                    "arguments":{
+                        "account_token": member_token,
+                        "project_id": project_id,
+                        "memory_id": promoted_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(member_share["result"]["isError"], true);
+
+        let shared = response(
+            &mut server,
+            request(
+                17,
+                "tools/call",
+                json!({
+                    "name":"memory_project_share",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "memoryId": promoted_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(shared["result"]["isError"], false);
+
+        let member_read = response(
+            &mut server,
+            request(
+                18,
+                "tools/call",
+                json!({
+                    "name":"memory_project_shared",
+                    "arguments":{"account_token": member_token, "project_id": project_id}
+                }),
+            ),
+        );
+        assert_eq!(member_read["result"]["isError"], false);
+        let memories = member_read["result"]["structuredContent"]
+            .as_array()
+            .unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["memory_id"], promoted_id);
+        assert!(
+            !memories
+                .iter()
+                .any(|memory| memory["memory_id"].as_str() == Some(private_id.as_str()))
+        );
+
+        let member_search = response(
+            &mut server,
+            request(
+                19,
+                "tools/call",
+                json!({
+                    "name":"memory_search",
+                    "arguments":{
+                        "query":"private observation",
+                        "limit":5,
+                        "context":{"repository":"cairn-demo"}
+                    }
+                }),
+            ),
+        );
+        assert_eq!(member_search["result"]["isError"], false);
+        let results = member_search["result"]["structuredContent"]
+            .as_array()
+            .unwrap();
+        assert!(
+            !results
+                .iter()
+                .any(|result| result["memory_id"].as_str() == Some(private_id.as_str()))
+        );
+
+        let revoked = response(
+            &mut server,
+            request(
+                20,
+                "tools/call",
+                json!({
+                    "name":"memory_project_revoke",
+                    "arguments":{
+                        "accountToken": owner_token,
+                        "projectId": project_id,
+                        "memoryId": promoted_id,
+                        "email":"member@example.test"
+                    }
+                }),
+            ),
+        );
+        assert_eq!(revoked["result"]["isError"], false);
+
+        let after_revoke = response(
+            &mut server,
+            request(
+                21,
+                "tools/call",
+                json!({
+                    "name":"memory_project_shared",
+                    "arguments":{"accountToken": member_token, "projectId": project_id}
+                }),
+            ),
+        );
+        assert_eq!(after_revoke["result"]["isError"], false);
+        assert_eq!(
+            after_revoke["result"]["structuredContent"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
 
         let _ = std::fs::remove_file(path);
     }

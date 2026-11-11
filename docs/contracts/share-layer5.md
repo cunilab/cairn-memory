@@ -102,6 +102,29 @@ Owner audit history records `project_member_invited`,
 contain the project id, member person id, and memory id. It does not contain
 memory content, tokens, or passwords.
 
+## CLI and MCP
+
+The file-backed `cairn` binary and the local MCP adapter call the same store
+methods. Each share command and tool passes the account token through
+`authenticate_account`. A missing token, unknown email, or non-owner action
+is an error.
+
+CLI commands print the store JSON and exit 1 on `StoreError`:
+
+- `cairn account-register <store> <email> <password>`
+- `cairn project-invite <store> <owner-token> <project-id> <email>`
+- `cairn project-share <store> <owner-token> <project-id> <memory-id> <email>`
+- `cairn project-shared <store> <member-token> <project-id>`
+- `cairn project-revoke <store> <owner-token> <project-id> <memory-id> <email>`
+
+MCP tools accept the camelCase fields below and the same names in snake_case.
+
+- `memory_account_register` (`email`, `password`)
+- `memory_project_invite` (`accountToken`, `projectId`, `email`)
+- `memory_project_share` (`accountToken`, `projectId`, `memoryId`, `email`)
+- `memory_project_shared` (`accountToken`, `projectId`)
+- `memory_project_revoke` (`accountToken`, `projectId`, `memoryId`, `email`)
+
 ## Out of scope
 
 Roles beyond owner and member, automatic sharing, offline-device purge,

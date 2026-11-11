@@ -117,7 +117,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** Authorized people and agents can share selected project memory without exposing private personal memory.
 
-Explicit invite, share, read, and revoke of one already promoted project memory exists for an owner and one member. Roles beyond owner and member, automatic sharing, and offline purge do not.
+Explicit invite, share, read, and revoke of one already promoted project memory exists for an owner and one member. The file-backed CLI and MCP can invite, share, read, and revoke. Roles beyond owner and member, automatic sharing, and offline purge do not.
 
 - [ ] Add project and team spaces, memberships, roles, and permission checks.
 - [ ] Add explicit promote, share, revoke, forget, and delete operations with audit entries.
