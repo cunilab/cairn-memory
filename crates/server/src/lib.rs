@@ -1,22 +1,22 @@
 //! REST compatibility transport for the Layer 1 Cairn core.
 
-pub mod mcp;
 pub mod viewer;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cairn_core::{
-    Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack, Device, DeviceRegistration,
-    ExportBundle, ImportResult, LifecycleInput, LifecycleSummary, Memory, MemoryKind, MemoryStore,
-    ObservationInput, Project, ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput,
-    ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare,
-    ProjectMergeResult, ProjectShareCandidate, ProjectSharePolicyRecord, ProjectTeam,
-    ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, Session,
-    ShareCandidateDismissal, SharedProjectMemory, StoreError, SyncDiagnostics, SyncPullResult,
-    SyncPushResult, WorkContext,
+    Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack, DEVICE_TOKEN_PREFIX,
+    Device, DeviceRegistration, ExportBundle, ImportResult, LifecycleInput, LifecycleSummary,
+    Memory, MemoryKind, MemoryStore, ObservationInput, Project, ProjectBranch, ProjectConflict,
+    ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent, ProjectMaintenanceReport,
+    ProjectMembership, ProjectMemoryShare, ProjectMergeResult, ProjectShareCandidate,
+    ProjectSharePolicyRecord, ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter,
+    RecallResult, Session, ShareCandidateDismissal, SharedProjectMemory, StoreError,
+    SyncDiagnostics, SyncPullResult, SyncPushResult, WEB_ONLY_ERROR, WorkContext,
 };
 use cairn_storage::{PostgresError, PostgresStore};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 
 const AUTH_ATTEMPT_LIMIT: u32 = 10;
 const AUTH_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
+const AUTH_ATTEMPT_PRUNE_AT: usize = 1024;
 
 #[derive(Default)]
 struct AuthRateLimiter {
@@ -42,6 +43,10 @@ impl AuthRateLimiter {
             .attempts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Keys come from unauthenticated callers; drop expired windows so the map stays bounded.
+        if attempts.len() >= AUTH_ATTEMPT_PRUNE_AT {
+            attempts.retain(|_, (started, _)| now.duration_since(*started) < AUTH_ATTEMPT_WINDOW);
+        }
         let entry = attempts.entry(key.to_owned()).or_insert((now, 0));
         if now.duration_since(entry.0) >= AUTH_ATTEMPT_WINDOW {
             *entry = (now, 0);
@@ -90,6 +95,8 @@ pub struct HealthResponse {
     pub service: &'static str,
     pub storage: &'static str,
     pub semantic_search: &'static str,
+    /// True while no account exists; the web console then offers first-account setup.
+    pub bootstrap_required: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -366,8 +373,9 @@ pub struct AccountCredentialsRequest {
 pub struct DeviceRegisterRequest {
     #[serde(rename = "deviceId", alias = "device_id", default)]
     pub device_id: Option<String>,
-    #[serde(rename = "personId", alias = "person_id")]
-    pub person_id: String,
+    /// Defaults to the authenticated account; any other value is rejected.
+    #[serde(rename = "personId", alias = "person_id", default)]
+    pub person_id: Option<String>,
     #[serde(rename = "agentId", alias = "agent_id", default)]
     pub agent_id: Option<String>,
     pub name: String,
@@ -410,12 +418,17 @@ impl From<PostgresError> for PostgresApiError {
 impl IntoResponse for PostgresApiError {
     fn into_response(self) -> Response {
         let error = self.0;
-        let status = if error.is_unauthorized() {
+        let status = if error.to_string().contains(WEB_ONLY_ERROR) {
+            StatusCode::FORBIDDEN
+        } else if error.is_unauthorized() {
             StatusCode::UNAUTHORIZED
         } else {
             match &error {
                 PostgresError::Validation(_) | PostgresError::Core(StoreError::Validation(_)) => {
                     StatusCode::BAD_REQUEST
+                }
+                PostgresError::Conflict(_) | PostgresError::Core(StoreError::Conflict(_)) => {
+                    StatusCode::CONFLICT
                 }
                 PostgresError::Database(_)
                 | PostgresError::Core(StoreError::Io(_) | StoreError::Json(_))
@@ -447,7 +460,11 @@ impl IntoResponse for ApiError {
             ),
             Self::Store(error) => {
                 let status = match &error {
+                    StoreError::Validation(message) if message.contains(WEB_ONLY_ERROR) => {
+                        StatusCode::FORBIDDEN
+                    }
                     StoreError::Validation(_) => StatusCode::BAD_REQUEST,
+                    StoreError::Conflict(_) => StatusCode::CONFLICT,
                     StoreError::Io(_) | StoreError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, error.to_string())
@@ -582,6 +599,7 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/sync/pull", post(sync_pull))
         .route("/cairn-memory/sync/diagnose", get(sync_diagnose))
         .route("/viewer", get(viewer::page))
+        .layer(middleware::from_fn_with_state(state.clone(), touch_device))
         .with_state(state)
 }
 
@@ -698,6 +716,7 @@ pub fn postgres_app(store: PostgresStore) -> Router {
             post(postgres_confirm_project_memory),
         )
         .route("/cairn-memory/session/start", post(postgres_start_session))
+        .route("/cairn-memory/observe", post(postgres_capture_observation))
         .route("/cairn-memory/session/end", post(postgres_end_session))
         .route("/cairn-memory/search", post(postgres_search))
         .route("/cairn-memory/smart-search", post(postgres_search))
@@ -727,19 +746,24 @@ pub fn postgres_app(store: PostgresStore) -> Router {
         .with_state(PostgresAppState::new(store))
 }
 
-async fn postgres_health() -> Json<HealthResponse> {
-    Json(HealthResponse {
+async fn postgres_health(
+    State(state): State<PostgresAppState>,
+) -> Result<Json<HealthResponse>, PostgresApiError> {
+    Ok(Json(HealthResponse {
         ok: true,
         service: "cairn-server",
         storage: "postgresql-layer-3",
         semantic_search: "disabled",
-    })
+        bootstrap_required: !state.store.has_accounts().await?,
+    }))
 }
 
 async fn postgres_auth_bootstrap(
     State(state): State<PostgresAppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, PostgresApiError> {
+    postgres_reject_device_bearer(&state, &headers).await?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("bootstrap", &request.email))
@@ -756,8 +780,10 @@ async fn postgres_auth_bootstrap(
 
 async fn postgres_auth_register(
     State(state): State<PostgresAppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, PostgresApiError> {
+    postgres_reject_device_bearer(&state, &headers).await?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("register", &request.email))
@@ -774,8 +800,10 @@ async fn postgres_auth_register(
 
 async fn postgres_auth_login(
     State(state): State<PostgresAppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, PostgresApiError> {
+    postgres_reject_device_bearer(&state, &headers).await?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("login", &request.email))
@@ -1316,6 +1344,23 @@ async fn postgres_start_session(
     ))
 }
 
+/// A device capture is a sync push: it is the account's observation and a sync event.
+async fn postgres_capture_observation(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ObservationRequest>,
+) -> Result<Json<CaptureResult>, PostgresApiError> {
+    let pushed = state
+        .store
+        .sync_push(postgres_token(&headers)?, observation_input(request))
+        .await?;
+    Ok(Json(CaptureResult {
+        accepted: pushed.accepted,
+        duplicate: pushed.duplicate,
+        observation: pushed.observation,
+    }))
+}
+
 async fn postgres_end_session(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
@@ -1526,13 +1571,18 @@ async fn postgres_register_device(
     Json(request): Json<DeviceRegisterRequest>,
 ) -> Result<Json<DeviceRegistration>, PostgresApiError> {
     let device_id = request.device_id.unwrap_or_else(generated_device_id);
+    let token = postgres_token(&headers)?;
+    let person_id = match request.person_id {
+        Some(person_id) => person_id,
+        None => state.store.authenticate_session(token).await?.person_id,
+    };
     Ok(Json(
         state
             .store
             .register_device(
-                postgres_token(&headers)?,
+                token,
                 &device_id,
-                &request.person_id,
+                &person_id,
                 request.agent_id.as_deref(),
                 &request.name,
             )
@@ -1616,12 +1666,13 @@ async fn postgres_sync_diagnose(
     ))
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
         service: "cairn-server",
         storage: "file-backed-layer-3-prototype",
         semantic_search: "disabled",
+        bootstrap_required: !state.store.lock().await.has_accounts(),
     })
 }
 
@@ -1634,8 +1685,10 @@ async fn livez() -> Json<LivezResponse> {
 
 async fn auth_bootstrap(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, ApiError> {
+    reject_device_bearer(&*state.store.lock().await, &headers)?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("bootstrap", &request.email))
@@ -1652,8 +1705,10 @@ async fn auth_bootstrap(
 
 async fn auth_register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, ApiError> {
+    reject_device_bearer(&*state.store.lock().await, &headers)?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("register", &request.email))
@@ -1670,8 +1725,10 @@ async fn auth_register(
 
 async fn auth_login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, ApiError> {
+    reject_device_bearer(&*state.store.lock().await, &headers)?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("login", &request.email))
@@ -2199,12 +2256,21 @@ async fn confirm_project_memory(
 
 async fn start_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<SessionStartRequest>,
 ) -> Result<Json<Session>, ApiError> {
     let mut store = state.store.lock().await;
-    Ok(Json(
-        store.start_session(request.session_id, request.context)?,
-    ))
+    if let Some(token) = file_bearer(&store, &headers)? {
+        Ok(Json(
+            store
+                .start_session_for_account(token, request.session_id, request.context)
+                .map_err(account_api_error)?,
+        ))
+    } else {
+        Ok(Json(
+            store.start_session(request.session_id, request.context)?,
+        ))
+    }
 }
 
 async fn capture_observation(
@@ -2213,22 +2279,30 @@ async fn capture_observation(
     Json(request): Json<ObservationRequest>,
 ) -> Result<Json<CaptureResult>, ApiError> {
     let mut store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
-        return Ok(Json(
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
             store
                 .capture_for_account(token, observation_input(request))
                 .map_err(account_api_error)?,
-        ));
+        )),
+        None => Ok(Json(store.capture_observation(observation_input(request))?)),
     }
-    Ok(Json(store.capture_observation(observation_input(request))?))
 }
 
 async fn end_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<SessionEndRequest>,
 ) -> Result<Json<Memory>, ApiError> {
     let mut store = state.store.lock().await;
-    Ok(Json(store.end_session(&request.session_id)?))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .end_session_for_account(token, &request.session_id)
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(store.end_session(&request.session_id)?)),
+    }
 }
 
 async fn search(
@@ -2390,8 +2464,8 @@ async fn remember(
     Json(request): Json<RememberRequest>,
 ) -> Result<Json<Memory>, ApiError> {
     let mut store = state.store.lock().await;
-    if let Some(token) = optional_auth_token(&headers) {
-        return Ok(Json(
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
             store
                 .remember_for_account(
                     token,
@@ -2402,15 +2476,15 @@ async fn remember(
                     request.kind,
                 )
                 .map_err(account_api_error)?,
-        ));
+        )),
+        None => Ok(Json(store.remember_with_kind(
+            &request.content,
+            request.concepts,
+            request.context,
+            request.lifecycle,
+            request.kind,
+        )?)),
     }
-    Ok(Json(store.remember_with_kind(
-        &request.content,
-        request.concepts,
-        request.context,
-        request.lifecycle,
-        request.kind,
-    )?))
 }
 
 async fn correct(
@@ -2471,9 +2545,19 @@ async fn import(
     }
 }
 
-async fn diagnose(State(state): State<AppState>) -> Result<Json<LifecycleSummary>, ApiError> {
+async fn diagnose(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LifecycleSummary>, ApiError> {
     let store = state.store.lock().await;
-    Ok(Json(store.lifecycle_summary()))
+    match file_bearer(&store, &headers)? {
+        Some(token) => Ok(Json(
+            store
+                .lifecycle_summary_for_account(token)
+                .map_err(account_api_error)?,
+        )),
+        None => Ok(Json(store.lifecycle_summary())),
+    }
 }
 
 async fn register_device(
@@ -2492,19 +2576,21 @@ async fn register_device(
     });
     let mut store = state.store.lock().await;
     let account = store
-        .authenticate_account(auth_token(&headers)?)
+        .authenticate_session(auth_token(&headers)?)
         .map_err(account_api_error)?;
-    if account.person_id != request.person_id {
+    if request
+        .person_id
+        .is_some_and(|person_id| account.person_id != person_id)
+    {
         return Err(ApiError::Unauthorized(
             "account does not own the requested person".to_owned(),
         ));
     }
-    Ok(Json(store.register_device(
-        device_id,
-        request.person_id,
-        request.agent_id,
-        request.name,
-    )?))
+    Ok(Json(
+        store
+            .register_device(device_id, account.person_id, request.agent_id, request.name)
+            .map_err(device_api_error)?,
+    ))
 }
 
 async fn list_devices(
@@ -2512,8 +2598,10 @@ async fn list_devices(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Device>>, ApiError> {
     let token = auth_token(&headers)?;
-    let mut store = state.store.lock().await;
-    let caller = store.authenticate_device(token).map_err(device_api_error)?;
+    let store = state.store.lock().await;
+    let caller = store
+        .authenticate_session(token)
+        .map_err(account_api_error)?;
     let devices = store
         .devices()
         .filter(|device| device.person_id == caller.person_id)
@@ -2532,7 +2620,7 @@ async fn revoke_device(
     Ok(Json(
         store
             .revoke_device(token, &request.device_id)
-            .map_err(device_api_error)?,
+            .map_err(account_api_error)?,
     ))
 }
 
@@ -2546,7 +2634,7 @@ async fn rotate_device(
     Ok(Json(
         store
             .rotate_device_token(token, &request.device_id)
-            .map_err(device_api_error)?,
+            .map_err(account_api_error)?,
     ))
 }
 
@@ -2602,6 +2690,37 @@ fn observation_input(request: ObservationRequest) -> ObservationInput {
     }
 }
 
+fn reject_device_bearer(store: &MemoryStore, headers: &HeaderMap) -> Result<(), ApiError> {
+    if optional_auth_token(headers).is_some_and(|token| store.is_device_token(token)) {
+        return Err(StoreError::Validation(WEB_ONLY_ERROR.to_owned()).into());
+    }
+    Ok(())
+}
+
+async fn postgres_reject_device_bearer(
+    state: &PostgresAppState,
+    headers: &HeaderMap,
+) -> Result<(), PostgresApiError> {
+    if let Some(token) = optional_auth_token(headers)
+        && state.store.is_device_token(token).await?
+    {
+        return Err(PostgresError::Validation(WEB_ONLY_ERROR.to_owned()).into());
+    }
+    Ok(())
+}
+
+/// Records device use before the handler runs. File-store only: PostgreSQL records it
+/// while authenticating.
+async fn touch_device(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    // Session and malformed bearers cannot be device tokens, so they skip the global lock.
+    if let Some(token) = optional_auth_token(request.headers())
+        && token.starts_with(DEVICE_TOKEN_PREFIX)
+    {
+        state.store.lock().await.touch_device(token);
+    }
+    next.run(request).await
+}
+
 fn file_bearer<'a>(
     store: &MemoryStore,
     headers: &'a HeaderMap,
@@ -2652,9 +2771,11 @@ fn account_api_error(error: StoreError) -> ApiError {
     match &error {
         StoreError::Validation(message)
             if message.contains("authentication failed")
+                || message.contains("device is revoked")
                 || message.contains("expired or revoked")
                 || message.contains("account is disabled")
                 || message.contains("invalid account credentials")
+                || message.contains("device is outside the caller scope")
                 || message.contains("does not own") =>
         {
             ApiError::Unauthorized(message.clone())
@@ -2667,7 +2788,8 @@ fn device_api_error(error: StoreError) -> ApiError {
     match &error {
         StoreError::Validation(message)
             if message.contains("authentication failed")
-                || message.contains("device is revoked") =>
+                || message.contains("device is revoked")
+                || message.contains("device is outside the caller scope") =>
         {
             ApiError::Unauthorized(message.clone())
         }
@@ -2691,6 +2813,13 @@ mod tests {
     use serde_json::Value;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
+
+    #[test]
+    fn a_postgres_conflict_is_http_409() {
+        let response =
+            PostgresApiError(PostgresError::Conflict("taken".to_owned())).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 
     fn temp_store_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -2871,6 +3000,20 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn auth_rate_limiter_drops_expired_windows() {
+        let limiter = AuthRateLimiter::default();
+        let stale = Instant::now() - AUTH_ATTEMPT_WINDOW - Duration::from_secs(1);
+        {
+            let mut attempts = limiter.attempts.lock().unwrap();
+            for index in 0..AUTH_ATTEMPT_PRUNE_AT * 2 {
+                attempts.insert(format!("login:{index}@example.test"), (stale, 1));
+            }
+        }
+        assert!(limiter.allow("login:fresh@example.test"));
+        assert_eq!(limiter.attempts.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn account_login_attempts_are_rate_limited() {
         let path = temp_store_path("auth-rate-limit");
@@ -3011,12 +3154,21 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(resumed["events"].as_array().unwrap().is_empty());
 
-        let (status, rotated) = json_request_auth(
+        let (status, _) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/devices/rotate",
             serde_json::json!({"deviceId": "device-a"}),
             &first_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, rotated) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/rotate",
+            serde_json::json!({"deviceId": "device-a"}),
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3032,12 +3184,43 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
+        // Registering the same device id again issues a new token; the old one stops working.
+        let (status, again) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({"deviceId": "device-a", "personId": person_id, "name": "MacBook"}),
+            account_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let again_token = again["token"].as_str().unwrap();
+        assert_ne!(again_token, rotated_token);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/pull",
+            serde_json::json!({"cursor": 0}),
+            rotated_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/pull",
+            serde_json::json!({"cursor": 0}),
+            again_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
         let (status, revoked) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/devices/revoke",
             serde_json::json!({"deviceId": "device-b"}),
-            rotated_token,
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3051,6 +3234,498 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_device_token_is_an_agent_credential_and_web_only_routes_refuse_it() {
+        let path = temp_store_path("device-agent-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, health) =
+            json_request(router.clone(), "GET", "/cairn-memory/health", Value::Null).await;
+        assert_eq!(health["bootstrap_required"], true);
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email": "agent-owner@example.test", "password": password}),
+        )
+        .await;
+        let session = owner["token"].as_str().unwrap();
+        let (_, health) =
+            json_request(router.clone(), "GET", "/cairn-memory/health", Value::Null).await;
+        assert_eq!(health["bootstrap_required"], false);
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email": "agent-other@example.test", "password": password}),
+        )
+        .await;
+        let other_session = other["token"].as_str().unwrap();
+
+        // The session creates a device without naming the person; the token is shown once.
+        let (status, created) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({"name": "Laptop"}),
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let device = created["token"].as_str().unwrap();
+        let device_id = created["device"]["device_id"].as_str().unwrap();
+        let (_, other_created) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({"name": "Other"}),
+            other_session,
+        )
+        .await;
+        let other_device = other_created["token"].as_str().unwrap();
+        let (status, listed) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/devices",
+            Value::Null,
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(!listed.to_string().contains(device));
+
+        // Agent routes accept the device token and act as its account.
+        let (status, project) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/projects",
+            serde_json::json!({"repository": "cairn-demo", "name": "Demo"}),
+            device,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let project_id = project["project_id"].as_str().unwrap();
+        let (status, projects) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/projects",
+            Value::Null,
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(projects.as_array().unwrap().len(), 1);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "anything"}),
+            device,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "GET",
+            &format!("/cairn-memory/projects/{project_id}/memories"),
+            Value::Null,
+            other_device,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Web-only routes refuse the device token with 403.
+        for (method, route) in [
+            ("GET", "/cairn-memory/devices"),
+            ("POST", "/cairn-memory/devices/register"),
+            ("POST", "/cairn-memory/devices/revoke"),
+            ("POST", "/cairn-memory/devices/rotate"),
+            ("GET", "/cairn-memory/auth/audit"),
+            ("POST", "/cairn-memory/auth/logout"),
+            ("POST", "/cairn-memory/auth/login"),
+            ("POST", "/cairn-memory/auth/register"),
+            ("POST", "/cairn-memory/auth/bootstrap"),
+        ] {
+            let (status, body) = json_request_auth(
+                router.clone(),
+                method,
+                route,
+                serde_json::json!({
+                    "name": "x", "deviceId": device_id,
+                    "email": "agent-third@example.test", "password": password
+                }),
+                device,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{route}: {body}");
+            assert!(body["error"].as_str().unwrap().contains("web console"));
+        }
+
+        // Merge: allowed on a solo project, 403 once the project has another member.
+        let mut merge_ids = Vec::new();
+        for name in ["feat/solo", "feat/shared"] {
+            let (status, branch) = json_request_auth(
+                router.clone(),
+                "POST",
+                &format!("/cairn-memory/projects/{project_id}/branches"),
+                serde_json::json!({"name": name}),
+                device,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, memory) = json_request_auth(
+                router.clone(),
+                "POST",
+                "/cairn-memory/remember",
+                serde_json::json!({
+                    "content": format!("decision on {name}"),
+                    "context": {"repository": "cairn-demo", "branch": name}
+                }),
+                device,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            merge_ids.push((
+                branch["branch_id"].as_str().unwrap().to_owned(),
+                memory["memory_id"].as_str().unwrap().to_owned(),
+            ));
+        }
+        let merge = |token: &str, ids: (String, String)| {
+            let router = router.clone();
+            let token = token.to_owned();
+            let route = format!(
+                "/cairn-memory/projects/{project_id}/branches/{}/merge",
+                ids.0
+            );
+            let body = serde_json::json!({"memoryId": ids.1, "commit": "c1", "reason": "ok"});
+            async move { json_request_auth(router, "POST", &route, body, &token).await }
+        };
+        let (status, body) = merge(device, merge_ids[0].clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            &format!("/cairn-memory/projects/{project_id}/members"),
+            serde_json::json!({"email": "agent-other@example.test"}),
+            device,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = merge(device, merge_ids[1].clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, body) = merge(session, merge_ids[1].clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Removing a member is web-only, so a device cannot reopen the solo-merge path.
+        for (route, body) in [
+            ("team", serde_json::json!({"name": "Core"})),
+            (
+                "team/members",
+                serde_json::json!({"email": "agent-other@example.test"}),
+            ),
+        ] {
+            let (status, body) = json_request_auth(
+                router.clone(),
+                "POST",
+                &format!("/cairn-memory/projects/{project_id}/{route}"),
+                body,
+                device,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{route}: {body}");
+        }
+        let remove = |token: &str| {
+            let router = router.clone();
+            let token = token.to_owned();
+            let route = format!("/cairn-memory/projects/{project_id}/team/members/remove");
+            async move {
+                json_request_auth(
+                    router,
+                    "POST",
+                    &route,
+                    serde_json::json!({"email": "agent-other@example.test"}),
+                    &token,
+                )
+                .await
+            }
+        };
+        let (status, body) = remove(device).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, body) = remove(session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // A revoked device token is rejected on agent routes and on sync.
+        let (status, revoked) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/revoke",
+            serde_json::json!({"deviceId": device_id}),
+            session,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(revoked["status"], "revoked");
+        for (route, body) in [
+            ("/cairn-memory/search", serde_json::json!({"query": "x"})),
+            (
+                "/cairn-memory/remember",
+                serde_json::json!({"content": "x"}),
+            ),
+            ("/cairn-memory/sync/pull", serde_json::json!({"cursor": 0})),
+        ] {
+            let (status, body) =
+                json_request_auth(router.clone(), "POST", route, body, device).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}: {body}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn touch_middleware_skips_the_store_lock_for_non_device_bearers() {
+        let path = temp_store_path("touch-lock");
+        let state = AppState::open(&path).unwrap();
+        let router = app(state.clone());
+        let _held = state.store.lock().await;
+        let request = |token: &str| {
+            Request::builder()
+                .uri("/cairn-memory/no-such-route")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let timeout = std::time::Duration::from_millis(300);
+        let session = tokio::time::timeout(timeout, router.clone().oneshot(request("session-x")))
+            .await
+            .expect("a non-device bearer does not wait for the store lock");
+        assert_eq!(session.unwrap().status(), StatusCode::NOT_FOUND);
+        // A device-shaped bearer still takes the lock.
+        let device = tokio::time::timeout(
+            timeout,
+            router.oneshot(request(&format!("{DEVICE_TOKEN_PREFIX}x"))),
+        )
+        .await;
+        assert!(device.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_sync_adopts_an_owned_observation_once() {
+        let path = temp_store_path("sync-adopt");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({
+                "email": "sync-owner@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap();
+        let owner_person = owner["account"]["person_id"].as_str().unwrap();
+        let (_, member) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({
+                "email": "sync-member@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let member_token = member["token"].as_str().unwrap();
+        let member_person = member["account"]["person_id"].as_str().unwrap();
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({
+                "sessionId": "adopt-session",
+                "context": {"repository": "owner-repo", "branch": "owner-branch"}
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, captured) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "owned-event",
+                "sessionId": "adopt-session",
+                "content": "canonicalalphafact",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(captured["duplicate"], false);
+        assert_eq!(captured["observation"]["context"]["branch"], "owner-branch");
+
+        let (status, owner_device) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({
+                "deviceId": "device-owner",
+                "personId": owner_person,
+                "name": "Owner"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let owner_device_token = owner_device["token"].as_str().unwrap();
+        let (status, second_device) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({
+                "deviceId": "device-owner-2",
+                "personId": owner_person,
+                "name": "Owner two"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let second_token = second_device["token"].as_str().unwrap();
+        let (status, member_device) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({
+                "deviceId": "device-member",
+                "personId": member_person,
+                "name": "Member"
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let member_device_token = member_device["token"].as_str().unwrap();
+
+        let replacement = serde_json::json!({
+            "eventId": "owned-event",
+            "sessionId": "other-session",
+            "content": "replacementbetatext",
+            "role": "user",
+            "source": "sync",
+            "context": {"repository": "member-repo", "branch": "member-branch"}
+        });
+        let (status, adopted) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/push",
+            replacement.clone(),
+            owner_device_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(adopted["accepted"], true);
+        assert_eq!(adopted["duplicate"], false);
+        assert_eq!(adopted["observation"]["content"], "canonicalalphafact");
+        assert_eq!(adopted["observation"]["session_id"], "adopt-session");
+        assert_eq!(adopted["observation"]["context"]["branch"], "owner-branch");
+        let cursor = adopted["cursor"].clone();
+
+        let (status, pulled) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/pull",
+            serde_json::json!({"cursor": 0}),
+            second_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let events = pulled["events"].as_array().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_id"] == "owned-event"
+                    && event["observation"]["content"] == "canonicalalphafact")
+                .count(),
+            1
+        );
+        let (status, resumed) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/pull",
+            serde_json::json!({"cursor": pulled["cursor"]}),
+            second_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            resumed["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|event| event["event_id"] != "owned-event")
+        );
+
+        let (status, retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/push",
+            replacement,
+            owner_device_token,
+        )
+        .await;
+        // The pushed text differs from the canonical row, so replaying it conflicts.
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(retry.get("observation").is_none(), "{retry}");
+        let (status, retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/push",
+            serde_json::json!({
+                "eventId": "owned-event",
+                "sessionId": "adopt-session",
+                "content": "canonicalalphafact",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_device_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry["duplicate"], true);
+        assert_eq!(retry["cursor"], cursor);
+        assert_eq!(retry["observation"]["content"], "canonicalalphafact");
+
+        let (status, collision) = json_request_auth(
+            router,
+            "POST",
+            "/cairn-memory/sync/push",
+            serde_json::json!({
+                "eventId": "owned-event",
+                "sessionId": "adopt-session",
+                "content": "memberstealtext",
+                "role": "agent",
+                "source": "sync"
+            }),
+            member_device_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = collision.to_string();
+        assert!(
+            error.contains("event belongs to another person: owned-event"),
+            "{error}"
+        );
+        assert!(!error.contains("canonicalalphafact"), "{error}");
+        assert!(!error.contains("memberstealtext"), "{error}");
+        assert!(collision.get("observation").is_none(), "{collision}");
         let _ = std::fs::remove_file(path);
     }
 
@@ -3216,7 +3891,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(closed_branch["status"], "closed");
 
-        let (_, source) = json_request(
+        let (_, source) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3233,6 +3908,7 @@ mod tests {
                     "tests": ["cache_reads_are_consistent"]
                 }
             }),
+            account_token,
         )
         .await;
         let source_id = source["memory_id"].as_str().unwrap();
@@ -3347,10 +4023,11 @@ mod tests {
         assert_eq!(merged["memory"]["verified_commit"], "merge999");
         assert_eq!(merged["memory"]["promoted_from"], source_id);
         assert!(
-            !merged["memory"]["source_event_ids"]
+            merged["memory"]["source_event_ids"]
                 .as_array()
                 .unwrap()
-                .is_empty()
+                .is_empty(),
+            "a promoted copy keeps no personal source events"
         );
 
         let (status, resolved_branches) = json_request_auth(
@@ -3414,7 +4091,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(repeated["memory_id"], promoted["memory_id"]);
 
-        let (status, secret) = json_request(
+        let (status, secret) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3422,6 +4099,7 @@ mod tests {
                 "content": "api_key=do-not-promote",
                 "context": {"repository": "cairn-demo", "branch": "feature/cache"}
             }),
+            account_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -3502,7 +4180,7 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{method} {path}");
         }
 
-        let (_, source) = json_request(
+        let (_, source) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3518,6 +4196,7 @@ mod tests {
                     "runbooks": ["cache-runbook"]
                 }
             }),
+            account_token,
         )
         .await;
         let source_id = source["memory_id"].as_str().unwrap();
@@ -3612,7 +4291,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3620,6 +4299,7 @@ mod tests {
                 "content": "This belongs to another repository.",
                 "context": { "repository": "other-repo" }
             }),
+            account_token,
         )
         .await;
         let (status, _) = json_request_auth(
@@ -3739,7 +4419,7 @@ mod tests {
                 .any(|id| id == promoted_id)
         );
 
-        let (_, secret) = json_request(
+        let (_, secret) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3747,6 +4427,7 @@ mod tests {
                 "content": "api_key=do-not-promote",
                 "context": { "repository": "cairn-demo", "commit": "abc1234" }
             }),
+            account_token,
         )
         .await;
         let (status, _) = json_request_auth(
@@ -3845,7 +4526,7 @@ mod tests {
         )
         .await;
         let project_id = project["project_id"].as_str().unwrap();
-        let (_, source) = json_request(
+        let (_, source) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/remember",
@@ -3856,6 +4537,7 @@ mod tests {
                     "commit": "abc1234"
                 }
             }),
+            account_token,
         )
         .await;
         let source_id = source["memory_id"].as_str().unwrap();
@@ -4497,6 +5179,536 @@ mod tests {
         let _ = std::fs::remove_file(target_path);
     }
 
+    async fn post_as(
+        router: &Router,
+        token: &str,
+        route: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        json_request_auth(router.clone(), "POST", route, body, token).await
+    }
+
+    #[tokio::test]
+    async fn foreign_supersedes_import_does_not_hide_another_accounts_memory_over_http() {
+        let path = temp_store_path("foreign-supersedes-http");
+        let router = app(AppState::open(&path).unwrap());
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":"correct horse battery staple"}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":"correct horse battery staple"}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+
+        let (_, kept) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"alphalink checkout cache redis fits"}),
+        )
+        .await;
+        let (_, target) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"alphalink checkout cache avoid redis"}),
+        )
+        .await;
+        let target_id = target["memory_id"].as_str().unwrap().to_owned();
+        post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId":"link-session"}),
+        )
+        .await;
+        post_as(&router, &owner_token, "/cairn-memory/observe", serde_json::json!({"eventId":"link-evt","sessionId":"link-session","content":"resumelink resumefact","role":"agent","source":"test"})).await;
+        let (_, summary) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId":"link-session"}),
+        )
+        .await;
+        let summary_id = summary["memory_id"].as_str().unwrap().to_owned();
+
+        // The other account imports its own rows naming the owner's rows as predecessors.
+        let (status, mut bundle) =
+            post_as(&router, &other_token, "/cairn-memory/export", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let link = |label: &str, supersedes: &str| {
+            let mut row = target.clone();
+            row["memory_id"] = format!("memory-link-{label}").into();
+            row["source_event_ids"] = serde_json::json!([format!("event-link-{label}")]);
+            row["content"] = format!("betalink {label} unrelated").into();
+            row["supersedes"] = supersedes.into();
+            row
+        };
+        bundle["memories"] =
+            serde_json::json!([link("target", &target_id), link("summary", &summary_id)]);
+        let (status, imported) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": bundle}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["imported_memories"], 2);
+
+        let ids = |value: &Value| {
+            let mut ids = value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["memory_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+        let mut expected = vec![
+            kept["memory_id"].as_str().unwrap().to_owned(),
+            target_id.clone(),
+        ];
+        expected.sort();
+        let (_, hits) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/search",
+            serde_json::json!({"query":"alphalink","limit":10}),
+        )
+        .await;
+        assert_eq!(ids(&hits), expected);
+        assert!(
+            hits.as_array()
+                .unwrap()
+                .iter()
+                .all(|hit| hit["contradictory"] == true)
+        );
+        let (_, pack) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/context",
+            serde_json::json!({"query":"alphalink","limit":10}),
+        )
+        .await;
+        assert_eq!(ids(&pack["results"]), expected);
+        let (_, resume) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/resume",
+            serde_json::json!({"limit":10}),
+        )
+        .await;
+        assert_eq!(ids(&resume["results"]), vec![summary_id.clone()]);
+
+        let (_, theirs) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/search",
+            serde_json::json!({"query":"alphalink","limit":10}),
+        )
+        .await;
+        assert!(theirs.as_array().unwrap().is_empty());
+        let (_, own) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/context",
+            serde_json::json!({"query":"betalink","limit":10}),
+        )
+        .await;
+        assert_eq!(own["results"].as_array().unwrap().len(), 2);
+        assert!(!own.to_string().contains("alphalink"));
+
+        let (_, owner_export) =
+            post_as(&router, &owner_token, "/cairn-memory/export", Value::Null).await;
+        assert!(
+            owner_export["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["memory_id"] == target_id.as_str())
+        );
+        let (_, other_export) =
+            post_as(&router, &other_token, "/cairn-memory/export", Value::Null).await;
+        assert!(
+            other_export["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row["memory_id"] == "memory-link-target"
+                        && row["supersedes"] == target_id.as_str()
+                })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn foreign_tombstone_import_is_rejected_and_unknown_ones_are_ignored_over_http() {
+        let path = temp_store_path("foreign-tombstone-http");
+        let router = app(AppState::open(&path).unwrap());
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":"correct horse battery staple"}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":"correct horse battery staple"}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+        let (_, kept) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"tombhttp private owner note"}),
+        )
+        .await;
+        let kept_id = kept["memory_id"].as_str().unwrap().to_owned();
+        let before = std::fs::read(&path).unwrap();
+
+        let (_, mut bundle) =
+            post_as(&router, &other_token, "/cairn-memory/export", Value::Null).await;
+        bundle["memories"] = serde_json::json!([]);
+        bundle["forgottenIds"] = serde_json::json!([kept_id]);
+        let (status, error) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": bundle}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!error.to_string().contains("tombhttp"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let (_, hits) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/search",
+            serde_json::json!({"query":"tombhttp","limit":5}),
+        )
+        .await;
+        assert_eq!(hits.as_array().unwrap().len(), 1);
+
+        bundle["forgottenIds"] = serde_json::json!(["tombhttp-unknown-id"]);
+        let (status, imported) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": bundle}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["imported_forgotten_ids"], 0);
+
+        // A memory row named like the owner's future event id does not poison its capture.
+        let mut squat = kept.clone();
+        squat["memory_id"] = "tombhttp-future-evt".into();
+        squat["source_event_ids"] = serde_json::json!(["event-squat"]);
+        squat["content"] = "tombhttp squat row".into();
+        bundle["memories"] = serde_json::json!([squat]);
+        bundle["forgottenIds"] = serde_json::json!(["tombhttp-future-evt"]);
+        let (status, _) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": bundle}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, error) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/observe",
+            serde_json::json!({"eventId":"tombhttp-future-evt","sessionId":"s","content":"tombhttp private capture","role":"agent","source":"test"}),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK);
+        assert!(
+            error
+                .to_string()
+                .contains("event belongs to another person")
+        );
+        assert!(!error.to_string().contains("private capture"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn project_linked_import_is_owner_only_over_http() {
+        let path = temp_store_path("project-import-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":password}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":password}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+        let (_, project) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/projects",
+            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
+            &owner_token,
+        )
+        .await;
+        let project_id = project["project_id"].as_str().unwrap().to_owned();
+        let (_, template) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"projhttp private claim"}),
+        )
+        .await;
+        let before = std::fs::read(&path).unwrap();
+        let mut row = template.clone();
+        row["memory_id"] = "projhttp-row".into();
+        row["source_event_ids"] = serde_json::json!([]);
+        row["scope"] = "project".into();
+        row["project_id"] = project_id.clone().into();
+        let (_, mut bundle) =
+            post_as(&router, &other_token, "/cairn-memory/export", Value::Null).await;
+        bundle["memories"] = serde_json::json!([row.clone()]);
+        let (status, error) = post_as(
+            &router,
+            &other_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": bundle}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            error
+                .to_string()
+                .contains("account does not own the project")
+        );
+        assert!(!error.to_string().contains("projhttp"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // The owner imports the same shape into its own project.
+        let (_, mut own) =
+            post_as(&router, &owner_token, "/cairn-memory/export", Value::Null).await;
+        own["memories"] = serde_json::json!([row]);
+        let (status, imported) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/import",
+            serde_json::json!({"bundle": own}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(imported["imported_memories"], 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn account_forget_requires_an_owned_id_over_http() {
+        let path = temp_store_path("forget-owned-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        // A legacy row written before any account exists (the unscoped, trusted path).
+        let (_, legacy) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"forgethttp legacy local note"}),
+        )
+        .await;
+        let legacy_id = legacy["memory_id"].as_str().unwrap().to_owned();
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":password}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":password}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+        let (_, mine) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/remember",
+            serde_json::json!({"content":"forgethttp owner note"}),
+        )
+        .await;
+        let mine_id = mine["memory_id"].as_str().unwrap().to_owned();
+        let before = std::fs::read(&path).unwrap();
+        for id in [legacy_id.as_str(), mine_id.as_str(), "no-such-id"] {
+            let (status, error) = post_as(
+                &router,
+                &other_token,
+                "/cairn-memory/forget",
+                serde_json::json!({"id": id}),
+            )
+            .await;
+            assert_ne!(status, StatusCode::NO_CONTENT);
+            assert!(error.to_string().contains("unknown memory or event"));
+            assert!(!error.to_string().contains("forgethttp"));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let (status, _) = post_as(
+            &router,
+            &owner_token,
+            "/cairn-memory/forget",
+            serde_json::json!({"id": mine_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn project_maintenance_is_owner_only_over_http() {
+        let path = temp_store_path("maintenance-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":password}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":password}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+        let (_, project) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/projects",
+            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
+            &owner_token,
+        )
+        .await;
+        let project_id = project["project_id"].as_str().unwrap().to_owned();
+        let url = format!("/cairn-memory/projects/{project_id}/maintenance");
+        let (status, error) = post_as(
+            &router,
+            &other_token,
+            &url,
+            serde_json::json!({"currentCommit":"abc"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            error
+                .to_string()
+                .contains("account does not own the project")
+        );
+        assert!(error.get("active_memory_ids").is_none());
+        let (status, report) = post_as(&router, &owner_token, &url, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report["project_id"], project_id);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn project_registry_is_owner_only_over_http() {
+        let path = temp_store_path("registry-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email":"owner@example.test","password":password}),
+        )
+        .await;
+        let (_, other) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email":"other@example.test","password":password}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap().to_owned();
+        let other_token = other["token"].as_str().unwrap().to_owned();
+        let (_, project) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/projects",
+            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
+            &owner_token,
+        )
+        .await;
+        let project_id = project["project_id"].as_str().unwrap().to_owned();
+        let url = format!("/cairn-memory/projects/{project_id}/branches");
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            &url,
+            serde_json::json!({"name":"feature/owner"}),
+            &owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let before = std::fs::read(&path).unwrap();
+        // An outsider who knows the project id can neither read nor write the registry.
+        let (status, error) =
+            json_request_auth(router.clone(), "GET", &url, Value::Null, &other_token).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            error
+                .to_string()
+                .contains("account does not own the project")
+        );
+        assert!(!error.to_string().contains("feature/owner"));
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            &url,
+            serde_json::json!({"name":"feature/evil"}),
+            &other_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let (status, branches) =
+            json_request_auth(router.clone(), "GET", &url, Value::Null, &owner_token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(branches.as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[tokio::test]
     async fn lifecycle_fields_and_diagnostics_work_over_http() {
         let path = temp_store_path("lifecycle");
@@ -5029,7 +6241,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(accepted[0]["memory_id"], manual_id);
         assert_eq!(accepted[0]["share_reason"], "manual");
-        assert_eq!(accepted[0]["source_memory_id"], manual_source_id);
+        assert!(accepted[0]["promoted_from"].is_null());
+        assert!(!accepted.to_string().contains(manual_source_id));
 
         let (_, secret) = json_request_auth(
             router.clone(),
@@ -5157,7 +6370,8 @@ mod tests {
             auto_read["share_reason"],
             "auto_nonsensitive_project_memory"
         );
-        assert_eq!(auto_read["source_memory_id"], auto_source_id);
+        assert!(auto_read["promoted_from"].is_null());
+        assert!(!auto_read.to_string().contains(auto_source_id));
         let (status, member_search) = json_request_auth(
             router.clone(),
             "POST",
@@ -5847,6 +7061,795 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|observation| observation["content"] == "owner private observation")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_diagnose_needs_the_account_bearer_and_counts_owned_rows() {
+        let path = temp_store_path("file-diagnose-auth");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let mut tokens = Vec::new();
+        for (route, email) in [
+            ("bootstrap", "diagnose-owner@example.test"),
+            ("register", "diagnose-member@example.test"),
+        ] {
+            let (_, account) = json_request(
+                router.clone(),
+                "POST",
+                &format!("/cairn-memory/auth/{route}"),
+                serde_json::json!({"email": email, "password": password}),
+            )
+            .await;
+            tokens.push(account["token"].as_str().unwrap().to_owned());
+        }
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            serde_json::json!({"content": "owner durable note"}),
+            &tokens[0],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) =
+            json_request(router.clone(), "GET", "/cairn-memory/diagnose", Value::Null).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, owner) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/diagnose",
+            Value::Null,
+            &tokens[0],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner["durable_memories"], 1);
+        let (status, member) = json_request_auth(
+            router,
+            "GET",
+            "/cairn-memory/diagnose",
+            Value::Null,
+            &tokens[1],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member["durable_memories"], 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_http_capture_uses_file_bearer_when_accounts_exist() {
+        let path = temp_store_path("file-capture-auth");
+        let router = app(AppState::open(&path).unwrap());
+        let (status, _) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId": "anon-session", "context": {}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, anon) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "anon-event",
+                "sessionId": "anon-session",
+                "content": "anonymousstoredmarker",
+                "role": "agent",
+                "source": "hook"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(anon["duplicate"], false);
+
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({
+                "email": "capture-owner@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap();
+        let owner_person = owner["account"]["person_id"].as_str().unwrap();
+        let (_, member) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({
+                "email": "capture-member@example.test",
+                "password": password
+            }),
+        )
+        .await;
+        let member_token = member["token"].as_str().unwrap();
+        let member_person = member["account"]["person_id"].as_str().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let marker = "rejectedpayload";
+        let rejected = [
+            (
+                "/cairn-memory/session/start",
+                serde_json::json!({
+                    "sessionId": "rejected-session",
+                    "context": {"branch": "rejected-branch", "repository": marker}
+                }),
+            ),
+            (
+                "/cairn-memory/observe",
+                serde_json::json!({
+                    "eventId": "evt-owner",
+                    "sessionId": "shared-session",
+                    "content": marker,
+                    "role": "agent",
+                    "source": "test"
+                }),
+            ),
+            (
+                "/cairn-memory/session/end",
+                serde_json::json!({"sessionId": "shared-session", "content": marker}),
+            ),
+            (
+                "/cairn-memory/remember",
+                serde_json::json!({"content": marker}),
+            ),
+        ];
+        for token in [None, Some("not-a-session-token")] {
+            for (route, body) in &rejected {
+                let (status, value) = match token {
+                    Some(token) => {
+                        json_request_auth(router.clone(), "POST", route, body.clone(), token).await
+                    }
+                    None => json_request(router.clone(), "POST", route, body.clone()).await,
+                };
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{route} {value}");
+                assert!(value.get("observation").is_none(), "{value}");
+                assert!(value.get("memory_id").is_none(), "{value}");
+                assert!(value.get("content").is_none(), "{value}");
+                let error = value.to_string();
+                assert!(!error.contains(marker), "{error}");
+                assert!(!error.contains("anonymousstoredmarker"), "{error}");
+            }
+        }
+        let after = std::fs::read(&path).unwrap();
+        assert!(before == after, "rejected capture changed the store file");
+
+        let (status, anon_account) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({
+                "sessionId": "anon-session",
+                "context": {"repository": "account-repo", "branch": "account-branch"}
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(anon_account["person_id"], owner_person);
+        assert_eq!(anon_account["context"]["branch"], "account-branch");
+        let (status, anon_missing) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "anon-session"}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(anon_missing.to_string().contains("unknown session"));
+        assert!(!anon_missing.to_string().contains("account-branch"));
+
+        let (status, started) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({
+                "sessionId": "shared-session",
+                "context": {
+                    "repository": "owner-repo",
+                    "branch": "owner-branch",
+                    "worktree": "owner-tree"
+                }
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(started["context"]["branch"], "owner-branch");
+        assert_eq!(started["person_id"], owner_person);
+        let (status, owner_retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({
+                "sessionId": "shared-session",
+                "context": {"repository": "member-repo", "branch": "member-branch"}
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner_retry["context"]["branch"], "owner-branch");
+        assert_eq!(owner_retry["context"]["worktree"], "owner-tree");
+        let (status, member_started) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({
+                "sessionId": "shared-session",
+                "context": {"repository": "member-repo", "branch": "member-branch"}
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member_started["person_id"], member_person);
+        assert_eq!(member_started["context"]["branch"], "member-branch");
+        assert_eq!(member_started["context"]["repository"], "member-repo");
+        assert!(member_started["context"]["worktree"].is_null());
+
+        let (status, captured) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-owner",
+                "sessionId": "shared-session",
+                "content": "owneronlymarker",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(captured["duplicate"], false);
+        assert_eq!(captured["observation"]["content"], "owneronlymarker");
+        assert_eq!(captured["observation"]["context"]["branch"], "owner-branch");
+        assert_eq!(captured["observation"]["context"]["worktree"], "owner-tree");
+        assert_ne!(
+            captured["observation"]["context"]["branch"],
+            "member-branch"
+        );
+        let (status, retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-owner",
+                "sessionId": "shared-session",
+                "content": "ownerretrytext",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(retry.get("observation").is_none(), "{retry}");
+        let (status, retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-owner",
+                "sessionId": "shared-session",
+                "content": "owneronlymarker",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry["duplicate"], true);
+        assert_eq!(retry["observation"]["content"], "owneronlymarker");
+
+        let (status, foreign) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-owner",
+                "sessionId": "shared-session",
+                "content": "memberstealtext",
+                "role": "agent",
+                "source": "test"
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let foreign_body = foreign.to_string();
+        assert!(foreign_body.contains("another person"));
+        assert!(foreign.get("observation").is_none(), "{foreign}");
+        for secret in [
+            "owneronlymarker",
+            "memberstealtext",
+            "anonymousstoredmarker",
+            marker,
+        ] {
+            assert!(!foreign_body.contains(secret), "{foreign_body}");
+        }
+
+        let (status, unowned) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "anon-event",
+                "sessionId": "anon-session",
+                "content": "claimattemptmarker",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let unowned_body = unowned.to_string();
+        assert!(unowned_body.contains("outside sync scope"));
+        assert!(unowned.get("observation").is_none(), "{unowned}");
+        for secret in ["anonymousstoredmarker", "claimattemptmarker", marker] {
+            assert!(!unowned_body.contains(secret), "{unowned_body}");
+        }
+
+        let (status, member_capture) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-member",
+                "sessionId": "shared-session",
+                "content": "memberonlymarker",
+                "role": "agent",
+                "source": "test"
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member_capture["duplicate"], false);
+        assert_eq!(
+            member_capture["observation"]["context"]["branch"],
+            "member-branch"
+        );
+        assert_ne!(
+            member_capture["observation"]["context"]["branch"],
+            "owner-branch"
+        );
+        let (status, member_sent) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "evt-member-sent",
+                "sessionId": "shared-session",
+                "content": "membersentmarker",
+                "role": "agent",
+                "source": "test",
+                "context": {"files": ["member-file.rs"]}
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            member_sent["observation"]["context"]["files"][0],
+            "member-file.rs"
+        );
+        assert!(member_sent["observation"]["context"]["branch"].is_null());
+
+        let (status, owner_end) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "shared-session"}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            owner_end["memory_id"],
+            format!("memory-{owner_person}-shared-session")
+        );
+        let owner_summary = owner_end["content"].as_str().unwrap();
+        assert!(owner_summary.contains("owneronlymarker"));
+        assert!(!owner_summary.contains("memberonlymarker"));
+        assert!(!owner_summary.contains("membersentmarker"));
+        assert!(!owner_summary.contains("anonymousstoredmarker"));
+        assert_eq!(owner_end["scope"], "worktree");
+        assert_eq!(owner_end["context"]["branch"], "owner-branch");
+        let owner_events = owner_end["source_event_ids"].as_array().unwrap();
+        assert!(owner_events.iter().any(|id| id == "evt-owner"));
+        assert!(owner_events.iter().all(|id| id != "evt-member"));
+
+        let (status, member_end) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "shared-session"}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            member_end["memory_id"],
+            format!("memory-{member_person}-shared-session")
+        );
+        assert_ne!(member_end["memory_id"], owner_end["memory_id"]);
+        let member_summary = member_end["content"].as_str().unwrap();
+        assert!(member_summary.contains("memberonlymarker"));
+        assert!(!member_summary.contains("owneronlymarker"));
+        assert_eq!(member_end["scope"], "branch");
+        assert_eq!(member_end["context"]["repository"], "member-repo");
+        assert_ne!(member_end["context"]["branch"], "owner-branch");
+        let member_events = member_end["source_event_ids"].as_array().unwrap();
+        assert!(member_events.iter().any(|id| id == "evt-member"));
+        assert!(member_events.iter().all(|id| id != "evt-owner"));
+
+        let (status, owner_hits) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "owneronlymarker", "limit": 10}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner_hits.as_array().unwrap().len(), 1);
+        let (status, owner_miss) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "memberonlymarker", "limit": 10}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(owner_miss.as_array().unwrap().is_empty());
+        let (status, member_hits) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "memberonlymarker", "limit": 10}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member_hits.as_array().unwrap().len(), 1);
+        let (status, member_miss) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "owneronlymarker", "limit": 10}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(member_miss.as_array().unwrap().is_empty());
+
+        let (status, owner_memory) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            serde_json::json!({"content": "ownerremembermarker"}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            owner_memory["memory_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("memory-")
+        );
+        let (status, member_memory) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            serde_json::json!({"content": "memberremembermarker"}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, owner_remember) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "ownerremembermarker", "limit": 10}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(owner_remember.as_array().unwrap().len(), 1);
+        assert_eq!(owner_remember[0]["memory_id"], owner_memory["memory_id"]);
+        let (status, owner_remember_miss) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "memberremembermarker", "limit": 10}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(owner_remember_miss.as_array().unwrap().is_empty());
+        let (status, member_remember) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "memberremembermarker", "limit": 10}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(member_remember.as_array().unwrap().len(), 1);
+        assert_eq!(member_remember[0]["memory_id"], member_memory["memory_id"]);
+        let (status, member_remember_miss) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/search",
+            serde_json::json!({"query": "ownerremembermarker", "limit": 10}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(member_remember_miss.as_array().unwrap().is_empty());
+
+        let (status, owner_export) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/export",
+            serde_json::json!({}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let owner_sessions = owner_export["sessions"].as_array().unwrap();
+        assert!(
+            owner_sessions
+                .iter()
+                .all(|session| session["person_id"] == owner_person)
+        );
+        assert!(
+            owner_sessions
+                .iter()
+                .any(|session| session["context"]["branch"] == "owner-branch")
+        );
+        assert!(
+            owner_sessions
+                .iter()
+                .all(|session| session["context"]["branch"] != "member-branch")
+        );
+        let (status, member_export) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/export",
+            serde_json::json!({}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let member_sessions = member_export["sessions"].as_array().unwrap();
+        assert!(
+            member_sessions
+                .iter()
+                .all(|session| session["person_id"] == member_person)
+        );
+        assert!(
+            member_sessions
+                .iter()
+                .all(|session| session["context"]["branch"] != "owner-branch")
+        );
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["version"], 1);
+
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId": "handoff-topic", "context": {}}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId": "handoff-topic", "context": {}}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "owner-handoff-evt",
+                "sessionId": "handoff-topic",
+                "content": "quotadelta widget does not apply remaining",
+                "role": "agent",
+                "source": "test"
+            }),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/observe",
+            serde_json::json!({
+                "eventId": "member-handoff-evt",
+                "sessionId": "handoff-topic",
+                "content": "quotadelta widget does apply foreignmarker remaining",
+                "role": "agent",
+                "source": "test"
+            }),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "handoff-topic"}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "handoff-topic"}),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let foreign_memory = format!("memory-{member_person}-handoff-topic");
+        for route in ["/cairn-memory/resume", "/cairn-memory/unresolved"] {
+            let (status, pack) = json_request_auth(
+                router.clone(),
+                "POST",
+                route,
+                serde_json::json!({"limit": 5}),
+                owner_token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{route}");
+            let body = pack.to_string();
+            assert!(!body.contains(member_person), "{route} {body}");
+            assert!(!body.contains(&foreign_memory), "{route} {body}");
+            assert!(!body.contains("member-handoff-evt"), "{route} {body}");
+            assert!(!body.contains("foreignmarker"), "{route} {body}");
+            let handoff = pack["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| {
+                    row["memory_id"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("-handoff-topic")
+                })
+                .unwrap_or_else(|| panic!("{route} missing handoff"));
+            assert_eq!(handoff["contradictory"], false, "{route}");
+            assert!(handoff["contradiction_ids"].as_array().unwrap().is_empty());
+            let (status, zero) = json_request_auth(
+                router.clone(),
+                "POST",
+                route,
+                serde_json::json!({"limit": 0}),
+                owner_token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{route}");
+            assert!(zero["results"].as_array().unwrap().is_empty(), "{route}");
+            let zero_body = zero.to_string();
+            assert!(!zero_body.contains(&foreign_memory), "{route} {zero_body}");
+            assert!(!zero_body.contains("foreignmarker"), "{route} {zero_body}");
+        }
+        let anon_unscoped = raw["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| {
+                session["session_id"] == "anon-session" && session.get("person_id").is_none()
+            })
+            .expect("unscoped anon session");
+        assert!(anon_unscoped["ended_at"].is_null());
+        assert!(anon_unscoped["context"]["branch"].is_null());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_device_errors_match_postgres_statuses() {
+        let path = temp_store_path("device-error-statuses");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let mut tokens = Vec::new();
+        for (route, email) in [
+            ("bootstrap", "dev-a@example.test"),
+            ("register", "dev-b@example.test"),
+        ] {
+            let (_, account) = json_request(
+                router.clone(),
+                "POST",
+                &format!("/cairn-memory/auth/{route}"),
+                serde_json::json!({"email": email, "password": password}),
+            )
+            .await;
+            let token = account["token"].as_str().unwrap().to_owned();
+            let person = account["account"]["person_id"].as_str().unwrap().to_owned();
+            let device_id = format!("device-{route}");
+            let (status, device) = json_request_auth(
+                router.clone(),
+                "POST",
+                "/cairn-memory/devices/register",
+                serde_json::json!({"deviceId": device_id, "personId": person, "name": route}),
+                &token,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            tokens.push((
+                token,
+                person,
+                device_id,
+                device["token"].as_str().unwrap().to_owned(),
+            ));
+        }
+
+        // An account acting on another person's device is out of scope: 401, as on PostgreSQL.
+        for action in ["revoke", "rotate"] {
+            let (status, body) = json_request_auth(
+                router.clone(),
+                "POST",
+                &format!("/cairn-memory/devices/{action}"),
+                serde_json::json!({"deviceId": tokens[1].2}),
+                &tokens[0].0,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{action}: {body}");
+        }
+
+        // A revoked device id cannot be registered again: 401, as on PostgreSQL.
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/revoke",
+            serde_json::json!({"deviceId": tokens[0].2}),
+            &tokens[0].0,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = json_request_auth(
+            router,
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({"deviceId": tokens[0].2, "personId": tokens[0].1, "name": "again"}),
+            &tokens[0].0,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("device is revoked")
         );
         let _ = std::fs::remove_file(path);
     }

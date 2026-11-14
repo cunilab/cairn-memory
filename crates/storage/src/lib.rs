@@ -14,15 +14,16 @@ use cairn_core::{
     ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO,
     SHARE_REASON_MANUAL, Session, ShareCandidateDismissal, SharedProjectMemory, SyncDeletion,
     SyncDiagnostics, SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
-    build_explicit_memory_record, competing_project_memories, derive_session_memory,
-    memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
-    now_seconds, random_token, recall_result, redact_sensitive_content, session_memory_id,
-    validate_password,
+    build_explicit_memory_record, carry_summary_state, competing_project_memories,
+    derive_session_memory, memory_matches_filter, normalize_email, normalize_export_bundle,
+    normalize_observation, now_seconds, prefer_newer_contradiction, random_token, recall_result,
+    redact_memory_metadata, redact_sensitive_content, redact_work_context,
+    sensitivity_including_context, session_memory_id, validate_password, why_changed_priority,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
 use sqlx::{Postgres, Row, Transaction};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 const MIGRATION: &str = include_str!("../../../migrations/0001_layer3_personal_memory.sql");
@@ -41,7 +42,14 @@ const SHARE_POLICY_MIGRATION: &str =
     include_str!("../../../migrations/0009_layer5_share_policy.sql");
 const TEAM_SPACE_MIGRATION: &str = include_str!("../../../migrations/0010_layer5_team_space.sql");
 const SYNC_DELETION_MIGRATION: &str = include_str!("../../../migrations/0011_sync_deletions.sql");
+const SESSION_PENDING_MIGRATION: &str =
+    include_str!("../../../migrations/0012_session_summary_pending.sql");
 const MAX_PULL_EVENTS: i64 = 512;
+/// A session whose newest retained observation is older than this is finished on the next
+/// capture or session start of the same person.
+const IDLE_SESSION_SECONDS: i64 = 30 * 60;
+/// Sessions one capture or start may finish. The rest wait for the next trigger.
+const MAX_SWEEP_SESSIONS: i64 = 16;
 const MAX_SEARCH_RESULTS: i64 = 512;
 
 #[derive(Debug)]
@@ -50,6 +58,8 @@ pub enum PostgresError {
     Core(cairn_core::StoreError),
     Json(serde_json::Error),
     Validation(String),
+    /// An event id that is already taken by different content, or by a row outside sync.
+    Conflict(String),
     RateLimited,
 }
 
@@ -78,6 +88,7 @@ impl fmt::Display for PostgresError {
             Self::Core(error) => write!(formatter, "core validation error: {error}"),
             Self::Json(error) => write!(formatter, "JSON encoding error: {error}"),
             Self::Validation(message) => write!(formatter, "validation error: {message}"),
+            Self::Conflict(message) => write!(formatter, "conflict: {message}"),
             Self::RateLimited => write!(formatter, "authentication rate limit exceeded"),
         }
     }
@@ -149,6 +160,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(SYNC_DELETION_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(SESSION_PENDING_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -329,7 +343,79 @@ impl PostgresStore {
         self.issue_session(account).await
     }
 
+    /// Agent credential: a web session token or an active device token, resolved to the
+    /// owning account.
     pub async fn authenticate_account(&self, token: &str) -> Result<Account, PostgresError> {
+        self.authenticate_principal(token)
+            .await
+            .map(|(account, _)| account)
+    }
+
+    /// Web-only credential: a device token fails with `WEB_ONLY_ERROR`.
+    pub async fn authenticate_session(&self, token: &str) -> Result<Account, PostgresError> {
+        let error = match self.session_account(token).await {
+            Ok(account) => return Ok(account),
+            Err(error) => error,
+        };
+        if self.is_device_token(token).await? {
+            return Err(PostgresError::Validation(
+                cairn_core::WEB_ONLY_ERROR.to_owned(),
+            ));
+        }
+        Err(error)
+    }
+
+    /// True for any device token, including a revoked one.
+    pub async fn is_device_token(&self, token: &str) -> Result<bool, PostgresError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM cairn_devices WHERE token_hash = $1)",
+        )
+        .bind(cairn_core::hash_token(token))
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn has_accounts(&self) -> Result<bool, PostgresError> {
+        Ok(
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM cairn_accounts)")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    /// The account and whether the credential was a device token. A device use also
+    /// records `last_seen_at`.
+    async fn authenticate_principal(&self, token: &str) -> Result<(Account, bool), PostgresError> {
+        if let Ok(account) = self.session_account(token).await {
+            return Ok((account, false));
+        }
+        // The touch skips a device seen within the throttle window; the read does not need it.
+        let row = sqlx::query(
+            "WITH touched AS (
+                 UPDATE cairn_devices SET last_seen_at = now()
+                 WHERE token_hash = $1 AND status = 'active'
+                   AND last_seen_at < now() - interval '60 seconds'
+             )
+             SELECT a.person_id, a.email, a.status,
+                    EXTRACT(EPOCH FROM a.created_at)::bigint::text AS created_at
+             FROM cairn_devices d JOIN cairn_accounts a ON a.person_id = d.person_id
+             WHERE d.token_hash = $1 AND d.status = 'active' AND a.status = 'active'",
+        )
+        .bind(cairn_core::hash_token(token))
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = row {
+            return Ok((account_from_row(&row)?, true));
+        }
+        if self.is_device_token(token).await? {
+            return Err(PostgresError::Validation("device is revoked".to_owned()));
+        }
+        Err(PostgresError::Validation(
+            "account authentication failed".to_owned(),
+        ))
+    }
+
+    async fn session_account(&self, token: &str) -> Result<Account, PostgresError> {
         let token_hash = cairn_core::hash_token(token);
         let row = sqlx::query(
             "SELECT a.person_id, a.email, a.status,
@@ -347,6 +433,11 @@ impl PostgresStore {
     }
 
     pub async fn logout_account(&self, token: &str) -> Result<(), PostgresError> {
+        if self.is_device_token(token).await? {
+            return Err(PostgresError::Validation(
+                cairn_core::WEB_ONLY_ERROR.to_owned(),
+            ));
+        }
         let token_hash = cairn_core::hash_token(token);
         let person_id = sqlx::query_scalar::<_, String>(
             "SELECT person_id FROM cairn_auth_sessions
@@ -422,15 +513,29 @@ impl PostgresStore {
                 "session_id must not be empty".to_owned(),
             ));
         }
+        let context = redact_work_context(&context);
+        self.finish_idle_sessions(&account.person_id).await;
         let context = serde_json::to_value(&context)?;
+        let empty_context = serde_json::to_value(WorkContext::default())?;
+        let mut transaction = self.pool.begin().await?;
+        // `canonical || stored = canonical` counts omitted default fields as empty.
+        // An extra key or a real value keeps the row. PostgreSQL rechecks this
+        // after waiting, so the first non-empty context stays.
         sqlx::query(
             "INSERT INTO cairn_sessions (session_id, person_id, context)
-             VALUES ($1, $2, $3) ON CONFLICT (person_id, session_id) DO NOTHING",
+             VALUES ($1, $2, $3)
+             ON CONFLICT (person_id, session_id) DO UPDATE
+             SET context = EXCLUDED.context
+             WHERE cairn_sessions.person_id = $2
+               AND cairn_sessions.session_id = $1
+               AND ($4::jsonb || cairn_sessions.context) = $4::jsonb
+               AND EXCLUDED.context <> $4::jsonb",
         )
         .bind(session_id)
         .bind(&account.person_id)
-        .bind(context)
-        .execute(&self.pool)
+        .bind(&context)
+        .bind(&empty_context)
+        .execute(&mut *transaction)
         .await?;
         let row = sqlx::query(
             "SELECT session_id,
@@ -439,10 +544,11 @@ impl PostgresStore {
                     context
              FROM cairn_sessions WHERE person_id = $1 AND session_id = $2",
         )
-        .bind(account.person_id)
+        .bind(&account.person_id)
         .bind(session_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         session_from_row(&row)
     }
 
@@ -469,6 +575,32 @@ impl PostgresStore {
         session_id: &str,
     ) -> Result<Memory, PostgresError> {
         let account = self.authenticate_account(account_token).await?;
+        self.finish_session(&account.person_id, session_id).await
+    }
+
+    /// Explicit end. A summary the person forgot or corrected is reported, not returned.
+    async fn finish_session(
+        &self,
+        person_id: &str,
+        session_id: &str,
+    ) -> Result<Memory, PostgresError> {
+        self.finish_session_summary(person_id, session_id)
+            .await?
+            .ok_or_else(|| {
+                PostgresError::Validation(format!(
+                    "session summary was forgotten or superseded: {}",
+                    session_memory_id(Some(person_id), session_id)
+                ))
+            })
+    }
+
+    /// Ends the session and derives its summary. `None`: the person forgot or corrected the
+    /// summary, so it stays as it is and is not derived again under the same id.
+    async fn finish_session_summary(
+        &self,
+        person_id: &str,
+        session_id: &str,
+    ) -> Result<Option<Memory>, PostgresError> {
         if session_id.trim().is_empty() {
             return Err(PostgresError::Validation(
                 "session_id must not be empty".to_owned(),
@@ -479,7 +611,7 @@ impl PostgresStore {
             "UPDATE cairn_sessions SET ended_at = COALESCE(ended_at, now())
              WHERE person_id = $1 AND session_id = $2",
         )
-        .bind(&account.person_id)
+        .bind(person_id)
         .bind(session_id)
         .execute(&mut *transaction)
         .await?;
@@ -490,23 +622,13 @@ impl PostgresStore {
                     context
              FROM cairn_sessions WHERE person_id = $1 AND session_id = $2",
         )
-        .bind(&account.person_id)
+        .bind(person_id)
         .bind(session_id)
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or_else(|| PostgresError::Validation(format!("unknown session: {session_id}")))?;
         let session = session_from_row(&session_row)?;
-        let memory_id = session_memory_id(Some(&account.person_id), session_id);
-        let existing = sqlx::query(&session_memory_select_sql())
-            .bind(&account.person_id)
-            .bind(&memory_id)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        if let Some(row) = existing {
-            let memory = memory_from_row(&row)?;
-            transaction.commit().await?;
-            return Ok(memory);
-        }
+        let memory_id = session_memory_id(Some(person_id), session_id);
         let observation_query = format!(
             "{} WHERE o.person_id = $1 AND o.session_id = $2
                AND NOT EXISTS (
@@ -519,23 +641,217 @@ impl PostgresStore {
             observation_select_sql()
         );
         let observation_rows = sqlx::query(&observation_query)
-            .bind(&account.person_id)
+            .bind(person_id)
             .bind(session_id)
             .fetch_all(&mut *transaction)
             .await?;
-        let observations = observation_rows
+        let mut observations = observation_rows
             .iter()
             .map(observation_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        let memory = derive_session_memory(
-            Some(&account.person_id),
-            session_id,
-            &session.context,
-            &observations,
-        )?;
-        insert_memory(&mut transaction, &account.person_id, &memory).await?;
+        let existing = sqlx::query(&session_memory_select_sql())
+            .bind(person_id)
+            .bind(&memory_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let mut earlier = None;
+        if let Some(row) = existing {
+            let memory = memory_from_row(&row)?;
+            let hidden = sqlx::query_scalar::<_, bool>(&format!(
+                "SELECT EXISTS (SELECT 1 FROM cairn_forgotten_items f
+                                WHERE f.person_id = $1 AND f.item_id = $2)
+                     OR EXISTS (SELECT 1 FROM cairn_memories m
+                                WHERE m.person_id = $1 AND m.memory_id = $2 AND NOT {})",
+                not_superseded_by_live_memory_sql(false)
+            ))
+            .bind(person_id)
+            .bind(&memory_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if hidden {
+                clear_session_pending(&mut transaction, person_id, session_id).await?;
+                transaction.commit().await?;
+                return Ok(None);
+            }
+            let forgotten_source = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM cairn_forgotten_items f
+                                WHERE f.person_id = $1 AND f.item_id = ANY($2))",
+            )
+            .bind(person_id)
+            .bind(&memory.source_event_ids)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !forgotten_source
+                && !observations
+                    .iter()
+                    .any(|observation| !memory.source_event_ids.contains(&observation.event_id))
+            {
+                clear_session_pending(&mut transaction, person_id, session_id).await?;
+                transaction.commit().await?;
+                return Ok(Some(memory));
+            }
+            // The session id was reused after its summary, or a source was forgotten: derive
+            // the summary again from what is retained.
+            sqlx::query("DELETE FROM cairn_memories WHERE person_id = $1 AND memory_id = $2")
+                .bind(person_id)
+                .bind(&memory_id)
+                .execute(&mut *transaction)
+                .await?;
+            earlier = Some(memory);
+        }
+        // Summary input only. Stored observations and sync payloads stay unchanged.
+        for observation in &mut observations {
+            if observation.context == WorkContext::default() {
+                observation.context.clone_from(&session.context);
+            }
+        }
+        let mut memory =
+            derive_session_memory(Some(person_id), session_id, &session.context, &observations)?;
+        if let Some(earlier) = &earlier {
+            carry_summary_state(earlier, &mut memory);
+        }
+        insert_memory(&mut transaction, person_id, &memory).await?;
+        clear_session_pending(&mut transaction, person_id, session_id).await?;
         transaction.commit().await?;
-        Ok(memory)
+        Ok(Some(memory))
+    }
+
+    /// Finishes this person's sessions that have been pending (a capture the summary may not
+    /// cover) for longer than `IDLE_SESSION_SECONDS`, at most `MAX_SWEEP_SESSIONS` per call.
+    /// Reads only the partial pending index. A session that fails is marked pending again, so
+    /// it is retried after another idle period, not on every push. Failures are logged; the
+    /// capture or session start that called this has already succeeded.
+    async fn finish_idle_sessions(&self, person_id: &str) {
+        let sessions = sqlx::query_scalar::<_, String>(
+            "SELECT session_id FROM cairn_sessions
+             WHERE person_id = $1 AND pending_since IS NOT NULL
+               AND pending_since < now() - make_interval(secs => $2)
+             ORDER BY pending_since LIMIT $3",
+        )
+        .bind(person_id)
+        .bind(IDLE_SESSION_SECONDS as f64)
+        .bind(MAX_SWEEP_SESSIONS)
+        .fetch_all(&self.pool)
+        .await;
+        let sessions = match sessions {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                eprintln!("cairn: automatic session close failed: {error}");
+                return;
+            }
+        };
+        for session_id in sessions {
+            // A summary the person hid comes back as `None` and is left as it is.
+            if let Err(error) = self.finish_session_summary(person_id, &session_id).await {
+                eprintln!("cairn: automatic session close failed: {error}");
+                let backoff = sqlx::query(
+                    "UPDATE cairn_sessions SET pending_since = now()
+                     WHERE person_id = $1 AND session_id = $2",
+                )
+                .bind(person_id)
+                .bind(&session_id)
+                .execute(&self.pool)
+                .await;
+                if let Err(error) = backoff {
+                    eprintln!("cairn: automatic session close failed: {error}");
+                }
+            }
+        }
+    }
+
+    /// Automatic registration on capture. The person's own project for the repository comes
+    /// first, then one they are a member of; only when there is none, a project owned by this
+    /// person is created. A branch is registered on a project the person owns (branch writes
+    /// are owner-only); an empty or detached branch is skipped. Idempotent.
+    async fn auto_register_project(
+        &self,
+        person_id: &str,
+        context: &WorkContext,
+    ) -> Result<(), PostgresError> {
+        let Some(repository) = context
+            .repository
+            .as_deref()
+            .map(str::trim)
+            .filter(|repository| !repository.is_empty())
+        else {
+            return Ok(());
+        };
+        validate_project_text(repository, "repository")?;
+        let branch = context
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty() && *branch != "HEAD");
+        if let Some(branch) = branch {
+            validate_project_text(branch, "branch name")?;
+        }
+        let mut transaction = self.pool.begin().await?;
+        let owned = sqlx::query_scalar::<_, String>(
+            "SELECT project_id FROM cairn_projects WHERE person_id = $1 AND repository = $2",
+        )
+        .bind(person_id)
+        .bind(repository)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let project_id = match owned {
+            Some(project_id) => project_id,
+            None => {
+                let is_member = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM cairn_projects p
+                        JOIN cairn_project_members m
+                          ON m.owner_person_id = p.person_id AND m.project_id = p.project_id
+                        WHERE m.member_person_id = $1 AND p.repository = $2)",
+                )
+                .bind(person_id)
+                .bind(repository)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if is_member {
+                    return Ok(());
+                }
+                let project_id = format!(
+                    "project-{}",
+                    &cairn_core::hash_token(&random_token("project"))[..24]
+                );
+                sqlx::query(
+                    "INSERT INTO cairn_projects (person_id, project_id, repository, name)
+                     VALUES ($1, $2, $3, $3) ON CONFLICT (person_id, repository) DO NOTHING",
+                )
+                .bind(person_id)
+                .bind(&project_id)
+                .bind(repository)
+                .execute(&mut *transaction)
+                .await?;
+                sqlx::query_scalar::<_, String>(
+                    "SELECT project_id FROM cairn_projects
+                     WHERE person_id = $1 AND repository = $2",
+                )
+                .bind(person_id)
+                .bind(repository)
+                .fetch_one(&mut *transaction)
+                .await?
+            }
+        };
+        if let Some(branch) = branch {
+            let branch_id = format!(
+                "branch-{}",
+                &cairn_core::hash_token(&random_token("branch"))[..24]
+            );
+            sqlx::query(
+                "INSERT INTO cairn_project_branches (person_id, branch_id, project_id, name)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (person_id, project_id, name) DO NOTHING",
+            )
+            .bind(person_id)
+            .bind(&branch_id)
+            .bind(&project_id)
+            .bind(branch)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn forget(&self, account_token: &str, item_id: &str) -> Result<(), PostgresError> {
@@ -564,7 +880,7 @@ impl PostgresStore {
         }
         let mut transaction = self.pool.begin().await?;
         let memory = sqlx::query(
-            "SELECT source_event_ids FROM cairn_memories
+            "SELECT source_event_ids, promoted_from FROM cairn_memories
              WHERE person_id = $1 AND memory_id = $2",
         )
         .bind(&account.person_id)
@@ -601,8 +917,25 @@ impl PostgresStore {
             )));
         }
         insert_forget(&mut transaction, &account.person_id, item_id).await?;
+        // A summary built from a forgotten observation is derived again without it.
+        sqlx::query(
+            "UPDATE cairn_sessions SET pending_since = now()
+             WHERE person_id = $1 AND session_id IN
+                   (SELECT session_id FROM cairn_observations
+                    WHERE person_id = $1 AND event_id = $2)",
+        )
+        .bind(&account.person_id)
+        .bind(item_id)
+        .execute(&mut *transaction)
+        .await?;
+        // Session row first, then the cursor lock: the order sync_push takes them in.
         insert_sync_deletion(&mut transaction, &account.person_id, item_id).await?;
-        if let Some(memory) = memory {
+        // A promoted copy never cascades: its origin and the origin's events stay personal.
+        if let Some(memory) = memory
+            && memory
+                .try_get::<Option<String>, _>("promoted_from")?
+                .is_none()
+        {
             let source_event_ids: Vec<String> = memory
                 .try_get::<Json<Vec<String>>, _>("source_event_ids")?
                 .0;
@@ -631,6 +964,25 @@ impl PostgresStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, PostgresError> {
+        Ok(self
+            .search_window(account_token, query, limit, filter)
+            .await?
+            .0)
+    }
+
+    /// Returns the capped result window and the number of eligible matches before the cap.
+    ///
+    /// The total comes from `COUNT(*) OVER ()` in the same statement, so it shares the
+    /// snapshot and predicate of the rows. It is read from the returned rows, so callers
+    /// that need it must ask for at least one row (`context` passes `usize::MAX`;
+    /// `why_changed_context` has its own query).
+    async fn search_window(
+        &self,
+        account_token: &str,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<(Vec<RecallResult>, usize), PostgresError> {
         let account = self.authenticate_account(account_token).await?;
         if query.trim().is_empty() {
             return Err(PostgresError::Validation(
@@ -639,24 +991,7 @@ impl PostgresStore {
         }
         let limit = i64::try_from(limit.min(MAX_SEARCH_RESULTS as usize))
             .map_err(|_| PostgresError::Validation("limit exceeds PostgreSQL range".to_owned()))?;
-        let mut binds: Vec<String> = vec![account.person_id.clone()];
-        let mut conditions = vec![
-            "m.person_id = $1".to_owned(),
-            "m.search_tsv @@ plainto_tsquery('simple', $2)".to_owned(),
-            "NOT EXISTS (
-                 SELECT 1 FROM cairn_forgotten_items f
-                 WHERE f.person_id = m.person_id
-                   AND (f.item_id = m.memory_id OR f.item_id IN
-                        (SELECT jsonb_array_elements_text(m.source_event_ids)))
-             )"
-            .to_owned(),
-            "(m.lifecycle->>'expiresAt' IS NULL OR
-              (m.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)"
-                .to_owned(),
-            not_superseded_by_live_memory_sql(false),
-        ];
-        binds.push(query.to_owned());
-        append_filter_conditions(filter, &mut conditions, &mut binds);
+        let (conditions, binds) = search_conditions(&account.person_id, query, filter);
         let limit_bind = binds.len() + 1;
         let sql = format!(
             "{} WHERE {} ORDER BY ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) DESC,
@@ -670,8 +1005,14 @@ impl PostgresStore {
         }
         request = request.bind(limit);
         let rows = request.fetch_all(&self.pool).await?;
+        let total = match rows.first() {
+            Some(row) => usize::try_from(row.try_get::<i64, _>("total_matches")?)
+                .map_err(|_| PostgresError::Validation("match count is out of range".to_owned()))?,
+            None => 0,
+        };
         let all_memories = self.all_memories_for_person(&account.person_id).await?;
-        rows.iter()
+        let mut results = rows
+            .iter()
             .map(|row| {
                 let memory = memory_from_row(row)?;
                 let score: f32 = row.try_get("search_score")?;
@@ -683,7 +1024,10 @@ impl PostgresStore {
                     filter,
                 ))
             })
-            .collect()
+            .collect::<Result<Vec<_>, PostgresError>>()?;
+        // Applies inside the SQL window; a tie cut by the row cap stays in memory_id order.
+        prefer_newer_contradiction(&mut results, &all_memories);
+        Ok((results, total))
     }
 
     pub async fn context(
@@ -693,10 +1037,10 @@ impl PostgresStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, PostgresError> {
-        let mut results = self
-            .search(account_token, query, usize::MAX, filter)
+        let (mut results, total) = self
+            .search_window(account_token, query, usize::MAX, filter)
             .await?;
-        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+        Ok(pack_window(query.to_owned(), &mut results, limit, total))
     }
 
     pub async fn resume_context(
@@ -738,6 +1082,14 @@ impl PostgresStore {
         ))
     }
 
+    /// Ranks decision evidence across every eligible match, then applies the 512 cap.
+    ///
+    /// One uncapped query returns only `(memory_id, score)` for each eligible match, in the
+    /// same lexical order as `search`. Each id is resolved in the person's live memories
+    /// (the set recall metadata already loads), ranked with `why_changed_priority`, stably
+    /// sorted by decision, then relationship count, then that lexical order, and cut to
+    /// `MAX_SEARCH_RESULTS` before full results are built. Cost grows with the number of
+    /// matches, not with 512: every match is scored and inspected in Rust.
     pub async fn why_changed_context(
         &self,
         account_token: &str,
@@ -745,26 +1097,60 @@ impl PostgresStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, PostgresError> {
-        let mut results = self
-            .search(account_token, query, usize::MAX, filter)
-            .await?;
-        results.sort_by(|left, right| {
-            right
-                .decision_reason
-                .is_some()
-                .cmp(&left.decision_reason.is_some())
-                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
-                .then_with(|| {
-                    right
-                        .score
-                        .partial_cmp(&left.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+        let account = self.authenticate_account(account_token).await?;
+        if query.trim().is_empty() {
+            return Err(PostgresError::Validation(
+                "query must not be empty".to_owned(),
+            ));
+        }
+        let (conditions, binds) = search_conditions(&account.person_id, query, filter);
+        let sql = format!(
+            "SELECT m.memory_id,
+                    ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score
+             FROM cairn_memories m WHERE {}
+             ORDER BY ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) DESC,
+             m.memory_id ASC",
+            conditions.join(" AND ")
+        );
+        let mut request = sqlx::query(&sql);
+        for value in &binds {
+            request = request.bind(value);
+        }
+        let rows = request.fetch_all(&self.pool).await?;
+        let all_memories = self.all_memories_for_person(&account.person_id).await?;
+        let by_id: HashMap<&str, &Memory> = all_memories
+            .iter()
+            .map(|memory| (memory.memory_id.as_str(), memory))
+            .collect();
+        // A match deleted between the two reads has no memory to rank and is not counted.
+        let mut ranked = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: String = row.try_get("memory_id")?;
+            if let Some(memory) = by_id.get(id.as_str()) {
+                ranked.push((*memory, row.try_get::<f32, _>("search_score")?));
+            }
+        }
+        let total = ranked.len();
+        // Stable: equal priority keeps the lexical order from the query.
+        ranked.sort_by_cached_key(|(memory, _)| {
+            let (decision, relationships) = why_changed_priority(memory);
+            (
+                std::cmp::Reverse(decision),
+                std::cmp::Reverse(relationships),
+            )
         });
-        Ok(build_context_pack(
+        let mut results = ranked
+            .into_iter()
+            .take(MAX_SEARCH_RESULTS as usize)
+            .map(|(memory, score)| {
+                recall_result(memory, score, &all_memories, &HashSet::new(), filter)
+            })
+            .collect::<Vec<_>>();
+        Ok(pack_window(
             format!("why changed: {query}"),
             &mut results,
             limit,
+            total,
         ))
     }
 
@@ -837,7 +1223,9 @@ impl PostgresStore {
             )));
         };
         if context == WorkContext::default() {
-            replacement.context = target_context;
+            replacement.lifecycle.sensitivity =
+                sensitivity_including_context(&replacement.lifecycle.sensitivity, &target_context);
+            replacement.context = redact_work_context(&target_context);
             replacement.scope = target_scope;
         }
         replacement.lifecycle.confidence = 100;
@@ -937,6 +1325,8 @@ impl PostgresStore {
         let account = self.authenticate_account(account_token).await?;
         validate_project_text(project_id, "project_id")?;
         validate_project_text(name, "branch name")?;
+        self.require_own_project(&account.person_id, project_id)
+            .await?;
         let existing = sqlx::query(&branch_select_sql("b.project_id = $2 AND b.name = $3"))
             .bind(&account.person_id)
             .bind(project_id)
@@ -997,6 +1387,8 @@ impl PostgresStore {
         let account = self.authenticate_account(account_token).await?;
         validate_project_text(project_id, "project_id")?;
         validate_project_text(path, "worktree path")?;
+        self.require_own_project(&account.person_id, project_id)
+            .await?;
         if let Some(branch_id) = &branch_id {
             let branch_exists = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (
@@ -1273,7 +1665,7 @@ impl PostgresStore {
         commit: &str,
         reason: &str,
     ) -> Result<ProjectMergeResult, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
+        let (account, via_device) = self.authenticate_principal(account_token).await?;
         validate_project_text(project_id, "project_id")?;
         validate_project_text(branch_id, "branch_id")?;
         validate_project_text(memory_id, "memory_id")?;
@@ -1300,7 +1692,8 @@ impl PostgresStore {
             "SELECT project_id, repository, name, default_branch,
                     EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
                     EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at
-             FROM cairn_projects WHERE person_id = $1 AND project_id = $2",
+             FROM cairn_projects WHERE person_id = $1 AND project_id = $2
+             FOR UPDATE",
         )
         .bind(&account.person_id)
         .bind(project_id)
@@ -1308,6 +1701,26 @@ impl PostgresStore {
         .await?
         .ok_or_else(|| PostgresError::Validation(format!("unknown project: {project_id}")))?;
         let project = project_from_row(&project)?;
+        // The row lock conflicts with the key-share lock a concurrent member insert takes through
+        // its foreign key, so the member check below cannot race an invite.
+        if via_device
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM cairn_project_members
+                                WHERE owner_person_id = $1 AND project_id = $2
+                                  AND member_person_id <> $1)
+                     OR EXISTS (SELECT 1 FROM cairn_project_team_members
+                                WHERE owner_person_id = $1 AND project_id = $2
+                                  AND member_person_id <> $1)",
+            )
+            .bind(&account.person_id)
+            .bind(project_id)
+            .fetch_one(&mut *transaction)
+            .await?
+        {
+            return Err(PostgresError::Validation(
+                cairn_core::WEB_ONLY_ERROR.to_owned(),
+            ));
+        }
         let branch_query = format!(
             "{} FOR UPDATE",
             branch_select_sql("b.project_id = $2 AND b.branch_id = $3")
@@ -1400,8 +1813,9 @@ impl PostgresStore {
         }
 
         let duplicate_query = format!(
-            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3",
-            memory_select_sql()
+            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND {}",
+            memory_select_sql(),
+            live_memory_sql()
         );
         let existing = sqlx::query(&duplicate_query)
             .bind(&account.person_id)
@@ -1426,7 +1840,16 @@ impl PostgresStore {
             promoted.context.worktree = None;
             promoted.context.commit = None;
             promoted.promoted_from = Some(memory_id.to_owned());
+            promoted.source_event_ids.clear();
+            promoted.supersedes = prior_project_copy(
+                &mut transaction,
+                &account.person_id,
+                project_id,
+                promoted.supersedes.as_deref(),
+            )
+            .await?;
             promoted.promotion_reason = Some(redact_sensitive_content(reason));
+            redact_memory_metadata(&mut promoted);
             promoted.lifecycle.retention = cairn_core::Retention::Durable;
             promoted.lifecycle.expires_at = None;
             promoted.created_at = now_seconds().to_string();
@@ -1633,7 +2056,21 @@ impl PostgresStore {
             .bind(project_id)
             .fetch_all(&self.pool)
             .await?;
-        rows.iter().map(memory_from_row).collect()
+        // The origin link is exposed only while the personal memory is still recalled.
+        let live = self.all_memories_for_person(&account.person_id).await?;
+        let mut memories = rows
+            .iter()
+            .map(memory_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for memory in &mut memories {
+            if !live
+                .iter()
+                .any(|origin| Some(origin.memory_id.as_str()) == memory.promoted_from.as_deref())
+            {
+                memory.promoted_from = None;
+            }
+        }
+        Ok(memories)
     }
 
     pub async fn invite_project_member(
@@ -2035,7 +2472,8 @@ impl PostgresStore {
         project_id: &str,
         email: &str,
     ) -> Result<ProjectTeamMember, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
+        // Removing a member reopens the solo-project merge path, so it stays web-only.
+        let account = self.authenticate_session(account_token).await?;
         self.require_project_owner(&account.person_id, project_id)
             .await?;
         let member = self.account_by_email(&normalize_email(email)?).await?;
@@ -2481,6 +2919,29 @@ impl PostgresStore {
         ))
     }
 
+    /// The caller's own project, with one error for a missing and a foreign id so a request
+    /// never reaches a foreign-key failure. The database key still guards a concurrent delete.
+    async fn require_own_project(
+        &self,
+        person_id: &str,
+        project_id: &str,
+    ) -> Result<(), PostgresError> {
+        let owns = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM cairn_projects
+             WHERE person_id = $1 AND project_id = $2)",
+        )
+        .bind(person_id)
+        .bind(project_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if owns {
+            return Ok(());
+        }
+        Err(PostgresError::Validation(format!(
+            "unknown project: {project_id}"
+        )))
+    }
+
     async fn require_project_owner(
         &self,
         person_id: &str,
@@ -2708,8 +3169,9 @@ impl PostgresStore {
             ));
         }
         let duplicate_query = format!(
-            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3",
-            memory_select_sql()
+            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND {}",
+            memory_select_sql(),
+            live_memory_sql()
         );
         if let Some(row) = sqlx::query(&duplicate_query)
             .bind(&account.person_id)
@@ -2733,7 +3195,16 @@ impl PostgresStore {
         promoted.context.worktree = None;
         promoted.context.commit = None;
         promoted.promoted_from = Some(memory_id.to_owned());
+        promoted.source_event_ids.clear();
+        promoted.supersedes = prior_project_copy(
+            &mut transaction,
+            &account.person_id,
+            project_id,
+            promoted.supersedes.as_deref(),
+        )
+        .await?;
         promoted.promotion_reason = Some(redact_sensitive_content(reason));
+        redact_memory_metadata(&mut promoted);
         promoted.verified_commit = source_commit;
         promoted.lifecycle.retention = cairn_core::Retention::Durable;
         promoted.lifecycle.expires_at = None;
@@ -2961,7 +3432,11 @@ impl PostgresStore {
             .fetch_optional(&mut *transaction)
             .await?;
             if let Some(row) = existing {
-                if session_from_row(&row)? != *session {
+                // The authenticated account is the PostgreSQL owner. A file bundle may
+                // carry person_id; that field must not false-conflict this row.
+                let mut stored = session_from_row(&row)?;
+                stored.person_id.clone_from(&session.person_id);
+                if stored != *session {
                     return Err(import_conflict("session", &session.session_id));
                 }
             } else {
@@ -3071,7 +3546,7 @@ impl PostgresStore {
         account_token: &str,
         limit: usize,
     ) -> Result<Vec<AuditEvent>, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
+        let account = self.authenticate_session(account_token).await?;
         let limit = i64::try_from(limit.min(MAX_SEARCH_RESULTS as usize))
             .map_err(|_| PostgresError::Validation("limit exceeds PostgreSQL range".to_owned()))?;
         let rows = sqlx::query(
@@ -3154,7 +3629,7 @@ impl PostgresStore {
         agent_id: Option<&str>,
         name: &str,
     ) -> Result<DeviceRegistration, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
+        let account = self.authenticate_session(account_token).await?;
         if account.person_id != person_id {
             return Err(PostgresError::Validation(
                 "account does not own the requested person".to_owned(),
@@ -3250,7 +3725,7 @@ impl PostgresStore {
     }
 
     pub async fn list_devices(&self, account_token: &str) -> Result<Vec<Device>, PostgresError> {
-        let account = self.authenticate_device(account_token).await?;
+        let account = self.authenticate_session(account_token).await?;
         let query = format!(
             "{} WHERE d.person_id = $1 ORDER BY d.registered_at",
             device_select_columns()
@@ -3267,9 +3742,9 @@ impl PostgresStore {
         account_token: &str,
         device_id: &str,
     ) -> Result<Device, PostgresError> {
-        let account = self.authenticate_device(account_token).await?;
+        let account = self.authenticate_session(account_token).await?;
         let result = sqlx::query(
-            "UPDATE cairn_devices SET status = 'revoked', last_seen_at = now()
+            "UPDATE cairn_devices SET status = 'revoked'
              WHERE device_id = $1 AND person_id = $2",
         )
         .bind(device_id)
@@ -3283,7 +3758,7 @@ impl PostgresStore {
         }
         self.record_audit_event(
             &account.person_id,
-            Some(&account.device_id),
+            None,
             "device_revoked",
             Some(device_id),
             serde_json::json!({}),
@@ -3297,7 +3772,7 @@ impl PostgresStore {
         account_token: &str,
         device_id: &str,
     ) -> Result<DeviceRegistration, PostgresError> {
-        let account = self.authenticate_device(account_token).await?;
+        let account = self.authenticate_session(account_token).await?;
         let token = random_token("cairn-device");
         let token_hash = cairn_core::hash_token(&token);
         let result = sqlx::query(
@@ -3316,7 +3791,7 @@ impl PostgresStore {
         }
         self.record_audit_event(
             &account.person_id,
-            Some(&account.device_id),
+            None,
             "device_rotated",
             Some(device_id),
             serde_json::json!({}),
@@ -3334,10 +3809,27 @@ impl PostgresStore {
         input: ObservationInput,
     ) -> Result<SyncPushResult, PostgresError> {
         let device = self.authenticate_device(device_token).await?;
+        let mut input = input;
+        let mut transaction = self.pool.begin().await?;
+        if input.context == WorkContext::default() {
+            // Copy only this person's stored session. A missing row stays empty
+            // and is inserted below so the observation foreign key holds.
+            if let Some(row) = sqlx::query(
+                "SELECT context FROM cairn_sessions
+                 WHERE person_id = $1 AND session_id = $2
+                 FOR UPDATE",
+            )
+            .bind(&device.person_id)
+            .bind(&input.session_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            {
+                input.context = row.try_get::<Json<WorkContext>, _>("context")?.0;
+            }
+        }
         let observation = normalize_observation(&input)?;
         let lifecycle = serde_json::to_value(&observation.lifecycle)?;
         let context = serde_json::to_value(&observation.context)?;
-        let mut transaction = self.pool.begin().await?;
         let event_query = sync_select_event_sql();
         if let Some(row) = sqlx::query(&event_query)
             .bind(&device.person_id)
@@ -3346,18 +3838,31 @@ impl PostgresStore {
             .await?
         {
             let event = sync_event_from_row(&row)?;
-            sqlx::query("UPDATE cairn_devices SET last_seen_at = now() WHERE device_id = $1")
-                .bind(&device.device_id)
-                .execute(&mut *transaction)
-                .await?;
-            record_audit(
-                &mut transaction,
-                &device.person_id,
-                Some(&device.device_id),
-                "sync_duplicate",
-                Some(&observation.event_id),
-                serde_json::json!({ "cursor": event.cursor }),
+            let stored = &event.observation;
+            if (
+                &stored.session_id,
+                &stored.content,
+                &stored.role,
+                &stored.source,
+            ) != (
+                &observation.session_id,
+                &observation.content,
+                &observation.role,
+                &observation.source,
+            ) {
+                transaction.rollback().await?;
+                return Err(PostgresError::Conflict(format!(
+                    "event id already used with different content: {}",
+                    observation.event_id
+                )));
+            }
+            // A pure replay changes nothing but the device's last-seen time; no audit row.
+            sqlx::query(
+                "UPDATE cairn_devices SET last_seen_at = now()
+                 WHERE device_id = $1 AND last_seen_at < now() - interval '60 seconds'",
             )
+            .bind(&device.device_id)
+            .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;
             return Ok(SyncPushResult {
@@ -3377,7 +3882,7 @@ impl PostgresStore {
         .await?;
         if observation_exists {
             transaction.rollback().await?;
-            return Err(PostgresError::Validation(format!(
+            return Err(PostgresError::Conflict(format!(
                 "event already exists outside sync scope: {}",
                 observation.event_id
             )));
@@ -3416,6 +3921,15 @@ impl PostgresStore {
         )
         .execute(&mut *transaction)
         .await?;
+        sqlx::query(
+            "UPDATE cairn_sessions SET pending_since = now()
+             WHERE person_id = $1 AND session_id = $2",
+        )
+        .bind(&device.person_id)
+        .bind(&observation.session_id)
+        .execute(&mut *transaction)
+        .await?;
+        lock_sync_cursor(&mut transaction, &device.person_id).await?;
         let sync_insert = sqlx::query(
             "INSERT INTO cairn_sync_events (person_id, event_id, device_id)
              VALUES ($1, $2, $3) ON CONFLICT (person_id, event_id) DO NOTHING",
@@ -3430,10 +3944,13 @@ impl PostgresStore {
             .bind(&observation.event_id)
             .fetch_one(&mut *transaction)
             .await?;
-        sqlx::query("UPDATE cairn_devices SET last_seen_at = now() WHERE device_id = $1")
-            .bind(&device.device_id)
-            .execute(&mut *transaction)
-            .await?;
+        sqlx::query(
+            "UPDATE cairn_devices SET last_seen_at = now()
+                 WHERE device_id = $1 AND last_seen_at < now() - interval '60 seconds'",
+        )
+        .bind(&device.device_id)
+        .execute(&mut *transaction)
+        .await?;
         record_audit(
             &mut transaction,
             &device.person_id,
@@ -3445,9 +3962,20 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         let event = sync_event_from_row(&row)?;
+        let duplicate = sync_insert.rows_affected() == 0;
+        if !duplicate {
+            // The push is acknowledged. Housekeeping failures must not turn it into an error.
+            if let Err(error) = self
+                .auto_register_project(&device.person_id, &event.observation.context)
+                .await
+            {
+                eprintln!("cairn: automatic project registration failed: {error}");
+            }
+            self.finish_idle_sessions(&device.person_id).await;
+        }
         Ok(SyncPushResult {
             accepted: true,
-            duplicate: sync_insert.rows_affected() == 0,
+            duplicate,
             cursor: event.cursor,
             observation: event.observation,
         })
@@ -3460,6 +3988,12 @@ impl PostgresStore {
     ) -> Result<SyncPullResult, PostgresError> {
         let device = self.authenticate_device(device_token).await?;
         let cursor_param = database_cursor(cursor)?;
+        // One snapshot for both lists, so a commit between the two reads cannot put an item
+        // below the page cursor that the first read did not see.
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *transaction)
+            .await?;
         let query = format!(
             "{} AND se.cursor > $2
                AND NOT EXISTS (
@@ -3472,7 +4006,7 @@ impl PostgresStore {
         let rows = sqlx::query(&query)
             .bind(&device.person_id)
             .bind(cursor_param)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *transaction)
             .await?;
         let events = rows
             .iter()
@@ -3485,7 +4019,7 @@ impl PostgresStore {
         ))
         .bind(&device.person_id)
         .bind(cursor_param)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
         let deletions = deletion_rows
             .iter()
@@ -3497,20 +4031,27 @@ impl PostgresStore {
                 })
             })
             .collect::<Result<Vec<_>, PostgresError>>()?;
-        let next_cursor = events
-            .iter()
-            .map(|event| event.cursor)
-            .chain(deletions.iter().map(|deletion| deletion.cursor))
-            .max()
-            .unwrap_or(cursor.max(device.cursor));
+        let mut events = events;
+        let mut deletions = deletions;
+        let next_cursor = pull_page_end(
+            events.last().map(|event| event.cursor),
+            events.len(),
+            deletions.last().map(|deletion| deletion.cursor),
+            deletions.len(),
+            cursor.max(device.cursor),
+        );
+        events.retain(|event| event.cursor <= next_cursor);
+        deletions.retain(|deletion| deletion.cursor <= next_cursor);
         sqlx::query(
             "UPDATE cairn_devices SET pull_cursor = GREATEST(pull_cursor, $1), last_seen_at = now()
-             WHERE device_id = $2",
+             WHERE device_id = $2
+               AND (pull_cursor < $1 OR last_seen_at < now() - interval '60 seconds')",
         )
         .bind(next_cursor as i64)
         .bind(&device.device_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(SyncPullResult {
             cursor: next_cursor,
             events,
@@ -3556,6 +4097,11 @@ impl PostgresStore {
         let device = device_from_row(&row)?;
         if device.status != DeviceStatus::Active {
             return Err(PostgresError::Validation("device is revoked".to_owned()));
+        }
+        if !row.try_get::<bool, _>("account_active")? {
+            return Err(PostgresError::Validation(
+                "account authentication failed".to_owned(),
+            ));
         }
         Ok(device)
     }
@@ -3798,11 +4344,46 @@ async fn insert_observation(
     Ok(())
 }
 
+/// The summary is current as of this transaction. A capture committed after it read the
+/// observations sets the flag again.
+async fn clear_session_pending(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    session_id: &str,
+) -> Result<(), PostgresError> {
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = NULL
+         WHERE person_id = $1 AND session_id = $2 AND pending_since <= now()",
+    )
+    .bind(person_id)
+    .bind(session_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// Serialises cursor allocation with commit for one person. A cursor is allocated when its
+/// row is inserted but becomes visible only at commit, so without this a later cursor could
+/// commit first and a pull would move past an earlier one that commits afterwards. With it,
+/// this person's cursors commit in allocation order, so everything a pull sees is a prefix.
+/// The lock is released with the transaction.
+async fn lock_sync_cursor(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+) -> Result<(), PostgresError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('cairn-sync-cursor:' || $1, 0))")
+        .bind(person_id)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 async fn insert_sync_deletion(
     transaction: &mut Transaction<'_, Postgres>,
     person_id: &str,
     item_id: &str,
 ) -> Result<(), PostgresError> {
+    lock_sync_cursor(transaction, person_id).await?;
     sqlx::query(
         "INSERT INTO cairn_sync_deletions (person_id, item_id, cursor)
          SELECT $1, $2, nextval(pg_get_serial_sequence('cairn_sync_events', 'cursor'))
@@ -3837,6 +4418,8 @@ async fn insert_forget(
 fn session_from_row(row: &PgRow) -> Result<Session, PostgresError> {
     Ok(Session {
         session_id: row.try_get("session_id")?,
+        // PostgreSQL identity stays in the person_id query. The file field is absent here.
+        person_id: None,
         context: row.try_get::<Json<WorkContext>, _>("context")?.0,
         started_at: row.try_get("started_at")?,
         ended_at: row.try_get("ended_at")?,
@@ -3849,12 +4432,13 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
     } else {
         ""
     };
+    // A live correction of the personal origin also hides its promoted copies (ADR 0010).
     format!(
         "NOT EXISTS (
              SELECT 1 FROM cairn_memories newer
              WHERE newer.person_id = m.person_id
-               AND newer.supersedes = m.memory_id
-               {project_clause}
+               AND ((newer.supersedes = m.memory_id {project_clause})
+                    OR newer.supersedes = m.promoted_from)
                AND NOT EXISTS (
                    SELECT 1 FROM cairn_forgotten_items f
                    WHERE f.person_id = newer.person_id
@@ -3865,6 +4449,39 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
                     (newer.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)
          )"
     )
+}
+
+/// The earlier project copy of the memory a promoted correction supersedes. The copy links
+/// to it instead of to the personal id, which a member must never see.
+async fn prior_project_copy(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    project_id: &str,
+    corrected: Option<&str>,
+) -> Result<Option<String>, PostgresError> {
+    let Some(corrected) = corrected else {
+        return Ok(None);
+    };
+    Ok(sqlx::query_scalar::<_, String>(&format!(
+        "SELECT m.memory_id FROM cairn_memories m
+             WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND {}
+             ORDER BY m.created_at LIMIT 1",
+        live_memory_sql()
+    ))
+    .bind(person_id)
+    .bind(project_id)
+    .bind(corrected)
+    .fetch_optional(&mut **transaction)
+    .await?)
+}
+
+/// Predicate on an aliased memory `m`: not forgotten and not expired. A forgotten copy is a
+/// tombstone, so promoting again creates a new copy.
+fn live_memory_sql() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cairn_forgotten_items f
+                 WHERE f.person_id = m.person_id AND f.item_id = m.memory_id)
+     AND (m.lifecycle->>'expiresAt' IS NULL OR
+          (m.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)"
 }
 
 fn session_memory_select_sql() -> String {
@@ -3894,9 +4511,55 @@ fn shared_memory_select_sql() -> &'static str {
      FROM cairn_memories m"
 }
 
+/// The eligibility, query, and filter predicate shared by every PostgreSQL search path.
+/// `$1` is the person, `$2` the query; filter binds follow.
+fn search_conditions(
+    person_id: &str,
+    query: &str,
+    filter: &RecallFilter,
+) -> (Vec<String>, Vec<String>) {
+    let mut binds = vec![person_id.to_owned(), query.to_owned()];
+    let mut conditions = vec![
+        "m.person_id = $1".to_owned(),
+        "m.search_tsv @@ plainto_tsquery('simple', $2)".to_owned(),
+        "NOT EXISTS (
+             SELECT 1 FROM cairn_forgotten_items f
+             WHERE f.person_id = m.person_id
+               AND (f.item_id = m.memory_id OR f.item_id IN
+                    (SELECT jsonb_array_elements_text(m.source_event_ids)))
+         )"
+        .to_owned(),
+        "(m.lifecycle->>'expiresAt' IS NULL OR
+          (m.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)"
+            .to_owned(),
+        not_superseded_by_live_memory_sql(false),
+    ];
+    append_filter_conditions(filter, &mut conditions, &mut binds);
+    (conditions, binds)
+}
+
+/// Packs a capped search window. `omitted_count` is every eligible match not returned,
+/// including matches past `MAX_SEARCH_RESULTS`; `omitted_memory_ids` lists only the window.
+fn pack_window(
+    query: String,
+    results: &mut Vec<RecallResult>,
+    limit: usize,
+    total: usize,
+) -> ContextPack {
+    let mut pack = build_context_pack(query, results, limit);
+    pack.omitted_count = total.saturating_sub(pack.results.len());
+    if pack.omitted_count > pack.omitted_memory_ids.len() {
+        pack.recovery_hint = Some(format!(
+            "Results are capped at {MAX_SEARCH_RESULTS} matches, so omitted_memory_ids lists only part of the omitted results and a larger limit cannot recover the rest. Narrow the query or filter."
+        ));
+    }
+    pack
+}
+
 fn memory_search_select_sql() -> String {
     format!(
-        "{} , ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score
+        "{} , ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score,
+         COUNT(*) OVER () AS total_matches
          FROM cairn_memories m",
         memory_select_columns()
     )
@@ -3928,9 +4591,12 @@ fn observation_select_sql() -> &'static str {
 fn shared_memory_from_row(row: &PgRow) -> Result<SharedProjectMemory, PostgresError> {
     let memory = memory_from_row(row)?;
     Ok(SharedProjectMemory {
-        source_memory_id: memory.promoted_from.clone(),
         share_reason: row.try_get("share_reason")?,
-        memory,
+        // A member never sees the personal memory the copy came from.
+        memory: Memory {
+            promoted_from: None,
+            ..memory
+        },
     })
 }
 
@@ -4276,7 +4942,12 @@ fn device_select_columns() -> &'static str {
 }
 
 fn device_select_sql() -> String {
-    format!("{} WHERE d.token_hash = $1", device_select_columns())
+    format!(
+        "SELECT x.*, COALESCE((SELECT a.status = 'active' FROM cairn_accounts a
+                           WHERE a.person_id = x.person_id), false) AS account_active
+         FROM ({} WHERE d.token_hash = $1) x",
+        device_select_columns()
+    )
 }
 
 fn device_from_row(row: &PgRow) -> Result<Device, PostgresError> {
@@ -4401,6 +5072,29 @@ fn scope_name(scope: &MemoryScope) -> &'static str {
     }
 }
 
+/// The cursor a pull page ends at. Events and deletions share one cursor sequence but are
+/// capped separately. A list that hit the cap may hold more items past its last cursor, so
+/// the page stops there; later items of the other list wait for the next pull. Both lists are
+/// ordered by cursor, so the last cursor is the largest.
+fn pull_page_end(
+    last_event: Option<u64>,
+    event_count: usize,
+    last_deletion: Option<u64>,
+    deletion_count: usize,
+    floor: u64,
+) -> u64 {
+    let capped =
+        |last: Option<u64>, count: usize| last.filter(|_| count >= MAX_PULL_EVENTS as usize);
+    match (
+        capped(last_event, event_count),
+        capped(last_deletion, deletion_count),
+    ) {
+        (Some(event), Some(deletion)) => event.min(deletion),
+        (Some(bound), None) | (None, Some(bound)) => bound,
+        (None, None) => last_event.max(last_deletion).unwrap_or(floor),
+    }
+}
+
 fn database_cursor(cursor: u64) -> Result<i64, PostgresError> {
     i64::try_from(cursor)
         .map_err(|_| PostgresError::Validation("cursor exceeds PostgreSQL range".to_owned()))
@@ -4431,6 +5125,22 @@ fn validate_entity_kind(kind: &str) -> Result<(), PostgresError> {
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_PULL_EVENTS, pull_page_end};
+
+    #[test]
+    fn pull_page_never_passes_an_undelivered_item() {
+        let cap = MAX_PULL_EVENTS as usize;
+        // Neither list capped: everything is delivered, so the page ends at the newest item.
+        assert_eq!(pull_page_end(Some(9), 3, Some(12), 2, 4), 12);
+        assert_eq!(pull_page_end(None, 0, None, 0, 4), 4);
+        // Events capped at cursor 512 while the only deletion sits at 600: stop at 512.
+        assert_eq!(pull_page_end(Some(512), cap, Some(600), 1, 0), 512);
+        // Deletions capped at 512 while the newest event is 603: stop at 512.
+        assert_eq!(pull_page_end(Some(603), 3, Some(512), cap, 0), 512);
+        // Both capped: the earlier of the two limits.
+        assert_eq!(pull_page_end(Some(1000), cap, Some(700), cap, 0), 700);
+    }
+
     use super::session_memory_select_sql;
 
     #[test]

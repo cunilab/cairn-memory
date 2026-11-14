@@ -1,0 +1,21 @@
+[package]
+name = "cairn-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Network CLI and MCP client for Cairn Memory; agents call the REST API with a device token"
+
+[[bin]]
+name = "cairn"
+path = "src/bin/cairn.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
+
+[dev-dependencies]
+axum.workspace = true
+cairn-server = { path = "../server" }
+cairn-storage = { path = "../storage" }
+tokio.workspace = true
