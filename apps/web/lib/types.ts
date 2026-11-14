@@ -19,6 +19,7 @@ export type ProjectMemory = {
     sensitivity?: string;
   };
   share_reason?: string | null;
+  created_at?: string;
 };
 
 export type ProjectTeam = {
@@ -30,4 +31,49 @@ export type ProjectTeam = {
     email: string;
     created_at: string;
   }>;
+};
+
+export type LifecycleSummary = {
+  temporary_observations: number;
+  durable_memories: number;
+  sensitive_items: number;
+  expired_items: number;
+};
+
+export type ProjectConflict = { memory_ids: string[] };
+
+export type ProjectFreshnessEvent = {
+  event_id: string;
+  memory_id: string;
+  previous_commit?: string | null;
+  commit: string;
+  action: string;
+  reason?: string | null;
+  created_at: string;
+};
+
+export type ProjectRevocation = {
+  memory_id: string;
+  member_person_id: string;
+  created_at: string;
+  revoked_at?: string | null;
+};
+
+export type ShareCandidate = {
+  memory_id: string;
+  reason: string;
+  not_auto_shared_reason: string;
+};
+
+export type Device = {
+  device_id: string;
+  name: string;
+  status: string;
+  registered_at: string;
+  last_seen_at: string;
+};
+
+export type DeviceRegistration = {
+  device: Device;
+  token: string;
 };

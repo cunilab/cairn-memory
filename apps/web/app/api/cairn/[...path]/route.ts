@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isNoBodyStatus, isSessionRequired } from "@/lib/session";
 
 const COOKIE = "cairn_token";
 
@@ -55,7 +56,13 @@ async function proxy(request: NextRequest, context: Context) {
 
   const bytes = await upstream.arrayBuffer();
 
-  if (request.method === "POST" && joined === "auth/login" && upstream.ok) {
+  if (
+    request.method === "POST" &&
+    (joined === "auth/login" ||
+      joined === "auth/bootstrap" ||
+      joined === "auth/register") &&
+    upstream.ok
+  ) {
     let payload: { token?: unknown };
     try {
       payload = JSON.parse(new TextDecoder().decode(bytes)) as { token?: unknown };
@@ -75,18 +82,37 @@ async function proxy(request: NextRequest, context: Context) {
     return response;
   }
 
-  const response = new NextResponse(bytes, {
-    status: upstream.status,
-    headers: {
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
-    },
-  });
+  // A null-body status rejects any body, including an empty buffer.
+  const response = isNoBodyStatus(upstream.status)
+    ? new NextResponse(null, { status: upstream.status })
+    : new NextResponse(bytes, {
+        status: upstream.status,
+        headers: {
+          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        },
+      });
 
-  if (request.method === "POST" && joined === "auth/logout") {
+  if (
+    request.method === "POST" &&
+    joined === "auth/logout" &&
+    (upstream.ok || isSessionRequired(upstream.status, upstreamError(bytes)))
+  ) {
     response.cookies.set(COOKIE, "", { ...cookieOptions(request), maxAge: 0 });
   }
 
   return response;
+}
+
+function upstreamError(bytes: ArrayBuffer): string {
+  if (bytes.byteLength === 0) {
+    return "";
+  }
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { error?: unknown };
+    return typeof payload.error === "string" ? payload.error : "";
+  } catch {
+    return "";
+  }
 }
 
 export function GET(request: NextRequest, context: Context) {

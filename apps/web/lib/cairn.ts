@@ -1,3 +1,5 @@
+import { isSessionRequired, SessionRequiredError } from "@/lib/session";
+
 export async function cairn<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body !== undefined && !headers.has("content-type")) {
@@ -23,6 +25,9 @@ export async function cairn<T>(path: string, init?: RequestInit): Promise<T> {
       body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
         : text || response.statusText;
+    if (isSessionRequired(response.status, message)) {
+      throw new SessionRequiredError(message);
+    }
     throw new Error(message);
   }
 

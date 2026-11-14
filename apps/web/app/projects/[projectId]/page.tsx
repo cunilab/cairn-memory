@@ -7,7 +7,7 @@ async function ProjectBody({
   params: Promise<{ projectId: string }>;
 }) {
   const { projectId } = await params;
-  return <ProjectDetail projectId={projectId} />;
+  return <ProjectDetail key={projectId} projectId={projectId} />;
 }
 
 export default function ProjectPage({
