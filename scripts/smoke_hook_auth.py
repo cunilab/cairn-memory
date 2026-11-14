@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""Hook transport boundary. Stub HTTP plus one isolated file-server check.
+
+No live API. Tokens and payload secrets are asserted in memory and must not
+appear in hook stdout or stderr.
+"""
+
+import hashlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "scripts" / "cairn_hook.py"
+ACCOUNT = "account-token-hook7a"
+DEVICE = "device-token-hook7a"
+SECRET = "api_key=hook-secret-value"
+
+
+def fingerprint(session_id, content, source):
+    encoded = json.dumps(
+        {"sessionId": session_id, "content": content, "source": source},
+        sort_keys=True,
+    ).encode()
+    return "hook-" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def run_hook(url, payload, **env):
+    child = os.environ.copy()
+    child.pop("CAIRN_ACCOUNT_TOKEN", None)
+    child.pop("CAIRN_OUTBOX", None)
+    child["CAIRN_DEVICE_TOKEN"] = DEVICE
+    child["CAIRN_URL"] = url
+    for key, value in env.items():
+        if value is None:
+            child.pop(key, None)
+        else:
+            child[key] = value
+    if not isinstance(payload, str):
+        payload = json.dumps(payload)
+    return subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=child,
+        cwd=ROOT,
+        timeout=20,
+        check=False,
+    )
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        self.server.captured.append(
+            {
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+                "body": body,
+            }
+        )
+        status, payload = self.server.reply
+        data = payload.encode()
+        self.send_response(status)
+        if status in (301, 302, 303, 307, 308):
+            self.send_header("Location", "/cairn-memory/sync/push")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args):
+        return
+
+
+class StubHookTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server.captured = []
+        cls.server.reply = (200, '{"accepted":true}')
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        self.server.captured = []
+        self.server.reply = (200, '{"accepted":true}')
+
+    def assert_hidden(self, result, *secrets):
+        combined = result.stdout + result.stderr
+        for secret in secrets:
+            if secret and secret in combined:
+                self.fail("hook output exposed a credential or payload value")
+
+    def assert_bearer(self, header, token):
+        if token is None:
+            self.assertIsNone(header)
+        else:
+            self.assertTrue(header == "Bearer " + token)
+
+    def test_missing_device_token_rejects_before_post(self):
+        for token in (None, "", "  "):
+            result = run_hook(
+                self.url,
+                {"sessionId": "session-1", "content": SECRET},
+                CAIRN_DEVICE_TOKEN=token,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.server.captured, [])
+            self.assertIn("CAIRN_DEVICE_TOKEN is required", result.stderr)
+            self.assert_hidden(result, SECRET)
+
+    def test_account_token_env_is_ignored_and_never_sent(self):
+        result = run_hook(
+            self.url,
+            {
+                "session_id": "snake-session",
+                "event_id": "snake-event",
+                "text": "plain capture",
+                "type": "SnakeHook",
+                "role": "assistant",
+                "context": {"repository": "cairn"},
+            },
+            CAIRN_ACCOUNT_TOKEN=ACCOUNT,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.server.captured), 1)
+        posted = self.server.captured[0]
+        self.assertEqual(posted["path"], "/cairn-memory/sync/push")
+        self.assert_bearer(posted["authorization"], DEVICE)
+        self.assertNotIn(ACCOUNT, posted["body"].decode())
+        body = json.loads(posted["body"])
+        self.assertEqual(body["eventId"], "snake-event")
+        self.assertEqual(body["sessionId"], "snake-session")
+        self.assertEqual(body["source"], "SnakeHook")
+        self.assertEqual(body["role"], "assistant")
+        self.assertEqual(body["context"]["repository"], "cairn")
+        self.assert_hidden(result, ACCOUNT, DEVICE)
+
+    def test_device_token_posts_sync_and_redacts_before_the_request(self):
+        content = "decision " + SECRET
+        source = "PostToolUse"
+        result = run_hook(
+            self.url,
+            {
+                "sessionId": "device-session",
+                "content": content,
+                "role": "tool",
+                "source": source,
+                "context": {"repository": "cairn", "commands": ["token=hook-secret-value"]},
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.server.captured), 1)
+        posted = self.server.captured[0]
+        self.assertEqual(posted["path"], "/cairn-memory/sync/push")
+        self.assert_bearer(posted["authorization"], DEVICE)
+        body = json.loads(posted["body"])
+        self.assertEqual(body["eventId"], fingerprint("device-session", content, source))
+        self.assertEqual(body["role"], "tool")
+        self.assertEqual(body["source"], source)
+        self.assertEqual(body["context"]["repository"], "cairn")
+        self.assertNotIn("hook-secret-value", posted["body"].decode())
+        self.assertIn("api_key=[REDACTED]", body["content"])
+        self.assertEqual(body["context"]["commands"], ["token=[REDACTED]"])
+        self.assert_hidden(result, DEVICE, "hook-secret-value")
+
+    def test_role_does_not_change_the_event_fingerprint(self):
+        payload = {
+            "sessionId": "same-session",
+            "content": "same content",
+            "source": "PostToolUse",
+        }
+        first = run_hook(self.url, dict(payload, role="tool"))
+        second = run_hook(self.url, dict(payload, role="assistant"))
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        bodies = [json.loads(item["body"]) for item in self.server.captured]
+        self.assertEqual(bodies[0]["eventId"], bodies[1]["eventId"])
+        self.assertEqual(bodies[0]["eventId"], fingerprint("same-session", "same content", "PostToolUse"))
+        self.assertEqual(bodies[0]["role"], "tool")
+        self.assertEqual(bodies[1]["role"], "assistant")
+        self.assertEqual({item["path"] for item in self.server.captured}, {"/cairn-memory/sync/push"})
+
+    def test_nested_camel_case_still_normalizes(self):
+        result = run_hook(
+            self.url,
+            {"payload": {"sessionId": "nested", "eventId": "nested-event", "message": "nested text", "source": "Nested"}},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(self.server.captured[0]["body"])
+        self.assertEqual(body["sessionId"], "nested")
+        self.assertEqual(body["eventId"], "nested-event")
+        self.assertEqual(body["content"], "nested text")
+        self.assertEqual(body["source"], "Nested")
+        self.assertEqual(body["role"], "tool")
+
+    def test_spaced_token_rejects_before_post(self):
+        bad = "sk-not-a-header token"
+        result = run_hook(
+            self.url,
+            {"sessionId": "s", "content": SECRET},
+            CAIRN_DEVICE_TOKEN=bad,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.server.captured, [])
+        self.assertIn("one header token", result.stderr)
+        self.assert_hidden(result, bad, SECRET, "sk-not-a-header")
+
+    def test_malformed_input_hides_the_value_and_the_token(self):
+        result = run_hook(self.url, '{"content": "' + SECRET)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.server.captured, [])
+        self.assertIn("JSON object", result.stderr)
+        self.assert_hidden(result, DEVICE, SECRET)
+
+    def test_bad_device_context_rejects_before_post(self):
+        result = run_hook(
+            self.url,
+            {"sessionId": "s", "content": SECRET, "context": {"files": [1]}},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.server.captured, [])
+        self.assertIn("list of strings", result.stderr)
+        self.assert_hidden(result, DEVICE, SECRET)
+
+    def test_redirect_is_not_followed(self):
+        self.server.reply = (302, "{}")
+        result = run_hook(
+            self.url,
+            {"sessionId": "s", "eventId": "redirect-event", "content": SECRET},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.server.captured), 1)
+        self.assertEqual(self.server.captured[0]["path"], "/cairn-memory/sync/push")
+        self.assert_bearer(self.server.captured[0]["authorization"], DEVICE)
+        self.assert_hidden(result, DEVICE, SECRET)
+
+    def proxy_env(self, proxy_url):
+        return {
+            "HTTP_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "NO_PROXY": None,
+            "no_proxy": None,
+        }
+
+    def test_plain_http_off_loopback_is_refused_before_any_connection(self):
+        # The stub doubles as an HTTP proxy: any request that leaves the hook
+        # for a non-loopback http host would reach it and be captured.
+        urls = (
+            "http://example.invalid:3111",
+            "http://10.255.255.1:3111",
+            "http://localhost.example.invalid",
+            "http://127.0.0.1.example.invalid",
+            "http://user:pw-hook7a@127.0.0.1:3111",
+            "http://127.0.0.1:3111?token=query-hook7a",
+        )
+        for url in urls:
+            for bound in (False, True):
+                with self.subTest(url=url.split("@")[-1], bound=bound):
+                    with tempfile.TemporaryDirectory() as directory:
+                        queue = Path(directory) / "queue.json"
+                        env = self.proxy_env(self.url)
+                        env["CAIRN_OUTBOX"] = str(queue) if bound else None
+                        result = run_hook(
+                            url,
+                            {"sessionId": "s", "eventId": "plain-http", "content": SECRET},
+                            **env,
+                        )
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(self.server.captured, [])
+                        self.assertFalse(queue.exists())
+                        self.assertNotIn("Traceback", result.stderr)
+                        self.assert_hidden(result, DEVICE, SECRET, "pw-hook7a", "query-hook7a")
+        refused = run_hook(
+            "http://example.invalid:3111",
+            {"sessionId": "s", "content": SECRET},
+        )
+        self.assertIn("loopback", refused.stderr)
+
+    def test_https_non_loopback_passes_the_url_check(self):
+        # The refusal is the scheme rule only. https to a closed port fails at
+        # connect, not at the URL check.
+        result = run_hook(
+            "https://127.0.0.1:9",
+            {"sessionId": "s", "content": SECRET},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("loopback", result.stderr)
+        self.assertIn("delivery failed", result.stderr)
+
+    def test_loopback_http_never_goes_through_the_proxy(self):
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        proxy.captured = []
+        proxy.reply = (200, '{"accepted":true}')
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            proxy_url = "http://127.0.0.1:%d" % proxy.server_address[1]
+            for bound in (False, True):
+                with self.subTest(bound=bound):
+                    self.server.captured = []
+                    with tempfile.TemporaryDirectory() as directory:
+                        env = self.proxy_env(proxy_url)
+                        env["CAIRN_OUTBOX"] = str(Path(directory) / "queue.json") if bound else None
+                        result = run_hook(
+                            self.url,
+                            {"sessionId": "s", "eventId": "loopback-%s" % bound, "content": "x"},
+                            **env,
+                        )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(proxy.captured, [])
+                    self.assertEqual(len(self.server.captured), 1)
+                    self.assert_bearer(self.server.captured[0]["authorization"], DEVICE)
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
+
+    def test_connection_failure_drops_the_capture_without_a_traceback(self):
+        result = run_hook(
+            "http://127.0.0.1:9",
+            {"sessionId": "s", "content": SECRET},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("delivery failed", result.stderr)
+        self.assert_hidden(result, DEVICE, SECRET)
+
+    def test_oversized_device_content_is_rejected_before_post(self):
+        result = run_hook(
+            self.url,
+            {"sessionId": "s", "content": "x" * (64 * 1024 + 1)},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.server.captured, [])
+        self.assertIn("64 KiB", result.stderr)
+        self.assert_hidden(result, DEVICE)
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def http_json(url, path, payload=None, token=None):
+    data = None if payload is None else json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(
+        url + path,
+        data=data,
+        headers=headers,
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode(errors="replace")
+
+
+class FileServerHookTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.store = tempfile.NamedTemporaryFile(prefix="cairn-hook7a-", delete=False)
+        cls.store.close()
+        os.unlink(cls.store.name)
+        cls.log = tempfile.NamedTemporaryFile(prefix="cairn-hook7a-log-", delete=False)
+        cls.port = free_port()
+        cls.url = "http://127.0.0.1:%d" % cls.port
+        cls.server = subprocess.Popen(
+            [
+                "cargo",
+                "run",
+                "-q",
+                "-p",
+                "cairn-server",
+                "--",
+                "--store",
+                cls.store.name,
+                "--bind",
+                "127.0.0.1:%d" % cls.port,
+            ],
+            cwd=ROOT,
+            stdout=cls.log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        ready = False
+        for _ in range(600):
+            if cls.server.poll() is not None:
+                break
+            try:
+                http_json(cls.url, "/cairn-memory/health")
+                ready = True
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                time.sleep(0.1)
+        if not ready:
+            log_text = Path(cls.log.name).read_text(encoding="utf-8", errors="replace")[-4000:]
+            cls.tearDownClass()
+            raise RuntimeError("file server did not become ready\n" + log_text)
+        try:
+            status, account = http_json(
+                cls.url,
+                "/cairn-memory/auth/bootstrap",
+                {"email": "hook7a-owner@example.test", "password": "correct horse battery staple"},
+            )
+            if status != 200:
+                raise RuntimeError("bootstrap failed with status %s" % status)
+            cls.account_token = account["token"]
+            status, device = http_json(
+                cls.url,
+                "/cairn-memory/devices/register",
+                {"name": "Hook7a"},
+                cls.account_token,
+            )
+            if status != 200:
+                raise RuntimeError("device register failed with status %s" % status)
+            cls.device_token = device["token"]
+            cls.device_id = device["device"]["device_id"]
+        except Exception:
+            cls.tearDownClass()
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        server = getattr(cls, "server", None)
+        if server is not None and server.poll() is None:
+            os.killpg(server.pid, 15)
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(server.pid, 9)
+                server.wait(timeout=5)
+        for handle in (getattr(cls, "log", None),):
+            if handle is not None:
+                handle.close()
+                os.unlink(handle.name)
+        store = getattr(cls, "store", None)
+        if store is not None:
+            os.unlink(store.name) if os.path.exists(store.name) else None
+
+    def assert_hidden(self, result, *secrets):
+        combined = result.stdout + result.stderr
+        for secret in secrets:
+            if secret and secret in combined:
+                self.fail("hook output exposed a credential or payload value")
+
+    def test_device_sync_succeeds_and_other_credentials_do_not_authenticate(self):
+        wrong_device_slot = run_hook(
+            self.url,
+            {
+                "sessionId": "hook7a-session",
+                "eventId": "hook7a-wrong-device-slot",
+                "content": "wrong device slot marker hook7a",
+                "role": "tool",
+                "source": "PostToolUse",
+            },
+            CAIRN_DEVICE_TOKEN=self.account_token,
+        )
+        self.assertNotEqual(wrong_device_slot.returncode, 0)
+        self.assertEqual(wrong_device_slot.stdout, "")
+        self.assertIn("401", wrong_device_slot.stderr)
+        self.assert_hidden(wrong_device_slot, self.account_token, self.device_token)
+
+        device = run_hook(
+            self.url,
+            {
+                "sessionId": "hook7a-session",
+                "eventId": "hook7a-device",
+                "content": "device sync marker hook7a " + SECRET,
+                "role": "tool",
+                "source": "PostToolUse",
+                "context": {"commands": ["token=hook-secret-value"]},
+            },
+            CAIRN_DEVICE_TOKEN=self.device_token,
+        )
+        self.assertEqual(device.returncode, 0, device.stderr)
+        pushed = json.loads(device.stdout)
+        self.assertTrue(pushed["accepted"] is True)
+        self.assertEqual(pushed["observation"]["event_id"], "hook7a-device")
+        self.assertNotIn("hook-secret-value", device.stdout)
+        self.assert_hidden(device, self.account_token, self.device_token, "hook-secret-value")
+
+        # The web session revokes the device; the hook is then rejected.
+        status, _ = http_json(
+            self.url,
+            "/cairn-memory/devices/revoke",
+            {"deviceId": self.device_id},
+            self.account_token,
+        )
+        self.assertEqual(status, 200)
+        revoked = run_hook(
+            self.url,
+            {
+                "sessionId": "hook7a-session",
+                "eventId": "hook7a-revoked",
+                "content": "revoked marker hook7a",
+                "role": "tool",
+                "source": "PostToolUse",
+            },
+            CAIRN_DEVICE_TOKEN=self.device_token,
+        )
+        self.assertNotEqual(revoked.returncode, 0)
+        self.assertEqual(revoked.stdout, "")
+        self.assertIn("401", revoked.stderr)
+        self.assert_hidden(revoked, self.account_token, self.device_token)
+
+        with open(self.store.name, encoding="utf-8") as handle:
+            state = json.load(handle)
+        found = {
+            item.get("event_id"): item.get("content", "")
+            for item in state.get("observations", [])
+        }
+        ids = set(found)
+        self.assertIn("hook7a-device", ids)
+        self.assertNotIn("hook7a-wrong-device-slot", ids)
+        self.assertNotIn("hook7a-revoked", ids)
+        if "hook-secret-value" in found.get("hook7a-device", ""):
+            self.fail("device observation retained the raw secret")
+
+
+if __name__ == "__main__":
+    unittest.main()

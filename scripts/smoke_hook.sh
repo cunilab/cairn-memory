@@ -31,11 +31,23 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/session/start" \
+json_field() {
+  python3 -c 'import json,sys; print(eval("d" + sys.argv[1], {"d": json.load(sys.stdin)}))' "$1"
+}
+
+# The first account is created once; the web session creates the device the hook uses.
+session="$(curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/auth/bootstrap" \
   -H 'Content-Type: application/json' \
+  -d '{"email":"hook-smoke@example.test","password":"correct horse battery staple"}' | json_field '["token"]')"
+device="$(curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/devices/register" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer ${session}" \
+  -d '{"name":"hook smoke"}' | json_field '["token"]')"
+
+curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/session/start" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer ${device}" \
   -d '{"sessionId":"hook-smoke-session"}' >/dev/null
 
-hook_response="$(CAIRN_URL="http://127.0.0.1:${port}" python3 scripts/cairn_hook.py <<'JSON'
+hook_response="$(CAIRN_DEVICE_TOKEN="$device" CAIRN_URL="http://127.0.0.1:${port}" python3 scripts/cairn_hook.py <<'JSON'
 {"eventId":"hook-smoke-event","sessionId":"hook-smoke-session","content":"The portable hook captured this decision.","role":"tool","source":"PostToolUse","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
 JSON
 )"
@@ -49,11 +61,11 @@ assert payload["observation"]["event_id"] == "hook-smoke-event"
 PY
 
 curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/session/end" \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer ${device}" \
   -d '{"sessionId":"hook-smoke-session"}' >/dev/null
 
 results="$(curl -fsS -X POST "http://127.0.0.1:${port}/cairn-memory/search" \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer ${device}" \
   -d '{"query":"portable hook decision","limit":5}')"
 RESULTS_JSON="$results" python3 - <<'PY'
 import json

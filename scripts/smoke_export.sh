@@ -1,34 +1,39 @@
 #!/bin/sh
 set -eu
 
-store="$(mktemp "${TMPDIR:-/tmp}/cairn-export-store.XXXXXX")"
-restored="$(mktemp "${TMPDIR:-/tmp}/cairn-export-restored.XXXXXX")"
-bundle="$(mktemp "${TMPDIR:-/tmp}/cairn-export-bundle.XXXXXX")"
-output="$(mktemp "${TMPDIR:-/tmp}/cairn-export-output.XXXXXX")"
-trap 'rm -f "$store" "$restored" "$bundle" "$output"' EXIT INT TERM
-rm -f "$store" "$restored" "$bundle" "$output"
+. "$(dirname "$0")/smoke_agent_lib.sh"
 
-cargo run -q -p cairn-core --bin cairn -- init "$store" >/dev/null
-cargo run -q -p cairn-core --bin cairn -- start "$store" export-smoke >/dev/null
-cargo run -q -p cairn-core --bin cairn -- capture "$store" export-smoke export-event \
+start_server 3135
+create_agent export export@example.test bootstrap
+use_agent export
+bundle="$smoke_dir/bundle.json"
+output="$smoke_dir/import-output.json"
+
+cairn start export-smoke >/dev/null
+cairn capture export-smoke export-event \
   'The export smoke test preserves redacted session evidence.' >/dev/null
-cargo run -q -p cairn-core --bin cairn -- end "$store" export-smoke >/dev/null
-cargo run -q -p cairn-core --bin cairn -- forget "$store" export-event
-cargo run -q -p cairn-core --bin cairn -- export "$store" "$bundle"
-cargo run -q -p cairn-core --bin cairn -- import "$restored" "$bundle" >"$output"
+cairn end export-smoke >/dev/null
+cairn forget export-event
+cairn export "$bundle"
 
-OUTPUT_JSON="$(cat "$output")" python3 - <<'PY'
+# An account import only accepts its own person's rows, so the bundle goes back into the same
+# account: the import must be idempotent and must keep the forgotten evidence out of recall.
+cairn import "$bundle" >"$output"
+
+OUTPUT_JSON="$(cat "$output")" BUNDLE="$bundle" python3 - <<'PY'
 import json
 import os
 
 result = json.loads(os.environ["OUTPUT_JSON"])
-assert result["imported_sessions"] == 1
-assert result["imported_observations"] == 1
-assert result["imported_memories"] == 1
-assert result["imported_forgotten_ids"] == 1
+assert result["imported_sessions"] == 0, result
+assert result["imported_observations"] == 0, result
+assert result["imported_memories"] == 0, result
+bundle = json.load(open(os.environ["BUNDLE"]))
+assert len(bundle["memories"]) == 1 and len(bundle["observations"]) == 1
+assert "export-event" in bundle["forgottenIds"]
 PY
 
-context="$(cargo run -q -p cairn-core --bin cairn -- context "$restored" 'export smoke' 5)"
+context="$(cairn context 'export smoke' 5)"
 CONTEXT_JSON="$context" python3 - <<'PY'
 import json
 import os

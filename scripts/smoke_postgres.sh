@@ -97,6 +97,7 @@ try:
         log.seek(0)
         raise RuntimeError(f"PostgreSQL server did not become ready:\n{log.read()}")
 
+    assert call("/cairn-memory/health")[1]["bootstrap_required"] is True
     _, account = call(
         "/cairn-memory/auth/bootstrap",
         {
@@ -106,6 +107,7 @@ try:
     )
     account_token = account["token"]
     person_id = account["account"]["person_id"]
+    assert call("/cairn-memory/health")[1]["bootstrap_required"] is False
     _, first = call(
         "/cairn-memory/devices/register",
         {"deviceId": "postgres-device-a", "personId": person_id, "name": "MacBook"},
@@ -541,7 +543,8 @@ try:
         item for item in after_policy if item["memory_id"] == auto_promoted["memory_id"]
     )
     assert auto_read["share_reason"] == "auto_nonsensitive_project_memory"
-    assert auto_read["source_memory_id"] == auto_source["memory_id"]
+    assert auto_read["promoted_from"] is None
+    assert auto_source["memory_id"] not in json.dumps(auto_read)
     _, private_search = call(
         "/cairn-memory/search",
         {"query": "private observation", "limit": 5},
@@ -668,13 +671,29 @@ try:
     assert "nonsensitive repository decision is ready for collaborators" not in audit_text
     assert "correct horse battery staple" not in audit_text
 
-    _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}, token_a)
+    # A device token is an agent credential for this account; device management and
+    # account auth stay web-session only.
+    _, device_projects = call("/cairn-memory/projects", token=token_b)
+    assert any(item["project_id"] == project["project_id"] for item in device_projects)
+    for method_path, payload in (
+        ("/cairn-memory/devices", None),
+        ("/cairn-memory/devices/register", {"name": "denied"}),
+        ("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}),
+        ("/cairn-memory/devices/revoke", {"deviceId": "postgres-device-a"}),
+        ("/cairn-memory/auth/audit", None),
+        ("/cairn-memory/auth/logout", {}),
+    ):
+        expect_error(method_path, payload, token_b, 403)
+
+    _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "postgres-device-a"}, account_token)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
     token_a = rotated["token"]
-    _, listed = call("/cairn-memory/devices", token=token_b)
+    _, listed = call("/cairn-memory/devices", token=account_token)
     assert len(listed) == 2
-    call("/cairn-memory/devices/revoke", {"deviceId": "postgres-device-a"}, token_b)
+    assert token_a not in json.dumps(listed)
+    call("/cairn-memory/devices/revoke", {"deviceId": "postgres-device-a"}, account_token)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
+    expect_unauthorized("/cairn-memory/projects", None, token_a)
 finally:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGTERM)

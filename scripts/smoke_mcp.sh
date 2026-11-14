@@ -1,28 +1,20 @@
 #!/bin/sh
 set -eu
 
-store="$(mktemp "${TMPDIR:-/tmp}/cairn-mcp.XXXXXX")"
-rm -f "$store"
-trap 'rm -f "$store"' EXIT INT TERM
+. "$(dirname "$0")/smoke_agent_lib.sh"
 
-python3 - "$store" <<'PY'
+start_server 3134
+create_agent mcp mcp@example.test bootstrap
+use_agent mcp
+
+CAIRN_BIN="$bin_dir/cairn" python3 - <<'PY'
 import json
+import os
 import subprocess
-import sys
 
-store = sys.argv[1]
+# The server speaks to the device token in the CLI config; `cairn mcp` proxies to it.
 process = subprocess.Popen(
-    [
-        "cargo",
-        "run",
-        "-q",
-        "-p",
-        "cairn-server",
-        "--",
-        "mcp",
-        "--store",
-        store,
-    ],
+    [os.environ["CAIRN_BIN"], "mcp"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
@@ -159,7 +151,7 @@ try:
             "arguments": {"eventId": "mcp-smoke-event"},
         },
     )
-    assert forgotten["result"]["structuredContent"]["forgotten"] is True
+    assert forgotten["result"]["isError"] is False
 
     recalled = call(
         9,

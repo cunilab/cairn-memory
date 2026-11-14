@@ -72,17 +72,35 @@ start_source_server() {
   wait_for_server "$base" "$log"
 }
 
-start_source_server
+# Agents use a device token that the web session creates, so the first account comes first.
+json_field() {
+  python3 -c 'import json,sys; print(eval("d" + sys.argv[1], {"d": json.load(sys.stdin)}))' "$1"
+}
 
-curl -fsS -X POST "$base/cairn-memory/session/start" \
+# Prints "<session token> <device token>" for a freshly bootstrapped server.
+bootstrap_device() {
+  url="$1"
+  session="$(curl -fsS -X POST "$url/cairn-memory/auth/bootstrap" \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"full-flow@example.test","password":"correct horse battery staple"}' | json_field '["token"]')"
+  device_token="$(curl -fsS -X POST "$url/cairn-memory/devices/register" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $session" \
+    -d '{"name":"full flow"}' | json_field '["token"]')"
+  printf '%s %s\n' "$session" "$device_token"
+}
+
+start_source_server
+device="$(bootstrap_device "$base" | cut -d' ' -f2)"
+
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/start" \
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"full-flow-session","context":{"repository":"cairn-demo","branch":"main"}}' >/dev/null
 
-CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_first" <<'JSON'
+CAIRN_DEVICE_TOKEN="$device" CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_first" <<'JSON'
 {"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"tool","source":"PostToolUse","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
 JSON
 
-CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_duplicate" <<'JSON'
+CAIRN_DEVICE_TOKEN="$device" CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_duplicate" <<'JSON'
 {"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"tool","source":"PostToolUse","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
 JSON
 
@@ -100,43 +118,43 @@ assert "full-flow-secret" not in json.dumps(first)
 assert "full-flow-secret" not in json.dumps(duplicate)
 PY
 
-curl -fsS -X POST "$base/cairn-memory/session/end" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/end" \
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"full-flow-session"}' >"$summary"
 
-curl -fsS -X POST "$base/cairn-memory/resume" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/resume" \
   -H 'Content-Type: application/json' \
   -d '{"limit":5,"context":{"repository":"cairn-demo","branch":"main"}}' >"$resume"
 
-curl -fsS -X POST "$base/cairn-memory/unresolved" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/unresolved" \
   -H 'Content-Type: application/json' \
   -d '{"limit":5,"context":{"repository":"cairn-demo","branch":"main"}}' >"$unresolved"
 
-curl -fsS -X POST "$base/cairn-memory/remember" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
   -H 'Content-Type: application/json' \
   -d '{"content":"The project cache convention is documented.","context":{"repository":"cairn-demo","files":["src/cache.rs"],"symbols":["Cache::get"],"commands":["cargo test cache"],"tests":["cache_reads_are_consistent"],"services":["cache"]}}' >"$project_memory"
 
-curl -fsS -X POST "$base/cairn-memory/remember" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
   -H 'Content-Type: application/json' \
   -d '{"content":"The Redis cache experiment is branch-local and not yet verified.","context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$branch_memory"
 
-curl -fsS -X POST "$base/cairn-memory/remember" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
   -H 'Content-Type: application/json' \
   -d '{"content":"The user prefers evidence-backed cache decisions."}' >"$global_memory"
 
-curl -fsS -X POST "$base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"cache","limit":10,"context":{"repository":"cairn-demo","branch":"main","worktree":"wt-main"}}' >"$scoped_main"
 
-curl -fsS -X POST "$base/cairn-memory/context" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/context" \
   -H 'Content-Type: application/json' \
   -d '{"query":"cache","limit":2,"context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$scoped_branch"
 
-curl -fsS -X POST "$base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_before"
 
-curl -fsS -X POST "$base/cairn-memory/export" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/export" \
   -H 'Content-Type: application/json' \
   -d '{}' >"$bundle"
 
@@ -199,17 +217,17 @@ wait "$pid" 2>/dev/null || true
 pid=""
 start_source_server
 
-curl -fsS -X POST "$base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_after_restart"
 
 MEMORY_ID="$(SEARCH_JSON="$search_after_restart" python3 -c 'import json, os; print(json.load(open(os.environ["SEARCH_JSON"]))[0]["memory_id"])')"
 
-curl -fsS -X POST "$base/cairn-memory/correct" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/correct" \
   -H 'Content-Type: application/json' \
   -d "{\"targetId\":\"$MEMORY_ID\",\"content\":\"The authentication decision is verified after the signed cookie test.\",\"lifecycle\":{\"confidence\":95}}" >"$corrected"
 
-curl -fsS -X POST "$base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_after_correction"
 
@@ -227,11 +245,11 @@ assert search[0]["memory_id"] != corrected["supersedes"]
 PY
 
 CORRECTED_ID="$(CORRECTED_JSON="$corrected" python3 -c 'import json, os; print(json.load(open(os.environ["CORRECTED_JSON"]))["memory_id"])')"
-curl -fsS -X POST "$base/cairn-memory/forget" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/forget" \
   -H 'Content-Type: application/json' \
   -d "{\"id\":\"$CORRECTED_ID\"}" >/dev/null
 
-curl -fsS -X POST "$base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_after_forget"
 
@@ -245,32 +263,37 @@ assert search[0]["memory_id"] == os.environ["MEMORY_ID"]
 assert search[0]["memory_id"] != os.environ["CORRECTED_ID"]
 PY
 
-curl -fsS -X POST "$base/cairn-memory/export" \
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/export" \
   -H 'Content-Type: application/json' \
   -d '{}' >"$bundle"
 
 cargo run -q -p cairn-server -- --store "$restored" --bind "127.0.0.1:${restored_port}" >"$restored_log" 2>&1 &
 restored_pid=$!
 wait_for_server "$restored_base" "$restored_log"
+restored_device="$(bootstrap_device "$restored_base" | cut -d' ' -f2)"
 
-python3 - "$bundle" "$restored_base" "$import_result" <<'PY'
+# An account import binds sessions to the importing account, and a session that names
+# another person is rejected, so the restore drops the old person_id.
+python3 - "$bundle" "$restored_base" "$import_result" "$restored_device" <<'PY'
 import json
 import sys
 import urllib.request
 
-bundle_path, base, output_path = sys.argv[1:]
+bundle_path, base, output_path, token = sys.argv[1:]
 payload = json.load(open(bundle_path))
+for session in payload["sessions"]:
+    session.pop("person_id", None)
 request = urllib.request.Request(
     base + "/cairn-memory/import",
     data=json.dumps({"bundle": payload}).encode(),
-    headers={"Content-Type": "application/json"},
+    headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
     method="POST",
 )
 with urllib.request.urlopen(request, timeout=10) as response:
     open(output_path, "wb").write(response.read())
 PY
 
-curl -fsS -X POST "$restored_base/cairn-memory/search" \
+curl -fsS -X POST -H "Authorization: Bearer $restored_device" "$restored_base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_restored"
 

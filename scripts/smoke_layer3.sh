@@ -50,13 +50,17 @@ def call(path, payload=None, token=None):
         return response.status, json.loads(response.read())
 
 
-def expect_unauthorized(path, payload, token):
+def expect_status(expected, path, payload, token):
     try:
         call(path, payload, token)
     except urllib.error.HTTPError as error:
-        assert error.code == 401, error.code
+        assert error.code == expected, error.code
         return
     raise AssertionError("request unexpectedly succeeded")
+
+
+def expect_unauthorized(path, payload, token):
+    expect_status(401, path, payload, token)
 
 
 try:
@@ -177,7 +181,14 @@ try:
     _, resumed = call("/cairn-memory/sync/pull", {"cursor": cursor}, token_b)
     assert resumed["events"] == []
 
-    _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "device-a"}, token_a)
+    # Device tokens are agent credentials: device management is web-session only.
+    for path, payload in (
+        ("/cairn-memory/devices", None),
+        ("/cairn-memory/devices/rotate", {"deviceId": "device-a"}),
+        ("/cairn-memory/devices/revoke", {"deviceId": "device-b"}),
+    ):
+        expect_status(403, path, payload, token_a)
+    _, rotated = call("/cairn-memory/devices/rotate", {"deviceId": "device-a"}, account_token)
     token_a_rotated = rotated["token"]
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
     revoked_event = dict(event)
@@ -209,11 +220,11 @@ try:
     assert json.loads(purged_replay.stdout)["purged"] == 1
     assert json.loads(purged_replay.stdout)["pending"] == 0
 
-    _, devices = call("/cairn-memory/devices", None, token_a_rotated)
+    _, devices = call("/cairn-memory/devices", None, account_token)
     assert {device["device_id"] for device in devices} == {"device-a", "device-b"}
     assert all(device["last_seen_at"] for device in devices)
 
-    _, revoked = call("/cairn-memory/devices/revoke", {"deviceId": "device-b"}, token_a_rotated)
+    _, revoked = call("/cairn-memory/devices/revoke", {"deviceId": "device-b"}, account_token)
     assert revoked["status"] == "revoked"
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": cursor}, token_b)
 finally:
