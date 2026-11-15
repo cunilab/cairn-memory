@@ -45,6 +45,14 @@ replacement for the project documentation.
 - **Reason:** This is the smallest complete identity path for the self-hosted target and keeps account ownership separate from device sync credentials.
 - **Evidence:** `docs/adr/0008-self-hosted-account-authentication.md`; `docs/contracts/auth-layer3.md`; `crates/core/src/lib.rs`; `crates/server/src/lib.rs`; `cargo test --workspace`
 
+### 2026-11-15 — The first account is the only admin; only the admin creates accounts, in the web console
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** The bootstrap (first) account has `is_admin: true` and is the only admin; there is no role-change API (PostgreSQL: unique partial index `cairn_accounts_one_admin`). `POST auth/register` needs the admin's web session and the check runs before the per-email rate limit and input validation: no bearer or an unknown one is `401`, a device token is `403` (`WEB_ONLY_ERROR`), a non-admin web session is `403` (`ADMIN_ONLY_ERROR`). `GET auth/me` returns `is_admin`. The console's Accounts page (`/accounts`, linked only for an admin) is the only way to create accounts; the proxy drops the new account's session token so the admin keeps their own session. CLI and MCP never create accounts. A file store written before the field has no admin and needs a new bootstrap (pre-release, no repair path).
+- **Reason:** No open sign-up: after the first account, anyone who could reach the server could otherwise create an account and, by it, devices and memory. Account creation is a human, web-only action under the automation-first rule that agents hold only device tokens.
+- **Evidence:** `docs/contracts/auth-layer3.md` (Additional accounts); `crates/core/src/lib.rs` (`register_account_as_admin`, `authenticate_admin`, `ADMIN_ONLY_ERROR`); `crates/server/src/lib.rs` (`auth_register`, test `file_register_needs_the_admin_web_session_and_me_reports_is_admin`); `migrations/0013_admin_role.sql`; `apps/web/components/accounts.tsx`; `apps/web/app/api/cairn/[...path]/route.ts`
+
 ### 2026-11-14 — Device tokens are agent credentials; the web session is the human surface
 
 - **Type:** decision

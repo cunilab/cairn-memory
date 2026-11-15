@@ -12,14 +12,15 @@ account and explicitly shares one promoted project memory. The rationale is
 and promotion stay in [CM-CONTRACT-009](project-layer4.md).
 
 A second self-hosted account is created after bootstrap with the same
-credential body:
+credential body, by the admin's web session (see
+[auth-layer3](auth-layer3.md#additional-accounts)):
 
 ```http
 POST /cairn-memory/auth/register
 ```
 
 Bootstrap remains the first account only. Register fails before bootstrap,
-rejects a duplicate email, and returns an account session. The share target
+rejects a duplicate email, and returns the new account's session. The share target
 must already exist.
 
 Every owner route below accepts the owner's web session token or a device token
@@ -84,7 +85,11 @@ the original id until the owner shares the successor.
 
 `GET /cairn-memory/projects` includes projects the account owns and projects
 where that account is a member, so the member can open the shared read. Each
-listed project includes `role`: `owner` or `member`.
+listed project includes `role`: `owner` or `member`. A project the account owns also
+includes `share_policy`, the current policy (`manual` by default, or
+`auto_nonsensitive_project_memory`, the strings `POST .../policy` accepts); it is omitted
+for a member project. Both adapters report it (`MemoryStore::share_policy`,
+`PostgresStore::share_policy`).
 `GET /cairn-memory/projects/{projectId}/memories` stays owner-only and lists
 only rows the owner owns or that have no owner, not a row another account owns.
 Search and context for the member do not return the owner's private or unshared

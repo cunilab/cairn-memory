@@ -97,6 +97,15 @@ rename. A failed rename leaves neither, and that attempt does not return
 that new push copies the device person's `(person_id, session_id)` row. It
 does not copy a row with no `person_id` or another person's row.
 
+After a new push is acknowledged, both adapters register the context's project and
+branch for the device's person and finish that person's idle sessions, as the account
+`observe` does; see [continuity](continuity-v1.md#automatic-session-close). The file store
+used to do neither on a push. A new file-backed push also creates the device person's
+`(person_id, session_id)` row, with the pushed context, when none exists (the hook never
+starts a session, and PostgreSQL does the same); a push or a session start with a real
+context fills an empty row and never replaces a real one, and a failed rename leaves the row as it was. A housekeeping failure is logged and does not fail the
+push. A duplicate push does neither.
+
 On both adapters, an observation the person captured through the account (no
 sync event yet) can gain exactly one sync event when that person's device pushes
 the same event id with a matching session, content (after redaction), role, and
@@ -147,8 +156,9 @@ command is unchanged. The client rule is the [hook contract](./hook-v1.md).
 An empty PostgreSQL push is a context equal to `WorkContext::default()`. When
 this person's `(person_id, session_id)` row already exists, the push copies
 that stored context before normalize. It does not copy another person's row.
-When no session exists, the push inserts an empty session so the observation
-foreign key holds. A partial context, including one that sets only `files`,
+When no session exists, the push inserts a session with the pushed context so the
+observation foreign key holds, and a push with a real context fills an existing
+empty row under the same rule as a start (a real context is never replaced). A partial context, including one that sets only `files`,
 is stored as sent and does not replace the session. An account start may
 replace a session context only while merging that stored object over the
 canonical empty `WorkContext` still equals the canonical object, and only with
@@ -191,7 +201,8 @@ the device cursor, person stream cursor, lag, `pending_events`,
 non-zero lag means the client should pull from its last persisted cursor. Both
 adapters report `pending_events` and `rejected_events` as `0`; the server does
 not track either. The local outbox `status` command reports `version`,
-`pending`, `attempts`, and `hasErrors`, not rejected events.
+`pending`, `attempts`, `hasErrors`, `rejectedCount`, and `lastRejected` (see
+Local outbox).
 
 ## Local outbox
 
@@ -232,8 +243,14 @@ file, and it does not apply the sensitivity floor. Server normalize still redact
 and those lists, and it applies the sensitivity floor, as
 [lifecycle classification](lifecycle-v1.md) describes. The server classifies
 the payload it receives. After this client redacts, that floor cannot see the
-original secret. The documented label limit is unchanged. The spool removes only server-acknowledged events, and retains transiently
-failed items with attempt/error metadata for retry or repair. A `401` during
+original secret. The documented label limit is unchanged. The spool removes server-acknowledged events and 409 conflicts, and retains
+transiently failed items with attempt/error metadata for retry or repair.
+A `409` on replay (the server holds different content under that event id)
+cannot succeed on resend, so the event leaves the queue in both `replay` and
+the hook's bounded pass. `replay` lists it under `rejected` in its JSON summary
+(`eventId` and `reason`), does not count it in `failed`, and exits 1 once. Both
+paths add it to the queue file's `rejectedCount` and set `lastRejected`, which
+`status` prints. A `401` during
 replay means the device credential is revoked or invalid; the replay command
 purges the queued events for that credential. Operators can also run
 `cairn_outbox.py purge` explicitly. `replay` and `purge` on a missing queue

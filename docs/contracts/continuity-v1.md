@@ -153,11 +153,23 @@ summary memory:
 - A summary the person forgot, or that a live correction supersedes, is never
   derived again: the sweep leaves it alone, and an explicit end of that session
   returns a validation error instead of a hidden memory.
-- The sweep is scoped to the person of the trigger. Resume and search never
-  close a session. The file store sweeps on `capture_for_account` and
-  `start_session_for_account`, not on the unscoped library call or device
-  `sync/push` path; PostgreSQL sweeps on device `sync/push` and account session
-  start. A sweep failure is logged and does not fail the capture or the start.
+- A trigger sweep is scoped to the person of the trigger. Resume and search never
+  close a session. The file store sweeps on `capture_for_account`, device
+  `sync/push` of a new observation, and `start_session_for_account`, not on the
+  unscoped library call; PostgreSQL sweeps on device `sync/push` and account
+  session start. A new device push on the file store also registers the project
+  and branch like `capture_for_account`, and creates the session row (with the pushed context, on both stores) when the hook
+  pushed without a session start, so a hook-only session is summarised by the sweep
+  with the repository and branch scope. A sweep failure is logged and does not
+  fail the capture or the start.
+- A background sweep in `cairn-server` runs every 5 minutes (`IDLE_SWEEP_INTERVAL`
+  in `crates/server/src/main.rs`) and applies the same idle rule to every person, so a
+  session closes when the agent just stops, without new activity. The file store runs
+  it under its store lock; PostgreSQL closes at most 16 sessions per run, oldest
+  pending first, from the same partial index. The file store closes at most 16 per
+  person per sweep or trigger. A failure is logged and never stops the loop; the
+  next run continues. Entry points: `MemoryStore::sweep_idle_sessions`,
+  `PostgresStore::sweep_idle_sessions`.
 - PostgreSQL marks a session pending (`cairn_sessions.pending_since`) when a
   capture lands or one of its observations is forgotten, and clears it when the
   summary is derived. The sweep reads only that partial index, at most 16
@@ -168,7 +180,7 @@ summary memory:
   same 512-byte limit as `register_project`; an oversized value registers nothing
   and does not fail the capture.
 
-Implemented in `finish_idle_sessions` (`crates/core/src/lib.rs`,
+Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/lib.rs`,
 `crates/storage/src/lib.rs`); the pending column is
 `migrations/0012_session_summary_pending.sql`.
 
@@ -177,7 +189,21 @@ Implemented in `finish_idle_sessions` (`crates/core/src/lib.rs`,
 When two results have equal scores and list each other in `contradiction_ids`,
 the memory with the later `created_at` ranks first. This only orders; nothing is
 resolved or hidden. PostgreSQL applies it inside the capped window, so a tie that
-the 512-row cap separates stays in memory ID order.
+the 512-row cap separates stays in memory ID order. It does not move a non-decision
+ahead of a decision (see below).
+
+## Decision-first ordering
+
+Among results with equal scores, a memory with `kind` `decision` (a promoted
+project decision or an explicit decision memory) ranks before every other memory in
+`search`, `smart-search`, `context` and `recall`. The order of equal-score,
+equal-kind results is then the contradiction rule above, then memory ID. Scores are
+not changed, so a higher score still ranks first. Both adapters apply it; PostgreSQL
+puts it in the SQL `ORDER BY` (after the rank, before the memory ID), so the 512-row cap
+keeps decisions before other tied rows. `why-changed` keeps its own order (decision
+reason, then relationships, then score). Implemented in `prefer_decision` and
+`prefer_newer_contradiction` (`crates/core/src/lib.rs`) and `search_window`
+(`crates/storage/src/lib.rs`).
 
 ## Why a change exists
 

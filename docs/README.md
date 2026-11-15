@@ -15,6 +15,7 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [Product](./product.md) | CM-PRODUCT-001 | AI-managed personal memory, ownership model, users, boundaries, and success signals |
 | [Roadmap](./roadmap.md) | CM-ROADMAP-001 | Layered product phases, outcomes, and milestone gates |
 | [Architecture](./architecture.md) | CM-ARCH-001 | Edge, sync, system structure, interfaces, data ownership, and flows |
+| [Data flow guide](./data-flow.md) | CM-GUIDE-001 | Diagram-first explainer of capture, memory lifecycle, recall, projects, sharing, authentication, sync, use cases, and tools as implemented today |
 | [Autopilot and sharing policy](./policy.md) | CM-POLICY-001 | Automatic capture, retention, privacy, ownership, correction, and sharing rules |
 | [Phase 0 evidence](./evidence.md) | CM-EVIDENCE-001 | Recorded Phase 0 artifacts, source snapshot, checks, and limitations |
 | [AgentMemory compatibility baseline](./contracts/agentmemory-baseline.md) | CM-CONTRACT-001 | Upstream REST, MCP, hook, CLI, environment, lifecycle, and portability contracts |

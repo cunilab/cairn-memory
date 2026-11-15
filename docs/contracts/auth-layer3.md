@@ -39,14 +39,37 @@ console proxy, which stores the session in the same httpOnly cookie as sign-in.
 
 ## Additional accounts
 
-After bootstrap, `POST /cairn-memory/auth/register` takes the same body and
-returns the same session result. It needs no bearer token, invitation, or
-operator approval, so any caller that can reach the server can create an
-account. This records implemented behavior and sets no policy. Before bootstrap
-it fails with `account bootstrap has not completed`, and for an email that is
-already registered with `account email is already registered`; both are `400`.
-The CLI and MCP do not create accounts: account creation is a web action. The sharing
-flow that uses a second account is in [share-layer5](share-layer5.md).
+The bootstrap account is the admin (`is_admin: true`); every other account is not.
+There is exactly one admin and no role-change API. `GET /cairn-memory/auth/me` returns
+the account with `is_admin` (boolean) for a web session or a device token.
+
+After bootstrap, `POST /cairn-memory/auth/register` creates an account from the same
+body and returns the same session result. It needs the admin's web session
+(`Authorization: Bearer <admin session>`); there is no open sign-up:
+
+| Caller | Status |
+| --- | --- |
+| No bearer | `401` |
+| Unknown, expired or revoked bearer | `401` |
+| Device token (any account, including the admin's) | `403`, `web console session required; device tokens cannot do this` |
+| Web session of a non-admin account | `403`, `admin web session required; only the admin account can do this` |
+| Admin web session | `200` |
+
+The returned session belongs to the new account, not the caller; the console does not
+store it. Before bootstrap it fails with `account bootstrap has not completed`, and for
+an email that is already registered with `account email is already registered`; both are
+`400`. The authorization check runs before the per-email rate limit and before the email and
+password are validated, so a caller without the admin session cannot use up an email's
+attempts. The CLI
+and MCP do not create accounts: account creation is a web action. The sharing flow that
+uses a second account is in [share-layer5](share-layer5.md).
+
+Both adapters store the flag with the account (`Account.is_admin`; PostgreSQL
+`cairn_accounts.is_admin`, at most one true row by a unique partial index,
+`migrations/0013_admin_role.sql`). Development databases created before the column
+exist treat the earliest account as the admin when the migration runs; a file store
+written before the field has no admin and needs a new bootstrap (pre-release, no
+compatibility path).
 
 ## Account sessions
 
@@ -71,11 +94,13 @@ Invalid account credentials and revoked or expired sessions do not return
 account data.
 
 Standard authentication statuses: a validation failure (an invalid email or
-password, a second bootstrap, register before bootstrap, a duplicate email)
-returns `400`; invalid login credentials, a missing bearer, and an unknown,
+password, a second bootstrap, a duplicate email) returns `400`; invalid login
+credentials, a missing bearer, register before bootstrap (the admin check runs
+first and no session can exist yet), and an unknown,
 revoked, expired, or disabled account or device return `401`; a device token on a
 web-only action returns `403` with `web console session required; device tokens
-cannot do this`; the rate limit returns `429`. The server maps these from the error text (`account_api_error` in
+cannot do this`; a non-admin web session on `auth/register` returns `403` with `admin web
+session required; only the admin account can do this`; the rate limit returns `429`. The server maps these from the error text (`account_api_error` in
 `crates/server/src/lib.rs`, `PostgresError::is_unauthorized` in
 `crates/storage/src/lib.rs`), so this list covers only these standard cases.
 
@@ -108,7 +133,7 @@ disabled account gets `401` on `sync/push`, `sync/pull`, and `sync/diagnose`. A
 
 | Group | Routes | Web session | Device token |
 | --- | --- | --- | --- |
-| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap`, `register`, `login` take no bearer; a device bearer on them is refused) | `403` |
+| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register` needs the admin session) | `403` |
 | Merge confirmation | `projects/{id}/branches/{branch}/merge` | yes | `403` when the project has any member besides its owner (invited or team); allowed on a solo project |
 | Identity | `auth/me` | yes | yes |
 | Capture and sync | `session/start`, `session/end`, `observe`, `sync/push`, `sync/pull`, `sync/diagnose` | start, end: yes; observe: yes on the file store, `401` on PostgreSQL (device only, it is a sync push); sync: `401` (device only) | yes |

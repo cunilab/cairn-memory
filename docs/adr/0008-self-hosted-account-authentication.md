@@ -32,9 +32,9 @@ the personal-memory path is complete.
 3. Account sessions use opaque random bearer tokens. Only SHA-256 token hashes
    are persisted; sessions expire after 30 days and can be revoked.
 4. The first account is created through a one-time bootstrap operation. The
-   current implementation also exposes an unauthenticated register operation
-   for later accounts; that is implemented behavior, not an approved policy
-   (see the [contract](../contracts/auth-layer3.md)). Logout and current-account
+   original implementation also exposed an unauthenticated register operation
+   for later accounts; the 2026-11-15 amendment replaces it with admin-only
+   registration (see the [contract](../contracts/auth-layer3.md)). Logout and current-account
    inspection use the account bearer token; login uses email and password.
 5. Device registration requires an active account token and the requested
    `personId` must match that account. Device tokens remain a separate bearer
@@ -221,6 +221,34 @@ devices; the unscoped store methods remain library-only and are unreachable from
 agent tools. The cost is that the agent tools need a running server; there is no offline
 mode. A token passed to `setup` is visible in the process list while it runs; the
 environment variables avoid that.
+
+## Amendment 2026-11-15: admin role and admin-only account creation
+
+Reason: the first amendments left `POST /cairn-memory/auth/register` open to any caller
+that can reach the server, which the ADR itself recorded as implemented behavior and not
+approved policy. A self-hosted server needs no open sign-up, and the automation-first
+model needs one person who administers accounts.
+
+1. The bootstrap (first) account is the admin: `Account.is_admin` is `true` for it and
+   `false` for every other account. There is exactly one admin for now and no
+   role-change API. `GET /cairn-memory/auth/me` returns `is_admin`. PostgreSQL stores it
+   in `cairn_accounts.is_admin` with a unique partial index that allows one true row
+   (`migrations/0013_admin_role.sql`); the file store stores it in the account record.
+2. `POST /cairn-memory/auth/register` requires the admin's web session. No bearer is
+   `401`; a device token (any account) is `403` with the existing web-only text; a
+   non-admin web session is `403` with `admin web session required; only the admin
+   account can do this`. The admin supplies the new account's email and password; the
+   response shape is unchanged, and its session belongs to the new account, so the
+   console does not store it. This supersedes decision 4's open register.
+3. Nothing else about the model changes: accounts are still person-scoped, and the admin
+   has no access to another person's memory.
+
+Consequences: account creation is a web action by one person. An admin who loses the
+password has no recovery path (password recovery is still open). Multiple admins and
+role changes need a later amendment. A file store or development database that predates
+the field: PostgreSQL promotes the earliest account when the migration runs; a file
+store has no admin until it is recreated (pre-release, no compatibility path). This ADR
+keeps its `draft` status.
 
 ## Security boundary
 

@@ -69,6 +69,50 @@ If none of `content`, `text`, or `message` is present, the whole input object
 becomes the content as compact sorted JSON. `role` defaults to `tool` and the
 source defaults to `hook`.
 
+## Claude Code hook input
+
+Claude Code runs a hook command with one JSON object on stdin
+([hooks reference](https://code.claude.com/docs/en/hooks)). The adapter reads
+these fields directly, so a settings entry needs no wrapper script. Setup is in
+[`examples/README.md`](../../examples/README.md).
+
+| Claude Code field | Cairn field | Rule |
+| --- | --- | --- |
+| `session_id` | `sessionId` | Same as the `session_id` alias above. |
+| `hook_event_name` | `source` | First choice for `source` (before `source`, `hook`, `type`), so a `SessionStart` input with `source: "startup"` is still recorded as `SessionStart`. |
+| `prompt` (`UserPromptSubmit`) | `content` | After `content`, `text`, `message`. |
+| `last_assistant_message` (`Stop`) | `content` | After `prompt`. |
+| `tool_name`, `tool_input`, `tool_response` (`PostToolUse`) | `content` | With no field above: `<tool_name> {"tool_input":...,"tool_response":...}` as compact sorted JSON, cut to 16000 characters. |
+| other events, e.g. `SessionStart`, `SessionEnd` | `content` | Whole input object as compact sorted JSON (the fallback above). |
+| `hook_event_name` | `role` | `UserPromptSubmit` is `user`, `Stop` is `assistant`, anything else is `tool`. An explicit `role` wins. |
+
+Claude Code sends no repository or branch in its hook input, only `cwd`. When
+the payload has no `context.repository` (top level or nested), the hook derives
+one from `cwd` with at most three `git -C <cwd>` calls (no shell, 1 second
+each; any failure leaves that part empty):
+
+| Context field | Source |
+| --- | --- |
+| `repository` | The last path part of `remote.origin.url` without a trailing `/` or `.git` (`https://host/acme/widget.git` and `git@host:acme/widget.git` both give `widget`). With no origin, the name of the `rev-parse --show-toplevel` directory. Never a host, a user, a credential, or an absolute path. This is the short-name style `project-register` and the examples use, and it is the same on every clone, device, and worktree. |
+| `branch` | `rev-parse --abbrev-ref HEAD`; a detached HEAD sends none. |
+
+`cwd` that is missing, not a repository, or a machine without `git` leaves
+`context` empty as before. Derived values fill only what the payload lacks: an
+explicit `context.repository` is never replaced, and other keys of a partial
+`context` are kept. The context is not part of the event fingerprint, so ids
+do not change. Two repositories with the same short name under one person share
+a project; send an explicit `context.repository` to tell them apart.
+
+Claude Code sends no event id, so the id is the derived fingerprint: the same
+session, source, and content is one event (an identical repeated prompt in a
+session is stored once). When the input has a `tool_use_id`, it is part of the
+fingerprint, so two identical tool results in one session stay separate events.
+Content over 64 KiB (a very long prompt or reply) is cut at a character
+boundary and ends with `[truncated]` instead of being rejected, so the capture
+is kept. The hook prints the server's JSON reply on stdout, so an
+example command redirects stdout to `/dev/null` instead of letting
+`UserPromptSubmit` or `SessionStart` add it to the model's context.
+
 The adapter posts one request and does not follow a redirect. It does not
 start a background process, a thread, or a second POST of its own event. With `CAIRN_OUTBOX`
 unset, a failed delivery is still dropped.
@@ -115,7 +159,10 @@ acknowledgement, 401, 408, 429, or 5xx stops the pass. The pass never purges:
 a 401 stops it, adds an attempt, and leaves every event queued. Only explicit
 `replay` purges. Events that already have 3 failed attempts are skipped and do
 not count against the 20, so they cannot starve newer ones; explicit `replay`
-still retries them. The pass skips silently on a busy lock, and a failure in
+still retries them. A 409 (the server holds different content
+under that event id) is not retried: the event leaves the queue and the queue
+file's `rejectedCount` and `lastRejected` record it, which
+`cairn_outbox.py status` prints. The pass skips silently on a busy lock, and a failure in
 it never changes the hook's exit status or output. The hook's own event is
 not sent twice, and the hook starts no background process or thread. It uses
 the replay code of `cairn_outbox.py`, so the binding check, redirect block,
@@ -161,6 +208,16 @@ that redaction. There is no PostgreSQL `/cairn-memory/observe` route, and the
 hook does not use the file `/observe` route.
 
 ## Change record
+
+2026-11-15: when the payload has no `context.repository`, the hook derives
+`repository` and `branch` from Claude Code's `cwd` with `git`, so hook-only
+sessions register a project and branch and match repository filters.
+
+2026-11-15: a queued event refused with 409 is removed from the queue on
+replay and counted (`rejectedCount`, `lastRejected`) instead of staying
+`rejected` until purge; manual `replay` reports it under `rejected`. The hook
+reads Claude Code's input fields (`hook_event_name`, `prompt`,
+`last_assistant_message`, `tool_name`/`tool_input`/`tool_response`).
 
 2026-11-14: the hook became device-token only. Removed: the
 `CAIRN_ACCOUNT_TOKEN` observe path, the unauthenticated zero-account observe
