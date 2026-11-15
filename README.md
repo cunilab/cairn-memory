@@ -43,6 +43,18 @@ Start with the [documentation index](docs/README.md). The documents are delibera
 
 Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. Layer 5 project sharing, teams, membership, maintenance, and the `apps/web` console are implemented. Federation remains later work. File-store authorization and sync deletion behavior are covered by the focused tests for those paths; they are not a separate finished product claim.
 
+## Install and update
+
+Releases are tags on `main` published as GitHub Releases ([release process](docs/release.md)). Each release holds raw binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc` (`cairn-<target>[.exe]` for the CLI, `cairn-server-<target>[.exe]` for the server), the hook scripts, and `SHA256SUMS`. Download the `cairn` asset for your platform, check it against `SHA256SUMS`, make it executable, and put it on your `PATH` as `cairn`:
+
+```bash
+cairn --version
+cairn update --check   # report only
+cairn update           # install the latest release and refresh the hook scripts
+```
+
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` into `hook/` beside the config file (see [examples](examples/README.md)). Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+
 ## Agent CLI and MCP
 
 People use the web console. Agents use the `cairn` CLI, the hooks, and `cairn mcp`, all of which call the server's REST API with a device token. Start a server, create the first account and a device token in the web console, then:

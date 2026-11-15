@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
             "timeout": 20
           }
         ]
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
             "timeout": 20
           }
         ]
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
             "timeout": 20
           }
         ]
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
             "timeout": 20
           }
         ]
