@@ -180,4 +180,5 @@ under the Compose project `cairn-dev`, bound to 127.0.0.1 only:
 
 `.env.dev` holds a generated dev-only database password and is git-ignored.
 Images are rebuilt from the working tree on each `dev_up.sh`; there is no hot
-reload.
+reload. The web image uses Next.js standalone output on a slim Node runtime
+(about 330 MB) and reads `CAIRN_API_URL` at runtime.
