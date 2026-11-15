@@ -622,9 +622,11 @@ def _replay_loaded(
     # stay pending and unchanged. bounded never purges (a 401 stops the pass),
     # stops at the first outage, and skips events that already failed
     # MAX_BOUNDED_ATTEMPTS times so they cannot starve newer ones. The CLI
-    # passes none of them. A 409 marks the event rejected: it is never resent
-    # (the CLI reports it as failed on every pass until it is purged).
+    # passes none of them. A 409 means the server holds different content under
+    # that event id, so resending cannot succeed: the event leaves the queue,
+    # the CLI reports it as rejected, and the queue metadata counts it.
     remaining = []
+    rejected = []
     accepted = 0
     failed = 0
     purged = 0
@@ -632,12 +634,6 @@ def _replay_loaded(
     stop = False
     for item in state.get("events", []):
         payload = item["payload"]
-        if item.get("rejected"):
-            # A 409 means the server holds different content under this event id.
-            # Resending cannot succeed, so keep it for inspection and purge only.
-            failed += 0 if bounded else 1
-            remaining.append(item)
-            continue
         if (
             stop
             or payload.get("eventId") == skip_event_id
@@ -680,11 +676,12 @@ def _replay_loaded(
                 remaining = []
                 failed += 1
                 break
+            if error.code == 409:
+                rejected.append({"eventId": payload.get("eventId"), "reason": str(error)})
+                continue
             failed += 1
             item["attempts"] = int(item.get("attempts", 0)) + 1
             item["lastError"] = str(error)
-            if error.code == 409:
-                item["rejected"] = True
             remaining.append(item)
             stop = bounded and (error.code == 401 or _retryable_status(error.code))
         # A bad ack or a mid-read failure must keep this event and the loop's progress.
@@ -695,6 +692,9 @@ def _replay_loaded(
             remaining.append(item)
             stop = bounded
     state["events"] = remaining
+    if rejected:
+        state["rejectedCount"] = int(state.get("rejectedCount", 0)) + len(rejected)
+        state["lastRejected"] = rejected[-1]
     save(path, state)
     if report:
         print(
@@ -704,10 +704,11 @@ def _replay_loaded(
                     "failed": failed,
                     "purged": purged,
                     "pending": len(remaining),
+                    "rejected": rejected,
                 }
             )
         )
-    return 0 if failed == 0 else 1
+    return 0 if failed == 0 and not rejected else 1
 
 
 def replay(path: Path, base_url: str, token: str) -> int:
@@ -774,6 +775,8 @@ def status(path: Path) -> int:
                 "pending": len(events),
                 "attempts": sum(int(item.get("attempts", 0)) for item in events),
                 "hasErrors": any(item.get("lastError") for item in events),
+                "rejectedCount": int(state.get("rejectedCount", 0)),
+                "lastRejected": state.get("lastRejected"),
             }
         )
     )

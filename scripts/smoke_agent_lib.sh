@@ -42,10 +42,12 @@ start_server() {
 
 # create_agent <name> <email> <bootstrap|register>: new account, one device token, and a CLI
 # config home of its own. The web session token is kept for web-only steps (session_of).
+# The bootstrap account is the admin; register is called with its session.
 create_agent() {
   session="$(curl -fsS -X POST "$base/cairn-memory/auth/$3" \
-    -H 'Content-Type: application/json' \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer ${admin_session:-}" \
     -d "{\"email\":\"$2\",\"password\":\"$password\"}" | json_field '["token"]')"
+  if [ "$3" = bootstrap ]; then admin_session="$session"; fi
   device="$(curl -fsS -X POST "$base/cairn-memory/devices/register" \
     -H 'Content-Type: application/json' -H "Authorization: Bearer $session" \
     -d "{\"name\":\"$1\"}" | json_field '["token"]')"

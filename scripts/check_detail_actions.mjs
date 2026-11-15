@@ -159,10 +159,12 @@ try {
     password,
   });
   const token = owner.token;
-  await api(apiUrl, "/cairn-memory/auth/register", {
-    email: "member@example.test",
-    password,
-  });
+  await api(
+    apiUrl,
+    "/cairn-memory/auth/register",
+    { email: "member@example.test", password },
+    token,
+  );
   const project = await api(
     apiUrl,
     "/cairn-memory/projects",

@@ -368,8 +368,18 @@ try:
             "email": "postgres-member@example.test",
             "password": "correct horse battery staple",
         },
+        account_token,
     )
     member_token = member["token"]
+    # Only the admin web session creates accounts; the first account is the admin.
+    assert call("/cairn-memory/auth/me", token=account_token)[1]["is_admin"] is True
+    assert call("/cairn-memory/auth/me", token=member_token)[1]["is_admin"] is False
+    register_body = {
+        "email": "postgres-open@example.test",
+        "password": "correct horse battery staple",
+    }
+    expect_error("/cairn-memory/auth/register", register_body, None, 401)
+    expect_error("/cairn-memory/auth/register", register_body, member_token, 403)
     _, private_memory = call(
         "/cairn-memory/remember",
         {"content": "private observation stays on the owner account"},
@@ -510,6 +520,14 @@ try:
         {"policy": "auto_nonsensitive_project_memory"},
         account_token,
     )
+    # The owner's project list carries the policy; the member's does not.
+    owner_list = call("/cairn-memory/projects", token=account_token)[1]
+    listed = next(item for item in owner_list if item["project_id"] == project["project_id"])
+    assert listed["role"] == "owner"
+    assert listed["share_policy"] == "auto_nonsensitive_project_memory"
+    member_list = call("/cairn-memory/projects", token=member_token)[1]
+    listed = next(item for item in member_list if item["project_id"] == project["project_id"])
+    assert listed["role"] == "member" and "share_policy" not in listed
     _, auto_source = call(
         "/cairn-memory/remember",
         {
@@ -568,6 +586,7 @@ try:
             "email": "postgres-stranger@example.test",
             "password": "correct horse battery staple",
         },
+        account_token,
     )
     stranger_token = stranger["token"]
     project_id = project["project_id"]

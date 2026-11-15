@@ -1,0 +1,54 @@
+{
+  "env": {
+    "CAIRN_URL": "http://127.0.0.1:3111",
+    "CAIRN_DEVICE_TOKEN": "<device-token-from-the-web-console>",
+    "CAIRN_OUTBOX": "/absolute/path/to/cairn-outbox.json"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/cairn-memory/scripts/cairn_hook.py >/dev/null",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

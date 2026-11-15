@@ -571,63 +571,74 @@ class OutboxRedactionCheck(unittest.TestCase):
                 )
             self.assertFalse(limited.exists())
 
-    def test_conflict_is_a_permanent_rejection_that_is_never_resent(self) -> None:
+    def test_conflict_is_dropped_from_the_queue_and_reported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "conflict.json"
             enqueue_in_process(path, {"eventId": "evt-conflict", "content": "changed text"})
             enqueue_in_process(path, {"eventId": "evt-fine", "content": "fine text"})
-
-            def replay(codes: list[int]):
-                server, base = serve(codes)
-                try:
-                    done = subprocess.run(
-                        [
-                            sys.executable,
-                            str(OUTBOX_PATH),
-                            "replay",
-                            str(path),
-                            "--url",
-                            base,
-                            "--token",
-                            "synthetic-device-token",
-                        ],
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                finally:
-                    server.shutdown()
-                    server.server_close()
-                return done, [json.loads(body)["eventId"] for body in server.bodies]  # type: ignore[attr-defined]
-
-            first, sent = replay([409, 200])
-            self.assertEqual(first.returncode, 1, first.stderr)
-            self.assertEqual(sent, ["evt-conflict", "evt-fine"])
-            report = json.loads(first.stdout)
+            server, base = serve([409, 200])
+            try:
+                done = subprocess.run(
+                    [
+                        sys.executable,
+                        str(OUTBOX_PATH),
+                        "replay",
+                        str(path),
+                        "--url",
+                        base,
+                        "--token",
+                        "synthetic-device-token",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+            self.assertEqual(done.returncode, 1, done.stderr)
+            report = json.loads(done.stdout)
             self.assertEqual(
-                (report["accepted"], report["failed"], report["pending"]), (1, 1, 1)
+                (report["accepted"], report["failed"], report["pending"]), (1, 0, 0)
             )
-            kept = json.loads(path.read_text(encoding="utf-8"))["events"]
-            self.assertEqual([item["payload"]["eventId"] for item in kept], ["evt-conflict"])
-            self.assertIs(kept[0]["rejected"], True)
-            self.assertEqual(kept[0]["attempts"], 1)
-            self.assertIn("409", kept[0]["lastError"])
+            self.assertEqual([item["eventId"] for item in report["rejected"]], ["evt-conflict"])
+            self.assertIn("409", report["rejected"][0]["reason"])
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(state["events"], [])
+            self.assertEqual(state["rejectedCount"], 1)
+            self.assertEqual(state["lastRejected"]["eventId"], "evt-conflict")
 
-            second, sent = replay([])
-            self.assertEqual(sent, [], "a rejected event must not be resent")
-            self.assertEqual(second.returncode, 1)
-            self.assertEqual(json.loads(second.stdout)["pending"], 1)
-            kept = json.loads(path.read_text(encoding="utf-8"))["events"]
-            self.assertEqual(kept[0]["attempts"], 1)
-
-            purged = subprocess.run(
-                [sys.executable, str(OUTBOX_PATH), "purge", str(path), "--event-id", "evt-conflict"],
+            status = subprocess.run(
+                [sys.executable, str(OUTBOX_PATH), "status", str(path)],
                 text=True,
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(purged.returncode, 0, purged.stderr)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["events"], [])
+            self.assertEqual(json.loads(status.stdout)["rejectedCount"], 1)
+
+    def test_bounded_replay_drops_a_conflict_silently_and_counts_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bounded.json"
+            server, base = serve([409, 200])
+            try:
+                for event_id in ("evt-conflict", "evt-fine"):
+                    OUTBOX.enqueue_bound(
+                        path, {"eventId": event_id, "content": event_id}, base, "synthetic-device-token", report=False
+                    )
+                captured = io.StringIO()
+                with redirect_stdout(captured):
+                    OUTBOX.replay_bounded(
+                        path, base, "synthetic-device-token", limit=20, budget=2.0
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+            self.assertEqual(captured.getvalue(), "")
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(state["events"], [])
+            self.assertEqual(state["rejectedCount"], 1)
+            self.assertEqual(state["lastRejected"]["eventId"], "evt-conflict")
+            self.assertIn("409", state["lastRejected"]["reason"])
 
     def test_context_lists_are_redacted_before_the_spool_write(self) -> None:
         lists = (

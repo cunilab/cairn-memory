@@ -12,6 +12,7 @@ import hashlib
 import http.client
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -28,6 +29,12 @@ QUEUE_FAILED = "Cairn hook queue failed"
 QUEUE_BUSY = "Cairn hook queue is busy; the capture was not retained"
 REPLAY_LIMIT = 20
 REPLAY_BUDGET = 2.0
+# Claude Code hook events (hook_event_name) whose role is not the default "tool".
+HOST_ROLES = {"UserPromptSubmit": "user", "Stop": "assistant"}
+# shortcut: a plain character cut, 4 bytes each stays under the 64 KiB content
+# limit; upgrade if tool output needs smarter summarizing.
+TOOL_CONTENT_CHARS = 16000
+TRUNCATED_MARKER = "\n[truncated]"
 
 
 class _Retryable(Exception):
@@ -97,21 +104,69 @@ def read_input():
     return raw, source
 
 
+def _git(cwd, *args):
+    try:
+        done = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def git_context(cwd):
+    # Claude Code sends no repository or branch, only cwd. The repository is the
+    # last path part of origin (the same short name `project-register` and the
+    # examples use; stable across clones and worktrees, no host, user, or
+    # credentials), else the top-level directory name. Failure leaves it empty.
+    if not isinstance(cwd, str) or not cwd:
+        return {}
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return {}
+    origin = _git(cwd, "config", "--get", "remote.origin.url").rstrip("/")
+    name = origin.removesuffix(".git").replace(":", "/").rsplit("/", 1)[-1] or os.path.basename(top)
+    derived = {"repository": name}
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch and branch != "HEAD":
+        derived["branch"] = branch
+    return derived
+
+
 def build_request(source):
     nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
     session_id = first(source, "sessionId", "session_id") or first(nested, "sessionId", "session_id") or os.environ.get("CAIRN_SESSION_ID")
     if not session_id:
         raise SystemExit("hook payload requires sessionId or CAIRN_SESSION_ID")
-    content = first(source, "content", "text", "message") or first(nested, "content", "text", "message")
+    content = first(source, "content", "text", "message", "prompt", "last_assistant_message") or first(nested, "content", "text", "message")
+    if not content and source.get("tool_name"):
+        detail = json.dumps({"tool_input": source.get("tool_input"), "tool_response": source.get("tool_response")}, sort_keys=True, separators=(",", ":"))
+        content = f"{source['tool_name']} {detail}"[:TOOL_CONTENT_CHARS]
     if not content:
         content = json.dumps(source, sort_keys=True, separators=(",", ":"))
-    role = first(source, "role") or first(nested, "role") or "tool"
-    source_name = first(source, "source", "hook", "type") or first(nested, "source", "type") or "hook"
+    content = str(content)
+    if len(content.encode()) > cairn_outbox.MAX_CONTENT_BYTES:
+        keep = cairn_outbox.MAX_CONTENT_BYTES - len(TRUNCATED_MARKER)
+        content = content.encode()[:keep].decode(errors="ignore") + TRUNCATED_MARKER
+    host_event = first(source, "hook_event_name")
+    role = first(source, "role") or first(nested, "role") or HOST_ROLES.get(host_event) or "tool"
+    source_name = first(source, "hook_event_name", "source", "hook", "type") or first(nested, "source", "type") or "hook"
     event_id = first(source, "eventId", "event_id") or first(nested, "eventId", "event_id")
     if not event_id:
-        fingerprint = json.dumps({"sessionId": session_id, "content": content, "source": source_name}, sort_keys=True).encode()
+        parts = {"sessionId": session_id, "content": content, "source": source_name}
+        tool_use_id = first(source, "tool_use_id")
+        if tool_use_id:
+            parts["toolUseId"] = str(tool_use_id)
+        fingerprint = json.dumps(parts, sort_keys=True).encode()
         event_id = "hook-" + hashlib.sha256(fingerprint).hexdigest()[:24]
     context = first(source, "context") or first(nested, "context") or {}
+    if isinstance(context, dict) and not context.get("repository"):
+        context = {**git_context(first(source, "cwd") or first(nested, "cwd")), **context}
     lifecycle = first(source, "lifecycle") or first(nested, "lifecycle") or {}
     request = {
         "eventId": event_id,

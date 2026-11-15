@@ -139,7 +139,7 @@ for (const message of [
 JS
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import { deleteDecisionImpact, revokeShareImpact } from "./apps/web/lib/action-copy.ts";
+import { deleteDecisionImpact, revokeShareImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
 
 const deleted = deleteDecisionImpact("memory-1");
 if (!deleted.includes("memory-1") || !deleted.includes("retained delete") || !deleted.includes("keeps the stored record")) {
@@ -157,6 +157,10 @@ if (!revoked.includes("Share this decision again to show it to this member.")) {
 }
 if (/cannot undo the revoke/i.test(revoked)) {
   throw new Error("revoke copy must not say the console cannot undo a revoke");
+}
+const rotated = rotateDeviceImpact("laptop");
+if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
+  throw new Error("rotate copy must name the device, the old token and the one-time new token");
 }
 const missingEmail = revokeShareImpact("memory-1", "  ");
 if (!missingEmail.includes("member email") || !missingEmail.includes("No request is sent")) {
@@ -215,6 +219,7 @@ for web_only in "GET devices" "POST devices/revoke" "GET auth/audit"; do
 done
 
 curl -fsS -H 'content-type: application/json' \
+  -H "authorization: Bearer ${owner_token}" \
   -d "{\"email\":\"member@example.test\",\"password\":\"${password}\"}" \
   "${api}/cairn-memory/auth/register" >/dev/null
 
@@ -315,11 +320,21 @@ if "set-cookie:" not in headers or "cairn_token=" not in headers or "httponly" n
     raise SystemExit("login did not set an httpOnly cairn_token cookie")
 if '"token"' in body:
     raise SystemExit("login response still contains a token field")
+if "max-age=2592000" not in headers:
+    raise SystemExit("login cookie is not a 30 day session")
 PY
 
+me_body="$workdir/me.body"
+curl -fsS -o "$me_body" -b "$owner_jar" "${web}/api/cairn/auth/me"
+ME_BODY="$me_body" python3 - <<'PY'
+import json, os
+assert json.load(open(os.environ["ME_BODY"], encoding="utf-8"))["is_admin"] is True, "first account must be an admin"
+PY
+
+# An admin session creates accounts without its own cookie changing or the new token returned.
 register_headers="$workdir/register.headers"
 register_body="$workdir/register.body"
-register_code="$(curl -sS -o "$register_body" -D "$register_headers" -w '%{http_code}' \
+register_code="$(curl -sS -o "$register_body" -D "$register_headers" -b "$owner_jar" -w '%{http_code}' \
   -H 'content-type: application/json' \
   -d "{\"email\":\"proxy-register@example.test\",\"password\":\"${password}\"}" \
   "${web}/api/cairn/auth/register")"
@@ -332,11 +347,19 @@ REGISTER_HEADERS="$register_headers" REGISTER_BODY="$register_body" python3 - <<
 import os
 headers = open(os.environ["REGISTER_HEADERS"], encoding="utf-8").read().lower()
 body = open(os.environ["REGISTER_BODY"], encoding="utf-8").read()
-if "cairn_token=" not in headers or "httponly" not in headers:
-    raise SystemExit("register did not set an httpOnly cairn_token cookie")
+if "set-cookie:" in headers:
+    raise SystemExit("register replaced the caller's session cookie")
 if '"token"' in body:
-    raise SystemExit("register response still contains a token field")
+    raise SystemExit("register response contains a token field")
 PY
+anon_register_code="$(curl -sS -o /dev/null -D "$workdir/anon-register.headers" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"anon-register@example.test\",\"password\":\"${password}\"}" \
+  "${web}/api/cairn/auth/register")"
+if [ "$anon_register_code" != "401" ] || grep -qi 'set-cookie:' "$workdir/anon-register.headers"; then
+  printf '%s\n' "anonymous register status: ${anon_register_code}" >&2
+  exit 1
+fi
 
 projects_body="$workdir/projects.body"
 projects_code="$(curl -sS -o "$projects_body" -b "$owner_jar" -w '%{http_code}' \
@@ -392,6 +415,84 @@ if [ "$revoke_code" != "200" ]; then
   printf '%s\n' "console device revoke failed: ${revoke_code}" >&2
   exit 1
 fi
+
+rotate_json="$(curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d '{"name":"rotating device"}' "${web}/api/cairn/devices/register")"
+rotate_id="$(printf '%s' "$rotate_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device"]["device_id"])')"
+old_token="$(printf '%s' "$rotate_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+rotated_json="$(curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d "{\"deviceId\":\"${rotate_id}\"}" "${web}/api/cairn/devices/rotate")"
+new_token="$(printf '%s' "$rotated_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+if [ -z "$new_token" ] || [ "$new_token" = "$old_token" ]; then
+  printf '%s\n' "rotate did not issue a new token" >&2
+  exit 1
+fi
+old_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -H "authorization: Bearer ${old_token}" -d '{"session_id":"rotate-old","context":{}}' \
+  "${api}/cairn-memory/session/start")"
+new_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -H "authorization: Bearer ${new_token}" -d '{"session_id":"rotate-new","context":{}}' \
+  "${api}/cairn-memory/session/start")"
+if [ "$old_code" != "401" ] || [ "$new_code" != "200" ]; then
+  printf '%s\n' "rotated token status old=${old_code} new=${new_code}" >&2
+  exit 1
+fi
+
+# Owner controls through the web session: policy, promote, verify, branch merge and close.
+owner_ok() {
+  owner_code="$(curl -sS -o "$workdir/owner-post.body" -b "$owner_jar" -w '%{http_code}' \
+    -H 'content-type: application/json' -d "$3" "${web}/api/cairn/$2")"
+  if [ "$owner_code" != "200" ]; then
+    printf '%s\n' "$1 failed: ${owner_code}" >&2
+    cat "$workdir/owner-post.body" >&2
+    exit 1
+  fi
+}
+owner_ok "share policy" "projects/${project_id}/policy" '{"policy":"manual"}'
+curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"session_id":"web-console-promote","context":{"repository":"cairn-demo","commit":"abc1234"}}' \
+  "${api}/cairn-memory/session/start" >/dev/null
+curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"event_id":"evt-console-promote","session_id":"web-console-promote","content":"decision promoted from the console","role":"agent","source":"hook"}' \
+  "${api}/cairn-memory/observe" >/dev/null
+console_source="$(curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"session_id":"web-console-promote"}' "${api}/cairn-memory/session/end" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+owner_ok "promote" promote "{\"project_id\":\"${project_id}\",\"memory_id\":\"${console_source}\",\"reason\":\"Console promote\"}"
+console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["memory_id"])' "$workdir/owner-post.body")"
+owner_ok "verify" projects/verify "{\"project_id\":\"${project_id}\",\"memory_id\":\"${console_promoted}\",\"commit\":\"abc1234\"}"
+for branch in feature-merge feature-close; do
+  curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+    -d "{\"name\":\"${branch}\"}" "${api}/cairn-memory/projects/${project_id}/branches" >/dev/null
+done
+curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"session_id":"web-branch","context":{"repository":"cairn-demo","branch":"feature-merge","commit":"def5678"}}' \
+  "${api}/cairn-memory/session/start" >/dev/null
+curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"event_id":"evt-branch","session_id":"web-branch","content":"branch decision ready to merge","role":"agent","source":"hook"}' \
+  "${api}/cairn-memory/observe" >/dev/null
+branch_memory="$(curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
+  -d '{"session_id":"web-branch"}' "${api}/cairn-memory/session/end" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+branches_body="$workdir/branches.body"
+curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
+merge_branch_id="$(BRANCHES="$branches_body" python3 -c 'import json,os; print(next(b["branch_id"] for b in json.load(open(os.environ["BRANCHES"])) if b["name"]=="feature-merge"))')"
+close_branch_id="$(BRANCHES="$branches_body" python3 -c 'import json,os; print(next(b["branch_id"] for b in json.load(open(os.environ["BRANCHES"])) if b["name"]=="feature-close"))')"
+owner_ok "branch merge" "projects/${project_id}/branches/${merge_branch_id}/merge" "{\"memory_id\":\"${branch_memory}\",\"commit\":\"def5678\",\"reason\":\"Console merge\"}"
+owner_ok "branch close" "projects/${project_id}/branches/${close_branch_id}/close" '{"reason":"Console close"}'
+curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
+BRANCHES="$branches_body" python3 - <<'PY'
+import json, os
+status = {b["name"]: b["status"] for b in json.load(open(os.environ["BRANCHES"]))}
+assert status["feature-merge"] == "merged" and status["feature-close"] == "closed", status
+PY
+for page in accounts "projects/${project_id}"; do
+  page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
+  if [ "$page_code" != "200" ]; then
+    printf '%s\n' "${page} page status: ${page_code}" >&2
+    exit 1
+  fi
+done
 
 for report in diagnose "projects/${project_id}/conflicts" "projects/${project_id}/freshness" \
   "projects/${project_id}/revocations" \

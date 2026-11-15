@@ -61,6 +61,19 @@ def run_hook(url, payload, **env):
     )
 
 
+def make_repo(parent, name, remote=None, branch="feature/x"):
+    """A real git repo with one commit, so HEAD names a branch."""
+    path = Path(parent) / name
+    path.mkdir()
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    git = ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.test"]
+    subprocess.run(git + ["init", "-q", "-b", branch], check=True, env=env)
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True, env=env)
+    if remote:
+        subprocess.run(git + ["remote", "add", "origin", remote], check=True, env=env)
+    return path
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -216,6 +229,95 @@ class StubHookTests(unittest.TestCase):
         self.assertEqual(body["source"], "Nested")
         self.assertEqual(body["role"], "tool")
 
+    def test_claude_code_hook_input_maps_to_capture_fields(self):
+        common = {"session_id": "cc-session", "cwd": "/work", "transcript_path": "/t.jsonl"}
+        cases = [
+            ({"hook_event_name": "UserPromptSubmit", "prompt": "fix the bug"}, "fix the bug", "user", "UserPromptSubmit"),
+            ({"hook_event_name": "Stop", "last_assistant_message": "done"}, "done", "assistant", "Stop"),
+            ({"hook_event_name": "SessionStart", "source": "startup"}, None, "tool", "SessionStart"),
+            (
+                {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "cargo test"},
+                    "tool_response": {"stdout": "x" * 40000},
+                },
+                None,
+                "tool",
+                "PostToolUse",
+            ),
+        ]
+        for extra, content, role, source in cases:
+            self.server.captured = []
+            result = run_hook(self.url, dict(common, **extra))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            body = json.loads(self.server.captured[0]["body"])
+            self.assertEqual((body["sessionId"], body["role"], body["source"]), ("cc-session", role, source))
+            if content is not None:
+                self.assertEqual(body["content"], content)
+        self.assertTrue(body["content"].startswith('Bash {"tool_input":{"command":"cargo test"}'))
+        self.assertLessEqual(len(body["content"]), 16000)
+
+    def _context_for(self, cwd, **env):
+        self.server.captured = []
+        payload = {"session_id": "ctx-session", "hook_event_name": "UserPromptSubmit", "prompt": "p", "cwd": str(cwd)}
+        self.assertEqual(run_hook(self.url, payload, **env).returncode, 0)
+        return json.loads(self.server.captured[0]["body"])
+
+    def test_cwd_in_a_git_repo_fills_repository_and_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # The slug is the origin's last path part: not the checkout dir, no
+            # credentials, no absolute path.
+            repo = make_repo(tmp, "checkout-dir", "https://user:pw-secret@example.test/acme/widget-svc.git")
+            (repo / "src").mkdir()
+            body = self._context_for(repo / "src")
+            self.assertEqual(body["context"], {"repository": "widget-svc", "branch": "feature/x"})
+            self.assertNotIn(tmp, json.dumps(body))
+            self.assertNotIn("pw-secret", json.dumps(body))
+            # No remote: fall back to the top-level directory name.
+            bare = make_repo(tmp, "local-only")
+            self.assertEqual(self._context_for(bare)["context"]["repository"], "local-only")
+            # scp-style remote
+            scp = make_repo(tmp, "other", "git@example.test:acme/scp-repo.git")
+            self.assertEqual(self._context_for(scp)["context"]["repository"], "scp-repo")
+
+    def test_derived_context_keeps_event_id_and_explicit_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
+            plain = {"session_id": "ctx-session", "hook_event_name": "UserPromptSubmit", "prompt": "p"}
+            self.assertEqual(run_hook(self.url, dict(plain, cwd=str(repo))).returncode, 0)
+            self.assertEqual(run_hook(self.url, plain).returncode, 0)
+            ids = [json.loads(item["body"])["eventId"] for item in self.server.captured]
+            self.assertEqual(ids[0], ids[1])
+            # An explicit repository is never replaced, and its other keys stay.
+            explicit = dict(plain, cwd=str(repo), context={"repository": "mine", "commands": ["make"]})
+            self.server.captured = []
+            self.assertEqual(run_hook(self.url, explicit).returncode, 0)
+            self.assertEqual(json.loads(self.server.captured[0]["body"])["context"], {"repository": "mine", "commands": ["make"]})
+            # A context without a repository is completed from cwd.
+            partial = dict(plain, cwd=str(repo), context={"commands": ["make"]})
+            self.server.captured = []
+            self.assertEqual(run_hook(self.url, partial).returncode, 0)
+            self.assertEqual(
+                json.loads(self.server.captured[0]["body"])["context"],
+                {"repository": "widget-svc", "branch": "feature/x", "commands": ["make"]},
+            )
+
+    def test_no_context_when_cwd_is_not_a_repo_or_git_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._context_for(tmp)["context"], {})
+            self.assertEqual(self._context_for(Path(tmp) / "missing")["context"], {})
+            repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
+            empty_path = Path(tmp) / "empty-bin"
+            empty_path.mkdir()
+            self.assertEqual(self._context_for(repo, PATH=str(empty_path))["context"], {})
+
+    def test_detached_head_sends_a_repository_but_no_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
+            self.assertEqual(self._context_for(repo)["context"], {"repository": "widget-svc"})
+
     def test_spaced_token_rejects_before_post(self):
         bad = "sk-not-a-header token"
         result = run_hook(
@@ -348,15 +450,26 @@ class StubHookTests(unittest.TestCase):
         self.assertIn("delivery failed", result.stderr)
         self.assert_hidden(result, DEVICE, SECRET)
 
-    def test_oversized_device_content_is_rejected_before_post(self):
+    def test_oversized_content_is_truncated_with_a_marker_not_rejected(self):
+        # Multibyte text: the cut must land on a character boundary.
         result = run_hook(
             self.url,
-            {"sessionId": "s", "content": "x" * (64 * 1024 + 1)},
+            {"sessionId": "s", "hook_event_name": "UserPromptSubmit", "prompt": "\u00e9" * (64 * 1024)},
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.server.captured, [])
-        self.assertIn("64 KiB", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(self.server.captured[0]["body"])
+        self.assertTrue(body["content"].endswith("[truncated]"))
+        self.assertLessEqual(len(body["content"].encode()), 64 * 1024)
         self.assert_hidden(result, DEVICE)
+
+    def test_tool_use_id_keeps_identical_tool_results_apart(self):
+        base = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        for tool_use_id in ("toolu_1", "toolu_2", "toolu_2", None):
+            extra = {} if tool_use_id is None else {"tool_use_id": tool_use_id}
+            self.assertEqual(run_hook(self.url, dict(base, **extra)).returncode, 0)
+        ids = [json.loads(item["body"])["eventId"] for item in self.server.captured]
+        self.assertEqual(len(set(ids[:2] + ids[3:])), 3)
+        self.assertEqual(ids[1], ids[2])
 
 
 def free_port():
@@ -507,6 +620,21 @@ class FileServerHookTests(unittest.TestCase):
         self.assertNotIn("hook-secret-value", device.stdout)
         self.assert_hidden(device, self.account_token, self.device_token, "hook-secret-value")
 
+        # A hook-only capture with just a cwd registers the project and branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp, "co", "https://example.test/acme/hook7a-repo.git")
+            auto = run_hook(
+                self.url,
+                {
+                    "session_id": "hook7a-cwd-session",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "cwd derived context marker hook7a",
+                    "cwd": str(repo),
+                },
+                CAIRN_DEVICE_TOKEN=self.device_token,
+            )
+        self.assertEqual(auto.returncode, 0, auto.stderr)
+
         # The web session revokes the device; the hook is then rejected.
         status, _ = http_json(
             self.url,
@@ -538,6 +666,9 @@ class FileServerHookTests(unittest.TestCase):
             for item in state.get("observations", [])
         }
         ids = set(found)
+        project = [item for item in state["projects"] if item["repository"] == "hook7a-repo"]
+        self.assertEqual(len(project), 1)
+        self.assertEqual([item["name"] for item in state["project_branches"]], ["feature/x"])
         self.assertIn("hook7a-device", ids)
         self.assertNotIn("hook7a-wrong-device-slot", ids)
         self.assertNotIn("hook7a-revoked", ids)

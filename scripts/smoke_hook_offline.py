@@ -312,6 +312,21 @@ class OfflineHookTests(unittest.TestCase):
             self.assertEqual(again["events"][0]["payload"]["eventId"], event_id)
             self.assert_hidden(second.stdout + second.stderr, DEVICE, SECRET, PEM)
 
+    def test_queued_event_keeps_the_context_derived_from_cwd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "checkout"
+            repo.mkdir()
+            git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.test"]
+            subprocess.run(git + ["init", "-q", "-b", "main"], check=True)
+            subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+            subprocess.run(git + ["remote", "add", "origin", "https://example.test/acme/widget-svc.git"], check=True)
+            path = Path(directory) / "queue.json"
+            payload = {"session_id": "cwd-session", "hook_event_name": "UserPromptSubmit", "prompt": "p", "cwd": str(repo)}
+            result = run_hook("http://127.0.0.1:9", payload, path, CAIRN_DEVICE_TOKEN=DEVICE)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            queued = json.loads(path.read_text(encoding="utf-8"))["events"][0]["payload"]
+            self.assertEqual(queued["context"], {"repository": "widget-svc", "branch": "main"})
+
     def test_timeout_after_store_replays_as_one_duplicate(self):
         stub = Stub(mode="stall")
         try:
