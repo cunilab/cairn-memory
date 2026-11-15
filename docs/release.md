@@ -16,7 +16,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Rust format and clippy`
   - `Rust tests`
   - `PostgreSQL tests` (each ignored test runs against its own fresh PostgreSQL 16 database, see `scripts/ci_postgres_tests.sh`)
-  - `Build on macos-14` and `Build on windows-latest`
+  - `Build on macos-15` and `Build on windows-latest`
   - `Web console typecheck, lint, build`
   - `Python hook and outbox tests`
   - `Documentation validation`
