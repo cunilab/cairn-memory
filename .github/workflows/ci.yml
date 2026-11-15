@@ -1,0 +1,121 @@
+# Required checks for pull requests into main. Job names are the check names; renaming a job
+# breaks branch protection until the rule is updated.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-format-and-lint:
+    name: Rust format and clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust-tests:
+    name: Rust tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  postgres-tests:
+    name: PostgreSQL tests
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: cairn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cairn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # One fresh database per ignored test, created by the script.
+      - run: ./scripts/ci_postgres_tests.sh
+        env:
+          CAIRN_TEST_SERVER_URL: postgres://cairn:cairn@127.0.0.1:5432
+          PGCONNECT_TIMEOUT: "10"
+
+  build-other-platforms:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p cairn-client -p cairn-server
+      - run: cargo test --locked -p cairn-client --lib --no-run
+
+  web-console:
+    name: Web console typecheck, lint, build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+
+  python-hook-tests:
+    name: Python hook and outbox tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # smoke_hook_auth.py starts the file-store server with `cargo run`.
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 scripts/smoke_outbox.py
+      - run: python3 scripts/smoke_hook_offline.py
+      - run: python3 scripts/smoke_hook_auth.py
+
+  docs-validation:
+    name: Documentation validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 scripts/validate_phase0.py
