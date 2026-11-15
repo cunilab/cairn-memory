@@ -9,7 +9,7 @@ status: draft
 | Field | Value |
 | --- | --- |
 | Scope | Server-authoritative Rust backend, optional edge client, Next.js console, persistence, retrieval, and compatibility boundaries |
-| Last updated | 2026-11-11 |
+| Last updated | 2026-11-15 |
 
 ## Overview
 
@@ -17,13 +17,15 @@ Cairn Memory is an AI-managed, person-owned memory layer. The Rust server owns c
 
 PostgreSQL is the canonical server store. PostgreSQL full-text search and pgvector support retrieval alongside ordinary relational queries, while graph tables and materialized views support graph-assisted retrieval. The system uses an append-only, authenticated memory-event log and materialized views for memories, search, graph data, and live counts. Derived indexes can be rebuilt. Source events, identity, visibility, authorization decisions, and audit history must not be silently replaced by a derived summary.
 
-REST, MCP, hooks, web sessions, and optional edge replay use one application service layer. The first useful implementation should be a small vertical slice: capture, automatic memory lifecycle, retrieval, and a viewer. The internal boundaries should remain clear without requiring a distributed deployment. Personal continuity comes before project promotion, cross-person collaboration, or federation. The first deployment is centralized or self-hosted rather than peer-to-peer; federation is a later product decision after identity, revocation, deletion, and recovery are proven.
+REST is the one application boundary: the web console (web session), hooks, `cairn`, and `cairn mcp` (device token), and optional edge replay all call it. The first useful implementation should be a small vertical slice: capture, automatic memory lifecycle, retrieval, and a viewer. The internal boundaries should remain clear without requiring a distributed deployment. Personal continuity comes before project promotion, cross-person collaboration, or federation. The first deployment is centralized or self-hosted rather than peer-to-peer; federation is a later product decision after identity, revocation, deletion, and recovery are proven.
 
 ### Layer 1 prototype boundary
 
-The current Layer 1 implementation is the `cairn-core` crate plus REST, MCP, and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, keyword recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter now provides the first server-authoritative PostgreSQL account, device, observation, and sync-event path.
+The current Layer 1 implementation is the `cairn-core` crate plus REST and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, keyword recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter now provides the first server-authoritative PostgreSQL account, device, observation, and sync-event path.
 
 `apps/web` is the first Next.js App Router console. The browser calls same-origin Next.js routes, those routes proxy to the Rust API at `CAIRN_API_URL`, and the embedded `/viewer` remains.
+
+Humans use only the web console, and only a web session creates, lists, rotates, or revokes device tokens. Agents use a device token through three clients that all call the REST API: the `cairn` CLI and `cairn mcp` (crate `crates/client`, a blocking REST client that never opens a store file or holds an account session) and `scripts/cairn_hook.py` (device token only, posting `sync/push`). `cairn setup <server-url>` reads the token from stdin; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace the stored config. The CLI, MCP, and the hook accept `https`, or `http` only for a loopback host. A device token gets `403` on account and device management. Credentials are owned by [ADR 0008](adr/0008-self-hosted-account-authentication.md) and [CM-CONTRACT-008](contracts/auth-layer3.md); the tool table is [CM-CONTRACT-002](contracts/mcp-layer1.md); the hook is [CM-CONTRACT-005](contracts/hook-v1.md).
 
 The first Layer 2 slice keeps the same boundary and adds deterministic memory
 scopes (`session`, `worktree`, `branch`, `project`, and `global`), structured
@@ -44,13 +46,13 @@ observations, sync events, cursors, and the `--database-url` server boundary.
 flowchart LR
     subgraph Clients[Clients]
         HookA[Agent hooks] --> Edge[Optional edge spool/cache]
-        AgentA[MCP clients] -->|MCP / REST| Server
+        AgentA[cairn CLI and cairn mcp] -->|REST + device token| Server
         Edge -->|replay with idempotency key| Server
-        Web[Next.js + shadcn/ui] -->|browser session + REST/SSE| Server
+        Web[Next.js + shadcn/ui] -->|web session + REST/SSE| Server
     end
 
     subgraph Server[Server-authoritative Cairn Memory]
-        API[Axum REST + MCP]
+        API[Axum REST]
         API --> Identity[Identity and token registry]
         API --> Spaces[Organizations, projects, teams, permissions]
         API --> Services[Application services]
@@ -80,8 +82,7 @@ flowchart LR
 | `providers` crate | Optional LLM and embedding integrations | HTTP clients, provider configuration, retries, circuit state |
 | `jobs` crate | Background work with leases and recovery | Compression, summaries, embeddings, sharing proposals, consolidation, retention |
 | `api` crate | REST routes, authentication, request limits, error mapping, and OpenAPI-facing schemas | Axum, Tower middleware, service layer |
-| `mcp` crate | MCP tools, resources, prompts, and transport adapters | `rmcp`, local edge service, sync-aware context selection |
-| `cli` binary | Installation, startup, migration, login, device management, status, diagnostics, and local administration | Server process, optional edge spool, filesystem paths, export/import |
+| `client` crate (`cairn-client`) | The agent-facing `cairn` CLI and `cairn mcp` stdio server: one shared tool table, one REST call per command or tool, device-token credential | Blocking HTTP client, user config file (mode `0600`), export/import files |
 | `apps/web` | Human-facing collaboration and operations console | Next.js App Router, shadcn/ui, typed API client, live event client |
 
 The component boundaries are design seams, not a requirement to deploy separate services. Early layers may run as one Rust process with one database and a small viewer. The system should earn additional queues, projections, providers, and collaboration surfaces through measured need.
@@ -202,14 +203,14 @@ Evidence is a first-class relationship from a memory to the observation, session
 
 | From | To | Interface | Purpose |
 | --- | --- | --- | --- |
-| Agent hooks | Server or optional edge spool | HTTP JSON | Session lifecycle and observation capture |
-| MCP clients | Server | MCP streamable HTTP or a generated local config | Recall, save, search, and management tools |
+| Agent hooks | Server or optional edge spool | HTTP JSON with a device token | Session lifecycle and observation capture |
+| `cairn` CLI and `cairn mcp` | Server | REST JSON over HTTPS (HTTP on loopback), device token | Recall, save, search, project, and share tools for agents; no account or device management |
 | Edge spool | Server | Authenticated replay HTTP | Outage-tolerant capture delivery |
 | Next.js console | Server | REST JSON | Identity, spaces, memory, collaboration, and operations |
 | Next.js console | Event service | SSE initially | Live health, counts, conflicts, jobs, and row changes |
 | Services | Providers | Provider trait over HTTP | Optional compression, summaries, graph extraction, and embeddings |
 | Services | Storage | Repository and transaction traits | PostgreSQL domain state, event log, vector data, and job coordination |
-| Migration CLI | Storage | Versioned JSON export/import | Portable migration without depending on internal storage layout |
+| `cairn export` / `cairn import` | Server | Versioned JSON export/import over REST | Portable migration without depending on internal storage layout |
 
 ## Data
 

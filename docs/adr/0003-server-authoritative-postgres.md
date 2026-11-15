@@ -65,3 +65,10 @@ Rejected because the first graph needs bounded code and memory relationships, no
 ### LLM-required ingestion
 
 Rejected because provider outages, cost, and privacy must not prevent capture or basic retrieval.
+
+## Amendment 2026-11-15: CLI scope and replay results
+
+- Decision 10: the web console is the only place to manage accounts, devices, and tokens. The `cairn` CLI is an agent client with a device token (plus the one-time `cairn setup`), not an administration tool; see the [second 2026-11-14 amendment to ADR 0008](0008-self-hosted-account-authentication.md#amendment-2026-11-14-second-the-cli-and-mcp-are-device-token-network-clients). Server startup and migration stay in `cairn-server`.
+- Decision 7: an identical replay returns the original acceptance result. A replay of the same event id with a changed session, content, role, or source returns `409 Conflict` instead; see the [2026-11-15 amendment to ADR 0007](0007-layer3-local-trusted-device-slice.md#amendment-2026-11-15-a-changed-or-out-of-scope-replay-is-a-conflict).
+
+This ADR keeps its `draft` status.

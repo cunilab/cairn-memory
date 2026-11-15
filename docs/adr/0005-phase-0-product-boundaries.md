@@ -35,6 +35,7 @@ The central product promise is that a person should not need to curate memory ma
 - A user can get value from Cairn before identity, synchronization, and team permissions are complete.
 - The product promise is simple: Cairn remembers the work automatically, while the person remains the owner.
 - Privacy and sharing decisions have a separate policy boundary from ranking and retrieval.
+- Capture stores the stricter of the supplied sensitivity label and the label detected from the original text, so a client cannot mark detected secret material as public. The patterns are in the lifecycle contract.
 - The architecture can grow from one process and one store instead of requiring a distributed platform on day one.
 - AgentMemory and Graphify remain useful foundations without forcing their internal implementation choices into Cairn.
 

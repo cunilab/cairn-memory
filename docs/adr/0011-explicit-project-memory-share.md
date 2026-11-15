@@ -1,7 +1,7 @@
 ---
 id: CM-ADR-0011
 title: "Explicit project memory share"
-status: accepted
+status: proposed
 ---
 
 # ADR 0011 — Explicit project memory share
@@ -59,9 +59,11 @@ closed unless an explicit policy matches. This follow-on does not add roles.
 5. Contradictory live project memories stay stored. The owner and the member
    can read a conflict list of both ids. A member only sees conflicts among
    memories shared with them.
-6. A shared read includes `share_reason` and `source_memory_id` when those
-   values exist. Session summaries keep source actors and source event ids.
-   Branch merge keeps `promoted_from` and `source_event_ids`.
+6. A shared read includes `share_reason` when it exists. Session summaries
+   keep source actors and source event ids. Since 2026-11-14 a member read
+   never includes `promoted_from`, `source_memory_id`, or personal source event
+   ids, and a promoted copy has no source event ids (see ADR 0009, amendment of
+   2026-11-14).
 
 ## Amendment: project team space and retained delete
 
@@ -77,6 +79,12 @@ Delete is owner-only. It hides the memory from normal recall with the same
 tombstone as forget, keeps the stored record and the export copy, and writes
 `memory_delete_retained`. It does not purge other devices. A member delete
 fails with the existing not-owner error.
+
+Amendment 2026-11-14, reason: project actions must never delete personal
+memory. Forget and retained delete of a project copy, by the project and team
+owner, hide only that copy and its shares. They never tombstone the personal
+memory it was promoted from or that memory's source events. Forgetting the
+personal memory does not hide the shared copy.
 
 Creating a team, adding a member, and removing a member write
 `project_team_created`, `project_team_member_added`, and

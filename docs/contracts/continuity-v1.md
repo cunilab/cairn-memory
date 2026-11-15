@@ -96,6 +96,19 @@ recovery hint:
 }
 ```
 
+PostgreSQL returns at most 512 matches per search (`MAX_SEARCH_RESULTS`). For
+`context` and `why-changed`, `omitted_count` is every eligible match not
+returned — same person, query, lifecycle, supersession, and filter predicate —
+including matches past 512. `omitted_memory_ids` lists only omitted rows inside
+that 512 window, so it can be shorter than `omitted_count`. When it is, the hint
+says the results are capped and to narrow the query or filter, because a larger
+limit cannot recover the rest. `why-changed` on PostgreSQL ranks every eligible
+match before the 512 cut: decision reason present first, then relationship count,
+then the lexical order of `search` (score, then memory ID). The cut keeps the first
+512 of that order, so a decision that ranks 513th lexically still leads at limit 1.
+The same ranking runs in the file store. `resume` and `unresolved` are not capped,
+and the file store has no cap.
+
 ## Session handoff retrieval
 
 Ending a session deterministically extracts two structured lists from captured
@@ -118,6 +131,54 @@ returned on session-summary results and can be retrieved without a query:
 Both paths accept the same context filter and return a bounded context pack.
 This is deterministic handoff extraction, not model-generated planning.
 
+## Automatic session close
+
+Sessions close without a human step (ADR 0009, automation-first). On the capture
+of an account-owned observation and on a session start, both adapters finish the
+same person's sessions through the ordinary end-session path, which derives the
+summary memory:
+
+- A session is finished when its newest retained observation (owned, not
+  forgotten, not expired) is older than 30 minutes and it has no current summary.
+  Only this idle rule closes a session. A session start does not close another
+  open session, because a parallel agent of the same person on the same
+  repository and branch must keep its own.
+- A session with no retained observations is skipped, without an error.
+- An ended session whose id received observations the summary does not cover (the
+  agent reused the id), or whose summary has a forgotten source, gets a new
+  summary: the next sweep, and an explicit end, derive it again from what is
+  retained and replace the old one under the same memory id. The new summary keeps
+  the earlier one's `verified_commit`, lifecycle (sensitivity can only rise) and
+  `created_at`.
+- A summary the person forgot, or that a live correction supersedes, is never
+  derived again: the sweep leaves it alone, and an explicit end of that session
+  returns a validation error instead of a hidden memory.
+- The sweep is scoped to the person of the trigger. Resume and search never
+  close a session. The file store sweeps on `capture_for_account` and
+  `start_session_for_account`, not on the unscoped library call or device
+  `sync/push` path; PostgreSQL sweeps on device `sync/push` and account session
+  start. A sweep failure is logged and does not fail the capture or the start.
+- PostgreSQL marks a session pending (`cairn_sessions.pending_since`) when a
+  capture lands or one of its observations is forgotten, and clears it when the
+  summary is derived. The sweep reads only that partial index, at most 16
+  sessions per call, so its cost does not grow with finished sessions. A session
+  whose close fails is marked pending again and retried after another idle
+  period, not on every push.
+- Automatic project registration validates the repository and branch against the
+  same 512-byte limit as `register_project`; an oversized value registers nothing
+  and does not fail the capture.
+
+Implemented in `finish_idle_sessions` (`crates/core/src/lib.rs`,
+`crates/storage/src/lib.rs`); the pending column is
+`migrations/0012_session_summary_pending.sql`.
+
+## Contradiction ordering
+
+When two results have equal scores and list each other in `contradiction_ids`,
+the memory with the later `created_at` ranks first. This only orders; nothing is
+resolved or hidden. PostgreSQL applies it inside the capped window, so a tie that
+the 512-row cap separates stays in memory ID order.
+
 ## Why a change exists
 
 The decision retrieval path combines lexical recall with deterministic evidence
@@ -138,10 +199,22 @@ Relationships are deterministic and bounded. Current relationship types include
 `memory_touches_file`, `memory_mentions_symbol`, `file_contains_symbol`,
 `symbol_verified_by_test`, `command_verifies_test`, and `service_owns_file`.
 
-Staleness is signaled when freshness is below 50 or when a branch/worktree
-memory was captured at a different commit than the current context. A
+Staleness is signaled when freshness is below 50, when a branch/worktree
+memory in the same repository was captured at a different commit than the
+current context, or when a project memory in the same repository has a
+`verified_commit` that differs from the current commit. The commit checks need
+a commit on both sides. A
 contradiction signal is raised when same-scope memories share at least two
-topic terms but have opposite explicit negation polarity.
+topic terms but have opposite explicit negation polarity. A contradiction
+target must itself be eligible for recall.
+
+A correction hides its predecessor in normal recall and in contradiction targets
+only when the successor is not owned by a different person than the predecessor.
+In the file store the owner is the account that owns the memory id. A successor
+with no owner (an unscoped library call, or data from before accounts) counts. A
+`supersedes` link from another account is stored and exported unchanged, never
+rejected at import, and has no effect on this account's results. PostgreSQL
+compares `person_id` in the query.
 
 ## Layer 2 measurement
 
@@ -167,7 +240,7 @@ stability, branch scope precision, and stale/contradiction signal coverage.
 
 - `crates/core/src/lib.rs` implements scope derivation and filtered retrieval.
 - `crates/server/src/lib.rs` exposes REST filters.
-- `crates/server/src/mcp.rs` exposes MCP filters.
+- `crates/client/src/tools.rs` carries the MCP and CLI filters to REST.
 - `crates/core/src/lib.rs` extracts session handoff fields and provides resume
   and unresolved retrieval.
 - `crates/core/src/lib.rs` provides deterministic decision reasons, bounded code

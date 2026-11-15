@@ -28,6 +28,14 @@ a below-75 confidence cutoff.
    expired. This applies to search, context, resume, unresolved work,
    why-changed, lessons, and project listing. Project listing keeps its
    same-project form of that filter.
+   "Same person" is a rule on the successor, not on the link. In the file store
+   a link counts unless the successor has an owner that differs from the
+   target's owner, so a target with no owner is not hidden by an owned successor
+   from another account. A successor with no owner (an unscoped library capture, or
+   data from before accounts) still counts. The link is stored and exported
+   unchanged. It is inert, not rejected, so an export with an unknown target
+   stays importable, and it takes effect again only for a successor of the same
+   owner. PostgreSQL already compares `person_id` in its query.
 4. When the target is a memory with a `project_id`, the correction copies
    that `project_id`. Observations have no `project_id`. Context and scope
    inheritance stay as they are.
@@ -38,7 +46,8 @@ a below-75 confidence cutoff.
 ## Consequences
 
 - The old record remains available in storage and export. Normal recall
-  returns the correction.
+  returns the correction and does not report the predecessor as an active
+  contradiction while a live successor exists.
 - Forgetting or expiring the correction makes the older memory eligible for
   normal recall again, because the skip requires a live successor.
 - A later graph edge can build on the stored `supersedes` link. This decision

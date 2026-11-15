@@ -23,10 +23,44 @@ Authorization: Bearer <account-token>
 }
 ```
 
+A capture does the same without a call. When an account-owned observation (file
+store `capture_for_account`, PostgreSQL device `sync/push`) carries
+`context.repository`, the trimmed repository selects a project: one the person
+owns first, then one the person is a member of, otherwise a new project (name is
+the repository) owned by the capturing person is created. A project with no owner
+record is never used or claimed. The branch is then registered on the owned
+project, idempotently; an empty branch or `HEAD` is skipped, and a member of a
+shared project registers no branch (branch writes are owner-only). A failure is
+logged and does not fail the capture.
+
 Registration is idempotent for the same person and repository. Project
-listing is available at `GET /cairn-memory/projects`.
+listing is available at `GET /cairn-memory/projects`. In the file store it lists
+the projects the caller owns and the projects shared with the caller as a member;
+the `role` field is in [share-layer5](share-layer5.md).
 
 ## Repository branches and worktrees
+
+In the file store the project registry operations are owner-only, for reads and
+writes: branch and worktree registration and listing, evidence entity
+registration and listing, freshness history, branch merge confirmation and branch
+close. After authentication the caller must own a project that has an owner
+record. A current member, a removed member and a registered outsider who know the
+project id get `account does not own the project`, with no registry content in the
+error, and nothing is written. An unknown project is `unknown project: <id>`. A
+project with no owner record is not usable until the existing project registration
+claims it (the first account that registers the repository claims it; that is not
+proof of the original owner and predates this rule). Members read only what the
+owner explicitly shares (see [share-layer5](share-layer5.md)). Merge confirmation
+also refuses a source memory another account owns (`unknown memory or event`),
+like promotion, and it looks up an existing promotion of the source only among the
+project's rows the owner owns or that have no owner, so a stored row another
+account owns is never returned, aliased by the branch or updated; the owner's real
+promotion is created instead. A repeat merge of an already merged branch returns the
+recorded merge row only when it is such an owner-visible row of the project;
+otherwise (an old branch whose recorded row is another account's, or another
+project's) it fails with `project branch is already merged`, and the old record is
+not repaired. The MCP tool `memory_project_freshness` is owner-only
+as well. In the PostgreSQL adapter, branch and worktree registration for a project the caller does not own, or that does not exist, returns `unknown project: <id>` (a validation error, HTTP 400, the same text for both) instead of a database foreign-key error; its registry reads and maintenance still return empty results for such a project and are not changed here.
 
 Branches are registered under a person-owned project:
 
@@ -62,7 +96,8 @@ not grant access to another person.
 
 Promoted decisions can be inspected at
 `GET /cairn-memory/projects/{projectId}/memories`; forgotten or expired
-decisions are omitted.
+decisions are omitted. A file-store row that another account owns is stored but
+not listed, and it cannot supersede a listed row.
 
 ## Merge confirmation and branch closure
 
@@ -88,6 +123,21 @@ status from `active` to `merged`, and records the decision link and redacted
 reason. Worktrees attached to the branch become `removed`. Repeating the same
 confirmation is idempotent; a different confirmation for an already resolved
 branch is rejected.
+
+Under the automation-first rule ([ADR 0009](../adr/0009-explicit-project-promotion.md))
+merge confirmation on a project that has members is a human action, while a
+project with no other members may be confirmed by an agent. Since 2026-11-14
+the signal is the credential ([ADR 0008](../adr/0008-self-hosted-account-authentication.md)):
+a device token (an agent) is refused with `403` and `web console session
+required; device tokens cannot do this` when the project has any member besides
+its owner, invited or team, in both the file-store and PostgreSQL routers. A
+device token may confirm a merge on a solo project, and the web session may
+confirm on any owned project. Removing a member is web-only too, so a device token
+cannot remove members to make a project solo. In PostgreSQL the merge locks the
+project row, so it cannot race a concurrent invite. The member check runs after the owned-project
+check, so an unknown or foreign project keeps its existing error. The other
+project routes in this contract accept a device token for the owner's account
+([permission table](auth-layer3.md#device-tokens-are-agent-credentials)).
 
 An abandoned branch can be closed without promotion:
 
@@ -119,15 +169,29 @@ Authorization: Bearer <account-token>
 The response is a new `decision` memory with `scope: project`. It includes:
 
 - `project_id` and repository context;
-- `promoted_from` source memory ID;
-- original source event IDs;
+- `promoted_from` source memory ID, returned only to the person who owns
+  the source memory while it is live (it is `null` for a member and after the
+  source is forgotten, expired, or superseded);
+- no `source_event_ids` (empty): the copy is not tied to the personal memory's
+  events;
 - files, symbols, commands, and tests from the source evidence;
 - redacted `promotion_reason`;
 - durable retention.
 
 The source memory remains unchanged. Branch, worktree, and commit fields are
 removed from the promoted project context. Repeating the same promotion
-returns the original promoted memory.
+returns the original promoted memory while that copy is live. After the copy is
+forgotten or expired, promoting the personal memory again creates a new live copy
+(the forgotten id stays a tombstone); branch merge confirmation follows the same
+rule.
+
+Project actions never delete personal memory. Forget and retained delete of the
+promoted copy, by the project owner, hide only the copy and its shares; the
+personal memory and its events stay recallable. Forgetting the personal memory
+does not hide the copy. A live correction of the personal memory hides the copy
+(ADR 0010), and promoting the correction creates a new copy whose `supersedes`
+is the earlier copy, not the personal id. See
+[ADR 0009](../adr/0009-explicit-project-promotion.md).
 
 Secret, forgotten, expired, or repository-mismatched memories are rejected.
 Project registration and promotion are person-scoped. Explicit cross-person
@@ -169,9 +233,12 @@ Active project entities are listed and registered on the same path:
 }
 ```
 
-`kind` and `key` are required. `content`, `sourceMemoryId` (alias
-`source_memory_id`), and `commit` are optional. `GET` returns active entities
-for that project. Registering the same kind and key again returns the existing
+`kind` and `key` are required. `kind` must be `file`, `symbol`, `decision`,
+`handoff`, or `runbook`; `key` is at most 512 bytes. `content`, `sourceMemoryId`
+(alias `source_memory_id`), and `commit` are optional. `content` is redacted and
+at most 2048 bytes. A `sourceMemoryId` must be a memory in the project's
+repository that no other account owns. `GET` returns active entities for that
+project. Registering the same kind and key again returns the existing
 entity.
 
 ## Freshness history
@@ -197,6 +264,19 @@ Authorization: Bearer <account-token>
 `project_id`, `current_commit`, `stale_memory_ids`, `superseded_memory_ids`,
 `active_memory_ids`, and `checked_at`. The call lists those ids and does not
 change stored memories.
+
+Maintenance is owner-only in the file store. After authentication it requires the
+caller to be the project owner: a current member, a removed member and a registered
+outsider who know the project id get `account does not own the project`, and the
+error carries no memory id or commit. An unknown project is `unknown project:
+<id>`. A project with no owner record (data from before accounts) is not
+maintainable by any account until the existing project registration for that
+repository claims it. The first account that registers the repository claims it,
+which is not proof of the original owner; that behavior predates this rule, and
+there is no other claim or repair. A member reads only what the owner
+explicitly shares (see [share-layer5](share-layer5.md)); there is no
+member-scoped maintenance. The PostgreSQL adapter selects the caller's own rows and
+is not changed here.
 
 ## Confirmation
 
@@ -228,35 +308,35 @@ correction is live.
 
 ## CLI and MCP
 
-The file-backed `cairn` binary and the local MCP adapter call the same store
-methods. Each project command and tool passes the account token through
-`authenticate_account`. There is no tokenless project API.
+The `cairn` binary and `cairn mcp` call the project routes above with the device token from
+`cairn setup` (see [mcp-layer1](mcp-layer1.md)); a device token resolves to its account. The
+commands take no account token and no store path. Each command prints the server JSON and
+exits 1 with the server's message on an error:
 
-CLI commands print the store JSON and exit 1 on `StoreError`:
+- `cairn project-register <repository> <name> [default-branch]`
+- `cairn project-list`
+- `cairn promote <project-id> <memory-id> <reason>`
+- `cairn project-memories <project-id>`
+- `cairn project-freshness <project-id>`
 
-- `cairn account-bootstrap <store> <email> <password>`
-- `cairn project-register <store> <account-token> <repository> <name> [default-branch]`
-- `cairn project-list <store> <account-token>`
-- `cairn promote <store> <account-token> <project-id> <memory-id> <reason>`
-- `cairn project-memories <store> <account-token> <project-id>`
-- `cairn project-freshness <store> <account-token> <project-id>`
+MCP tools take the camelCase fields below. An unknown project is a tool error.
 
-MCP tools accept the camelCase fields below and the same names in snake_case.
-A missing token or unknown project is a tool error.
+- `memory_project_list`
+- `memory_project_register` (`repository`, `name`, optional `defaultBranch`)
+- `memory_promote` (`projectId`, `memoryId`, `reason`)
+- `memory_project_memories` (`projectId`)
+- `memory_project_freshness` (`projectId`)
 
-- `memory_account_bootstrap` (`email`, `password`)
-- `memory_project_register` (`accountToken`, `repository`, `name`, optional `defaultBranch`)
-- `memory_promote` (`accountToken`, `projectId`, `memoryId`, `reason`)
-- `memory_project_memories` (`accountToken`, `projectId`)
-- `memory_project_freshness` (`accountToken`, `projectId`)
+Branch merge confirmation has no CLI command or tool; on a project with members it is
+web-only ([auth](auth-layer3.md)).
 
 ## Evidence
 
 - `docs/adr/0009-explicit-project-promotion.md`
 - `docs/adr/0010-correction-keeps-linked-history.md`
 - `crates/core/src/lib.rs`
-- `crates/core/src/bin/cairn.rs`
-- `crates/server/src/mcp.rs`
+- `crates/client/src/tools.rs`
+- `crates/client/src/bin/cairn.rs`
 - `scripts/smoke_layer4_cli.sh`
 - `crates/storage/src/lib.rs`
 - `migrations/0003_layer4_projects.sql`

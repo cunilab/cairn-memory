@@ -43,22 +43,24 @@ Start with the [documentation index](docs/README.md). The documents are delibera
 
 Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. Layer 5 project sharing, teams, membership, maintenance, and the `apps/web` console are implemented. Federation remains later work. File-store authorization and sync deletion behavior are covered by the focused tests for those paths; they are not a separate finished product claim.
 
-## Layer 1 prototype
+## Agent CLI and MCP
 
-The first Rust core and CLI exercise the local capture-to-recall path without a provider, database server, or UI:
+People use the web console. Agents use the `cairn` CLI, the hooks, and `cairn mcp`, all of which call the server's REST API with a device token. Start a server, create the first account and a device token in the web console, then:
 
 ```bash
-cargo run -p cairn-core --bin cairn -- init /tmp/cairn-memory.json
-cargo run -p cairn-core --bin cairn -- start /tmp/cairn-memory.json session-1 cairn-demo main worktree-1 abc1234
-cargo run -p cairn-core --bin cairn -- capture /tmp/cairn-memory.json session-1 event-1 "The session middleware validates the signed cookie before loading the user."
-cargo run -p cairn-core --bin cairn -- end /tmp/cairn-memory.json session-1
-cargo run -p cairn-core --bin cairn -- context /tmp/cairn-memory.json "signed cookie" 5
-cargo run -p cairn-core --bin cairn -- forget /tmp/cairn-memory.json event-1
-cargo run -p cairn-core --bin cairn -- export /tmp/cairn-memory.json /tmp/cairn-memory-export.json
-cargo run -p cairn-core --bin cairn -- import /tmp/cairn-memory-restored.json /tmp/cairn-memory-export.json
+cargo run -p cairn-server -- --store /tmp/cairn-memory.json --bind 127.0.0.1:3111
+printf %s "<device-token>" | cargo run -p cairn-client --bin cairn -- setup http://127.0.0.1:3111
+cargo run -p cairn-client --bin cairn -- start session-1 cairn-demo main worktree-1 abc1234
+cargo run -p cairn-client --bin cairn -- capture session-1 event-1 "The session middleware validates the signed cookie before loading the user."
+cargo run -p cairn-client --bin cairn -- end session-1
+cargo run -p cairn-client --bin cairn -- context "signed cookie" 5
+cargo run -p cairn-client --bin cairn -- forget event-1
+cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
 ```
 
-The local core is a prototype adapter, and the first REST compatibility server is now available:
+`setup` reads the token from stdin (a hidden prompt on a terminal, so it stays out of the process list and shell history) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host. Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
+
+The first REST compatibility server is:
 
 ```bash
 cargo run -p cairn-server -- --store /tmp/cairn-memory.json --bind 127.0.0.1:3111
@@ -85,10 +87,10 @@ http://127.0.0.1:3111/viewer
 
 It is an exception-driven control surface for recent captures, durable memories, provenance, lifecycle state, diagnostics, search, and forget—not a manual knowledge-base editor.
 
-The first standalone MCP compatibility transport is also available over stdio:
+The MCP server runs over stdio as a proxy to the same REST API, using the configured device token:
 
 ```bash
-cargo run -p cairn-server -- mcp --store /tmp/cairn-memory.json
+cargo run -p cairn-client --bin cairn -- mcp
 ```
 
 It supports the Layer 1/2 memory tools over newline-delimited JSON-RPC, including session capture, consolidation, recall, resume, unresolved-work, why-changed, explicit save, lifecycle diagnostics, forget, correction, export, and import. The export format is versioned and idempotently restorable. The first Next.js console is `apps/web`. The embedded viewer at `/viewer` remains.
@@ -107,7 +109,7 @@ printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"too
   | python3 scripts/cairn_hook.py
 ```
 
-The adapter forwards to the local REST server; Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery.
+The adapter needs `CAIRN_DEVICE_TOKEN` (a device token from the web console) and posts `sync/push` to `CAIRN_URL` (default `http://127.0.0.1:3111`); Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery. A reused event id with different content is a `409`.
 
 To verify the complete local application flow with real server processes and temporary stores:
 
@@ -158,3 +160,24 @@ CAIRN_DATABASE_URL="$CAIRN_DATABASE_URL" ./scripts/smoke_postgres.sh
 
 - Inspiration: [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory)
 - Documentation template: [cunilab/Document-Template-for-Product-Development](https://github.com/cunilab/Document-Template-for-Product-Development)
+
+## Development with Docker
+
+An isolated stack (PostgreSQL 16, server built from source, Next.js console) runs
+under the Compose project `cairn-dev`, bound to 127.0.0.1 only:
+
+```sh
+./scripts/dev_up.sh          # build, start, wait until healthy; creates .env.dev
+./scripts/dev_down.sh        # stop, keep the database volume
+./scripts/dev_down.sh --wipe # stop and drop the database volume
+```
+
+| Service  | URL / address                                  |
+| -------- | ---------------------------------------------- |
+| web      | http://127.0.0.1:53000/login                   |
+| server   | http://127.0.0.1:58080/cairn-memory/health     |
+| postgres | 127.0.0.1:55432 (user `cairn`, db `cairn`)     |
+
+`.env.dev` holds a generated dev-only database password and is git-ignored.
+Images are rebuilt from the working tree on each `dev_up.sh`; there is no hot
+reload.

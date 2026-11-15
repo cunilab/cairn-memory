@@ -22,6 +22,13 @@ Bootstrap remains the first account only. Register fails before bootstrap,
 rejects a duplicate email, and returns an account session. The share target
 must already exist.
 
+Every owner route below accepts the owner's web session token or a device token
+that belongs to the owner's account; a device token is not a member credential.
+See the [permission table](auth-layer3.md#device-tokens-are-agent-credentials).
+Removing a team member is the exception: it needs the web session, and a device
+token gets `403` (`web console session required; device tokens cannot do this`),
+because removing members would reopen the solo-project merge path for agents.
+
 ## Invite
 
 ```http
@@ -78,14 +85,16 @@ the original id until the owner shares the successor.
 `GET /cairn-memory/projects` includes projects the account owns and projects
 where that account is a member, so the member can open the shared read. Each
 listed project includes `role`: `owner` or `member`.
-`GET /cairn-memory/projects/{projectId}/memories` stays owner-only. Search and
-context for the member do not return the owner's private or unshared records.
+`GET /cairn-memory/projects/{projectId}/memories` stays owner-only and lists
+only rows the owner owns or that have no owner, not a row another account owns.
+Search and context for the member do not return the owner's private or unshared
+records.
 
-A shared memory object includes `share_reason` and `source_memory_id` when
-those values exist. `source_memory_id` is the promoted source memory.
+A shared memory object includes `share_reason` when it exists.
 `share_reason` is `manual` for an owner share and
-`auto_nonsensitive_project_memory` for a policy share. The memory's existing
-`promoted_from` and `source_event_ids` stay on the object.
+`auto_nonsensitive_project_memory` for a policy share. The object never
+exposes the personal memory it was promoted from: `promoted_from` is `null`,
+there is no `source_memory_id`, and `source_event_ids` is empty.
 
 ## Share policy
 
@@ -201,7 +210,8 @@ POST /cairn-memory/projects/{projectId}/team/members/remove
 }
 ```
 
-Only the owner can remove a team member. Removal deletes that person's
+Only the owner's web session can remove a team member; a device token gets `403`.
+Removal deletes that person's
 project membership and revokes active shares for that project. A later shared
 read by the former member is empty. A person who was never a member still
 receives the non-member error. The memory stays stored for the owner.
@@ -223,7 +233,10 @@ Delete is owner-only for a memory the owner already stores. It hides that
 memory from normal recall with the same tombstone as forget, keeps the record
 in storage and export, and writes `memory_delete_retained`. A member delete of
 a shared memory fails with the existing not-owner error. Delete does not purge
-other devices. `id` accepts the same aliases as forget.
+other devices. `id` accepts the same aliases as forget. Deleting or forgetting a
+project copy affects only that copy and its shares: it never hides the personal
+memory it was promoted from or that memory's source events, and forgetting the
+personal memory does not hide the copy ([ADR 0009](../adr/0009-explicit-project-promotion.md)).
 
 ## Revoke
 
@@ -253,40 +266,36 @@ id, and memory id. It does not contain memory content, tokens, or passwords.
 
 ## CLI and MCP
 
-The file-backed `cairn` binary and the local MCP adapter call the same store
-methods. Each share command and tool passes the account token through
-`authenticate_account`. A missing token, unknown email, or non-owner action
-is an error.
+The `cairn` binary and `cairn mcp` call the share routes above with the device token from
+`cairn setup` (see [mcp-layer1](mcp-layer1.md)). The commands take no account token and no
+store path. A second account is created in the web console, which also issues that
+account's device token. An unknown email or a non-owner action is an error. Each command
+prints the server JSON and exits 1 with the server's message on an error:
 
-CLI commands print the store JSON and exit 1 on `StoreError`:
+- `cairn project-invite <project-id> <email>`
+- `cairn project-share <project-id> <memory-id> <email>`
+- `cairn project-shared <project-id>`
+- `cairn project-revoke <project-id> <memory-id> <email>`
+- `cairn project-team-create <project-id> <name>`
+- `cairn project-team <project-id>`
+- `cairn project-team-add <project-id> <email>`
+- `cairn delete-memory <memory-id>`
 
-- `cairn account-register <store> <email> <password>`
-- `cairn project-invite <store> <owner-token> <project-id> <email>`
-- `cairn project-share <store> <owner-token> <project-id> <memory-id> <email>`
-- `cairn project-shared <store> <member-token> <project-id>`
-- `cairn project-revoke <store> <owner-token> <project-id> <memory-id> <email>`
-- `cairn project-team-create <store> <owner-token> <project-id> <name>`
-- `cairn project-team <store> <account-token> <project-id>`
-- `cairn project-team-add <store> <owner-token> <project-id> <email>`
-- `cairn project-team-remove <store> <owner-token> <project-id> <email>`
-- `cairn delete-memory <store> <owner-token> <memory-id>`
+`delete-memory` prints nothing on success (the route returns `204`).
 
-`delete-memory` calls `delete_for_account` and prints `null` on success.
-The team commands call `create_project_team`, `project_team`,
-`add_project_team_member`, and `remove_project_team_member`.
+MCP tools take the camelCase fields below.
 
-MCP tools accept the camelCase fields below and the same names in snake_case.
+- `memory_project_invite` (`projectId`, `email`)
+- `memory_project_share` (`projectId`, `memoryId`, `email`)
+- `memory_project_shared` (`projectId`)
+- `memory_project_revoke` (`projectId`, `memoryId`, `email`)
+- `memory_project_team_create` (`projectId`, `name`)
+- `memory_project_team` (`projectId`)
+- `memory_project_team_add` (`projectId`, `email`)
+- `memory_delete` (`id`)
 
-- `memory_account_register` (`email`, `password`)
-- `memory_project_invite` (`accountToken`, `projectId`, `email`)
-- `memory_project_share` (`accountToken`, `projectId`, `memoryId`, `email`)
-- `memory_project_shared` (`accountToken`, `projectId`)
-- `memory_project_revoke` (`accountToken`, `projectId`, `memoryId`, `email`)
-- `memory_project_team_create` (`accountToken`, `projectId`, `name`)
-- `memory_project_team` (`accountToken`, `projectId`)
-- `memory_project_team_add` (`accountToken`, `projectId`, `email`)
-- `memory_project_team_remove` (`accountToken`, `projectId`, `email`)
-- `memory_delete` (`accountToken`, `id`)
+Removing a team member is web-only: a device token is `403`, so the CLI and MCP have no
+command or tool for it.
 
 ## Viewer
 

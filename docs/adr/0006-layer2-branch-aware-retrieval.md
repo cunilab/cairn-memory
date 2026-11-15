@@ -43,6 +43,14 @@ identity, synchronization, embeddings, or a graph database.
   membership, promotion, and collaboration remain later work.
 - Existing exports remain version 1 because the new fields are additive and
   older records receive safe defaults during deserialization.
+- PostgreSQL keeps a 512-match search window. `omitted_count` still reports every
+  eligible match not returned; `omitted_memory_ids` is bounded by the window, and
+  the hint then asks the caller to narrow the query or filter
+  ([contract](../contracts/continuity-v1.md)).
+- PostgreSQL `why-changed` orders all eligible matches with the core decision and
+  relationship helpers before applying that window, so decision evidence is not
+  dropped by the lexical cut. Its work grows with the number of matches, not with
+  512.
 
 ## Alternatives considered
 

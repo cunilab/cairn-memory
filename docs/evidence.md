@@ -10,7 +10,7 @@ status: draft
 | --- | --- |
 | Scope | Phase 0 product definition, upstream contract inventory, policy, fixtures, and golden corpus |
 | Date | 2026-10-25 |
-| Implementation state | Local Layer 1 personal-memory vertical slice is complete: `cairn-core`, REST, MCP, CLI, hook adapter, export/import, and local viewer exist; the Next.js product console is later work |
+| Implementation state | Local Layer 1 personal-memory vertical slice is complete: `cairn-core`, REST, hook adapter, export/import, and local viewer exist; the CLI and MCP are device-token network clients (`crates/client`); `apps/web` is the first Next.js console |
 
 ## Result
 
@@ -75,7 +75,7 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 
 ## Limitations
 
-- The Rust core, REST transport, and MCP stdio transport described by this Phase 0 evidence are local adapters; the Layer 3 PostgreSQL boundary is tracked separately in the Layer 3 contracts and migration evidence.
+- The Rust core and REST transport described by this Phase 0 evidence are local adapters, and the MCP stdio transport is now the `cairn mcp` REST client; the Layer 3 PostgreSQL boundary is tracked separately in the Layer 3 contracts and migration evidence.
 - The local Layer 1 retention policy uses a 30-day default for temporary raw observations; product-wide retention durations remain policy-configurable later.
 - Full upstream AgentMemory registry parity and the Next.js product console remain outside this local Layer 1 completion gate; PostgreSQL-derived Layer 2 retrieval is now covered by the Layer 3 checks.
 - `scripts/smoke_full_flow.sh` is the end-to-end acceptance check: it uses actual Cairn server processes, the real hook adapter, temporary stores, HTTP requests, restart recovery, correction, forget, and restore verification.
@@ -91,7 +91,8 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - Project freshness is covered by stale retrieval against a different commit and explicit verification through `/cairn-memory/projects/verify`; verification preserves provenance while restoring freshness to 100.
 - Project entity inspection is covered by branch/worktree registration and project-memory listing in the local and PostgreSQL tests/smoke flow; registration is person-scoped and idempotent.
 - Merge confirmation and branch closure are covered by local and PostgreSQL tests: merge evidence is branch-matched, project freshness is reset to the merge commit, retries reuse the same decision, attached worktrees are removed, and closed branches cannot be merged.
-- The viewer is a dependency-free local HTML surface served by `cairn-server`; the planned Next.js product console remains a later UI layer.
+- The embedded viewer is a dependency-free local HTML surface served by `cairn-server`; `apps/web` is the first Next.js console and the viewer remains.
+- The CLI and MCP no longer open a store file or take an account token. `cargo test -p cairn-client` passed on 2026-11-15 (15 unit tests and 5 integration tests in `crates/client/tests/agent_flow.rs`, which run the real `cairn` binary and `cairn mcp` against the file-store router; the PostgreSQL case is ignored without `CAIRN_TEST_DATABASE_URL`). The credential rules are in [CM-CONTRACT-008](contracts/auth-layer3.md) and the tool table in [CM-CONTRACT-002](contracts/mcp-layer1.md).
 - The MCP adapter covers the Layer 1 compatibility set and direct capture aliases, not the upstream full registry or modern protocol-era discovery.
 - The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](contracts/export-v1.md).
 - The golden corpus defines expected behavior but has not been scored against a running implementation.

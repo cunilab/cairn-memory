@@ -33,11 +33,11 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** One person gets useful automatic memory on one machine without manually saving, tagging, or filing anything.
 
-> **Layer 1 status:** The local personal-memory vertical slice is complete: automatic hook capture, lifecycle classification, deterministic consolidation, lessons, corrections, retention sweep, REST, MCP, export/import, CLI, and the local viewer are all implemented and verified. Full upstream registry parity, authentication, PostgreSQL, and the Next.js console remain later tracks.
+> **Layer 1 status:** The local personal-memory vertical slice is complete: automatic hook capture, lifecycle classification, deterministic consolidation, lessons, corrections, retention sweep, REST, export/import, and the local viewer were implemented and verified here; the CLI and MCP were later rebuilt as device-token network clients (Layer 3). Full upstream registry parity remains a later track.
 
 - [x] Create the smallest Rust workspace and domain model needed for the vertical slice.
 - [x] Add the first AgentMemory-compatible REST transport for health, readiness, session lifecycle, observation capture, search, context, forget, and explicit remember.
-- [x] Add a standalone MCP stdio transport with the Layer 1 core tool set and direct capture aliases.
+- [x] Add an MCP stdio transport (`cairn mcp`, a REST client in `crates/client`) with the Layer 1 core tool set and direct capture aliases.
 - [x] Preserve the Layer 1 capture, REST, MCP, and export outcomes through local compatibility adapters; full upstream registry parity remains a separate compatibility track.
 - [x] Capture sessions and observations with bounded payloads and secret filtering.
 - [x] Classify importance, sensitivity, freshness, confidence, and temporary versus durable value.
@@ -47,7 +47,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 - [x] Implement keyword search and bounded context assembly over durable session context without requiring a remote LLM.
 - [x] Implement persisted forget/suppression behavior.
 - [x] Implement versioned export/import with idempotent restore and persisted forget tombstones.
-- [x] Provide a small CLI path for init, capture, session end, context, search, forget, lessons, corrections, export, and import.
+- [x] Provide a small agent CLI (`cairn`, a REST client) for session start and end, capture, context, search, forget, lessons, corrections, export, and import.
 - [x] Provide a small viewer for recent captures, memory detail, provenance, lifecycle state, diagnostics, search, and forget.
 - [x] Provide a portable hook adapter for automatic JSON capture into the REST boundary.
 
@@ -81,6 +81,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 - [x] Add server-authoritative PostgreSQL persistence for session summaries, explicit memories, forget tombstones, and keyword retrieval.
 - [x] Add PostgreSQL parity for context packs, corrections, lifecycle diagnostics, export/import, and advanced retrieval signals.
 - [x] Add device registration, rotation, revocation, and last-seen state.
+- [x] Make the web console the only place that creates, rotates, or revokes device tokens and manages accounts; agents (`cairn`, `cairn mcp`, the hook) use a device token only ([ADR 0008](adr/0008-self-hosted-account-authentication.md)).
 - [x] Add a bounded local spool/outbox and authenticated replay for short outages.
 - [x] Make replay idempotent and resumable after process, network, or server failure.
 - [x] Define what clients may cache and how revoked or deleted material is purged.
@@ -99,7 +100,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 > replay, project-scoped retrieval, branch/worktree registration, and project
 > memory inspection are implemented in file-backed and PostgreSQL modes.
 > Merge confirmation is implemented. Maintenance listing and linked correction
-> history are implemented. The file-backed CLI and MCP can register a project,
+> history are implemented. The `cairn` CLI and `cairn mcp` (device token) can register a project,
 > promote a memory, list project memories, and read freshness. Retiring project
 > entities is not part of this layer.
 
