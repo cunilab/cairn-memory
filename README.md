@@ -45,7 +45,7 @@ Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are pr
 
 ## Install and update
 
-Releases are tags on `main` published as GitHub Releases ([release process](docs/release.md)). Each release holds raw binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc` (`cairn-<target>[.exe]` for the CLI, `cairn-server-<target>[.exe]` for the server), the hook scripts, and `SHA256SUMS`. Download the `cairn` asset for your platform, check it against `SHA256SUMS`, make it executable, and put it on your `PATH` as `cairn`:
+Releases are tags on `main` published as GitHub Releases ([release process](docs/release.md)). Each release holds raw binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static, any Linux distribution), and `x86_64-pc-windows-msvc` (`cairn-<target>[.exe]` for the CLI, `cairn-server-<target>[.exe]` for the server), the hook scripts, and `SHA256SUMS`. Download the `cairn` asset for your platform, check it against `SHA256SUMS`, make it executable, and put it on your `PATH` as `cairn`:
 
 ```bash
 cairn --version
@@ -53,7 +53,7 @@ cairn update --check   # report only
 cairn update           # install the latest release and refresh the hook scripts
 ```
 
-`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` into `hook/` beside the config file (see [examples](examples/README.md)). Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` of the release that matches the installed binary into `hook/` beside the config file (see [examples](examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
 
 ## Agent CLI and MCP
 

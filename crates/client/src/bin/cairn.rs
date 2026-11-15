@@ -221,9 +221,10 @@ fn setup(args: &[String]) -> Result<(), Error> {
     let path = config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
-    // The hook scripts come from the latest release; being offline must not undo a good setup.
+    // The hook scripts come from the release matching this binary; being offline (or running a
+    // build with no release) must not undo a good setup.
     match update::install_hooks() {
-        Ok(dir) => println!("Hook scripts installed in {}", dir.display()),
+        Ok(message) => println!("{message}"),
         Err(error) => eprintln!(
             "cairn: warning: hook scripts were not installed ({error}); `cairn update` retries"
         ),
