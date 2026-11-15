@@ -3,8 +3,13 @@ use cairn_server::app;
 use cairn_server::postgres_app;
 use cairn_storage::PostgresStore;
 use std::env;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::process;
+use std::time::Duration;
+
+/// How often sessions idle for over 30 minutes are closed without waiting for new activity.
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[tokio::main]
 async fn main() {
@@ -23,6 +28,11 @@ async fn main() {
                 eprintln!("failed to connect to Cairn PostgreSQL storage: {error}");
                 process::exit(1);
             });
+        let sweeper = store.clone();
+        spawn_idle_sweep(move || {
+            let store = sweeper.clone();
+            async move { store.sweep_idle_sessions().await }
+        });
         postgres_app(store)
     } else {
         let store_path = option_value(&args, "--store").unwrap_or_else(|| {
@@ -32,6 +42,11 @@ async fn main() {
         let state = AppState::open(store_path).unwrap_or_else(|error| {
             eprintln!("failed to open Cairn store: {error}");
             process::exit(1);
+        });
+        let sweeper = state.clone();
+        spawn_idle_sweep(move || {
+            let state = sweeper.clone();
+            async move { state.sweep_idle_sessions().await }
         });
         app(state)
     };
@@ -47,6 +62,21 @@ async fn main() {
         eprintln!("Cairn server stopped: {error}");
         process::exit(1);
     }
+}
+
+fn spawn_idle_sweep<F, Fut>(sweep: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(IDLE_SWEEP_INTERVAL);
+        tick.tick().await; // the first tick is immediate; a fresh start has nothing idle to close
+        loop {
+            tick.tick().await;
+            sweep().await;
+        }
+    });
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {

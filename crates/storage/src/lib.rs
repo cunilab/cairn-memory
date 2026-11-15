@@ -44,6 +44,7 @@ const TEAM_SPACE_MIGRATION: &str = include_str!("../../../migrations/0010_layer5
 const SYNC_DELETION_MIGRATION: &str = include_str!("../../../migrations/0011_sync_deletions.sql");
 const SESSION_PENDING_MIGRATION: &str =
     include_str!("../../../migrations/0012_session_summary_pending.sql");
+const ADMIN_ROLE_MIGRATION: &str = include_str!("../../../migrations/0013_admin_role.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 /// A session whose newest retained observation is older than this is finished on the next
 /// capture or session start of the same person.
@@ -165,6 +166,9 @@ impl PostgresStore {
         sqlx::raw_sql(SESSION_PENDING_MIGRATION)
             .execute(&self.pool)
             .await?;
+        sqlx::raw_sql(ADMIN_ROLE_MIGRATION)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -197,6 +201,7 @@ impl PostgresStore {
             person_id: person_id.clone(),
             email,
             status: AccountStatus::Active,
+            is_admin: true,
             created_at: now_seconds().to_string(),
         };
         let password_hash = cairn_core::hash_password(password)?;
@@ -205,7 +210,8 @@ impl PostgresStore {
         let session_id = format!("auth-{}", &token_hash[..16]);
         let expires_at = now_seconds() + AUTH_SESSION_SECONDS;
         sqlx::query(
-            "INSERT INTO cairn_accounts (person_id, email, password_hash) VALUES ($1, $2, $3)",
+            "INSERT INTO cairn_accounts (person_id, email, password_hash, is_admin)
+             VALUES ($1, $2, $3, true)",
         )
         .bind(&person_id)
         .bind(&account.email)
@@ -278,6 +284,7 @@ impl PostgresStore {
             person_id: person_id.clone(),
             email,
             status: AccountStatus::Active,
+            is_admin: false,
             created_at: now_seconds().to_string(),
         };
         let password_hash = cairn_core::hash_password(password)?;
@@ -318,6 +325,29 @@ impl PostgresStore {
         })
     }
 
+    /// Admin web session only. A device token fails with `WEB_ONLY_ERROR`, a non-admin
+    /// session with `ADMIN_ONLY_ERROR`.
+    pub async fn authenticate_admin(&self, token: &str) -> Result<Account, PostgresError> {
+        let account = self.authenticate_session(token).await?;
+        if account.is_admin {
+            Ok(account)
+        } else {
+            Err(PostgresError::Validation(
+                cairn_core::ADMIN_ONLY_ERROR.to_owned(),
+            ))
+        }
+    }
+
+    pub async fn register_account_as_admin(
+        &self,
+        token: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<AuthSessionResult, PostgresError> {
+        self.authenticate_admin(token).await?;
+        self.register_account(email, password).await
+    }
+
     pub async fn login(
         &self,
         email: &str,
@@ -325,7 +355,7 @@ impl PostgresStore {
     ) -> Result<AuthSessionResult, PostgresError> {
         let email = normalize_email(email)?;
         let row = sqlx::query(
-            "SELECT person_id, email, password_hash, status, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at
+            "SELECT person_id, email, password_hash, status, is_admin, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at
              FROM cairn_accounts WHERE email = $1",
         )
         .bind(email)
@@ -396,7 +426,7 @@ impl PostgresStore {
                  WHERE token_hash = $1 AND status = 'active'
                    AND last_seen_at < now() - interval '60 seconds'
              )
-             SELECT a.person_id, a.email, a.status,
+             SELECT a.person_id, a.email, a.status, a.is_admin,
                     EXTRACT(EPOCH FROM a.created_at)::bigint::text AS created_at
              FROM cairn_devices d JOIN cairn_accounts a ON a.person_id = d.person_id
              WHERE d.token_hash = $1 AND d.status = 'active' AND a.status = 'active'",
@@ -418,7 +448,7 @@ impl PostgresStore {
     async fn session_account(&self, token: &str) -> Result<Account, PostgresError> {
         let token_hash = cairn_core::hash_token(token);
         let row = sqlx::query(
-            "SELECT a.person_id, a.email, a.status,
+            "SELECT a.person_id, a.email, a.status, a.is_admin,
                     EXTRACT(EPOCH FROM a.created_at)::bigint::text AS created_at
              FROM cairn_auth_sessions s
              JOIN cairn_accounts a ON a.person_id = s.person_id
@@ -733,28 +763,54 @@ impl PostgresStore {
         .bind(MAX_SWEEP_SESSIONS)
         .fetch_all(&self.pool)
         .await;
-        let sessions = match sessions {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                eprintln!("cairn: automatic session close failed: {error}");
-                return;
-            }
-        };
-        for session_id in sessions {
-            // A summary the person hid comes back as `None` and is left as it is.
-            if let Err(error) = self.finish_session_summary(person_id, &session_id).await {
-                eprintln!("cairn: automatic session close failed: {error}");
-                let backoff = sqlx::query(
-                    "UPDATE cairn_sessions SET pending_since = now()
-                     WHERE person_id = $1 AND session_id = $2",
-                )
-                .bind(person_id)
-                .bind(&session_id)
-                .execute(&self.pool)
-                .await;
-                if let Err(error) = backoff {
-                    eprintln!("cairn: automatic session close failed: {error}");
+        match sessions {
+            Ok(sessions) => {
+                for session_id in sessions {
+                    self.finish_idle_session(person_id, &session_id).await;
                 }
+            }
+            Err(error) => eprintln!("cairn: automatic session close failed: {error}"),
+        }
+    }
+
+    /// Periodic close: the idle sweep for every person, at most `MAX_SWEEP_SESSIONS` sessions
+    /// per call, oldest pending first, from the same partial pending index. Failures are
+    /// logged and never returned; a failed session backs off like `finish_idle_sessions`.
+    pub async fn sweep_idle_sessions(&self) {
+        let sessions = sqlx::query_as::<_, (String, String)>(
+            "SELECT person_id, session_id FROM cairn_sessions
+             WHERE pending_since IS NOT NULL
+               AND pending_since < now() - make_interval(secs => $1)
+             ORDER BY pending_since LIMIT $2",
+        )
+        .bind(IDLE_SESSION_SECONDS as f64)
+        .bind(MAX_SWEEP_SESSIONS)
+        .fetch_all(&self.pool)
+        .await;
+        match sessions {
+            Ok(sessions) => {
+                for (person_id, session_id) in sessions {
+                    self.finish_idle_session(&person_id, &session_id).await;
+                }
+            }
+            Err(error) => eprintln!("cairn: automatic session close failed: {error}"),
+        }
+    }
+
+    async fn finish_idle_session(&self, person_id: &str, session_id: &str) {
+        // A summary the person hid comes back as `None` and is left as it is.
+        if let Err(error) = self.finish_session_summary(person_id, session_id).await {
+            eprintln!("cairn: automatic session close failed: {error}");
+            let backoff = sqlx::query(
+                "UPDATE cairn_sessions SET pending_since = now()
+                 WHERE person_id = $1 AND session_id = $2",
+            )
+            .bind(person_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await;
+            if let Err(error) = backoff {
+                eprintln!("cairn: automatic session close failed: {error}");
             }
         }
     }
@@ -995,7 +1051,7 @@ impl PostgresStore {
         let limit_bind = binds.len() + 1;
         let sql = format!(
             "{} WHERE {} ORDER BY ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) DESC,
-             m.memory_id ASC LIMIT ${limit_bind}",
+             (m.kind = 'decision') DESC, m.memory_id ASC LIMIT ${limit_bind}",
             memory_search_select_sql(),
             conditions.join(" AND ")
         );
@@ -2566,6 +2622,18 @@ impl PostgresStore {
         })
     }
 
+    /// The owner's current share policy for the project.
+    pub async fn share_policy(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<ProjectSharePolicy, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_owner(&account.person_id, project_id)
+            .await?;
+        self.load_share_policy(&account.person_id, project_id).await
+    }
+
     pub async fn share_candidates(
         &self,
         account_token: &str,
@@ -2986,7 +3054,7 @@ impl PostgresStore {
 
     async fn account_by_email(&self, email: &str) -> Result<Account, PostgresError> {
         let row = sqlx::query(
-            "SELECT person_id, email, status,
+            "SELECT person_id, email, status, is_admin,
                     EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at
              FROM cairn_accounts WHERE email = $1",
         )
@@ -3904,13 +3972,21 @@ impl PostgresStore {
                 )));
             }
         }
+        // A new row takes the pushed context. An empty row takes the first real one (the
+        // `start_session` rule); a real context is never replaced.
+        let empty_context = serde_json::to_value(WorkContext::default())?;
         sqlx::query(
             "INSERT INTO cairn_sessions (session_id, person_id, context)
-             VALUES ($1, $2, $3) ON CONFLICT (person_id, session_id) DO NOTHING",
+             VALUES ($1, $2, $3)
+             ON CONFLICT (person_id, session_id) DO UPDATE
+             SET context = EXCLUDED.context
+             WHERE ($4::jsonb || cairn_sessions.context) = $4::jsonb
+               AND EXCLUDED.context <> $4::jsonb",
         )
         .bind(&observation.session_id)
         .bind(&device.person_id)
         .bind(context.clone())
+        .bind(&empty_context)
         .execute(&mut *transaction)
         .await?;
         sqlx::query(
@@ -4853,6 +4929,7 @@ fn account_from_row(row: &PgRow) -> Result<Account, PostgresError> {
                 )));
             }
         },
+        is_admin: row.try_get("is_admin")?,
         created_at: row.try_get("created_at")?,
     })
 }

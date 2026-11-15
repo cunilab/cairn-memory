@@ -9,14 +9,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cairn_core::{
-    Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack, DEVICE_TOKEN_PREFIX,
-    Device, DeviceRegistration, ExportBundle, ImportResult, LifecycleInput, LifecycleSummary,
-    Memory, MemoryKind, MemoryStore, ObservationInput, Project, ProjectBranch, ProjectConflict,
-    ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent, ProjectMaintenanceReport,
-    ProjectMembership, ProjectMemoryShare, ProjectMergeResult, ProjectShareCandidate,
-    ProjectSharePolicyRecord, ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter,
-    RecallResult, Session, ShareCandidateDismissal, SharedProjectMemory, StoreError,
-    SyncDiagnostics, SyncPullResult, SyncPushResult, WEB_ONLY_ERROR, WorkContext,
+    ADMIN_ONLY_ERROR, Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack,
+    DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, ImportResult, LifecycleInput,
+    LifecycleSummary, Memory, MemoryKind, MemoryStore, ObservationInput, Project, ProjectBranch,
+    ProjectConflict, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
+    ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare, ProjectMergeResult,
+    ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord, ProjectTeam,
+    ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, Session,
+    ShareCandidateDismissal, SharedProjectMemory, StoreError, SyncDiagnostics, SyncPullResult,
+    SyncPushResult, WEB_ONLY_ERROR, WorkContext,
 };
 use cairn_storage::{PostgresError, PostgresStore};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,11 @@ impl AppState {
             store: Arc::new(Mutex::new(MemoryStore::open(path)?)),
             auth_rate_limiter: Arc::new(AuthRateLimiter::default()),
         })
+    }
+
+    /// Closes every person's idle sessions under the store lock. Failures are logged.
+    pub async fn sweep_idle_sessions(&self) {
+        self.store.lock().await.sweep_idle_sessions();
     }
 }
 
@@ -227,6 +233,9 @@ struct ListedProject {
     #[serde(flatten)]
     project: Project,
     role: String,
+    /// Owner projects only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    share_policy: Option<ProjectSharePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -418,7 +427,8 @@ impl From<PostgresError> for PostgresApiError {
 impl IntoResponse for PostgresApiError {
     fn into_response(self) -> Response {
         let error = self.0;
-        let status = if error.to_string().contains(WEB_ONLY_ERROR) {
+        let message = error.to_string();
+        let status = if message.contains(WEB_ONLY_ERROR) || message.contains(ADMIN_ONLY_ERROR) {
             StatusCode::FORBIDDEN
         } else if error.is_unauthorized() {
             StatusCode::UNAUTHORIZED
@@ -460,7 +470,10 @@ impl IntoResponse for ApiError {
             ),
             Self::Store(error) => {
                 let status = match &error {
-                    StoreError::Validation(message) if message.contains(WEB_ONLY_ERROR) => {
+                    StoreError::Validation(message)
+                        if message.contains(WEB_ONLY_ERROR)
+                            || message.contains(ADMIN_ONLY_ERROR) =>
+                    {
                         StatusCode::FORBIDDEN
                     }
                     StoreError::Validation(_) => StatusCode::BAD_REQUEST,
@@ -783,7 +796,11 @@ async fn postgres_auth_register(
     headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, PostgresApiError> {
-    postgres_reject_device_bearer(&state, &headers).await?;
+    // The admin check comes first so a caller without it cannot use up an email's quota.
+    state
+        .store
+        .authenticate_admin(postgres_token(&headers)?)
+        .await?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("register", &request.email))
@@ -793,7 +810,7 @@ async fn postgres_auth_register(
     Ok(Json(
         state
             .store
-            .register_account(&request.email, &request.password)
+            .register_account_as_admin(postgres_token(&headers)?, &request.email, &request.password)
             .await?,
     ))
 }
@@ -876,16 +893,23 @@ async fn postgres_list_projects(
     let projects = state.store.projects(token).await?;
     let mut listed = Vec::with_capacity(projects.len());
     for project in projects {
-        let role = match state
+        let (role, share_policy) = match state
             .store
             .project_memories(token, &project.project_id)
             .await
         {
-            Ok(_) => "owner".to_owned(),
-            Err(error) if error.to_string().contains("does not own") => "member".to_owned(),
+            Ok(_) => (
+                "owner".to_owned(),
+                Some(state.store.share_policy(token, &project.project_id).await?),
+            ),
+            Err(error) if error.to_string().contains("does not own") => ("member".to_owned(), None),
             Err(error) => return Err(error.into()),
         };
-        listed.push(ListedProject { project, role });
+        listed.push(ListedProject {
+            project,
+            role,
+            share_policy,
+        });
     }
     Ok(Json(listed))
 }
@@ -1708,17 +1732,19 @@ async fn auth_register(
     headers: HeaderMap,
     Json(request): Json<AccountCredentialsRequest>,
 ) -> Result<Json<AuthSessionResult>, ApiError> {
-    reject_device_bearer(&*state.store.lock().await, &headers)?;
+    let token = auth_token(&headers)?;
+    let mut store = state.store.lock().await;
+    // The admin check comes first so a caller without it cannot use up an email's quota.
+    store.authenticate_admin(token).map_err(account_api_error)?;
     if !state
         .auth_rate_limiter
         .allow(&auth_rate_key("register", &request.email))
     {
         return Err(ApiError::RateLimited);
     }
-    let mut store = state.store.lock().await;
     Ok(Json(
         store
-            .register_account(&request.email, &request.password)
+            .register_account_as_admin(token, &request.email, &request.password)
             .map_err(account_api_error)?,
     ))
 }
@@ -1805,14 +1831,25 @@ async fn list_projects(
     let projects = store.projects(token).map_err(account_api_error)?;
     let mut listed = Vec::with_capacity(projects.len());
     for project in projects {
-        let role = match store.project_memories(token, &project.project_id) {
-            Ok(_) => "owner".to_owned(),
+        let (role, share_policy) = match store.project_memories(token, &project.project_id) {
+            Ok(_) => (
+                "owner".to_owned(),
+                Some(
+                    store
+                        .share_policy(token, &project.project_id)
+                        .map_err(account_api_error)?,
+                ),
+            ),
             Err(StoreError::Validation(message)) if message.contains("does not own") => {
-                "member".to_owned()
+                ("member".to_owned(), None)
             }
             Err(error) => return Err(account_api_error(error)),
         };
-        listed.push(ListedProject { project, role });
+        listed.push(ListedProject {
+            project,
+            role,
+            share_policy,
+        });
     }
     Ok(Json(listed))
 }
@@ -3256,11 +3293,12 @@ mod tests {
         let (_, health) =
             json_request(router.clone(), "GET", "/cairn-memory/health", Value::Null).await;
         assert_eq!(health["bootstrap_required"], false);
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email": "agent-other@example.test", "password": password}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let other_session = other["token"].as_str().unwrap();
@@ -3529,7 +3567,7 @@ mod tests {
         .await;
         let owner_token = owner["token"].as_str().unwrap();
         let owner_person = owner["account"]["person_id"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -3537,6 +3575,7 @@ mod tests {
                 "email": "sync-member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
@@ -5216,11 +5255,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":"correct horse battery staple"}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":"correct horse battery staple"}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5381,11 +5421,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":"correct horse battery staple"}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":"correct horse battery staple"}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5478,11 +5519,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":password}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":password}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5565,11 +5607,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":password}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":password}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5619,11 +5662,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":password}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":password}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5670,11 +5714,12 @@ mod tests {
             serde_json::json!({"email":"owner@example.test","password":password}),
         )
         .await;
-        let (_, other) = json_request(
+        let (_, other) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
             serde_json::json!({"email":"other@example.test","password":password}),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap().to_owned();
@@ -5787,7 +5832,7 @@ mod tests {
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -5795,6 +5840,7 @@ mod tests {
                 "email": "share-member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
@@ -6164,7 +6210,7 @@ mod tests {
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -6172,6 +6218,7 @@ mod tests {
                 "email": "policy-member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
@@ -6594,7 +6641,7 @@ mod tests {
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -6602,10 +6649,11 @@ mod tests {
                 "email": "team-member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
-        let (_, stranger) = json_request(
+        let (_, stranger) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -6613,6 +6661,7 @@ mod tests {
                 "email": "team-stranger@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let stranger_token = stranger["token"].as_str().unwrap();
@@ -7019,7 +7068,7 @@ mod tests {
         )
         .await;
         let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -7027,6 +7076,7 @@ mod tests {
                 "email": "member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
@@ -7093,6 +7143,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unauthorised_register_attempts_do_not_burn_the_email_quota() {
+        let path = temp_store_path("register-quota");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, admin) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email": "quota-admin@example.test", "password": password}),
+        )
+        .await;
+        let body = serde_json::json!({"email": "victim@example.test", "password": password});
+        for _ in 0..(AUTH_ATTEMPT_LIMIT + 2) {
+            let (status, _) = json_request_auth(
+                router.clone(),
+                "POST",
+                "/cairn-memory/auth/register",
+                body.clone(),
+                "not-a-real-token",
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            body,
+            admin["token"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = std::fs::remove_file(path);
+    }
+
+    async fn projects_as(router: &Router, token: &str) -> Value {
+        json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/projects",
+            Value::Null,
+            token,
+        )
+        .await
+        .1
+    }
+
+    #[tokio::test]
+    async fn file_project_list_reports_the_share_policy_to_owners_only() {
+        let path = temp_store_path("project-list-policy");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, owner) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email": "list-owner@example.test", "password": password}),
+        )
+        .await;
+        let owner_token = owner["token"].as_str().unwrap();
+        let (_, member) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            serde_json::json!({"email": "list-member@example.test", "password": password}),
+            owner_token,
+        )
+        .await;
+        let member_token = member["token"].as_str().unwrap();
+        let (_, project) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/projects",
+            serde_json::json!({"repository": "list-demo", "name": "List Demo"}),
+            owner_token,
+        )
+        .await;
+        let project_id = project["project_id"].as_str().unwrap();
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            &format!("/cairn-memory/projects/{project_id}/members"),
+            serde_json::json!({"email": "list-member@example.test"}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let listed = projects_as(&router, owner_token).await;
+        assert_eq!(listed[0]["role"], "owner");
+        assert_eq!(listed[0]["share_policy"], "manual");
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            &format!("/cairn-memory/projects/{project_id}/policy"),
+            serde_json::json!({"policy": "auto_nonsensitive_project_memory"}),
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = projects_as(&router, owner_token).await;
+        assert_eq!(
+            listed[0]["share_policy"],
+            "auto_nonsensitive_project_memory"
+        );
+        let listed = projects_as(&router, member_token).await;
+        assert_eq!(listed[0]["role"], "member");
+        assert!(listed[0].get("share_policy").is_none(), "{listed}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn file_register_needs_the_admin_web_session_and_me_reports_is_admin() {
+        let path = temp_store_path("admin-register-http");
+        let router = app(AppState::open(&path).unwrap());
+        let password = "correct horse battery staple";
+        let (_, admin) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({"email": "root@example.test", "password": password}),
+        )
+        .await;
+        let admin_token = admin["token"].as_str().unwrap();
+        let body = |email: &str| serde_json::json!({"email": email, "password": password});
+
+        // No bearer is 401, and nothing is created.
+        let (status, _) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            body("open@example.test"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, member) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            body("member@example.test"),
+            admin_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let member_token = member["token"].as_str().unwrap();
+        assert_eq!(member["account"]["is_admin"], false);
+
+        // A non-admin session is 403.
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            body("second@example.test"),
+            member_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // A device token is 403, even the admin's own.
+        let (status, device) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/devices/register",
+            serde_json::json!({"name": "hook", "deviceId": "admin-hook"}),
+            admin_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/register",
+            body("third@example.test"),
+            device["token"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (_, me) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/auth/me",
+            Value::Null,
+            admin_token,
+        )
+        .await;
+        assert_eq!(me["is_admin"], true);
+        let (_, me) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/auth/me",
+            Value::Null,
+            member_token,
+        )
+        .await;
+        assert_eq!(me["is_admin"], false);
+
+        // Only the created account exists.
+        for email in ["open", "second", "third"] {
+            let (status, _) = json_request(
+                router.clone(),
+                "POST",
+                "/cairn-memory/auth/login",
+                body(&format!("{email}@example.test")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{email}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn file_diagnose_needs_the_account_bearer_and_counts_owned_rows() {
         let path = temp_store_path("file-diagnose-auth");
         let router = app(AppState::open(&path).unwrap());
@@ -7102,11 +7365,13 @@ mod tests {
             ("bootstrap", "diagnose-owner@example.test"),
             ("register", "diagnose-member@example.test"),
         ] {
-            let (_, account) = json_request(
+            // The first account is the admin; the second is created with its session.
+            let (_, account) = json_request_auth(
                 router.clone(),
                 "POST",
                 &format!("/cairn-memory/auth/{route}"),
                 serde_json::json!({"email": email, "password": password}),
+                tokens.first().map_or("", String::as_str),
             )
             .await;
             tokens.push(account["token"].as_str().unwrap().to_owned());
@@ -7188,7 +7453,7 @@ mod tests {
         .await;
         let owner_token = owner["token"].as_str().unwrap();
         let owner_person = owner["account"]["person_id"].as_str().unwrap();
-        let (_, member) = json_request(
+        let (_, member) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/auth/register",
@@ -7196,6 +7461,7 @@ mod tests {
                 "email": "capture-member@example.test",
                 "password": password
             }),
+            owner["token"].as_str().unwrap(),
         )
         .await;
         let member_token = member["token"].as_str().unwrap();
@@ -7808,16 +8074,18 @@ mod tests {
         let path = temp_store_path("device-error-statuses");
         let router = app(AppState::open(&path).unwrap());
         let password = "correct horse battery staple";
-        let mut tokens = Vec::new();
+        let mut tokens: Vec<(String, String, String, String)> = Vec::new();
         for (route, email) in [
             ("bootstrap", "dev-a@example.test"),
             ("register", "dev-b@example.test"),
         ] {
-            let (_, account) = json_request(
+            // The first account is the admin; the second is created with its session.
+            let (_, account) = json_request_auth(
                 router.clone(),
                 "POST",
                 &format!("/cairn-memory/auth/{route}"),
                 serde_json::json!({"email": email, "password": password}),
+                tokens.first().map_or("", |(token, _, _, _)| token.as_str()),
             )
             .await;
             let token = account["token"].as_str().unwrap().to_owned();

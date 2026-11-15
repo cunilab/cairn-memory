@@ -29,6 +29,8 @@ const DEFAULT_TEMPORARY_RETENTION_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const AUTH_SESSION_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Servers map this error text to 403: a device token reached a web-only action.
 pub const WEB_ONLY_ERROR: &str = "web console session required; device tokens cannot do this";
+/// Servers map this error text to 403: a non-admin web session reached an admin action.
+pub const ADMIN_ONLY_ERROR: &str = "admin web session required; only the admin account can do this";
 const MIN_PASSWORD_BYTES: usize = 12;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,6 +417,9 @@ pub struct Account {
     pub email: String,
     #[serde(default)]
     pub status: AccountStatus,
+    /// Only the bootstrap account is an admin; it alone may create accounts.
+    #[serde(default)]
+    pub is_admin: bool,
     pub created_at: String,
 }
 
@@ -914,6 +919,8 @@ struct DeviceRecord {
 /// An open session whose newest observation is older than this is finished on the next capture
 /// or session start of the same person.
 const IDLE_SESSION_SECS: u64 = 30 * 60;
+/// At most this many idle sessions are finished per person per trigger; the next one continues.
+const MAX_SWEEP_SESSIONS: usize = 16;
 
 pub struct MemoryStore {
     path: PathBuf,
@@ -1065,13 +1072,18 @@ impl MemoryStore {
         if let Some(person_id) = person_id.as_deref() {
             self.finish_idle_sessions(person_id);
         }
-        if let Some(session) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.session_id == session_id && session.person_id == person_id)
+        if let Some(index) =
+            self.state.sessions.iter().position(|session| {
+                session.session_id == session_id && session.person_id == person_id
+            })
         {
-            return Ok(session.clone());
+            // A push-created row is empty; the first real context fills it, as on PostgreSQL.
+            let existing = &self.state.sessions[index];
+            if existing.context == WorkContext::default() && context != WorkContext::default() {
+                self.state.sessions[index].context = redact_work_context(&context);
+                self.persist()?;
+            }
+            return Ok(self.state.sessions[index].clone());
         }
 
         // A session has no sensitivity field. Redact the human-readable lists
@@ -1107,6 +1119,7 @@ impl MemoryStore {
             person_id: format!("person-{}", timestamp_nanos()),
             email,
             status: AccountStatus::Active,
+            is_admin: true,
             created_at: timestamp(),
         };
         self.state.accounts.push(AccountRecord {
@@ -1144,6 +1157,7 @@ impl MemoryStore {
             person_id: format!("person-{}", timestamp_nanos()),
             email,
             status: AccountStatus::Active,
+            is_admin: false,
             created_at: timestamp(),
         };
         self.state.accounts.push(AccountRecord {
@@ -1153,6 +1167,27 @@ impl MemoryStore {
         let session = self.issue_auth_session(account)?;
         self.persist()?;
         Ok(session)
+    }
+
+    /// Admin web session only. A device token fails with `WEB_ONLY_ERROR`, a non-admin
+    /// session with `ADMIN_ONLY_ERROR`.
+    pub fn authenticate_admin(&self, token: &str) -> Result<Account, StoreError> {
+        let account = self.authenticate_session(token)?;
+        if account.is_admin {
+            Ok(account)
+        } else {
+            Err(StoreError::Validation(ADMIN_ONLY_ERROR.to_owned()))
+        }
+    }
+
+    pub fn register_account_as_admin(
+        &mut self,
+        token: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<AuthSessionResult, StoreError> {
+        self.authenticate_admin(token)?;
+        self.register_account(email, password)
     }
 
     pub fn login(&mut self, email: &str, password: &str) -> Result<AuthSessionResult, StoreError> {
@@ -3127,6 +3162,17 @@ impl MemoryStore {
         Ok(member)
     }
 
+    /// The owner's current share policy for the project.
+    pub fn share_policy(
+        &self,
+        account_token: &str,
+        project_id: &str,
+    ) -> Result<ProjectSharePolicy, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_owner(&account, project_id)?;
+        Ok(self.project_share_policy(project_id))
+    }
+
     fn project_share_policy(&self, project_id: &str) -> ProjectSharePolicy {
         self.state
             .project_policies
@@ -3580,13 +3626,37 @@ impl MemoryStore {
         let event_id = capture.observation.event_id.clone();
         // The device person owns the new observation, so the account sees it like an observe.
         self.record_observation_owner(&device.person_id, &event_id);
+        // The hook never starts a session, so a push creates the row from the pushed context
+        // (as on PostgreSQL). An empty row takes the first real context; a real one is kept.
+        let session_id = capture.observation.session_id.clone();
+        let pushed_context = capture.observation.context.clone();
+        let mut created_session = false;
+        let mut filled_session = None;
+        if let Some(session) = self.state.sessions.iter_mut().find(|session| {
+            session.session_id == session_id
+                && session.person_id.as_deref() == Some(device.person_id.as_str())
+        }) {
+            if session.context == WorkContext::default() && pushed_context != WorkContext::default()
+            {
+                filled_session = Some(std::mem::replace(&mut session.context, pushed_context));
+            }
+        } else {
+            created_session = true;
+            self.state.sessions.push(Session {
+                session_id: session_id.clone(),
+                person_id: Some(device.person_id.clone()),
+                context: pushed_context,
+                started_at: timestamp(),
+                ended_at: None,
+            });
+        }
         let previous_cursor = self.state.next_sync_cursor;
         self.state.next_sync_cursor = self.state.next_sync_cursor.saturating_add(1);
         let cursor = self.state.next_sync_cursor;
         self.state.sync_events.push(SyncEvent {
             cursor,
             event_id: event_id.clone(),
-            person_id: device.person_id,
+            person_id: device.person_id.clone(),
             device_id: device.device_id.clone(),
             observation: capture.observation.clone(),
         });
@@ -3598,9 +3668,30 @@ impl MemoryStore {
             self.state.next_sync_cursor = previous_cursor;
             self.unstage_observation(&event_id);
             self.unstage_observation_owner(&event_id);
+            if created_session {
+                self.state.sessions.retain(|session| {
+                    session.session_id != session_id
+                        || session.person_id.as_deref() != Some(device.person_id.as_str())
+                });
+            }
+            if let Some(previous) = filled_session
+                && let Some(session) = self.state.sessions.iter_mut().find(|session| {
+                    session.session_id == session_id
+                        && session.person_id.as_deref() == Some(device.person_id.as_str())
+                })
+            {
+                session.context = previous;
+            }
             self.restore_device_seen(&device.device_id, &previous_seen);
             return Err(error);
         }
+        // The push is acknowledged. Housekeeping failures must not turn it into an error.
+        if let Err(error) =
+            self.auto_register_project(&device.person_id, &capture.observation.context)
+        {
+            eprintln!("cairn: automatic project registration failed: {error}");
+        }
+        self.finish_idle_sessions(&device.person_id);
         Ok(SyncPushResult {
             accepted: true,
             duplicate: false,
@@ -3847,9 +3938,23 @@ impl MemoryStore {
                     && self.session_needs_summary(person_id, session, observations, &superseded)
             })
             .map(|session| session.session_id.clone())
+            .take(MAX_SWEEP_SESSIONS)
             .collect();
         drop((retained, superseded));
         self.finish_sessions(person_id, &idle);
+    }
+
+    /// Periodic close: the idle-session sweep for every person that has a session.
+    pub fn sweep_idle_sessions(&mut self) {
+        let people: HashSet<String> = self
+            .state
+            .sessions
+            .iter()
+            .filter_map(|session| session.person_id.clone())
+            .collect();
+        for person_id in people {
+            self.finish_idle_sessions(&person_id);
+        }
     }
 
     fn finish_sessions(&mut self, person_id: &str, session_ids: &[String]) {
@@ -4602,6 +4707,7 @@ impl MemoryStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.memory_id.cmp(&right.memory_id))
         });
+        prefer_decision(&mut results, &self.state.memories);
         Ok(results)
     }
 
@@ -5949,16 +6055,45 @@ fn push_unique(items: &mut Vec<String>, item: String) {
     }
 }
 
+fn decision_ids(memories: &[Memory]) -> HashSet<&str> {
+    memories
+        .iter()
+        .filter(|memory| memory.kind == MemoryKind::Decision)
+        .map(|memory| memory.memory_id.as_str())
+        .collect()
+}
+
+/// Among results with equal scores, a decision (project decision) ranks before any other
+/// memory. Scores are unchanged and the stable sort keeps the earlier order otherwise.
+pub fn prefer_decision(results: &mut [RecallResult], memories: &[Memory]) {
+    let decisions = decision_ids(memories);
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                decisions
+                    .contains(right.memory_id.as_str())
+                    .cmp(&decisions.contains(left.memory_id.as_str()))
+            })
+    });
+}
+
 /// Among results with equal scores that list each other as contradictions, the newer
-/// memory ranks first. Nothing is resolved or hidden. Adjacent swaps only, so unrelated
-/// order is unchanged and no comparator has to be a total order.
+/// memory ranks first, unless that would put a non-decision before a decision. Nothing is
+/// resolved or hidden. Adjacent swaps only, so unrelated order is unchanged and no
+/// comparator has to be a total order.
 pub fn prefer_newer_contradiction(results: &mut [RecallResult], memories: &[Memory]) {
     let created: HashMap<&str, &str> = memories
         .iter()
         .map(|memory| (memory.memory_id.as_str(), memory.created_at.as_str()))
         .collect();
+    let decisions = decision_ids(memories);
     let older_first = |earlier: &RecallResult, later: &RecallResult| {
         earlier.score == later.score
+            && decisions.contains(earlier.memory_id.as_str())
+                == decisions.contains(later.memory_id.as_str())
             && (earlier.contradiction_ids.contains(&later.memory_id)
                 || later.contradiction_ids.contains(&earlier.memory_id))
             && created.get(earlier.memory_id.as_str()) < created.get(later.memory_id.as_str())
@@ -13629,6 +13764,258 @@ mod tests {
             handoffs: context_items(value, "handoffs"),
             runbooks: context_items(value, "runbooks"),
         }
+    }
+
+    #[test]
+    fn file_sync_push_registers_project_and_closes_idle_sessions() -> Result<(), StoreError> {
+        let path = temp_store_path("sync-housekeeping");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let a_id = a.account.person_id.clone();
+        let device = store.register_device("dev-house", &a_id, None, "Hook")?;
+        store.start_session_for_account(&device.token, "idle-push", WorkContext::default())?;
+        let mut first = observation_for("idle-push", "evt-idle-push", "pushidle");
+        first.context = repo_context("push-repo", Some("feat/push"));
+        store.sync_push(&device.token, first)?;
+        let projects = store.projects(&a.token)?;
+        assert_eq!(projects.len(), 1, "push registers the project");
+        assert_eq!(projects[0].repository, "push-repo");
+        let branches = store.branches(&a.token, &projects[0].project_id)?;
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].name, "feat/push");
+        age_observations(&mut store, "idle-push", 31 * 60);
+        assert!(!ended(&store, &a_id, "idle-push"));
+
+        store.sync_push(
+            &device.token,
+            observation_for("trigger", "evt-trigger", "trigger"),
+        )?;
+
+        assert!(
+            ended(&store, &a_id, "idle-push"),
+            "push sweeps idle sessions"
+        );
+        assert_eq!(summaries(&store, "idle-push").len(), 1);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn equal_scores_rank_decisions_before_other_memories() -> Result<(), StoreError> {
+        let path = temp_store_path("decision-first");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let filter = RecallFilter::default();
+        let mut decision = String::new();
+        for (label, kind) in [
+            ("one", MemoryKind::Explicit),
+            ("two", MemoryKind::Explicit),
+            ("three", MemoryKind::Explicit),
+            ("four", MemoryKind::Lesson),
+            ("five", MemoryKind::Decision),
+            ("six", MemoryKind::Explicit),
+        ] {
+            let memory = store.remember_for_account(
+                &a.token,
+                &format!("rankdecision {label}"),
+                Vec::new(),
+                WorkContext::default(),
+                LifecycleInput::default(),
+                kind.clone(),
+            )?;
+            if kind == MemoryKind::Decision {
+                decision = memory.memory_id;
+            }
+        }
+        // A strictly higher score still ranks first: scores are unchanged.
+        let strong = remember_owned(&mut store, &a.token, "rankdecision rankdecision strong")?;
+
+        let hits = store.search_for_account(&a.token, "rankdecision", 10, &filter)?;
+        assert_eq!(hits[0].memory_id, strong.memory_id);
+        assert_eq!(hits[1].memory_id, decision);
+        let pack = store.context_for_account(&a.token, "rankdecision", 10, &filter)?;
+        assert_eq!(pack.results[1].memory_id, decision);
+        let plain = store.search("rankdecision", 10)?;
+        assert_eq!(plain[1].memory_id, decision);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_admin_web_session_creates_accounts() -> Result<(), StoreError> {
+        let path = temp_store_path("admin-register");
+        let mut store = MemoryStore::open(&path)?;
+        let pw = "correct horse battery staple";
+        let admin = store.bootstrap_account("admin@example.test", pw)?;
+        assert!(admin.account.is_admin);
+        assert!(store.authenticate_account(&admin.token)?.is_admin);
+
+        let member = store.register_account_as_admin(&admin.token, "m@example.test", pw)?;
+        assert!(!member.account.is_admin);
+        assert!(!store.login("m@example.test", pw)?.account.is_admin);
+        assert!(!store.authenticate_account(&member.token)?.is_admin);
+
+        let denied = |error: StoreError, text: &str| error.to_string().contains(text);
+        let error = store
+            .register_account_as_admin(&member.token, "x@example.test", pw)
+            .unwrap_err();
+        assert!(denied(error, ADMIN_ONLY_ERROR));
+        let device = store.register_device("dev-admin", &admin.account.person_id, None, "Hook")?;
+        let error = store
+            .register_account_as_admin(&device.token, "x@example.test", pw)
+            .unwrap_err();
+        assert!(denied(error, WEB_ONLY_ERROR));
+        let error = store
+            .register_account_as_admin("nope", "x@example.test", pw)
+            .unwrap_err();
+        assert!(denied(error, "account authentication failed"));
+        assert!(
+            store.login("x@example.test", pw).is_err(),
+            "nothing was created"
+        );
+
+        // The flag survives a reload.
+        let reopened = MemoryStore::open(&path)?;
+        assert!(reopened.authenticate_account(&admin.token)?.is_admin);
+        assert!(!reopened.authenticate_account(&member.token)?.is_admin);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn periodic_sweep_closes_idle_sessions_for_every_person() -> Result<(), StoreError> {
+        let path = temp_store_path("sweep-all");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let b = store.register_account("b@example.test", "correct horse battery staple")?;
+        let (a_id, b_id) = (a.account.person_id.clone(), b.account.person_id.clone());
+        for (token, session) in [
+            (&a.token, "sweep-a"),
+            (&a.token, "fresh-a"),
+            (&b.token, "sweep-b"),
+        ] {
+            store.start_session_for_account(token, session, WorkContext::default())?;
+            store.capture_for_account(
+                token,
+                observation_for(session, &format!("evt-{session}"), "sweepfact"),
+            )?;
+        }
+        age_observations(&mut store, "sweep-a", 31 * 60);
+        age_observations(&mut store, "sweep-b", 31 * 60);
+        age_observations(&mut store, "fresh-a", 29 * 60);
+
+        store.sweep_idle_sessions();
+
+        assert!(ended(&store, &a_id, "sweep-a") && ended(&store, &b_id, "sweep-b"));
+        assert!(!ended(&store, &a_id, "fresh-a"), "29 minutes is not idle");
+        assert_eq!(summaries(&store, "sweep-a").len(), 1);
+        assert_eq!(summaries(&store, "sweep-b").len(), 1);
+        store.sweep_idle_sessions();
+        assert_eq!(summaries(&store, "sweep-a").len(), 1, "no second summary");
+        let reopened = MemoryStore::open(&path)?;
+        assert!(ended(&reopened, &b_id, "sweep-b"));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hook_only_push_creates_the_session_and_the_sweep_summarises_it() -> Result<(), StoreError> {
+        let path = temp_store_path("push-only-session");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let a_id = a.account.person_id.clone();
+        let device = store.register_device("dev-hook", &a_id, None, "Hook")?;
+        store.sync_push(
+            &device.token,
+            observation_for("hook-only", "evt-hook-only", "hookonlyfact"),
+        )?;
+        assert!(!ended(&store, &a_id, "hook-only"));
+        age_observations(&mut store, "hook-only", 31 * 60);
+
+        store.sweep_idle_sessions();
+
+        assert!(ended(&store, &a_id, "hook-only"));
+        assert_eq!(summaries(&store, "hook-only").len(), 1);
+        // The same push replayed does not add a second session row.
+        store.sync_push(
+            &device.token,
+            observation_for("hook-only", "evt-hook-only", "hookonlyfact"),
+        )?;
+        let rows = store
+            .state
+            .sessions
+            .iter()
+            .filter(|session| session.session_id == "hook-only")
+            .count();
+        assert_eq!(rows, 1);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_push_gives_the_session_its_context_so_the_summary_is_repository_scoped()
+    -> Result<(), StoreError> {
+        let path = temp_store_path("push-context-scope");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-pc", &a.account.person_id, None, "Hook")?;
+        let hook_context = |branch: &str| WorkContext {
+            repository: Some("cairn-demo".to_owned()),
+            branch: Some(branch.to_owned()),
+            ..WorkContext::default()
+        };
+        let mut push = |session: &str, event: &str, context: WorkContext| {
+            let mut input = observation_for(session, event, "pushscopefact");
+            input.context = context;
+            store.sync_push(&device.token, input)
+        };
+        push("created", "evt-created", hook_context("feat/hook"))?;
+        // A push into an empty row fills it; a later push never replaces a real context.
+        push("filled", "evt-filled-1", WorkContext::default())?;
+        push("filled", "evt-filled-2", hook_context("feat/hook"))?;
+        push("filled", "evt-filled-3", hook_context("feat/other"))?;
+        for session in ["created", "filled"] {
+            age_observations(&mut store, session, 31 * 60);
+        }
+
+        store.sweep_idle_sessions();
+
+        for session in ["created", "filled"] {
+            let summary = summaries(&store, session).remove(0);
+            assert_eq!(summary.scope, MemoryScope::Branch, "{session}");
+            assert_eq!(summary.context.branch.as_deref(), Some("feat/hook"));
+        }
+        let filter = RecallFilter {
+            context: Some(hook_context("feat/hook")),
+            ..RecallFilter::default()
+        };
+        let hits = store.search_with_filter("pushscopefact", 10, &filter)?;
+        assert!(
+            hits.iter()
+                .any(|hit| hit.memory_id == summaries(&store, "created")[0].memory_id),
+            "a repository/branch-filtered recall finds the hook-only summary"
+        );
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_start_after_a_push_fills_the_empty_session_context() -> Result<(), StoreError> {
+        let path = temp_store_path("push-then-start");
+        let mut store = MemoryStore::open(&path)?;
+        let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-ps", &a.account.person_id, None, "Hook")?;
+        let mut input = observation_for("push-start", "evt-push-start", "pushstartfact");
+        input.context = WorkContext::default();
+        store.sync_push(&device.token, input)?;
+        let started = store.start_session_for_account(&a.token, "push-start", context())?;
+        assert_eq!(started.context.branch.as_deref(), Some("feat/auth"));
+        // A real context is kept: the next start does not replace it.
+        let again =
+            store.start_session_for_account(&a.token, "push-start", WorkContext::default())?;
+        assert_eq!(again.context.branch.as_deref(), Some("feat/auth"));
+        fs::remove_file(path)?;
+        Ok(())
     }
 
     fn context_items(value: &Value, key: &str) -> Vec<String> {

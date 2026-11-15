@@ -178,13 +178,14 @@ fn scenario(url: &str, label: &str) {
             &json!({"email": "owner@example.test", "password": PASSWORD}),
         )
         .unwrap();
-    let member = anonymous
+    let owner_web = web(url, owner["token"].as_str().unwrap());
+    // Only the admin session creates accounts.
+    let member = owner_web
         .post(
             "/cairn-memory/auth/register",
             &json!({"email": "member@example.test", "password": PASSWORD}),
         )
         .unwrap();
-    let owner_web = web(url, owner["token"].as_str().unwrap());
     let member_web = web(url, member["token"].as_str().unwrap());
     let (owner_token, owner_device) = device_token(&owner_web, "owner agent");
     let (member_token, _) = device_token(&member_web, "member agent");

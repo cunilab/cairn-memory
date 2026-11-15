@@ -3392,3 +3392,245 @@ async fn postgres_push_adopts_an_observation_that_has_no_sync_event() {
         1
     );
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_only_the_admin_web_session_creates_accounts() {
+    let (_pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let admin = store
+        .bootstrap_account("admin-role@example.test", pw)
+        .await
+        .expect("admin");
+    assert!(admin.account.is_admin);
+    assert!(
+        store
+            .authenticate_account(&admin.token)
+            .await
+            .expect("me")
+            .is_admin
+    );
+    let member = store
+        .register_account_as_admin(&admin.token, "member-role@example.test", pw)
+        .await
+        .expect("admin creates an account");
+    assert!(!member.account.is_admin);
+    assert!(
+        !store
+            .login("member-role@example.test", pw)
+            .await
+            .expect("login")
+            .account
+            .is_admin
+    );
+    let error = store
+        .register_account_as_admin(&member.token, "x@example.test", pw)
+        .await
+        .expect_err("non-admin session");
+    assert!(error.to_string().contains(cairn_core::ADMIN_ONLY_ERROR));
+    let device = store
+        .register_device(
+            &admin.token,
+            "admin-device",
+            &admin.account.person_id,
+            None,
+            "Hook",
+        )
+        .await
+        .expect("device");
+    let error = store
+        .register_account_as_admin(&device.token, "x@example.test", pw)
+        .await
+        .expect_err("device token");
+    assert!(error.to_string().contains(cairn_core::WEB_ONLY_ERROR));
+    assert!(
+        store
+            .register_account_as_admin("nope", "x@example.test", pw)
+            .await
+            .expect_err("bad token")
+            .is_unauthorized()
+    );
+    assert!(store.login("x@example.test", pw).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_equal_scores_rank_decisions_before_other_memories() {
+    let (_pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("decision-rank@example.test", "correct horse battery staple")
+        .await
+        .expect("owner");
+    let mut decision = String::new();
+    for (label, kind) in [
+        ("one", cairn_core::MemoryKind::Explicit),
+        ("two", cairn_core::MemoryKind::Explicit),
+        ("three", cairn_core::MemoryKind::Lesson),
+        ("four", cairn_core::MemoryKind::Decision),
+        ("five", cairn_core::MemoryKind::Explicit),
+        ("six", cairn_core::MemoryKind::Explicit),
+    ] {
+        let memory = store
+            .remember_with_kind(
+                &owner.token,
+                &format!("rankpgdecision {label}"),
+                Vec::new(),
+                WorkContext::default(),
+                Default::default(),
+                kind.clone(),
+            )
+            .await
+            .expect("remember");
+        if kind == cairn_core::MemoryKind::Decision {
+            decision = memory.memory_id;
+        }
+    }
+    let hits = store
+        .search(&owner.token, "rankpgdecision", 3, &RecallFilter::default())
+        .await
+        .expect("search");
+    assert_eq!(hits[0].memory_id, decision, "the cap keeps the decision");
+    let pack = store
+        .context(&owner.token, "rankpgdecision", 10, &RecallFilter::default())
+        .await
+        .expect("context");
+    assert_eq!(pack.results[0].memory_id, decision);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_periodic_sweep_closes_idle_sessions_for_every_person() {
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let a = store
+        .bootstrap_account("sweep-a@example.test", pw)
+        .await
+        .expect("a");
+    let b = store
+        .register_account("sweep-b@example.test", pw)
+        .await
+        .expect("b");
+    let (a_id, b_id) = (a.account.person_id.clone(), b.account.person_id.clone());
+    let (dev_a, dev_b) = (
+        device_for(&store, &a, "sweep-a").await,
+        device_for(&store, &b, "sweep-b").await,
+    );
+    push_in(&store, &dev_a, "sweep-a", "sa-1", WorkContext::default()).await;
+    push_in(&store, &dev_a, "fresh-a", "fa-1", WorkContext::default()).await;
+    push_in(&store, &dev_b, "sweep-b", "sb-1", WorkContext::default()).await;
+    age(&pool, &a_id, "sweep-a").await;
+    age(&pool, &b_id, "sweep-b").await;
+    assert!(!session_ended(&pool, &a_id, "sweep-a").await);
+
+    store.sweep_idle_sessions().await;
+
+    assert!(session_ended(&pool, &a_id, "sweep-a").await);
+    assert!(session_ended(&pool, &b_id, "sweep-b").await);
+    assert_eq!(summary_sources(&pool, &a_id, "sweep-a").await, vec![1]);
+    assert_eq!(summary_sources(&pool, &b_id, "sweep-b").await, vec![1]);
+    assert!(!session_ended(&pool, &a_id, "fresh-a").await, "not idle");
+    store.sweep_idle_sessions().await;
+    assert_eq!(summary_sources(&pool, &a_id, "sweep-a").await, vec![1]);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_push_gives_the_session_its_context_so_the_summary_is_scoped() {
+    let (pool, store) = pool_and_store().await;
+    let a = store
+        .bootstrap_account("push-scope@example.test", "correct horse battery staple")
+        .await
+        .expect("account");
+    let a_id = a.account.person_id.clone();
+    let device = device_for(&store, &a, "push-scope").await;
+    let hook = |branch: &str| WorkContext {
+        repository: Some("cairn".to_owned()),
+        branch: Some(branch.to_owned()),
+        ..WorkContext::default()
+    };
+    push_in(&store, &device, "created", "pc-1", hook("feat/hook")).await;
+    // A push into an empty row fills it; a later push never replaces a real context.
+    push_in(&store, &device, "filled", "pf-1", WorkContext::default()).await;
+    push_in(&store, &device, "filled", "pf-2", hook("feat/hook")).await;
+    push_in(&store, &device, "filled", "pf-3", hook("feat/other")).await;
+    for session in ["created", "filled"] {
+        age(&pool, &a_id, session).await;
+    }
+
+    store.sweep_idle_sessions().await;
+
+    let filter = RecallFilter {
+        context: Some(hook("feat/hook")),
+        ..Default::default()
+    };
+    let hits = store
+        .search(&a.token, "autofact", 10, &filter)
+        .await
+        .expect("filtered recall");
+    for session in ["created", "filled"] {
+        let summary_id = format!("memory-{a_id}-{session}");
+        let scope: String = sqlx::query_scalar(
+            "SELECT scope FROM cairn_memories WHERE person_id = $1 AND memory_id = $2",
+        )
+        .bind(&a_id)
+        .bind(&summary_id)
+        .fetch_one(&pool)
+        .await
+        .expect("summary row");
+        assert_eq!(scope, "branch", "{session}");
+        assert!(
+            hits.iter().any(|hit| hit.memory_id == summary_id),
+            "a repository/branch-filtered recall finds the {session} summary"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_share_policy_is_readable_by_the_owner_only() {
+    let (_pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store
+        .bootstrap_account("policy-read-owner@example.test", pw)
+        .await
+        .expect("owner");
+    let member = store
+        .register_account("policy-read-member@example.test", pw)
+        .await
+        .expect("member");
+    let project = store
+        .register_project(&owner.token, "policy-read", "Policy Read", None)
+        .await
+        .expect("project");
+    store
+        .invite_project_member(
+            &owner.token,
+            &project.project_id,
+            "policy-read-member@example.test",
+        )
+        .await
+        .expect("invite");
+    let policy = |token: String| {
+        let store = store.clone();
+        let project_id = project.project_id.clone();
+        async move { store.share_policy(&token, &project_id).await }
+    };
+    assert_eq!(
+        policy(owner.token.clone()).await.expect("default"),
+        cairn_core::ProjectSharePolicy::Manual
+    );
+    store
+        .set_project_share_policy(
+            &owner.token,
+            &project.project_id,
+            "auto_nonsensitive_project_memory",
+        )
+        .await
+        .expect("set policy");
+    assert_eq!(
+        policy(owner.token.clone()).await.expect("auto"),
+        cairn_core::ProjectSharePolicy::AutoNonsensitiveProjectMemory
+    );
+    let denied = policy(member.token.clone()).await.expect_err("member");
+    assert!(denied.to_string().contains("does not own"), "{denied}");
+}
