@@ -13,8 +13,8 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 | Service | Image or source | Notes |
 | --- | --- | --- |
 | PostgreSQL | a Dokploy PostgreSQL 16 service | The only place Cairn keeps data. Back it up; the containers hold nothing else. |
-| `cairn-server` | `ghcr.io/cunilab/cairn-server:vX.Y.Z` | Listens on `0.0.0.0:3111`. Applies its migrations on startup. |
-| `cairn-web` | `ghcr.io/cunilab/cairn-web:vX.Y.Z` | Next.js console, listens on port `3000`. |
+| `cairn-server` | `ghcr.io/cunilab/cairn-memory-server:vX.Y.Z` | Listens on `0.0.0.0:3111`. Applies its migrations on startup. |
+| `cairn-web` | `ghcr.io/cunilab/cairn-memory-web:vX.Y.Z` | Next.js console, listens on port `3000`. |
 
 `latest` also exists, but pin a version tag so an update is a deliberate redeploy.
 

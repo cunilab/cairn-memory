@@ -41,10 +41,10 @@ Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[w
    - fails unless the tag equals the workspace version, is `MAJOR.MINOR.PATCH` (no pre-release suffix), and points at a commit on `main`;
    - builds `cairn` and `cairn-server` natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`;
    - creates the GitHub Release with generated notes and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
-   - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-server` and `ghcr.io/cunilab/cairn-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (the arm64 half is built under emulation, so the job is slow). How to run them: [deploy](./deploy.md).
+   - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-memory-server` and `ghcr.io/cunilab/cairn-memory-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (each platform is built natively, then merged into one multi-arch manifest). How to run them: [deploy](./deploy.md).
 5. A bad release is not edited in place: delete the release and tag, fix on a branch, and release the next patch version. Clients never install a version lower than their own.
 
-Only the `Publish release` job has `contents: write`, and only the `Publish images` job has `packages: write`.
+Only the `Publish release` job has `contents: write`, and only the image and manifest jobs have `packages: write`.
 
 ## How clients update
 
