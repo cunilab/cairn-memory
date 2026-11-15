@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { isNoBodyStatus, isSessionRequired } from "@/lib/session";
 
 const COOKIE = "cairn_token";
+// Matches the server session lifetime.
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 
 type Context = { params: Promise<{ path: string[] }> };
 
@@ -19,6 +21,7 @@ function cookieOptions(request: NextRequest) {
     httpOnly: true,
     sameSite: "lax" as const,
     path: "/",
+    maxAge: SESSION_MAX_AGE,
     secure: request.nextUrl.protocol === "https:",
   };
 }
@@ -57,9 +60,7 @@ async function proxy(request: NextRequest, context: Context) {
 
   if (
     request.method === "POST" &&
-    (joined === "auth/login" ||
-      joined === "auth/bootstrap" ||
-      joined === "auth/register") &&
+    (joined === "auth/login" || joined === "auth/bootstrap" || joined === "auth/register") &&
     upstream.ok
   ) {
     let payload: { token?: unknown };
@@ -67,6 +68,11 @@ async function proxy(request: NextRequest, context: Context) {
       payload = JSON.parse(new TextDecoder().decode(bytes)) as { token?: unknown };
     } catch {
       return NextResponse.json({ error: "Login response was not JSON" }, { status: 502 });
+    }
+    // An admin creating an account keeps their own session and never receives the new token.
+    if (joined === "auth/register") {
+      delete payload.token;
+      return NextResponse.json(payload, { status: upstream.status });
     }
     if (typeof payload.token !== "string" || payload.token.length === 0) {
       return NextResponse.json(

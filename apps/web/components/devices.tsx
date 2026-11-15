@@ -24,7 +24,7 @@ import {
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
-import { revokeDeviceImpact } from "@/lib/action-copy";
+import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
@@ -37,14 +37,16 @@ function lastUsed(device: Device): string {
     : formatTime(device.last_seen_at);
 }
 
+type DeviceAction = { device: Device; kind: "revoke" | "rotate" };
+
 export function Devices() {
   const router = useRouter();
   const [devices, setDevices] = useState<Device[]>([]);
   const [name, setName] = useState("");
   const [created, setCreated] = useState<DeviceRegistration | null>(null);
   const [copied, setCopied] = useState(false);
-  const [revoking, setRevoking] = useState<Device | null>(null);
-  const [dialogDevice, setDialogDevice] = useState<Device | null>(null);
+  const [revoking, setRevoking] = useState<DeviceAction | null>(null);
+  const [dialogDevice, setDialogDevice] = useState<DeviceAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -157,19 +159,28 @@ export function Devices() {
     }
   }
 
-  async function revokeDevice() {
+  async function confirmDevice() {
     if (!revoking || acting.current) {
       return;
     }
-    const target = revoking;
+    const { device: target, kind } = revoking;
     acting.current = true;
     setPending(true);
     setActionError(null);
     try {
-      await cairn("devices/revoke", {
-        method: "POST",
-        body: JSON.stringify({ deviceId: target.device_id }),
-      });
+      if (kind === "rotate") {
+        const registration = await cairn<DeviceRegistration>("devices/rotate", {
+          method: "POST",
+          body: JSON.stringify({ deviceId: target.device_id }),
+        });
+        setCreated(registration);
+        setCopied(false);
+      } else {
+        await cairn("devices/revoke", {
+          method: "POST",
+          body: JSON.stringify({ deviceId: target.device_id }),
+        });
+      }
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
         requireSignIn();
@@ -189,7 +200,11 @@ export function Devices() {
         return;
       }
       setRevoking(null);
-      setError("The device was revoked, but the list could not be reloaded.");
+      setError(
+        kind === "rotate"
+          ? "The token was rotated, but the list could not be reloaded."
+          : "The device was revoked, but the list could not be reloaded.",
+      );
     } finally {
       acting.current = false;
       setPending(false);
@@ -333,15 +348,27 @@ export function Devices() {
                       <dd>{device.status === "revoked" ? "Revoked" : "Active"}</dd>
                     </dl>
                     {device.status === "revoked" ? null : (
-                      <div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          disabled={pending}
+                          onClick={() => {
+                            setActionError(null);
+                            setDialogDevice({ device, kind: "rotate" });
+                            setRevoking({ device, kind: "rotate" });
+                          }}
+                        >
+                          Rotate token
+                        </Button>
                         <Button
                           type="button"
                           variant="destructive"
                           disabled={pending}
                           onClick={() => {
                             setActionError(null);
-                            setDialogDevice(device);
-                            setRevoking(device);
+                            setDialogDevice({ device, kind: "revoke" });
+                            setRevoking({ device, kind: "revoke" });
                           }}
                         >
                           Revoke device
@@ -367,9 +394,15 @@ export function Devices() {
         >
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Revoke this device?</AlertDialogTitle>
+              <AlertDialogTitle>
+                {dialogDevice?.kind === "rotate" ? "Rotate this token?" : "Revoke this device?"}
+              </AlertDialogTitle>
               <AlertDialogDescription className="text-left [overflow-wrap:anywhere]">
-                {dialogDevice ? revokeDeviceImpact(dialogDevice.name) : ""}
+                {dialogDevice
+                  ? dialogDevice.kind === "rotate"
+                    ? rotateDeviceImpact(dialogDevice.device.name)
+                    : revokeDeviceImpact(dialogDevice.device.name)
+                  : ""}
               </AlertDialogDescription>
             </AlertDialogHeader>
             {actionError ? (
@@ -382,9 +415,13 @@ export function Devices() {
               <AlertDialogAction
                 variant="destructive"
                 disabled={pending}
-                onClick={() => void revokeDevice()}
+                onClick={() => void confirmDevice()}
               >
-                {pending ? "Working…" : "Revoke device"}
+                {pending
+                  ? "Working…"
+                  : dialogDevice?.kind === "rotate"
+                    ? "Rotate token"
+                    : "Revoke device"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

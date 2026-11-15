@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConsoleShell } from "@/components/console-shell";
+import { ProjectOwnerActions } from "@/components/project-owner-actions";
 import { ProjectReports } from "@/components/project-reports";
 import {
   AlertDialog,
@@ -30,7 +31,7 @@ import { cairn } from "@/lib/cairn";
 import { memoryReadPath } from "@/lib/memory-path";
 import { SessionRequiredError } from "@/lib/session";
 import { isAbsentTeam } from "@/lib/team";
-import type { ListedProject, ProjectMemory, ProjectTeam } from "@/lib/types";
+import type { ListedProject, ProjectBranch, ProjectMemory, ProjectTeam } from "@/lib/types";
 
 function field(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") {
@@ -55,6 +56,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
   const [project, setProject] = useState<ListedProject | null>(null);
   const [memories, setMemories] = useState<ProjectMemory[]>([]);
+  const [branches, setBranches] = useState<ProjectBranch[]>([]);
   const [team, setTeam] = useState<ProjectTeam | null>(null);
   const [teamError, setTeamError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +85,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     confirming.current = false;
     setProject(null);
     setMemories([]);
+    setBranches([]);
     setTeam(null);
     setTeamError(null);
     setError(null);
@@ -107,6 +110,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setSessionRequired(true);
     setProject(null);
     setMemories([]);
+    setBranches([]);
     setTeam(null);
     setTeamError(null);
     setError(null);
@@ -119,11 +123,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     (result: {
       current: ListedProject;
       decisions: ProjectMemory[];
+      nextBranches: ProjectBranch[];
       nextTeam: ProjectTeam | null;
       nextTeamError: string | null;
     }) => {
       setProject(result.current);
       setMemories(result.decisions);
+      setBranches(result.nextBranches);
       setTeam(result.nextTeam);
       setTeamError(result.nextTeamError);
       setError(null);
@@ -138,6 +144,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       throw new Error("Project is not on this account.");
     }
     const decisions = await cairn<ProjectMemory[]>(memoryReadPath(projectId, current.role));
+    const nextBranches =
+      current.role === "owner"
+        ? await cairn<ProjectBranch[]>(`projects/${encodeURIComponent(projectId)}/branches`)
+        : [];
     let nextTeam: ProjectTeam | null = null;
     let nextTeamError: string | null = null;
     try {
@@ -153,7 +163,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         nextTeamError = message;
       }
     }
-    return { current, decisions, nextTeam, nextTeamError };
+    return { current, decisions, nextBranches, nextTeam, nextTeamError };
   }, [projectId]);
 
   useEffect(() => {
@@ -183,7 +193,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
 
   const owner = project?.role === "owner";
 
-  async function run(action: () => Promise<unknown>, success?: string) {
+  async function run(action: () => Promise<unknown>, success?: string): Promise<boolean> {
     const generation = beginLoad();
     setPending(true);
     setActionError(null);
@@ -194,14 +204,15 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       if (isCurrent(generation)) {
         applyProject(result);
         setNotice(success ?? null);
+        return true;
       }
     } catch (cause) {
       if (!isCurrent(generation)) {
-        return;
+        return false;
       }
       if (cause instanceof SessionRequiredError) {
         requireSignIn();
-        return;
+        return false;
       }
       setActionError(cause instanceof Error ? cause.message : "Request failed");
     } finally {
@@ -209,6 +220,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         setPending(false);
       }
     }
+    return false;
   }
 
   async function confirmAction() {
@@ -478,6 +490,18 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           projectId={projectId}
           memberEmails={team?.members.map((member) => member.email) ?? []}
           decisions={memories}
+          onSessionRequired={requireSignIn}
+        />
+      ) : null}
+
+      {owner ? (
+        <ProjectOwnerActions
+          projectId={projectId}
+          sharePolicy={project.share_policy}
+          branches={branches}
+          decisions={memories}
+          pending={pending}
+          run={run}
           onSessionRequired={requireSignIn}
         />
       ) : null}

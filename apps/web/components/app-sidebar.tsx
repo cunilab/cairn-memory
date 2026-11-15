@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FolderIcon, KeyRoundIcon, LayoutDashboardIcon } from "lucide-react";
+import { FolderIcon, KeyRoundIcon, LayoutDashboardIcon, UsersIcon } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -10,8 +10,10 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { useAccount } from "@/hooks/use-account";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const account = useAccount();
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
@@ -47,6 +49,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <span>Devices</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {account?.is_admin ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton render={<Link href="/accounts" />}>
+                <UsersIcon />
+                <span>Accounts</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : null}
         </SidebarMenu>
       </SidebarContent>
     </Sidebar>

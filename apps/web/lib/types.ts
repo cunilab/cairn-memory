@@ -6,6 +6,30 @@ export type ListedProject = {
   created_at: string;
   updated_at: string;
   role: string;
+  share_policy?: string | null;
+};
+
+export type ProjectBranch = {
+  branch_id: string;
+  name: string;
+  status: string;
+  status_reason?: string | null;
+  merge_commit?: string | null;
+  head_commit?: string | null;
+};
+
+export type Account = {
+  person_id: string;
+  email: string;
+  is_admin?: boolean;
+};
+
+export type PersonalMemory = {
+  memory_id: string;
+  content: string;
+  scope: string;
+  context?: { branch?: string | null };
+  lifecycle?: { sensitivity?: string };
 };
 
 export type ProjectMemory = {
