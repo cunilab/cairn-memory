@@ -156,8 +156,11 @@ The owner and the member can read both routes. A conflict record has
 The owner sees conflicts among live project memories. The member sees
 conflicts only among memories shared with that member. Neither memory is
 deleted or hidden because the other exists. Revocations are share records
-with `revoked_at` set. A member sees only their own revoked shares, with no
-memory content beyond the share record.
+with `revoked_at` set. Each has `project_id`, `memory_id`, `member_person_id`,
+`member_email` (the revoked member's account email, omitted if the account is
+gone), `created_at`, and `revoked_at`. The owner already sees member emails in
+the team list, so this adds no new exposure. A member sees only their own
+revoked shares, with no memory content beyond the share record.
 
 ## Team space
 

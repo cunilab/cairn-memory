@@ -6024,6 +6024,16 @@ mod tests {
             json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
         assert_eq!(status, StatusCode::OK);
         assert!(after_revoke.as_array().unwrap().is_empty());
+        let (status, revocations) = json_request_auth(
+            router.clone(),
+            "GET",
+            &format!("/cairn-memory/projects/{project_id}/revocations"),
+            Value::Null,
+            owner_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(revocations[0]["member_email"], "share-member@example.test");
         let (status, owner_memories) = json_request_auth(
             router.clone(),
             "GET",

@@ -2768,12 +2768,13 @@ impl PostgresStore {
         }
         let rows = if owns {
             sqlx::query(
-                "SELECT project_id, memory_id, member_person_id,
-                        EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
-                        EXTRACT(EPOCH FROM revoked_at)::bigint::text AS revoked_at
-                 FROM cairn_project_shares
-                 WHERE owner_person_id = $1 AND project_id = $2 AND revoked_at IS NOT NULL
-                 ORDER BY revoked_at DESC",
+                "SELECT s.project_id, s.memory_id, s.member_person_id, a.email AS member_email,
+                        EXTRACT(EPOCH FROM s.created_at)::bigint::text AS created_at,
+                        EXTRACT(EPOCH FROM s.revoked_at)::bigint::text AS revoked_at
+                 FROM cairn_project_shares s
+                 LEFT JOIN cairn_accounts a ON a.person_id = s.member_person_id
+                 WHERE s.owner_person_id = $1 AND s.project_id = $2 AND s.revoked_at IS NOT NULL
+                 ORDER BY s.revoked_at DESC",
             )
             .bind(&account.person_id)
             .bind(project_id)
@@ -2781,19 +2782,27 @@ impl PostgresStore {
             .await?
         } else {
             sqlx::query(
-                "SELECT project_id, memory_id, member_person_id,
-                        EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at,
-                        EXTRACT(EPOCH FROM revoked_at)::bigint::text AS revoked_at
-                 FROM cairn_project_shares
-                 WHERE member_person_id = $1 AND project_id = $2 AND revoked_at IS NOT NULL
-                 ORDER BY revoked_at DESC",
+                "SELECT s.project_id, s.memory_id, s.member_person_id, a.email AS member_email,
+                        EXTRACT(EPOCH FROM s.created_at)::bigint::text AS created_at,
+                        EXTRACT(EPOCH FROM s.revoked_at)::bigint::text AS revoked_at
+                 FROM cairn_project_shares s
+                 LEFT JOIN cairn_accounts a ON a.person_id = s.member_person_id
+                 WHERE s.member_person_id = $1 AND s.project_id = $2 AND s.revoked_at IS NOT NULL
+                 ORDER BY s.revoked_at DESC",
             )
             .bind(&account.person_id)
             .bind(project_id)
             .fetch_all(&self.pool)
             .await?
         };
-        rows.iter().map(share_from_row).collect()
+        rows.iter()
+            .map(|row| {
+                Ok(ProjectMemoryShare {
+                    member_email: row.try_get("member_email")?,
+                    ..share_from_row(row)?
+                })
+            })
+            .collect()
     }
 
     async fn load_share_policy(
@@ -4824,6 +4833,7 @@ fn share_from_row(row: &PgRow) -> Result<ProjectMemoryShare, PostgresError> {
         project_id: row.try_get("project_id")?,
         memory_id: row.try_get("memory_id")?,
         member_person_id: row.try_get("member_person_id")?,
+        member_email: None,
         created_at: row.try_get("created_at")?,
         revoked_at: row.try_get("revoked_at")?,
     })

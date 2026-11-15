@@ -225,7 +225,7 @@ export function ProjectReports({
                   <CardContent className="flex min-w-0 flex-col gap-1 text-sm">
                     <p className="break-all">{share.memory_id}</p>
                     <p className="text-xs break-all text-muted-foreground">
-                      {share.member_person_id} · revoked {formatTime(share.revoked_at)}
+                      {share.member_email ?? share.member_person_id} · revoked {formatTime(share.revoked_at)}
                     </p>
                   </CardContent>
                 </Card>

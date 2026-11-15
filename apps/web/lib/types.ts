@@ -55,6 +55,7 @@ export type ProjectFreshnessEvent = {
 export type ProjectRevocation = {
   memory_id: string;
   member_person_id: string;
+  member_email?: string | null;
   created_at: string;
   revoked_at?: string | null;
 };

@@ -677,6 +677,17 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .await
         .expect("member read after revoke");
     assert!(after_revoke.is_empty());
+    for token in [&account.token, &member.token] {
+        let revoked = store
+            .project_revocations(token, &project.project_id)
+            .await
+            .expect("revocation report");
+        assert_eq!(revoked.len(), 1);
+        assert_eq!(
+            revoked[0].member_email.as_deref(),
+            Some("member@example.test")
+        );
+    }
     let owner_memories = store
         .project_memories(&account.token, &project.project_id)
         .await

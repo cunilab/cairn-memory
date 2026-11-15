@@ -798,6 +798,9 @@ pub struct ProjectMemoryShare {
     pub project_id: String,
     pub memory_id: String,
     pub member_person_id: String,
+    /// Set only on revocation reports, where the owner needs a readable member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_email: Option<String>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
@@ -933,6 +936,7 @@ fn share_view(record: &ProjectShareRecord) -> ProjectMemoryShare {
         project_id: record.project_id.clone(),
         memory_id: record.memory_id.clone(),
         member_person_id: record.member_person_id.clone(),
+        member_email: None,
         created_at: record.created_at.clone(),
         revoked_at: record.revoked_at.clone(),
     }
@@ -2780,7 +2784,15 @@ impl MemoryStore {
                     && share.revoked_at.is_some()
                     && (is_owner || share.member_person_id == account.person_id)
             })
-            .map(share_view)
+            .map(|share| ProjectMemoryShare {
+                member_email: self
+                    .state
+                    .accounts
+                    .iter()
+                    .find(|record| record.account.person_id == share.member_person_id)
+                    .map(|record| record.account.email.clone()),
+                ..share_view(share)
+            })
             .collect())
     }
 
@@ -7728,6 +7740,42 @@ mod tests {
         blocked.release();
         assert_eq!(fs::read(&path)?, before);
         let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    // A revocation report names the revoked member by email as well as person id.
+    #[test]
+    fn project_revocations_include_the_member_email() -> Result<(), StoreError> {
+        let path = temp_store_path("revocation-email");
+        let mut store = MemoryStore::open(&path)?;
+        let owner =
+            store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+        let member =
+            store.register_account("member@example.test", "correct horse battery staple")?;
+        let (project_id, mine) = owned_project(&mut store, &owner.token, "revocation email")?;
+        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        store.share_project_memory(
+            &owner.token,
+            &project_id,
+            &mine.memory_id,
+            "member@example.test",
+        )?;
+        store.revoke_project_share(
+            &owner.token,
+            &project_id,
+            &mine.memory_id,
+            "member@example.test",
+        )?;
+        for token in [&owner.token, &member.token] {
+            let revoked = store.project_revocations(token, &project_id)?;
+            assert_eq!(revoked.len(), 1);
+            assert_eq!(
+                revoked[0].member_email.as_deref(),
+                Some("member@example.test")
+            );
+            assert_eq!(revoked[0].member_person_id, member.account.person_id);
+        }
+        let _ = fs::remove_file(&path);
         Ok(())
     }
 
