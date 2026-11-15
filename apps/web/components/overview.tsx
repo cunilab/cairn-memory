@@ -23,6 +23,7 @@ export function Overview() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [sessionRequired, setSessionRequired] = useState(false);
 
   useResetOnHide(() => {
@@ -31,6 +32,7 @@ export function Overview() {
     setDecisions([]);
     setError(null);
     setLoading(true);
+    setLoadFailed(false);
     setSessionRequired(false);
   });
 
@@ -85,6 +87,7 @@ export function Overview() {
           return;
         }
         const message = cause instanceof Error ? cause.message : "Could not load the overview";
+        setLoadFailed(true);
         setError(`The overview could not be loaded. ${message}`);
       })
       .finally(() => {
@@ -148,7 +151,7 @@ export function Overview() {
             Loading overview…
           </p>
         ) : null}
-        {!loading ? (
+        {!loading && !loadFailed ? (
           <>
             <section className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
               <Card className="min-w-0">

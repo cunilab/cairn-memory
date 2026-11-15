@@ -20,6 +20,7 @@ export function LoginForm({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [bootstrap, setBootstrap] = useState(false);
+  const [ready, setReady] = useState(false);
 
   // An empty server has no account to sign in to: offer first-account setup instead.
   useEffect(() => {
@@ -30,7 +31,12 @@ export function LoginForm({
           setBootstrap(health.bootstrap_required === true);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) {
+          setReady(true);
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -111,7 +117,7 @@ export function LoginForm({
                 </p>
               ) : null}
               <Field>
-                <Button type="submit" disabled={pending}>
+                <Button type="submit" disabled={pending || !ready}>
                   {bootstrap
                     ? pending
                       ? "Creating account…"

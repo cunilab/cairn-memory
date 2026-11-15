@@ -59,6 +59,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [teamError, setTeamError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [teamName, setTeamName] = useState("");
   const [pending, setPending] = useState(false);
@@ -86,6 +87,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setTeamError(null);
     setError(null);
     setActionError(null);
+    setNotice(null);
     setEmail("");
     setTeamName("");
     setPending(false);
@@ -96,6 +98,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
 
   function openConfirm(next: ConfirmAction) {
     setActionError(null);
+    setNotice(null);
     setDialogAction(next);
     setConfirm(next);
   }
@@ -108,6 +111,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setTeamError(null);
     setError(null);
     setActionError(null);
+    setNotice(null);
     router.replace("/");
   }, [router]);
 
@@ -179,15 +183,17 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
 
   const owner = project?.role === "owner";
 
-  async function run(action: () => Promise<unknown>) {
+  async function run(action: () => Promise<unknown>, success?: string) {
     const generation = beginLoad();
     setPending(true);
     setActionError(null);
+    setNotice(null);
     try {
       await action();
       const result = await fetchProject();
       if (isCurrent(generation)) {
         applyProject(result);
+        setNotice(success ?? null);
       }
     } catch (cause) {
       if (!isCurrent(generation)) {
@@ -324,6 +330,15 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           {error}
         </p>
       ) : null}
+      {notice ? (
+        <p
+          role="status"
+          ref={(element) => element?.scrollIntoView({ block: "nearest" })}
+          className="text-sm text-muted-foreground"
+        >
+          {notice}
+        </p>
+      ) : null}
       {actionError ? (
         // The owner form sits far below the buttons, so bring the failure into view.
         <p
@@ -386,6 +401,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                                 email,
                               }),
                             }),
+                            "Decision shared.",
                           )
                         }
                       >
@@ -490,6 +506,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                     method: "POST",
                     body: JSON.stringify({ email }),
                   }),
+                  "Member invited.",
                 )
               }
             >
@@ -505,6 +522,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                     method: "POST",
                     body: JSON.stringify({ email }),
                   }),
+                  "Team member added.",
                 )
               }
             >
@@ -536,6 +554,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                     method: "POST",
                     body: JSON.stringify({ name: teamName }),
                   }),
+                  "Team created.",
                 );
               }}
             >

@@ -49,9 +49,8 @@ async function proxy(request: NextRequest, context: Context) {
       body: rawBody ? rawBody : undefined,
       cache: "no-store",
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Cairn API is unreachable";
-    return NextResponse.json({ error: message }, { status: 502 });
+  } catch {
+    return NextResponse.json({ error: "Cairn API is unreachable" }, { status: 502 });
   }
 
   const bytes = await upstream.arrayBuffer();

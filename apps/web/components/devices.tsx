@@ -299,7 +299,9 @@ export function Devices() {
         </section>
 
         <section className="flex min-w-0 flex-col gap-3">
-          <h2 className="text-base font-medium">Your devices</h2>
+          {loading || !error || devices.length > 0 ? (
+            <h2 className="text-base font-medium">Your devices</h2>
+          ) : null}
           {loading ? (
             <p role="status" className="text-sm text-muted-foreground">
               Loading devices…
