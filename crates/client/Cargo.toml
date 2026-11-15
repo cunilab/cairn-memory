@@ -12,6 +12,7 @@ path = "src/bin/cairn.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 
 [dev-dependencies]

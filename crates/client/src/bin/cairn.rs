@@ -2,7 +2,7 @@
 //! that `cairn setup` stored (or `CAIRN_URL` / `CAIRN_DEVICE_TOKEN`). Humans use the web console.
 
 use cairn_client::tools::{self, Tool};
-use cairn_client::{Client, Config, Error, config_path, mcp, write_private};
+use cairn_client::{Client, Config, Error, config_path, mcp, update, write_private};
 use serde_json::{Map, Value, json};
 use std::env;
 use std::fs;
@@ -144,6 +144,8 @@ fn usage() -> ! {
         "Usage:\n\
   cairn setup <server-url>      (reads the device token from stdin)\n\
   cairn mcp\n\
+  cairn update [--check]        (install the latest release; --check only reports)\n\
+  cairn --version\n\
   cairn start <session-id> [repository] [branch] [worktree] [commit]\n\
   cairn capture <session-id> <event-id> <content> [role] [source]\n\
   cairn end <session-id>\n\
@@ -178,17 +180,37 @@ management stay in the web console."
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    update::remove_old_exe();
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&args[1..]),
         Some("mcp") => Config::load().and_then(mcp::run_stdio),
+        Some("version" | "--version") => {
+            println!("cairn {}", update::VERSION);
+            Ok(())
+        }
+        Some("update") => match &args[1..] {
+            [] => update::update(false),
+            [flag] if flag == "--check" => update::update(true),
+            _ => usage(),
+        },
         Some(name) => match COMMANDS.iter().find(|command| command.name == name) {
             Some(command) => run(command, &args[1..]),
             None => usage(),
         },
         None => usage(),
     };
+    let failed = result.is_err();
     if let Err(error) = result {
         eprintln!("cairn: {error}");
+    }
+    // Never on `mcp` (a protocol stream), `update` (it reports itself) or the version flag.
+    if !matches!(
+        args.first().map(String::as_str),
+        Some("mcp" | "update" | "version" | "--version")
+    ) {
+        update::notify();
+    }
+    if failed {
         process::exit(1);
     }
 }
@@ -199,6 +221,14 @@ fn setup(args: &[String]) -> Result<(), Error> {
     let path = config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
+    // The hook scripts come from the release matching this binary; being offline (or running a
+    // build with no release) must not undo a good setup.
+    match update::install_hooks() {
+        Ok(message) => println!("{message}"),
+        Err(error) => eprintln!(
+            "cairn: warning: hook scripts were not installed ({error}); `cairn update` retries"
+        ),
+    }
     Ok(())
 }
 
