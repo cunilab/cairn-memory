@@ -20,7 +20,9 @@ printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"too
 `CAIRN_URL` defaults to `http://127.0.0.1:3111`. It must use `https`, or
 `http` only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), the same
 rule as the `cairn` CLI. Userinfo, a query, a fragment, or another scheme is
-refused. Otherwise the hook exits before it reads stdin and before it connects,
+refused. A path is allowed as a base for a reverse proxy mount, for example
+`CAIRN_URL=https://cairn.example.test/agent`; the hook posts to
+`<base>/cairn-memory/sync/push`. Otherwise the hook exits before it reads stdin and before it connects,
 with a fixed message that does not include the URL, so the device token never
 travels over plain http beyond the host. Plain-http loopback requests ignore
 `HTTP_PROXY`. Without a queue binding, the adapter then only strips trailing
@@ -119,10 +121,10 @@ unset, a failed delivery is still dropped.
 
 `CAIRN_OUTBOX` is an opt-in setting. The hook validates
 `normalize_origin(CAIRN_URL)` before it reads stdin and before it connects.
-A `%` in the hostname, userinfo, a query, a fragment, or a path is rejected
+A `%` in the hostname, userinfo, a query, a fragment, or a path that holds an empty, dot, `%`, or `cairn-memory` segment is rejected
 with the fixed origin message, and plain http to a non-loopback host with the
 loopback message. That message does not include the URL. The
-canonical origin is both the request base and the queue binding. There is no
+canonical base (origin plus path prefix) is both the request base and the queue binding. There is no
 separate URL-parser split.
 
 Before the POST, an existing queue is checked under `LOCK_EX|LOCK_NB`. A

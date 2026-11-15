@@ -362,7 +362,7 @@ def normalize(event: dict) -> dict:
 
 
 _ORIGIN_MESSAGE = (
-    "outbox origin must be an http(s) server base with no userinfo, query, fragment, or path"
+    "outbox origin must be an http(s) server base URL with no userinfo, query, or fragment"
 )
 _TRANSPORT_MESSAGE = "plain http is allowed only for loopback hosts; use https"
 _ROUTE = "sync/push"
@@ -411,8 +411,11 @@ def require_secure_url(base: str) -> None:
 
 
 def normalize_origin(base: str) -> str:
-    # CAIRN_URL is the server origin the hook posts to after stripping trailing
-    # slashes. A path is refused so it cannot silently become another route.
+    # CAIRN_URL is the server base the hook posts to after stripping trailing
+    # slashes: origin plus an optional path prefix (a reverse proxy mount such
+    # as /agent). The prefix must not already name the API route, repeat a slash,
+    # or hold dot segments or percent escapes, so the stored base maps to one
+    # request URL.
     if (
         not isinstance(base, str)
         or base == ""
@@ -429,7 +432,12 @@ def normalize_origin(base: str) -> str:
         raise ValueError(_ORIGIN_MESSAGE)
     if parts.username is not None or parts.password is not None:
         raise ValueError(_ORIGIN_MESSAGE)
-    if parts.query or parts.fragment or parts.path:
+    if parts.query or parts.fragment:
+        raise ValueError(_ORIGIN_MESSAGE)
+    segments = parts.path.split("/")[1:]
+    if "%" in parts.path or any(
+        segment in ("", ".", "..", "cairn-memory") for segment in segments
+    ):
         raise ValueError(_ORIGIN_MESSAGE)
     host = parts.hostname
     # Request unquotes a % in the host, so %2e or %3a would post somewhere
@@ -442,7 +450,7 @@ def normalize_origin(base: str) -> str:
         host = "[" + host + "]"
     default_port = 80 if scheme == "http" else 443
     netloc = host if port is None or port == default_port else f"{host}:{port}"
-    return f"{scheme}://{netloc}"
+    return f"{scheme}://{netloc}{parts.path}"
 
 
 def device_fingerprint(token: str) -> str:

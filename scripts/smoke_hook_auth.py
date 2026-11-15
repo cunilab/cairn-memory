@@ -199,6 +199,21 @@ class StubHookTests(unittest.TestCase):
         self.assertEqual(body["context"]["commands"], ["token=[REDACTED]"])
         self.assert_hidden(result, DEVICE, "hook-secret-value")
 
+    def test_base_path_prefixes_the_sync_route_bound_or_not(self):
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                self.server.captured = []
+                with tempfile.TemporaryDirectory() as directory:
+                    queue = Path(directory) / "queue.json"
+                    result = run_hook(
+                        self.url + "/agent/",
+                        {"sessionId": "s", "eventId": "base-%s" % bound, "content": "x"},
+                        CAIRN_OUTBOX=str(queue) if bound else None,
+                    )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.server.captured), 1)
+                self.assertEqual(self.server.captured[0]["path"], "/agent/cairn-memory/sync/push")
+
     def test_role_does_not_change_the_event_fingerprint(self):
         payload = {
             "sessionId": "same-session",
