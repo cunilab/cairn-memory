@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,7 @@ class _RedirectHandler(BaseHTTPRequestHandler):
                 "method": method,
                 "path": self.path.split("?", 1)[0],
                 "authorization": self.headers.get("Authorization"),
+                "user_agent": self.headers.get("User-Agent"),
                 "body": body,
             }
         )
@@ -1019,6 +1021,34 @@ class OutboxRedactionCheck(unittest.TestCase):
             self.assertNotIn(SK, failure_text)
             self.assertNotIn(BODY, failure_text)
             self.assertFalse(missing.exists())
+
+
+class OutboxUserAgentCheck(unittest.TestCase):
+    def test_version_constant_matches_the_workspace_version(self) -> None:
+        cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        match = re.search(r'\[workspace\.package\][^\[]*?^version = "([^"]+)"', cargo, re.M | re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(OUTBOX.VERSION, match.group(1))
+        self.assertEqual(OUTBOX.USER_AGENT, "cairn-hook/" + match.group(1))
+
+    def test_replay_names_itself_instead_of_the_urllib_default(self) -> None:
+        server, base = serve_reply(200, b'{"accepted": true}')
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "queue.json"
+                enqueue_in_process(path, {"eventId": "evt-ua", "content": "kept"})
+                done = subprocess.run(
+                    [sys.executable, str(OUTBOX_PATH), "replay", str(path), "--url", base, "--token", "t"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr)
+                hits = server.hits  # type: ignore[attr-defined]
+                self.assertEqual([hit["user_agent"] for hit in hits], [OUTBOX.USER_AGENT])
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class OutboxRedirectCheck(unittest.TestCase):

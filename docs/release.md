@@ -27,7 +27,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
 
 Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[workspace.package]` of the root `Cargo.toml`.
 
-1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]` and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
+1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, set `VERSION` in `scripts/cairn_outbox.py` to the same value (it forms the hook's `cairn-hook/<version>` User-Agent; `scripts/smoke_outbox.py` fails when they differ), and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
 2. Open the pull request, wait for the required checks, merge it.
 3. Tag the merge commit on `main` and push the tag:
 
