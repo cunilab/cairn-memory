@@ -1,0 +1,89 @@
+# Publishes a GitHub Release when a vX.Y.Z tag is pushed. The tag must equal the workspace
+# version and point at a commit on main. Assets are raw binaries (no archives) so
+# `cairn update` needs no unpacking: cairn-<target>[.exe], cairn-server-<target>[.exe],
+# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag matches the workspace version and is on main
+        run: |
+          version="$(awk '/^\[workspace.package\]/{p=1; next} /^\[/{p=0} p && $1=="version"{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $version" >&2
+            exit 1
+          fi
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "version must be MAJOR.MINOR.PATCH" >&2; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "tag is not on main" >&2; exit 1; }
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, ext: "" }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, ext: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p cairn-client -p cairn-server
+      - name: Stage raw assets
+        shell: bash
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/cairn${{ matrix.ext }}" "dist/cairn-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/cairn-server${{ matrix.ext }}" "dist/cairn-server-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Add hook scripts and checksums
+        working-directory: dist
+        run: |
+          cp ../scripts/cairn_hook.py ../scripts/cairn_outbox.py .
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
