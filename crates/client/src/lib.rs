@@ -513,6 +513,38 @@ mod tests {
     }
 
     #[test]
+    fn a_base_path_is_kept_and_prefixes_every_request() {
+        for (given, kept) in [
+            (
+                "https://cairn.example.test/agent",
+                "https://cairn.example.test/agent",
+            ),
+            (
+                "https://cairn.example.test/agent/",
+                "https://cairn.example.test/agent",
+            ),
+            (
+                " https://cairn.example.test/ ",
+                "https://cairn.example.test",
+            ),
+        ] {
+            assert_eq!(Config::new(given, TOKEN).unwrap().url(), kept, "{given}");
+        }
+        assert!(Config::new("https://cairn.example.test/agent#x", TOKEN).is_err());
+        assert!(Config::new("https://cairn.example.test/agent?x=1", TOKEN).is_err());
+        let (url, request) =
+            serve_once("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_owned());
+        let client = Client::new(Config::new(&format!("{url}/agent/"), TOKEN).unwrap());
+        client.get("/cairn-memory/auth/me").unwrap();
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .starts_with("GET /agent/cairn-memory/auth/me ")
+        );
+    }
+
+    #[test]
     fn debug_and_errors_never_show_the_token() {
         let config = Config::new("http://127.0.0.1:1", TOKEN).unwrap();
         assert!(!format!("{config:?}").contains(TOKEN));

@@ -2004,12 +2004,22 @@ class OutboxBoundCheck(unittest.TestCase):
         self.assertEqual(OUTBOX.normalize_origin("http://[::1]:80"), "http://[::1]")
         self.assertEqual(OUTBOX.normalize_origin("http://localhost:3111/"), "http://localhost:3111")
         self.assertEqual(OUTBOX.normalize_origin("http://localhost:80/"), "http://localhost")
+        # A base path is part of the bound origin; a trailing slash is not.
+        self.assertEqual(OUTBOX.normalize_origin("https://Example.COM:443/agent/"), "https://example.com/agent")
+        self.assertEqual(OUTBOX.normalize_origin("https://example.com/agent"), "https://example.com/agent")
+        self.assertNotEqual(
+            OUTBOX.normalize_origin("https://example.com/agent"), OUTBOX.normalize_origin("https://example.com")
+        )
         for raw in (
             "http://user:synthetic-userinfo@127.0.0.1:3111",
             "http://127.0.0.1:3111?token=synthetic-query-secret",
             "http://127.0.0.1:3111#synthetic-fragment",
             "http://127.0.0.1:3111/cairn-memory",
             "http://127.0.0.1:3111/cairn-memory/sync/push",
+            "https://example.com/agent/cairn-memory",
+            "https://example.com//agent",
+            "https://example.com/a/../b",
+            "https://example.com/%2e%2e/b",
         ):
             with self.assertRaises(ValueError) as rejected:
                 OUTBOX.normalize_origin(raw)
@@ -2226,6 +2236,20 @@ class OutboxBoundCheck(unittest.TestCase):
                 self.assertFalse(any(item.name.startswith("missing") for item in Path(directory).iterdir()))
         finally:
             OUTBOX._OPENER.open = original
+
+    def test_base_path_is_part_of_the_queue_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "base.json"
+            _bound_text(path, {"eventId": "evt-base", "content": "kept"}, "https://example.com/agent/")
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["origin"], "https://example.com/agent")
+            OUTBOX.preflight_bound(path, "https://example.com/agent", _BOUND_TOKEN)
+            before = path.read_bytes()
+            for other in ("https://example.com", "https://example.com/other"):
+                with self.subTest(other=other):
+                    with self.assertRaises(ValueError) as failed:
+                        OUTBOX.preflight_bound(path, other, _BOUND_TOKEN)
+                    self.assertEqual(str(failed.exception), "outbox origin does not match this queue")
+                    self.assertEqual(path.read_bytes(), before)
 
     def test_mismatch_makes_no_request_and_leaves_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

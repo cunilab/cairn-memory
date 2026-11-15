@@ -65,7 +65,8 @@ fn with_stdin(command: &mut Command, input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{input}").unwrap();
+    // A command that rejects its arguments exits without reading stdin: ignore the broken pipe.
+    let _ = writeln!(child.stdin.take().unwrap(), "{input}");
     child.wait_with_output().unwrap()
 }
 

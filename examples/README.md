@@ -29,7 +29,8 @@
    `.claude/settings.local.json` for one project. Merge with any existing
    `hooks` key instead of replacing it.
 5. If your config directory is not `~/.config/cairn`, change the script path in the
-   commands. Set `CAIRN_URL` (https, or http only for loopback), `CAIRN_DEVICE_TOKEN`, and
+   commands. Set `CAIRN_URL` (https, or http only for loopback; a reverse proxy path prefix such as
+   `https://cairn.example.test/agent` is allowed), `CAIRN_DEVICE_TOKEN`, and
    `CAIRN_OUTBOX` as an absolute path. Do not commit a file that holds the
    token. As an alternative to the `env` block, export the three variables in
    the shell that starts `claude` and drop the `env` block.

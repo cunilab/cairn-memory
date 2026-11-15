@@ -27,7 +27,9 @@ the upstream full tool registry. The credential model is in
   `cairn setup`.
 - Server URL: `https`, or `http` only for a loopback host (`localhost`, `127.0.0.0/8`,
   `::1`). Plain `http` to any other host is refused at setup and at load. A URL may not
-  carry credentials, a query, or a fragment.
+  carry credentials, a query, or a fragment. It may carry a path prefix (a trailing slash is
+  dropped), for a server behind a reverse proxy mount such as `https://cairn.example.test/agent`;
+  every request goes to `<url>/cairn-memory/...`.
 - The client never follows a redirect, so the token cannot leave the configured origin, and
   never prints the token. Errors show the server's own message, for example
   `HTTP 403: web console session required; device tokens cannot do this`.

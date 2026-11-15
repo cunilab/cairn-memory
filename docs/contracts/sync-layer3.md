@@ -357,14 +357,20 @@ path is missing. There is no new CLI command. The file is:
 }
 ```
 
-`origin` is the server base, not a route. Normalization removes trailing
-slashes, lowercases the scheme and host, and omits the default port (`80` for
-`http`, `443` for `https`). `http://127.0.0.1:3111/` and
-`http://127.0.0.1:3111` are the same origin. `http` and `https` are the only
-schemes. A userinfo, query, fragment, or path is rejected with the fixed
-message `outbox origin must be an http(s) server base with no userinfo, query, fragment, or path`.
-That message does not include the URL. A path is not stripped and is not
-treated as another route: `http://127.0.0.1:3111/cairn-memory` does not become
+`origin` is the server base URL, not a route: the origin plus an optional path
+prefix, such as the `/agent` mount of a reverse proxy. Normalization removes
+trailing slashes, lowercases the scheme and host, and omits the default port
+(`80` for `http`, `443` for `https`); the path is kept as given.
+`http://127.0.0.1:3111/` and `http://127.0.0.1:3111` are the same origin, and
+`https://cairn.example.test/agent/` is stored as `https://cairn.example.test/agent`.
+A queue stays bound to that exact string, so a different prefix is a different
+server. `http` and `https` are the only schemes. A userinfo, query, or
+fragment is rejected with the fixed message
+`outbox origin must be an http(s) server base URL with no userinfo, query, or fragment`.
+That message does not include the URL. A path with an empty, `.`, or `..`
+segment, a `%`, or a `cairn-memory` segment is rejected with the same message,
+so a base cannot already name the API route:
+`http://127.0.0.1:3111/cairn-memory` is not accepted and does not become
 `http://127.0.0.1:3111`. A hostname that contains `%` is rejected with that
 same message and is not percent-decoded or stored. This includes `%2e`,
 `%2E`, `%3a`, and `%00`. An IPv6 zone id, such as `fe80::1%lo0` or

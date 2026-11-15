@@ -29,6 +29,7 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [Layer 4 project promotion](./contracts/project-layer4.md) | CM-CONTRACT-009 | Project registration and explicit evidence-backed promotion |
 | [Layer 5 explicit project memory share](./contracts/share-layer5.md) | CM-CONTRACT-010 | Owner invite, project team, explicit share, member read, revoke, and retained delete |
 | [Release process](./release.md) | CM-REL-001 | Trunk-based flow, required checks, cutting a release, and how clients update |
+| [Deployment layout](./deploy.md) | CM-DEPLOY-001 | Dokploy and Traefik layout for PostgreSQL, `cairn-server`, and the console, with the `/agent` API path |
 | [Documentation standards](./standards.md) | CM-STD-001 | Document lifecycle, ownership, review, and evidence rules |
 | [ADR 0001 — Compatibility-first rewrite](./adr/0001-compatibility-first-rewrite.md) | CM-ADR-0001 | Rationale for the migration strategy and major boundaries |
 | [ADR 0002 — Collaborative sync model](./adr/0002-collaborative-sync-model.md) | CM-ADR-0002 | Identity, spaces, permissions, synchronization, and conflict boundaries |

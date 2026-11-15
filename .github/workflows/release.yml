@@ -1,7 +1,8 @@
 # Publishes a GitHub Release when a vX.Y.Z tag is pushed. The tag must equal the workspace
 # version and point at a commit on main. Assets are raw binaries (no archives) so
 # `cairn update` needs no unpacking: cairn-<target>[.exe], cairn-server-<target>[.exe],
-# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them.
+# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them. The images job then pushes
+# ghcr.io/cunilab/cairn-server and cairn-web (vX.Y.Z and latest, linux/amd64 and linux/arm64).
 name: Release
 
 on:
@@ -98,3 +99,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+
+  images:
+    name: Publish images
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Emulation builds linux/arm64 on this amd64 runner.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: cairn-server
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/server.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/cunilab/cairn-server:${{ github.ref_name }}
+            ghcr.io/cunilab/cairn-server:latest
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - name: cairn-web
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/web.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/cunilab/cairn-web:${{ github.ref_name }}
+            ghcr.io/cunilab/cairn-web:latest
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
