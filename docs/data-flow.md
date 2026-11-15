@@ -24,7 +24,7 @@ A picture-first explainer of how Cairn memory works today, for someone who does 
 
 ## 1. System map
 
-Two kinds of users reach one server. People use the web console, which holds their sign-in as an httpOnly cookie and forwards it as a bearer token. Agents use a device token through the hook, the `cairn` command, or `cairn mcp`. The hook reads its URL and token only from environment variables; the CLI and MCP read a saved config file or the same two variables.
+Two kinds of users reach one server. People use the web console, which holds their sign-in as an httpOnly cookie and forwards it as a bearer token. Agents use a device token through the hook, the `cairn` command, or `cairn mcp`. The hook reads its URL and token only from environment variables; the CLI and MCP read a saved config file or the same two variables. The URL may include a path prefix when a reverse proxy mounts the API under one (for example `https://cairn.example.test/agent`); see [deploy](./deploy.md).
 
 ```mermaid
 flowchart LR
