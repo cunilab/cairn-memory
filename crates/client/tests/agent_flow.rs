@@ -51,7 +51,9 @@ fn command(config_home: &Path) -> Command {
     command
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("CAIRN_URL")
-        .env_remove("CAIRN_DEVICE_TOKEN");
+        .env_remove("CAIRN_DEVICE_TOKEN")
+        // `setup` fetches the hook scripts; keep tests off the network (refused at once).
+        .env("CAIRN_UPDATE_URL", "http://127.0.0.1:1/releases/latest");
     command
 }
 

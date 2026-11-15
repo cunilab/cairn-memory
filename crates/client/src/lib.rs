@@ -4,6 +4,7 @@
 
 pub mod mcp;
 pub mod tools;
+pub mod update;
 
 use serde_json::{Value, json};
 use std::fmt;
@@ -136,14 +137,19 @@ impl Config {
         let dir = path
             .parent()
             .ok_or_else(|| Error::Config("config path has no directory".to_owned()))?;
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder.create(dir).map_err(io)?;
+        create_private_dir(dir).map_err(io)?;
         let body = json!({ "url": self.url, "token": self.token }).to_string();
         write_private(path, body.as_bytes()).map_err(io)
     }
+}
+
+/// Creates `dir` and any missing parents with mode 0700; an existing directory keeps its mode.
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 /// Replaces `path` with `body`, mode 0600 from the first byte. The data goes to a fresh

@@ -159,6 +159,7 @@ dependencies = [
  "cairn-storage",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "ureq",
 ]
