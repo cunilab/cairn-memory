@@ -190,17 +190,23 @@ This changes a public contract: the sync response for a reused `eventId`.
    overwritten.
 3. An `eventId` that already exists outside the caller's sync scope returns `409
    Conflict` with `event already exists outside sync scope`: on the file store an
-   observation with no owner, on PostgreSQL an observation of the same person with
-   no sync event.
+   observation with no owner. (As first written this also covered a PostgreSQL
+   observation with no sync event; see the difference note below.)
 4. Both stores apply rules 1 and 2, and `POST /cairn-memory/observe` follows the
    same rules as `sync/push`.
 5. The outbox treats `409` as a permanent rejection. It marks the event rejected,
    never resends it, and keeps it for inspection until it is purged.
 
-Known difference that remains: on the file store a device may attach one sync event
-to an observation its person already owns that has none, and that first adoption
-returns `duplicate: false`. PostgreSQL rejects the same case with `409` (rule 3). The
-file store is the local prototype adapter; this ADR does not align them.
+Difference resolved 2026-11-15 (user decision): both stores adopt. When a person's
+device pushes an event id that the same person captured through the account (an
+observation with no sync event), the push is adopted as the same event if session,
+content (after redaction), role, and source match: no second row, a sync event is
+recorded, and later replays are duplicates. The first adoption returns `duplicate:
+false`. Changed content returns `409` with `event id already used with different
+content`, on the file store as well as PostgreSQL. Another person's id stays
+rejected on the file store; PostgreSQL keeps a separate row per person. Rule 3's
+`event already exists outside sync scope` now applies only to a file observation
+with no owner.
 
 The wire-level rules, status text, and examples are in the
 [Layer 3 sync contract](../contracts/sync-layer3.md). This ADR keeps its `draft`

@@ -97,12 +97,18 @@ rename. A failed rename leaves neither, and that attempt does not return
 that new push copies the device person's `(person_id, session_id)` row. It
 does not copy a row with no `person_id` or another person's row.
 
-On the file adapter, an existing observation with no sync event can gain
-exactly one sync event when the persisted observation owner is the
-authenticated device's person. That first attachment returns `duplicate: false`
-and a new cursor, because no sync event existed yet. The sync event stores the
-canonical observation already on disk. The request's content, session, context,
-and any person text are not ownership proof and do not replace that payload.
+On both adapters, an observation the person captured through the account (no
+sync event yet) can gain exactly one sync event when that person's device pushes
+the same event id with a matching session, content (after redaction), role, and
+source. That is adoption: no second observation, a recorded sync event, and
+later replays are the `duplicate: true` case above. The first attachment returns
+`duplicate: false` and a new cursor, because no sync event existed yet. A push
+whose session, content, role, or source differs is not adopted: `409`, `event id
+already used with different content`, and nothing is written. On the file
+adapter the persisted observation owner must be the authenticated device's
+person. The sync event stores the canonical observation already on disk; the
+request's context and any person text are not ownership proof and do not
+replace that payload.
 The sync event, cursor, and device last-seen time commit in one rename. A
 failed rename drops those additions and leaves the observation and owner
 record in place, so the same push can be retried. The following push is the
@@ -115,18 +121,18 @@ else, and another person's sync event, are still rejected as
 `event belongs to another person` (`400`). Neither error returns the stored
 observation or records a new owner or sync event. The file still keeps one
 observation per event id. On the file store a differing replay, of an
-observe or of a push after the sync event exists, is the same `409`; the
-first adoption above is not a replay and still keeps the stored row.
+observe or of a push before or after the sync event exists, is the same `409`.
 
 PostgreSQL keys observations and sync events by `(person_id, event_id)`, so
-it has only the `event already exists outside sync scope` rule: another
-person's row with the same event id is a separate row, not a rejection. A
-same-person duplicate returns the stored sync event and its original cursor.
+another person's row with the same event id is a separate row, not a rejection.
+A same-person duplicate returns the stored sync event and its original cursor.
 The response observation is that stored row, and a pure replay writes no audit row.
-A replay whose session, content, role, or source differs from the stored event, and an
-observation that already exists for that person without a sync event, are both rejected as a
-conflict (`409`, `event id already used with different content` or `event already exists
-outside sync scope`); neither is adopted or overwritten. On PostgreSQL a device-token
+A same-person observation with no sync event (an account capture or an import) is
+adopted when the push matches it as above; the sync event and an audit row are
+written in one transaction and the stored row is returned. A replay whose session,
+content, role, or source differs from the stored event or observation is a conflict
+(`409`, `event id already used with different content`); it is neither adopted nor
+overwritten. `event already exists outside sync scope` is a file-store rule only. On PostgreSQL a device-token
 `POST /cairn-memory/observe` is this same push, so it behaves alike. Session start and end accept a web session or a
 device token. Sync accepts a device token only; a session token is `401`. The
 hook always posts `POST /cairn-memory/sync/push` with `CAIRN_DEVICE_TOKEN`.

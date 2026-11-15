@@ -58,7 +58,7 @@ pub enum PostgresError {
     Core(cairn_core::StoreError),
     Json(serde_json::Error),
     Validation(String),
-    /// An event id that is already taken by different content, or by a row outside sync.
+    /// An event id that is already taken by different content.
     Conflict(String),
     RateLimited,
 }
@@ -3872,20 +3872,28 @@ impl PostgresStore {
                 observation: event.observation,
             });
         }
-        let observation_exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM cairn_observations
-             WHERE person_id = $1 AND event_id = $2)",
+        // An observation with no sync event (an account capture) is adopted when the push is
+        // the same event. The insert below then keeps the stored row and adds the sync event.
+        if let Some(row) = sqlx::query(
+            "SELECT session_id, content, role, source FROM cairn_observations
+             WHERE person_id = $1 AND event_id = $2",
         )
         .bind(&device.person_id)
         .bind(&observation.event_id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        if observation_exists {
-            transaction.rollback().await?;
-            return Err(PostgresError::Conflict(format!(
-                "event already exists outside sync scope: {}",
-                observation.event_id
-            )));
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let same = row.try_get::<String, _>("session_id")? == observation.session_id
+                && row.try_get::<String, _>("content")? == observation.content
+                && row.try_get::<String, _>("role")? == observation.role
+                && row.try_get::<String, _>("source")? == observation.source;
+            if !same {
+                transaction.rollback().await?;
+                return Err(PostgresError::Conflict(format!(
+                    "event id already used with different content: {}",
+                    observation.event_id
+                )));
+            }
         }
         sqlx::query(
             "INSERT INTO cairn_sessions (session_id, person_id, context)

@@ -202,36 +202,52 @@ fn setup(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
+/// How the token is read: piped, typed without echo, or typed with echo.
+#[derive(Debug, PartialEq)]
+enum TokenInput {
+    Piped,
+    Hidden,
+    Visible,
+}
+
+/// `hide` runs only for a terminal, and a terminal that cannot hide input falls back to visible.
+fn token_input(interactive: bool, hide: impl FnOnce() -> bool) -> TokenInput {
+    match (interactive, interactive && hide()) {
+        (false, _) => TokenInput::Piped,
+        (true, true) => TokenInput::Hidden,
+        (true, false) => TokenInput::Visible,
+    }
+}
+
 /// The token never appears in argv or shell history: one line from stdin, typed without
-/// echo on a terminal.
+/// echo on a unix terminal. Elsewhere (or without `stty`) it is typed visibly, with a warning.
 fn read_token() -> Result<String, Error> {
     let stdin = io::stdin();
-    let interactive = stdin.is_terminal();
-    if interactive {
-        // shortcut: `stty` hides the input, so a terminal without it must pipe the token.
-        set_echo(false)?;
-        eprint!("Device token (input hidden): ");
+    let mode = token_input(stdin.is_terminal(), || set_echo(false));
+    match mode {
+        TokenInput::Piped => {}
+        TokenInput::Hidden => eprint!("Device token (input hidden): "),
+        TokenInput::Visible => eprintln!(
+            "cairn: warning: token input is visible on this terminal; piping it on stdin is recommended"
+        ),
     }
     let mut line = String::new();
     let read = stdin.lock().read_line(&mut line);
-    if interactive {
-        let _ = set_echo(true);
+    if mode == TokenInput::Hidden {
+        set_echo(true);
         eprintln!();
     }
     read.map_err(|error| Error::Input(format!("cannot read the device token: {error}")))?;
     Ok(line)
 }
 
-fn set_echo(on: bool) -> Result<(), Error> {
-    let status = process::Command::new("stty")
-        .arg(if on { "echo" } else { "-echo" })
-        .status();
-    match status {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(Error::Input(
-            "cannot hide terminal input; pipe the token on stdin instead".to_owned(),
-        )),
-    }
+/// shortcut: `stty` is unix only and may be missing; the caller falls back to visible input.
+fn set_echo(on: bool) -> bool {
+    cfg!(unix)
+        && process::Command::new("stty")
+            .arg(if on { "echo" } else { "-echo" })
+            .status()
+            .is_ok_and(|status| status.success())
 }
 
 fn run(command: &Command, args: &[String]) -> Result<(), Error> {
@@ -312,4 +328,16 @@ fn export(client: &Client, tool: &Tool, arguments: &Map<String, Value>) -> Resul
     write_private(Path::new(output), raw.as_bytes())
         .map_err(|error| Error::Input(format!("cannot write {output}: {error}")))?;
     Ok(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenInput, token_input};
+
+    #[test]
+    fn token_input_falls_back_when_the_terminal_cannot_hide() {
+        assert_eq!(token_input(false, || unreachable!()), TokenInput::Piped);
+        assert_eq!(token_input(true, || true), TokenInput::Hidden);
+        assert_eq!(token_input(true, || false), TokenInput::Visible);
+    }
 }

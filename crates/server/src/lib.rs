@@ -3622,11 +3622,28 @@ mod tests {
             "source": "sync",
             "context": {"repository": "member-repo", "branch": "member-branch"}
         });
-        let (status, adopted) = json_request_auth(
+        // Changed text is not the same event, so the first push conflicts and attaches nothing.
+        let (status, rejected) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/sync/push",
             replacement.clone(),
+            owner_device_token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(rejected.get("observation").is_none(), "{rejected}");
+        let (status, adopted) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/sync/push",
+            serde_json::json!({
+                "eventId": "owned-event",
+                "sessionId": "adopt-session",
+                "content": "canonicalalphafact",
+                "role": "agent",
+                "source": "test"
+            }),
             owner_device_token,
         )
         .await;

@@ -3525,7 +3525,11 @@ impl MemoryStore {
                 });
             }
 
-            // Attach the stored observation. Request text is not ownership or a replacement.
+            // Attach the stored observation, but only for the same event: changed text conflicts.
+            if !is_replay(&existing, &input) {
+                self.persist_or_restore_seen(&device.device_id, &previous_seen)?;
+                return Err(changed_replay(&event_id));
+            }
             let previous_cursor = self.state.next_sync_cursor;
             self.state.next_sync_cursor = self.state.next_sync_cursor.saturating_add(1);
             let cursor = self.state.next_sync_cursor;
@@ -11172,6 +11176,53 @@ mod tests {
     }
 
     #[test]
+    fn adoption_of_an_account_capture_requires_the_same_content() -> Result<(), StoreError> {
+        let path = temp_store_path("adopt-parity");
+        let mut store = MemoryStore::open(&path)?;
+        let owner =
+            store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+        let device =
+            store.register_device("device-a", owner.account.person_id.clone(), None, "MacBook")?;
+        let original = observation_for("sess-a", "evt-a", "original content");
+        let captured = store.capture_for_account(&owner.token, original.clone())?;
+        let persisted = fs::read(&path)?;
+
+        // Any changed field is a conflict on the first push too, and nothing is written.
+        for changed in [
+            ObservationInput {
+                content: "changed content".to_owned(),
+                ..original.clone()
+            },
+            ObservationInput {
+                session_id: "sess-b".to_owned(),
+                ..original.clone()
+            },
+            ObservationInput {
+                role: "user".to_owned(),
+                ..original.clone()
+            },
+            ObservationInput {
+                source: "other".to_owned(),
+                ..original.clone()
+            },
+        ] {
+            let result = store.sync_push(&device.token, changed);
+            assert!(matches!(result, Err(StoreError::Conflict(_))), "{result:?}");
+        }
+        assert_eq!(fs::read(&path)?, persisted, "a conflict writes nothing");
+
+        // A matching push adopts the stored row once; a replay is then a duplicate.
+        let adopted = store.sync_push(&device.token, original.clone())?;
+        assert!(adopted.accepted && !adopted.duplicate);
+        assert_eq!(adopted.observation, captured.observation);
+        let replay = store.sync_push(&device.token, original)?;
+        assert!(replay.duplicate && replay.cursor == adopted.cursor);
+        assert_eq!(store.observations().count(), 1);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_event_is_acknowledged_without_duplication() -> Result<(), StoreError> {
         let path = temp_store_path("deduplication");
         let mut store = MemoryStore::open(&path)?;
@@ -12025,8 +12076,24 @@ mod tests {
             lifecycle: LifecycleInput::default(),
             context: member_context,
         };
-        // First attachment enters the sync stream, so this is not a duplicate.
-        let adopted = store.sync_push(&owner_device.token, replacement.clone())?;
+        // Changed text is not the same event: a conflict, and nothing is attached.
+        let rejected = store.sync_push(&owner_device.token, replacement.clone());
+        assert!(
+            matches!(rejected, Err(StoreError::Conflict(_))),
+            "{rejected:?}"
+        );
+        assert!(
+            store
+                .state
+                .sync_events
+                .iter()
+                .all(|event| event.event_id != "owned-event")
+        );
+        // First attachment of the same event enters the sync stream, so this is not a duplicate.
+        let adopted = store.sync_push(
+            &owner_device.token,
+            empty_capture("adopt-session", "owned-event", "canonicalalphafact"),
+        )?;
         assert!(adopted.accepted);
         assert!(!adopted.duplicate);
         assert_eq!(adopted.observation, canonical);
@@ -12211,7 +12278,7 @@ mod tests {
         let failed = store
             .sync_push(
                 &device.token,
-                observation_for("adopt-sess", "owned-event", "replacementbetatext"),
+                observation_for("adopt-sess", "owned-event", "canonicalalphafact"),
             )
             .expect_err("a blocked parent directory must fail the adoption commit");
         assert!(
@@ -12252,11 +12319,10 @@ mod tests {
 
         let retry = store.sync_push(
             &device.token,
-            observation_for("adopt-sess", "owned-event", "replacementbetatext"),
+            observation_for("adopt-sess", "owned-event", "canonicalalphafact"),
         )?;
         assert!(!retry.duplicate);
         assert_eq!(retry.observation, canonical);
-        assert!(!fs::read_to_string(&path)?.contains("replacementbetatext"));
         assert_eq!(
             store
                 .state

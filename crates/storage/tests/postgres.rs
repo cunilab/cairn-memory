@@ -1165,9 +1165,11 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
             pushed("evt-import", "sess-import", WorkContext::default()),
         )
         .await
-        .expect_err("imported observation stays outside sync");
+        .expect_err("changed text is not adopted");
+    // The pushed text differs from the imported row, so it is a changed replay.
+    assert!(matches!(outside, PostgresError::Conflict(_)), "{outside:?}");
     let outside = outside.to_string();
-    assert!(outside.contains("event already exists outside sync scope"));
+    assert!(outside.contains("event id already used with different content"));
     assert!(!outside.contains("imported outside sync"));
 
     let raw = PgPool::connect(&database_url).await.expect("fixture pool");
@@ -3248,4 +3250,134 @@ async fn postgres_sync_checks_the_account_and_throttles_last_seen() {
         .await
         .expect("enable");
     store.sync_pull(&device, 0).await.expect("pull again");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_push_adopts_an_observation_that_has_no_sync_event() {
+    let database_url = std::env::var("CAIRN_TEST_DATABASE_URL")
+        .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
+    let store = PostgresStore::connect(&database_url)
+        .await
+        .expect("connect and migrate PostgreSQL");
+    let account = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .expect("bootstrap account");
+    let device = store
+        .register_device(
+            &account.token,
+            "device-adopt",
+            &account.account.person_id,
+            None,
+            "Adopt laptop",
+        )
+        .await
+        .expect("register device");
+    let stored = |content: &str| cairn_core::Observation {
+        event_id: "evt-adopt".to_owned(),
+        session_id: "sess-adopt".to_owned(),
+        content: content.to_owned(),
+        role: "agent".to_owned(),
+        source: "test".to_owned(),
+        importance: None,
+        lifecycle: cairn_core::Lifecycle::default(),
+        scope: cairn_core::MemoryScope::Session,
+        context: WorkContext::default(),
+        captured_at: "0".to_owned(),
+    };
+    store
+        .import_bundle(
+            &account.token,
+            cairn_core::ExportBundle {
+                format: cairn_core::EXPORT_FORMAT.to_owned(),
+                version: cairn_core::EXPORT_VERSION,
+                exported_at: "0".to_owned(),
+                sessions: vec![cairn_core::Session {
+                    session_id: "sess-adopt".to_owned(),
+                    person_id: None,
+                    context: WorkContext::default(),
+                    started_at: "0".to_owned(),
+                    ended_at: None,
+                }],
+                observations: vec![stored("adoptable fact")],
+                memories: Vec::new(),
+                forgotten_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("import an observation with no sync event");
+    let raw = PgPool::connect(&database_url).await.expect("fixture pool");
+    let count = |table: &'static str| {
+        let raw = raw.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT count(*) FROM {table} WHERE event_id = 'evt-adopt'"
+            ))
+            .fetch_one(&raw)
+            .await
+            .expect("count rows")
+        }
+    };
+    assert_eq!(count("cairn_sync_events").await, 0);
+
+    // Changed content, session, role, or source is a conflict and writes nothing.
+    for changed in [
+        pushed("evt-adopt", "sess-adopt", WorkContext::default()),
+        ObservationInput {
+            content: "adoptable fact".to_owned(),
+            session_id: "sess-other".to_owned(),
+            ..pushed("evt-adopt", "sess-adopt", WorkContext::default())
+        },
+        ObservationInput {
+            content: "adoptable fact".to_owned(),
+            role: "user".to_owned(),
+            ..pushed("evt-adopt", "sess-adopt", WorkContext::default())
+        },
+        ObservationInput {
+            content: "adoptable fact".to_owned(),
+            source: "other".to_owned(),
+            ..pushed("evt-adopt", "sess-adopt", WorkContext::default())
+        },
+    ] {
+        let result = store.sync_push(&device.token, changed).await;
+        assert!(
+            matches!(result, Err(PostgresError::Conflict(_))),
+            "{result:?}"
+        );
+    }
+    assert_eq!(count("cairn_sync_events").await, 0);
+    assert_eq!(count("cairn_observations").await, 1);
+
+    // The same event is adopted once: no second row, a sync event, then a duplicate.
+    let same = ObservationInput {
+        content: "adoptable fact".to_owned(),
+        ..pushed("evt-adopt", "sess-adopt", WorkContext::default())
+    };
+    let adopted = store
+        .sync_push(&device.token, same.clone())
+        .await
+        .expect("adopt the stored observation");
+    assert!(adopted.accepted && !adopted.duplicate);
+    assert!(adopted.cursor > 0);
+    assert_eq!(adopted.observation.content, "adoptable fact");
+    assert_eq!(adopted.observation.captured_at, "0");
+    assert_eq!(count("cairn_observations").await, 1);
+    assert_eq!(count("cairn_sync_events").await, 1);
+    let replay = store
+        .sync_push(&device.token, same)
+        .await
+        .expect("replay after adoption");
+    assert!(replay.duplicate);
+    assert_eq!(replay.cursor, adopted.cursor);
+    assert_eq!(count("cairn_sync_events").await, 1);
+    let pulled = store.sync_pull(&device.token, 0).await.expect("pull");
+    assert_eq!(
+        pulled
+            .events
+            .iter()
+            .filter(|event| event.event_id == "evt-adopt")
+            .count(),
+        1
+    );
 }
