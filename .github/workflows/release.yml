@@ -1,8 +1,9 @@
 # Publishes a GitHub Release when a vX.Y.Z tag is pushed. The tag must equal the workspace
 # version and point at a commit on main. Assets are raw binaries (no archives) so
 # `cairn update` needs no unpacking: cairn-<target>[.exe], cairn-server-<target>[.exe],
-# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them. The images job then pushes
-# ghcr.io/cunilab/cairn-server and cairn-web (vX.Y.Z and latest, linux/amd64 and linux/arm64).
+# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them. The image jobs then build
+# each platform natively and the manifest jobs publish ghcr.io/cunilab/cairn-memory-server and
+# cairn-memory-web (vX.Y.Z and latest, linux/amd64 and linux/arm64).
 name: Release
 
 on:
@@ -100,42 +101,83 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
 
-  images:
-    name: Publish images
+  image:
+    name: Image ${{ matrix.image }} ${{ matrix.platform }}
     needs: publish
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        image: [server, web]
+        include:
+          - { platform: linux/amd64, os: ubuntu-24.04, arch: amd64 }
+          - { platform: linux/arm64, os: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # Emulation builds linux/arm64 on this amd64 runner.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: cairn-server
+      # Each platform builds natively and is pushed by digest only; the merge job tags the manifest.
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: docker/server.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/cunilab/cairn-server:${{ github.ref_name }}
-            ghcr.io/cunilab/cairn-server:latest
-          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
-      - name: cairn-web
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+          file: docker/${{ matrix.image }}.Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: org.opencontainers.image.source=https://github.com/cunilab/cairn-memory
+          outputs: type=image,name=ghcr.io/cunilab/cairn-memory-${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          context: .
-          file: docker/web.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/cunilab/cairn-web:${{ github.ref_name }}
-            ghcr.io/cunilab/cairn-web:latest
-          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          name: digests-${{ matrix.image }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Manifest ${{ matrix.image }}
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [server, web]
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Create the multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ghcr.io/cunilab/cairn-memory-${{ matrix.image }}
+        run: |
+          refs=()
+          for digest in *; do refs+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.source=https://github.com/cunilab/cairn-memory" \
+            -t "$IMAGE:$GITHUB_REF_NAME" -t "$IMAGE:latest" "${refs[@]}"
+      - name: Inspect
+        env:
+          IMAGE: ghcr.io/cunilab/cairn-memory-${{ matrix.image }}
+        run: docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME"
