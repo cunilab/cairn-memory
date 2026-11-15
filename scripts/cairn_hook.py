@@ -263,6 +263,11 @@ def _replay_pending(spool, origin, token, event_id):
 
 def _give_up(error, token, content, raw):
     message = scrub(error.read().decode(errors="replace"), token, content, raw)
+    if error.code == 403 and not message.lstrip().startswith("{"):
+        # Cairn answers JSON; a plain-text 403 comes from a proxy such as Cloudflare.
+        raise SystemExit(
+            f"Cairn hook rejected by a proxy in front of Cairn (403: {message})"
+        ) from None
     raise SystemExit(f"Cairn rejected hook payload ({error.code}): {message}") from None
 
 
@@ -277,7 +282,11 @@ def _unbound_base():
 
 def deliver(token, request, content, raw, base_url, queue_retryable):
     opener = _LOOPBACK_OPENER if base_url[:5].lower() == "http:" else _OPENER
-    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + token}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + token,
+        "User-Agent": cairn_outbox.USER_AGENT,
+    }
     http_request = urllib.request.Request(
         base_url + SYNC_PATH,
         data=json.dumps(request).encode(),

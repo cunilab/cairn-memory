@@ -84,6 +84,7 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
+                "user_agent": self.headers.get("User-Agent"),
                 "body": body,
             }
         )
@@ -170,6 +171,22 @@ class StubHookTests(unittest.TestCase):
         self.assertEqual(body["role"], "assistant")
         self.assertEqual(body["context"]["repository"], "cairn")
         self.assert_hidden(result, ACCOUNT, DEVICE)
+
+    def test_post_sends_the_cairn_hook_user_agent(self):
+        # urllib's default Python-urllib agent is blocked by Cloudflare (error 1010).
+        result = run_hook(self.url, {"sessionId": "session-ua", "content": "plain"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        agent = self.server.captured[0]["user_agent"]
+        self.assertTrue(agent.startswith("cairn-hook/"), agent)
+
+    def test_proxy_block_is_reported_as_a_proxy_rejection(self):
+        self.server.reply = (403, "error code: 1010")
+        result = run_hook(self.url, {"sessionId": "session-403", "content": "plain"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "rejected by a proxy in front of Cairn (403: error code: 1010)", result.stderr
+        )
+        self.assert_hidden(result, DEVICE)
 
     def test_device_token_posts_sync_and_redacts_before_the_request(self):
         content = "decision " + SECRET

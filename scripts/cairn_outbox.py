@@ -38,6 +38,10 @@ except ImportError:
     fcntl = None  # type: ignore[assignment]
 
 
+# Keep VERSION equal to [workspace.package] version in Cargo.toml (smoke_outbox.py checks it).
+VERSION = "0.1.3"
+# urllib's default agent is blocked by Cloudflare (error 1010) in front of a deployed server.
+USER_AGENT = "cairn-hook/" + VERSION
 MAX_EVENTS = 256
 MAX_CONTENT_BYTES = 64 * 1024
 MAX_BOUNDED_ATTEMPTS = 3
@@ -664,6 +668,7 @@ def _replay_loaded(
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
+                "User-Agent": USER_AGENT,
             },
             method="POST",
         )
