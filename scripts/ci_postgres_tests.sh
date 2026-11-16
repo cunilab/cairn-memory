@@ -8,7 +8,12 @@ set -euo pipefail
 
 n=0
 failed=0
-for target in "cairn-storage --test postgres" "cairn-client --test agent_flow"; do
+current_db=""
+cleanup() {
+  if [ -n "$current_db" ]; then psql "$CAIRN_TEST_SERVER_URL/postgres" -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS $current_db WITH (FORCE)"; fi
+}
+trap cleanup EXIT
+for target in "cairn-storage --test postgres" "cairn-client --test agent_flow" "cairn-server --test project_model"; do
   read -ra cargo_target <<<"$target"
   cargo test -p "${cargo_target[@]}" --no-run
   names="$(cargo test -p "${cargo_target[@]}" -- --ignored --list | sed -n 's/: test$//p')"
@@ -18,8 +23,9 @@ for target in "cairn-storage --test postgres" "cairn-client --test agent_flow"; 
   fi
   for name in $names; do
     n=$((n + 1))
-    db="cairn_ci_$n"
+    db="cairn_ci_$$_$n"
     psql "$CAIRN_TEST_SERVER_URL/postgres" -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE $db"
+    current_db="$db"
     if CAIRN_TEST_DATABASE_URL="$CAIRN_TEST_SERVER_URL/$db" \
       cargo test -p "${cargo_target[@]}" -- --ignored --exact "$name" --nocapture; then
       echo "ok: $name"
@@ -27,6 +33,8 @@ for target in "cairn-storage --test postgres" "cairn-client --test agent_flow"; 
       echo "FAILED: $name" >&2
       failed=$((failed + 1))
     fi
+    cleanup
+    current_db=""
   done
 done
 echo "$n PostgreSQL tests, $failed failed"

@@ -6,6 +6,13 @@ status: proposed
 
 # ADR 0009 — Explicit evidence-backed project promotion
 
+## Supersession — 2026-11-16
+
+[ADR 0013](0013-shared-project-decisions-and-personal-memory-scopes.md) supersedes the sharing, team-space,
+private-project auto-registration and personal-origin suppression rules below
+where they conflict. The remainder is historical rationale, not the current
+project authorization contract.
+
 ## Context
 
 Cairn already stores branch-aware personal memories with repository, branch,
@@ -80,7 +87,7 @@ stake.
    and ordering contradicting recall (newer first, nothing auto-resolved). The
    rules are in [CM-CONTRACT-006](../contracts/continuity-v1.md) and
    [CM-CONTRACT-009](../contracts/project-layer4.md).
-2. A human acts for: accounts and sign-in, devices, invites, share and revoke,
+2. A human acts for: accounts and sign-in, devices, share and revoke,
    share-policy changes, delete and forget, branch close, and merge
    confirmation on a project that has members.
 3. Automatic registration never claims a project with no owner record, uses a
@@ -90,7 +97,7 @@ stake.
    2026-11-14 through the credential kind chosen in
    [ADR 0008](0008-self-hosted-account-authentication.md): a device token is
    refused (`403`) on a project with any member besides its owner, and the web
-   session is the human surface. The other decision 2 actions (invites, share
+   session is the human surface. The other decision 2 actions (share
    and revoke, share policy, delete and forget, branch close) accept a device
    token for the owner's account; accounts, sign-in and devices are web-session
    only. That follows the owner's choice in ADR 0008; this ADR's wording for
@@ -107,7 +114,7 @@ stake.
 
 ## Evidence
 
-- `crates/core/src/lib.rs`
+- `crates/core/src/projects.rs`
 - `crates/storage/src/lib.rs`
 - `migrations/0003_layer4_projects.sql`
 - `migrations/0004_layer4_freshness.sql`

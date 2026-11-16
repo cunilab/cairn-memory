@@ -284,17 +284,14 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        for expected in [
-            "memory_observe",
-            "memory_recall",
-            "memory_promote",
-            "memory_project_share",
-        ] {
+        for expected in ["memory_observe", "memory_recall", "memory_promote"] {
             assert!(names.contains(&expected), "{expected}");
         }
         for removed in [
             "memory_account_bootstrap",
             "memory_account_register",
+            "memory_project_invite",
+            "memory_project_team_add",
             "memory_project_team_remove",
             "memory_sessions",
         ] {

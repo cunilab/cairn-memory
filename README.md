@@ -41,7 +41,7 @@ Start with the [documentation index](docs/README.md). The documents are delibera
 
 ## Project status
 
-Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. Layer 5 project sharing, teams, membership, maintenance, and the `apps/web` console are implemented. Federation remains later work. File-store authorization and sync deletion behavior are covered by the focused tests for those paths; they are not a separate finished product claim.
+Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are present. The local Layer 1 and Layer 2 implementation gates, the trusted-device sync slice, the first self-hosted account-authentication adapter, the PostgreSQL Layer 3 boundary, and the first Layer 4 project-promotion/merge slice are complete. The shared project model, membership, owner transfer and the `apps/web` console are under validation on this branch. Federation remains later work. File-store authorization and sync deletion behavior are covered by the focused tests for those paths; they are not a separate finished product claim.
 
 ## Install and update
 
@@ -62,7 +62,7 @@ People use the web console. Agents use the `cairn` CLI, the hooks, and `cairn mc
 ```bash
 cargo run -p cairn-server -- --store /tmp/cairn-memory.json --bind 127.0.0.1:3111
 printf %s "<device-token>" | cargo run -p cairn-client --bin cairn -- setup http://127.0.0.1:3111
-cargo run -p cairn-client --bin cairn -- start session-1 cairn-demo main worktree-1 abc1234
+cargo run -p cairn-client --bin cairn -- start session-1
 cargo run -p cairn-client --bin cairn -- capture session-1 event-1 "The session middleware validates the signed cookie before loading the user."
 cargo run -p cairn-client --bin cairn -- end session-1
 cargo run -p cairn-client --bin cairn -- context "signed cookie" 5
@@ -71,6 +71,37 @@ cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
 ```
 
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
+
+To work together, run `cairn init` in the checkout and commit `.cairn/project.json`.
+It contains a project ID and a normalized `host/org/repo` locator, without a secret
+or server URL. Running init with a valid existing file joins the same project and
+says "already initialized, you are a member". Captures also join by that ID.
+Repositories without the file create no project: captures remain private personal
+repository memory. Broken/unknown files warn while personal capture continues.
+
+Every live published project decision is visible to every member in the console,
+REST, CLI, MCP and normal agent recall. Members can promote their own live memories
+after a full preview; secret-marked sources cannot be promoted. The source stays
+private and later source correction/forget does not change the published copy.
+Authors and the current owner can verify, correct and delete decisions, with
+attribution. Owners and admins can transfer ownership to an existing member.
+There are no selective grants, share policies, dismissals or team spaces.
+
+Personal memory without repository context is global (preferences, habits, lessons,
+working style); repository/branch/worktree memory stays private to the person.
+Recall ranks eligible personal memories and that project's decisions together,
+with `source: personal | project`; project matching uses its ID. A renamed remote
+keeps project-tagged sources promotable and decisions discoverable by that ID. Decisions are read
+online, outside personal sync/export. Imports restore personal memory only.
+
+**Joining trusts possession of the project ID.** Any admin-created account on the
+configured server with a copied/leaked ID can join permanently, read all decisions
+and see member emails. Cairn does not prove Git access; removing repository access
+or the file does not remove membership. Keep the server configuration consistent
+and revoke device credentials separately from web-session password resets. See
+[ADR 0013](docs/adr/0013-shared-project-decisions-and-personal-memory-scopes.md) and
+[the project contract](docs/contracts/project-layer4.md) for the trust boundary and
+current routes. Branch status is personal bookkeeping; the console says "Record merge".
 
 The first REST compatibility server is:
 
@@ -97,7 +128,7 @@ The local viewer is available at:
 http://127.0.0.1:3111/viewer
 ```
 
-It is an exception-driven control surface for recent captures, durable memories, provenance, lifecycle state, diagnostics, search, and forget—not a manual knowledge-base editor.
+The embedded viewer inspects personal memory; project actions are in the web console.
 
 The MCP server runs over stdio as a proxy to the same REST API, using the configured device token:
 
@@ -112,7 +143,7 @@ cd apps/web
 CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
 ```
 
-`CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and a member's shared read.
+`CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and the common project decision list (the member joins by a capture that carries the project id).
 
 For automatic hook capture, send one JSON object to the portable adapter:
 

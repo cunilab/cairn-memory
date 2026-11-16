@@ -6,7 +6,6 @@ export type ListedProject = {
   created_at: string;
   updated_at: string;
   role: string;
-  share_policy?: string | null;
 };
 
 export type ProjectBranch = {
@@ -24,17 +23,24 @@ export type Account = {
   is_admin?: boolean;
 };
 
+export type AccountRow = Required<Account> & { created_at: string };
+
 export type PersonalMemory = {
   memory_id: string;
   content: string;
+  kind?: string;
+  created_at?: string;
   scope: string;
-  context?: { branch?: string | null };
+  /** Set on a project decision, never on a personal memory. */
+  project_id?: string | null;
+  context?: { branch?: string | null; repository?: string | null };
   lifecycle?: { sensitivity?: string };
 };
 
 export type ProjectMemory = {
   memory_id: string;
   content: string;
+  kind?: string;
   scope: string;
   verified_commit?: string | null;
   supersedes?: string | null;
@@ -42,19 +48,18 @@ export type ProjectMemory = {
     freshness?: number;
     sensitivity?: string;
   };
-  share_reason?: string | null;
+  published_by?: string | null;
+  changed_by?: string | null;
+  changed_at?: string | null;
   created_at?: string;
 };
 
-export type ProjectTeam = {
-  project_id: string;
-  name: string;
-  created_at: string;
-  members: Array<{
-    person_id: string;
-    email: string;
-    created_at: string;
-  }>;
+export type ProjectMember = {
+  person_id: string;
+  email: string;
+  role: "owner" | "member";
+  /** Unix seconds as a string. */
+  joined_at: string;
 };
 
 export type LifecycleSummary = {
@@ -74,20 +79,6 @@ export type ProjectFreshnessEvent = {
   action: string;
   reason?: string | null;
   created_at: string;
-};
-
-export type ProjectRevocation = {
-  memory_id: string;
-  member_person_id: string;
-  member_email?: string | null;
-  created_at: string;
-  revoked_at?: string | null;
-};
-
-export type ShareCandidate = {
-  memory_id: string;
-  reason: string;
-  not_auto_shared_reason: string;
 };
 
 export type Device = {

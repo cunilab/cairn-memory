@@ -10,6 +10,13 @@ status: draft
 - **Milestone:** Phase 0 and Layers 3–5 — product, personal sync, and collaboration boundary
 - **Related:** [Product](../product.md), [Roadmap](../roadmap.md), [Architecture](../architecture.md), [Collaborative memory specification](../specs/collaborative-memory.md)
 
+## Supersession — 2026-11-16
+
+[ADR 0013](0013-shared-project-decisions-and-personal-memory-scopes.md) supersedes the sharing, team-space,
+private-project auto-registration and personal-origin suppression rules below
+where they conflict. The remainder is historical rationale, not the current
+project authorization contract.
+
 ## Context
 
 Cairn Memory needs to extend a strong single-device memory foundation into a person-owned source that works across sessions and devices before it works across people. Cross-person collaboration introduces new trust boundaries: identities, devices, spaces, permissions, sharing, revocation, deletion, outage buffering, duplicate delivery, stale facts, and conflicting claims.

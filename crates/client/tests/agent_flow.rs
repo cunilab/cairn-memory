@@ -96,6 +96,14 @@ impl Agent {
         command(&self.home).args(args).output().unwrap()
     }
 
+    fn run_in(&self, dir: &Path, args: &[&str]) -> Output {
+        command(&self.home)
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
     fn json(&self, args: &[&str]) -> Value {
         let output = self.run(args);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -206,7 +214,12 @@ fn scenario(url: &str, label: &str) {
     }
 
     // Capture, session end, and recall.
-    let project = agent.json(&["project-register", "cairn-demo", "Cairn Demo", "main"]);
+    let project = agent.json(&[
+        "project-register",
+        "example.test/acme/cairn-demo",
+        "Cairn Demo",
+        "main",
+    ]);
     let project_id = project["project_id"].as_str().unwrap().to_owned();
     assert_eq!(
         agent.json(&["project-list"])[0]["project_id"],
@@ -223,7 +236,14 @@ fn scenario(url: &str, label: &str) {
     let private = agent.json(&["end", "private-session"]);
     let private_id = private["memory_id"].as_str().unwrap().to_owned();
 
-    agent.json(&["start", "shared-session", "cairn-demo", "", "", "abc1234"]);
+    agent.json(&[
+        "start",
+        "shared-session",
+        "example.test/acme/cairn-demo",
+        "",
+        "",
+        "abc1234",
+    ]);
     let captured = agent.json(&[
         "capture",
         "shared-session",
@@ -239,9 +259,17 @@ fn scenario(url: &str, label: &str) {
     ]);
     assert_eq!(replay["duplicate"], true);
     let ended = agent.json(&["end", "shared-session"]);
-    assert_eq!(ended["context"]["repository"], "cairn-demo");
+    assert_eq!(
+        ended["context"]["repository"],
+        "example.test/acme/cairn-demo"
+    );
     let memory_id = ended["memory_id"].as_str().unwrap();
-    let context = agent.json(&["context", "cache decision", "5", "cairn-demo"]);
+    let context = agent.json(&[
+        "context",
+        "cache decision",
+        "5",
+        "example.test/acme/cairn-demo",
+    ]);
     assert!(context.to_string().contains("cache decision"));
     let lesson = agent.json(&["lesson", "Keep device tokens out of logs."]);
     assert_eq!(lesson["kind"], "lesson");
@@ -255,14 +283,80 @@ fn scenario(url: &str, label: &str) {
     ]);
     assert_eq!(promoted["scope"], "project");
     let promoted_id = promoted["memory_id"].as_str().unwrap().to_owned();
-    agent.json(&["project-invite", &project_id, "member@example.test"]);
-    agent.json(&[
-        "project-share",
-        &project_id,
-        &promoted_id,
-        "member@example.test",
+    // Membership comes from the committed project file: the owner runs `cairn init` in the
+    // checkout, the teammate's first capture there joins the project. There is no invite.
+    let checkout = temp_dir(&format!("{label}-checkout"));
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.test/acme/cairn-demo.git",
     ]);
-    let shared = teammate.json(&["project-shared", &project_id]);
+    let not_git = agent.run_in(&temp_dir(&format!("{label}-plain")), &["init"]);
+    assert!(!not_git.status.success());
+    let init = agent.run_in(&checkout, &["init"]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(String::from_utf8_lossy(&init.stdout).contains("Commit .cairn/project.json"));
+    let file = checkout.join(".cairn/project.json");
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        written,
+        json!({"project_id": project_id, "repository": "example.test/acme/cairn-demo"})
+    );
+    assert!(
+        agent.run_in(&checkout, &["init"]).status.success(),
+        "init repeats"
+    );
+    std::fs::write(
+        &file,
+        r#"{"project_id": "project-other", "repository": "example.test/acme/cairn-demo"}"#,
+    )
+    .unwrap();
+    let refused = agent.run_in(&checkout, &["init"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unknown project"));
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("project-other")
+    );
+    std::fs::write(&file, serde_json::to_string(&written).unwrap()).unwrap();
+    assert_eq!(teammate.json(&["project-list"]), json!([]));
+    let joined = teammate.run_in(
+        &checkout,
+        &[
+            "capture",
+            "join-session",
+            "evt-join",
+            "joined by the project file",
+        ],
+    );
+    assert!(
+        joined.status.success(),
+        "{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    assert_eq!(
+        teammate.json(&["project-list"])[0]["project_id"],
+        project_id.as_str()
+    );
+    let shared = teammate.json(&["project-memories", &project_id]);
     let ids: Vec<_> = shared
         .as_array()
         .unwrap()
@@ -271,13 +365,6 @@ fn scenario(url: &str, label: &str) {
         .collect();
     assert_eq!(ids, [json!(promoted_id)]);
     assert!(!shared.to_string().contains(&private_id));
-    agent.json(&[
-        "project-revoke",
-        &project_id,
-        &promoted_id,
-        "member@example.test",
-    ]);
-    assert_eq!(teammate.json(&["project-shared", &project_id]), json!([]));
     assert_eq!(
         agent
             .json(&["project-memories", &project_id])
@@ -311,7 +398,18 @@ fn scenario(url: &str, label: &str) {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"memory_observe") && !names.contains(&"memory_project_team_remove"));
+    assert!(names.contains(&"memory_observe"));
+    for removed in [
+        "memory_project_invite",
+        "memory_project_team_add",
+        "memory_project_share",
+        "memory_project_shared",
+        "memory_project_revoke",
+        "memory_project_team",
+        "memory_project_team_create",
+    ] {
+        assert!(!names.contains(&removed), "{removed}");
+    }
     assert_eq!(
         mcp.tool("memory_session_start", json!({"sessionId": "mcp-session"}))["isError"],
         false
@@ -345,10 +443,6 @@ fn scenario(url: &str, label: &str) {
     for result in [
         device.get("/cairn-memory/auth/audit"),
         device.get("/cairn-memory/devices"),
-        device.post(
-            &format!("/cairn-memory/projects/{project_id}/team/members/remove"),
-            &json!({"email": "member@example.test"}),
-        ),
     ] {
         match result {
             Err(Error::Status {

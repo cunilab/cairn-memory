@@ -16,6 +16,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 rm -f "$store"
 
+# Keep a cold build outside the 60-second HTTP readiness window.
+cargo build -q -p cairn-server
 cargo run -q -p cairn-server -- --store "$store" --bind "127.0.0.1:${port}" >"$log" 2>&1 &
 pid=$!
 
@@ -38,14 +40,11 @@ PAGE_HTML="$page" python3 - <<'PY'
 import os
 
 page = os.environ["PAGE_HTML"]
-for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "Create team", "Add member", "Remove member", "Delete memory", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
+for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Use the web console for project decisions", "Content-Type"):
     assert marker in page, marker
-loader = page.split("async function loadProjectMemories", 1)[1]
-member_at = loader.index("if (member)")
-shared_at = loader.index("/shared")
-owner_at = loader.index("/memories")
-assert member_at < shared_at < owner_at
-assert "/memories" not in loader[member_at:shared_at]
+for removed in ("Share decision", "Revoke share", "Create team", "Delete memory", "/shared"):
+    assert removed not in page, removed
+
 PY
 
 diagnose="$(curl -fsS "http://127.0.0.1:${port}/cairn-memory/diagnose")"

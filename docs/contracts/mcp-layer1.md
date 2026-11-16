@@ -80,20 +80,24 @@ configuration is the only credential, and the server scopes every call to its ac
 | `memory_import` | `POST /import` | Merge a versioned bundle idempotently |
 | `memory_correct` | `POST /correct` | Supersede a memory or observation with a corrected durable memory |
 
-Account, project, and sharing tools run the same routes as the web console, with the same
+Project tools run the same routes as the web console, with the same
 account scope. Their behavior is owned by the contract named here:
 
 | Tool | Owner |
 | --- | --- |
 | `memory_project_list`, `memory_project_register`, `memory_promote`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
-| `memory_project_invite`, `memory_project_share`, `memory_project_shared`, `memory_project_revoke`, `memory_project_team_create`, `memory_project_team`, `memory_project_team_add`, `memory_delete` | [CM-CONTRACT-010](share-layer5.md) |
+| `memory_project_members`, `memory_project_verify`, `memory_delete` | [CM-CONTRACT-009](project-layer4.md) |
 
 Removed with the local-store mode: `memory_sessions` (it listed the file store's unscoped
 sessions), `memory_account_bootstrap` and `memory_account_register` (account creation is a
 web action), and `memory_project_team_remove` (member removal is web-only; a device token is
-`403`, so the tool would only invite retries). `memory_diagnose` returns the lifecycle
+`403`, so the tool would only invite retries). Since 2026-11-16 there is no invite, team
+member add or member removal at all, so `memory_project_invite` and
+`memory_project_team_add` are gone too; a teammate joins a project by capturing in a checkout
+whose `.cairn/project.json` names it ([project-layer4](project-layer4.md)). `cairn init`, which
+writes that file, is a CLI command only. `memory_diagnose` returns the lifecycle
 summary of `GET /diagnose`, not the earlier local storage counts. `memory_project_list` is
-new: an agent needs a project id before it can promote or share. Argument names are the
+new: an agent needs a project id before it can publish a decision. Argument names are the
 camelCase names of the REST bodies; path ids (`projectId`, `memoryId`) are percent-encoded
 into the route.
 
@@ -104,6 +108,23 @@ checks its required arguments before the request.
 
 Capture and explicit-save tools accept the nested Layer 1 `lifecycle` object
 defined in [CM-CONTRACT-004](lifecycle-v1.md).
+
+## Shared project tools
+
+`memory_promote` accepts `dryRun: true` to preview the full publication payload
+without writing and returns `previewFingerprint`, which can be echoed on promotion
+to reject a changed source. It publishes only the caller's own live personal memory to every
+member. `memory_project_memories` returns one role-neutral decision list;
+`memory_project_members` lists the roster, and `memory_project_verify` takes
+`projectId`, `memoryId`, `commit`. `memory_correct` and `memory_delete` accept project
+decisions only for their author or the current owner. Search/context/recall and
+why-changed combine personal and published results, labelled by `source`, using
+`context.project_id` for the project. No project ID means no project decisions.
+
+Removed: `memory_project_share`, `memory_project_shared`, `memory_project_revoke`,
+`memory_project_team_create`, `memory_project_team`. No grant, policy or team API
+remains. Decisions are online reads; personal sync/export does not restore project
+publication. See [ADR 0013](../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
 
 ## CLI
 
@@ -126,7 +147,11 @@ An empty string skips an optional positional. `setup` reads the token from stdin
 (`cairn setup <url> <<<"$TOKEN"` or an interactive prompt). `export` writes the bundle with mode
 `0600` to a temporary file and renames it over the output path, so an existing symlink at
 that path is replaced, not followed.
-Project and sharing commands are listed in the contracts above.
+Project commands include `project-memories`, `project-members`, `promote`,
+`promote-preview` and `project-verify`. Old share/shared/revoke/team commands are
+removed. `cairn init` joins an existing committed project instead of creating an
+additional project. A remember/lesson with no repository context is global personal
+memory; supplying repository context keeps it private to that repository.
 
 ## Layer 2 context filters
 

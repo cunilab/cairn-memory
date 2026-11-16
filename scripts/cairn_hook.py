@@ -130,12 +130,41 @@ def git_context(cwd):
     if not top:
         return {}
     origin = _git(cwd, "config", "--get", "remote.origin.url").rstrip("/")
-    name = origin.removesuffix(".git").replace(":", "/").rsplit("/", 1)[-1] or os.path.basename(top)
+    remote = origin.removesuffix(".git")
+    if "://" in remote:
+        scheme, remote = remote.split("://", 1)
+        host, _, path = remote.partition("/")
+        if scheme not in ("ssh", "https", "http", "git"):
+            host, path = "", ""
+    else:
+        host, _, path = remote.partition(":")
+    host = host.rsplit("@", 1)[-1].split(":", 1)[0].lower()
+    name = f"{host}/{path.strip('/')}" if host and path else f"local:{os.path.basename(top)}"
     derived = {"repository": name}
     branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
     if branch and branch != "HEAD":
         derived["branch"] = branch
     return derived
+
+
+def project_file_id(cwd):
+    # The committed project ID joins the capturer; a broken file keeps captures personal.
+    if not isinstance(cwd, str) or not cwd:
+        return None, None
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return None, None
+    try:
+        with open(os.path.join(top, ".cairn", "project.json"), encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError):
+        return None, "cannot read valid .cairn/project.json; capture remains personal"
+    project_id = value.get("project_id") if isinstance(value, dict) else None
+    if isinstance(project_id, str) and project_id.strip():
+        return project_id.strip(), None
+    return None, "invalid .cairn/project.json project id; capture remains personal"
 
 
 def build_request(source):
@@ -165,8 +194,16 @@ def build_request(source):
         fingerprint = json.dumps(parts, sort_keys=True).encode()
         event_id = "hook-" + hashlib.sha256(fingerprint).hexdigest()[:24]
     context = first(source, "context") or first(nested, "context") or {}
+    cwd = first(source, "cwd") or first(nested, "cwd")
     if isinstance(context, dict) and not context.get("repository"):
-        context = {**git_context(first(source, "cwd") or first(nested, "cwd")), **context}
+        context = {**git_context(cwd), **context}
+    attachment_warning = None
+    if isinstance(context, dict) and not context.get("project_id"):
+        project_id, attachment_warning = project_file_id(cwd)
+        if attachment_warning:
+            print("Cairn warning: " + attachment_warning, file=sys.stderr)
+        if project_id:
+            context = {**context, "project_id": project_id}
     lifecycle = first(source, "lifecycle") or first(nested, "lifecycle") or {}
     request = {
         "eventId": event_id,
@@ -180,7 +217,7 @@ def build_request(source):
     importance = first(source, "importance") or first(nested, "importance")
     if importance is not None:
         request["importance"] = importance
-    return request, str(content)
+    return request, str(content), attachment_warning
 
 
 def prepare_body(request, token, content, raw):
@@ -280,7 +317,7 @@ def _unbound_base():
     return base_url
 
 
-def deliver(token, request, content, raw, base_url, queue_retryable):
+def deliver(token, request, content, raw, base_url, queue_retryable, attachment_warning):
     opener = _LOOPBACK_OPENER if base_url[:5].lower() == "http:" else _OPENER
     headers = {
         "Content-Type": "application/json",
@@ -311,6 +348,16 @@ def deliver(token, request, content, raw, base_url, queue_retryable):
         if queue_retryable:
             raise _Retryable from None
         raise SystemExit("Cairn hook delivery failed (timed out)") from None
+    try:
+        response_body = json.loads(payload)
+        if attachment_warning:
+            response_body["project_attachment"] = {"status": "personal", "warning": attachment_warning}
+            payload = json.dumps(response_body).encode()
+        attachment = response_body.get("project_attachment") or {}
+        if attachment.get("warning") and not attachment_warning:
+            sys.stderr.write("Cairn warning: " + scrub(str(attachment["warning"]), token, content, raw) + "\n")
+    except (ValueError, AttributeError, TypeError):
+        pass
     sys.stdout.write(scrub(payload.decode(), token))
     sys.stdout.write("\n")
 
@@ -322,14 +369,14 @@ def main():
     # Bad origin fails before stdin and before a lock file or a request.
     origin = _bound_origin() if bound else _unbound_base()
     raw, source = read_input()
-    request, content = build_request(source)
+    request, content, attachment_warning = build_request(source)
     request = prepare_body(request, token, content, raw)
     spool = None
     if bound:
         spool = Path(spool_value)
         _preflight(spool, origin, token, content, raw)
     try:
-        deliver(token, request, content, raw, origin, bound)
+        deliver(token, request, content, raw, origin, bound, attachment_warning)
     except _Retryable:
         # One POST already finished. Queue that same normalized body, or exit
         # nonzero. Do not post again and do not start a replay worker.

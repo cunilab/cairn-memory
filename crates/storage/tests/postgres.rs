@@ -488,7 +488,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .project_maintenance(&account.token, &project.project_id, None)
         .await
         .expect("maintenance after project correction");
-    assert!(report.superseded_memory_ids.contains(&promoted.memory_id));
+    assert!(report.superseded_memory_ids.is_empty());
     assert!(
         report
             .active_memory_ids
@@ -540,236 +540,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .register_account("member@example.test", "correct horse battery staple")
         .await
         .expect("register member account");
-    let private_memory = store
-        .remember_with_kind(
-            &account.token,
-            "private observation stays on the owner account",
-            Vec::new(),
-            WorkContext::default(),
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .expect("remember private observation");
-    let repository_memory = store
-        .remember_with_kind(
-            &account.token,
-            "repository cache decision is ready for the project",
-            Vec::new(),
-            WorkContext {
-                repository: Some("cairn".to_owned()),
-                ..WorkContext::default()
-            },
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .expect("remember repository memory");
-    let shared_promoted = store
-        .promote_memory(
-            &account.token,
-            &project.project_id,
-            &repository_memory.memory_id,
-            "Share the promoted repository decision",
-        )
-        .await
-        .expect("promote repository memory");
-    assert!(
-        store
-            .invite_project_member(&account.token, &project.project_id, "owner@example.test",)
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .invite_project_member(&account.token, &project.project_id, "missing@example.test",)
-            .await
-            .is_err()
-    );
-    let invited = store
-        .invite_project_member(&account.token, &project.project_id, "member@example.test")
-        .await
-        .expect("invite member");
-    let repeated_invite = store
-        .invite_project_member(&account.token, &project.project_id, "member@example.test")
-        .await
-        .expect("repeat invite");
-    assert_eq!(repeated_invite.person_id, invited.person_id);
-    assert!(
-        store
-            .share_project_memory(
-                &account.token,
-                &project.project_id,
-                &private_memory.memory_id,
-                "member@example.test",
-            )
-            .await
-            .is_err()
-    );
-    store
-        .share_project_memory(
-            &account.token,
-            &project.project_id,
-            &shared_promoted.memory_id,
-            "member@example.test",
-        )
-        .await
-        .expect("share promoted memory");
-    let shared = store
-        .shared_project_memories(&member.token, &project.project_id)
-        .await
-        .expect("member reads shared memory");
-    assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory.memory_id, shared_promoted.memory_id);
-    let member_search = store
-        .search(
-            &member.token,
-            "private observation",
-            10,
-            &RecallFilter::default(),
-        )
-        .await
-        .expect("member search");
-    assert!(member_search.is_empty());
-    let member_context = store
-        .context(
-            &member.token,
-            "private observation",
-            10,
-            &RecallFilter::default(),
-        )
-        .await
-        .expect("member context");
-    assert!(member_context.results.is_empty());
-    let member_project_memories = store
-        .project_memories(&member.token, &project.project_id)
-        .await
-        .expect_err("member project listing is owner-only");
-    assert!(member_project_memories.to_string().contains("does not own"));
-    let member_correct = store
-        .correct(
-            &member.token,
-            &shared_promoted.memory_id,
-            "A member must not rewrite the shared decision.",
-            Vec::new(),
-            WorkContext::default(),
-            Default::default(),
-        )
-        .await
-        .expect_err("member correction fails");
-    assert!(member_correct.to_string().contains("does not own"));
-    let member_forget = store
-        .forget(&member.token, &shared_promoted.memory_id)
-        .await
-        .expect_err("member forget fails");
-    assert!(member_forget.to_string().contains("does not own"));
-    store
-        .revoke_project_share(
-            &account.token,
-            &project.project_id,
-            &shared_promoted.memory_id,
-            "member@example.test",
-        )
-        .await
-        .expect("revoke share");
-    let after_revoke = store
-        .shared_project_memories(&member.token, &project.project_id)
-        .await
-        .expect("member read after revoke");
-    assert!(after_revoke.is_empty());
-    for token in [&account.token, &member.token] {
-        let revoked = store
-            .project_revocations(token, &project.project_id)
-            .await
-            .expect("revocation report");
-        assert_eq!(revoked.len(), 1);
-        assert_eq!(
-            revoked[0].member_email.as_deref(),
-            Some("member@example.test")
-        );
-    }
-    let owner_memories = store
-        .project_memories(&account.token, &project.project_id)
-        .await
-        .expect("owner still lists the memory");
-    assert!(
-        owner_memories
-            .iter()
-            .any(|memory| memory.memory_id == shared_promoted.memory_id)
-    );
-    let exported = store
-        .export_bundle(&account.token)
-        .await
-        .expect("owner still exports the memory");
-    assert!(
-        exported
-            .memories
-            .iter()
-            .any(|memory| memory.memory_id == shared_promoted.memory_id)
-    );
-    let share_audit = store
-        .audit_events(&account.token, 100)
-        .await
-        .expect("share audit");
-    assert!(
-        share_audit
-            .iter()
-            .any(|event| event.action == "project_memory_shared")
-    );
-    assert!(
-        share_audit
-            .iter()
-            .any(|event| event.action == "project_memory_share_revoked")
-    );
-
-    store
-        .share_project_memory(
-            &account.token,
-            &project.project_id,
-            &shared_promoted.memory_id,
-            "member@example.test",
-        )
-        .await
-        .expect("share again");
-    let successor = store
-        .correct(
-            &account.token,
-            &shared_promoted.memory_id,
-            "The successor repository decision replaces the shared one.",
-            Vec::new(),
-            WorkContext::default(),
-            Default::default(),
-        )
-        .await
-        .expect("owner corrects shared memory");
-    let omitted = store
-        .shared_project_memories(&member.token, &project.project_id)
-        .await
-        .expect("superseded share is omitted");
-    assert!(
-        omitted
-            .iter()
-            .all(|memory| memory.memory.memory_id != shared_promoted.memory_id)
-    );
-    store
-        .share_project_memory(
-            &account.token,
-            &project.project_id,
-            &successor.memory_id,
-            "member@example.test",
-        )
-        .await
-        .expect("share successor");
-    let successor_read = store
-        .shared_project_memories(&member.token, &project.project_id)
-        .await
-        .expect("member reads successor");
-    assert!(
-        successor_read
-            .iter()
-            .any(|memory| memory.memory.memory_id == successor.memory_id)
-    );
-
     let shared_session = "shared-session";
     store
         .start_session(&account.token, shared_session, WorkContext::default())
@@ -1822,7 +1592,7 @@ async fn postgres_why_changed_orders_like_the_file_store() {
 // first, so a missing or foreign project is a validation error, not a raw foreign-key failure.
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_branch_and_worktree_registration_validate_the_owned_project() {
+async fn postgres_branch_and_worktree_registration_validate_project_membership() {
     let url = std::env::var("CAIRN_TEST_DATABASE_URL")
         .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
     let store = PostgresStore::connect(&url).await.expect("connect");
@@ -1878,18 +1648,22 @@ async fn postgres_branch_and_worktree_registration_validate_the_owned_project() 
         .expect("idempotent worktree");
     assert_eq!(worktree_again.worktree_id, worktree.worktree_id);
 
-    // A foreign known project id, a missing project id, for both operations: one validation error.
+    // Both a foreign project and a missing project refuse registration without leaking schema details.
     let missing = "project-missing".to_owned();
     for (token, id) in [
         (&outsider.token, &project),
         (&outsider.token, &missing),
         (&owner.token, &missing),
     ] {
-        let expected = format!("unknown project: {id}");
+        let expected = if id == &missing {
+            format!("unknown project: {id}")
+        } else {
+            "account is not a project member".to_owned()
+        };
         let branch_error = store
             .register_branch(token, id, "feat/evil", None, None, None)
             .await
-            .expect_err("branch registration needs an owned project");
+            .expect_err("branch registration needs membership");
         assert!(
             matches!(&branch_error, PostgresError::Validation(text) if *text == expected),
             "branch: {branch_error}"
@@ -1897,7 +1671,7 @@ async fn postgres_branch_and_worktree_registration_validate_the_owned_project() 
         let worktree_error = store
             .register_worktree(token, id, None, "/wt/evil", None)
             .await
-            .expect_err("worktree registration needs an owned project");
+            .expect_err("worktree registration needs membership");
         assert!(
             matches!(&worktree_error, PostgresError::Validation(text) if *text == expected),
             "worktree: {worktree_error}"
@@ -1953,13 +1727,7 @@ async fn postgres_branch_and_worktree_registration_validate_the_owned_project() 
             .expect("other")
             .is_empty()
     );
-    assert!(
-        store
-            .branches(&outsider.token, &project)
-            .await
-            .expect("outsider read")
-            .is_empty()
-    );
+    assert!(store.branches(&outsider.token, &project).await.is_err());
 }
 
 // An `expiresAt` above i64::MAX would pass a u64 parse but fail the `::bigint` cast in every
@@ -2074,208 +1842,6 @@ async fn postgres_rejects_expiry_above_i64_before_persisting() {
         .expect("session end");
 }
 
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_project_actions_never_delete_personal_memory() {
-    let url = std::env::var("CAIRN_TEST_DATABASE_URL")
-        .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
-    let store = PostgresStore::connect(&url).await.expect("connect");
-    let password = "correct horse battery staple";
-    let owner = store
-        .bootstrap_account("never-owner@example.test", password)
-        .await
-        .expect("owner");
-    let member = store
-        .register_account("never-member@example.test", password)
-        .await
-        .expect("member");
-    let project = store
-        .register_project(&owner.token, "acme/never", "Never", None)
-        .await
-        .expect("project")
-        .project_id;
-    store
-        .invite_project_member(&owner.token, &project, "never-member@example.test")
-        .await
-        .expect("invite");
-    store
-        .create_project_team(&owner.token, &project, "Core")
-        .await
-        .expect("team");
-    let context = WorkContext {
-        repository: Some("acme/never".to_owned()),
-        ..WorkContext::default()
-    };
-    let filter = RecallFilter::default();
-    let promote_shared = |content: &'static str| {
-        let (store, owner, project, context) = (&store, &owner, &project, &context);
-        async move {
-            let source = store
-                .remember_with_kind(
-                    &owner.token,
-                    content,
-                    Vec::new(),
-                    context.clone(),
-                    cairn_core::LifecycleInput::default(),
-                    cairn_core::MemoryKind::Explicit,
-                )
-                .await
-                .expect("remember");
-            let copy = store
-                .promote_memory(&owner.token, project, &source.memory_id, "why")
-                .await
-                .expect("promote");
-            store
-                .share_project_memory(
-                    &owner.token,
-                    project,
-                    &copy.memory_id,
-                    "never-member@example.test",
-                )
-                .await
-                .expect("share");
-            (source, copy)
-        }
-    };
-    let ids = |hits: Vec<cairn_core::RecallResult>| {
-        let mut ids = hits
-            .into_iter()
-            .map(|hit| hit.memory_id)
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids
-    };
-
-    // Forget and retained delete of the copy, by the project and team owner.
-    for (word, delete) in [("forgetcopy", false), ("deletecopy", true)] {
-        let content: &'static str = Box::leak(format!("{word} personal fact").into_boxed_str());
-        let (source, copy) = promote_shared(content).await;
-        assert!(copy.source_event_ids.is_empty());
-        assert_eq!(
-            copy.promoted_from.as_deref(),
-            Some(source.memory_id.as_str())
-        );
-        let hits = store
-            .search(&owner.token, word, 10, &filter)
-            .await
-            .expect("search");
-        let origin = hits.iter().find(|hit| hit.memory_id == copy.memory_id);
-        assert_eq!(
-            origin.and_then(|hit| hit.promoted_from.as_deref()),
-            Some(source.memory_id.as_str()),
-            "the owner sees the origin"
-        );
-        if delete {
-            store.delete_memory(&owner.token, &copy.memory_id).await
-        } else {
-            store.forget(&owner.token, &copy.memory_id).await
-        }
-        .expect("hide copy");
-        let hits = store
-            .search(&owner.token, word, 10, &filter)
-            .await
-            .expect("search");
-        assert_eq!(ids(hits), vec![source.memory_id.clone()]);
-        let bundle = store.export_bundle(&owner.token).await.expect("export");
-        assert!(!bundle.forgotten_ids.contains(&source.memory_id));
-        assert!(
-            source
-                .source_event_ids
-                .iter()
-                .all(|event| !bundle.forgotten_ids.contains(event))
-        );
-        assert!(
-            store
-                .project_memories(&owner.token, &project)
-                .await
-                .expect("list")
-                .is_empty()
-        );
-        assert!(
-            store
-                .shared_project_memories(&member.token, &project)
-                .await
-                .expect("shared")
-                .is_empty()
-        );
-    }
-
-    // Forgetting the personal memory leaves the shared copy; the origin is never exposed.
-    let (source, copy) = promote_shared("keepcopy personal fact").await;
-    let shared = store
-        .shared_project_memories(&member.token, &project)
-        .await
-        .expect("shared");
-    assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory.promoted_from, None);
-    assert!(shared[0].memory.source_event_ids.is_empty());
-    store
-        .forget(&owner.token, &source.memory_id)
-        .await
-        .expect("forget personal");
-    let hits = store
-        .search(&owner.token, "keepcopy", 10, &filter)
-        .await
-        .expect("search");
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].memory_id, copy.memory_id);
-    assert_eq!(hits[0].promoted_from, None);
-    let listed = store
-        .project_memories(&owner.token, &project)
-        .await
-        .expect("list");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].promoted_from, None);
-    let shared = store
-        .shared_project_memories(&member.token, &project)
-        .await
-        .expect("shared");
-    assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory.memory_id, copy.memory_id);
-    assert_eq!(shared[0].memory.promoted_from, None);
-
-    // A correction of a personal memory hides its promoted copy; promoting the correction
-    // links the new copy to the old copy, never to the personal id.
-    let (source, copy) = promote_shared("stalecopy old fact").await;
-    let correction = store
-        .correct(
-            &owner.token,
-            &source.memory_id,
-            "stalecopy new fact",
-            Vec::new(),
-            context.clone(),
-            cairn_core::LifecycleInput::default(),
-        )
-        .await
-        .expect("correct");
-    assert!(
-        store
-            .project_memories(&owner.token, &project)
-            .await
-            .expect("list")
-            .iter()
-            .all(|memory| memory.memory_id != copy.memory_id)
-    );
-    assert!(
-        store
-            .shared_project_memories(&member.token, &project)
-            .await
-            .expect("shared")
-            .iter()
-            .all(|shared| shared.memory.memory_id != copy.memory_id)
-    );
-    let hits = store
-        .search(&owner.token, "stalecopy", 10, &filter)
-        .await
-        .expect("search");
-    assert_eq!(ids(hits), vec![correction.memory_id.clone()]);
-    let next = store
-        .promote_memory(&owner.token, &project, &correction.memory_id, "why")
-        .await
-        .expect("promote correction");
-    assert_eq!(next.supersedes.as_deref(), Some(copy.memory_id.as_str()));
-}
-
 async fn pool_and_store() -> (PgPool, PostgresStore) {
     let url = std::env::var("CAIRN_TEST_DATABASE_URL")
         .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
@@ -2312,6 +1878,28 @@ async fn push_in(
     let mut input = pushed(event, session, ctx);
     input.content = format!("autofact {event}");
     store.sync_push(device, input).await.expect("push");
+}
+
+/// Makes the account a project member the way the committed project file does: one device
+/// push that carries the project id.
+async fn join_project(
+    store: &PostgresStore,
+    account: &cairn_core::AuthSessionResult,
+    project_id: &str,
+) {
+    let device = device_for(store, account, &format!("join-{project_id}")).await;
+    let context = WorkContext {
+        project_id: Some(project_id.to_owned()),
+        ..WorkContext::default()
+    };
+    push_in(
+        store,
+        &device,
+        "join",
+        &format!("join-{project_id}"),
+        context,
+    )
+    .await;
 }
 
 async fn age(pool: &PgPool, person_id: &str, session_id: &str) {
@@ -2500,7 +2088,7 @@ async fn postgres_auto_closes_idle_sessions_per_person_and_rederives_reused_ids(
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_capture_registers_project_and_branch_without_a_second_project_for_members() {
+async fn postgres_capture_stays_personal_until_an_explicit_project_attaches() {
     let (pool, store) = pool_and_store().await;
     let pw = "correct horse battery staple";
     let owner = store
@@ -2540,32 +2128,26 @@ async fn postgres_capture_registers_project_and_branch_without_a_second_project_
     push_in(&store, &solo_dev, "rs", "r3", ctx("auto-pg", Some("HEAD"))).await;
     push_in(&store, &solo_dev, "rs", "r4", ctx("auto-pg", None)).await;
     let projects = store.projects(&solo.token).await.expect("projects");
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].repository, "auto-pg");
-    let branches = store
-        .branches(&solo.token, &projects[0].project_id)
-        .await
-        .expect("branches");
-    assert_eq!(
-        branches.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
-        vec!["feat/x"]
+    assert!(
+        projects.is_empty(),
+        "a repository alone never creates a project"
     );
 
     let shared = store
         .register_project(&owner.token, "shared-pg", "Shared", None)
         .await
         .expect("shared");
-    store
-        .invite_project_member(&owner.token, &shared.project_id, "reg-m@example.test")
-        .await
-        .expect("invite");
+    join_project(&store, &member, &shared.project_id).await;
     let member_dev = device_for(&store, &member, "reg-member").await;
     push_in(
         &store,
         &member_dev,
         "rm",
         "m1",
-        ctx("shared-pg", Some("feat/m")),
+        WorkContext {
+            project_id: Some(shared.project_id.clone()),
+            ..ctx("shared-pg", Some("feat/m"))
+        },
     )
     .await;
     let mine = store
@@ -2598,7 +2180,7 @@ async fn postgres_capture_registers_project_and_branch_without_a_second_project_
             member.account.person_id.clone()
         )
         .await,
-        0
+        1
     );
 }
 
@@ -2958,7 +2540,7 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
         .project_memories(&other_device, &project)
         .await
         .expect_err("another account's device is outside the project");
-    assert!(foreign.is_unauthorized() || foreign.to_string().contains("unknown project"));
+    assert!(foreign.is_unauthorized() || foreign.to_string().contains("not a project member"));
     let devices = store
         .list_devices(&owner.token)
         .await
@@ -2992,7 +2574,7 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
     assert!(!store.is_device_token(&owner.token).await.expect("session"));
     assert!(store.authenticate_session(&owner.token).await.is_ok());
 
-    // A solo project merges with a device token; a shared project does not.
+    // A device records its personal branches regardless of the project roster.
     let mut merges = Vec::new();
     for name in ["feat/solo", "feat/shared"] {
         let branch = store
@@ -3020,11 +2602,8 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
         .confirm_branch_merge(&device, &project, &merges[0].0, &merges[0].1, "c1", "solo")
         .await
         .expect("solo merge with a device token");
+    join_project(&store, &other, &project).await;
     store
-        .invite_project_member(&device, &project, "dev-other@example.test")
-        .await
-        .expect("device invites a member");
-    let refused = store
         .confirm_branch_merge(
             &device,
             &project,
@@ -3034,19 +2613,7 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
             "shared",
         )
         .await
-        .expect_err("a shared project needs the web console");
-    assert!(refused.to_string().contains(cairn_core::WEB_ONLY_ERROR));
-    store
-        .confirm_branch_merge(
-            &owner.token,
-            &project,
-            &merges[1].0,
-            &merges[1].1,
-            "c2",
-            "shared",
-        )
-        .await
-        .expect("session merges a shared project");
+        .expect("device records its own merge in a shared project");
 
     // A revoked token is rejected on agent actions and on sync.
     store
@@ -3059,130 +2626,6 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
         .expect_err("revoked device token");
     assert!(revoked.is_unauthorized());
     assert!(store.sync_pull(&device, 0).await.is_err());
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_invite() {
-    let (pool, store) = pool_and_store().await;
-    let password = "correct horse battery staple";
-    let owner = store
-        .bootstrap_account("gate-owner@example.test", password)
-        .await
-        .expect("owner");
-    let other = store
-        .register_account("gate-other@example.test", password)
-        .await
-        .expect("other");
-    let device = device_for(&store, &owner, "gate-device").await;
-    let project = store
-        .register_project(&device, "acme/gate", "Gate", None)
-        .await
-        .expect("project")
-        .project_id;
-    let mut branches = Vec::new();
-    for name in ["feat/gate", "feat/race"] {
-        let branch = store
-            .register_branch(&device, &project, name, None, None, None)
-            .await
-            .expect("branch");
-        let memory = store
-            .remember_with_kind(
-                &device,
-                &format!("decision on {name}"),
-                Vec::new(),
-                WorkContext {
-                    repository: Some("acme/gate".to_owned()),
-                    branch: Some(name.to_owned()),
-                    ..WorkContext::default()
-                },
-                Default::default(),
-                cairn_core::MemoryKind::Explicit,
-            )
-            .await
-            .expect("memory");
-        branches.push((branch.branch_id, memory.memory_id));
-    }
-    store
-        .invite_project_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect("device invites");
-    store
-        .create_project_team(&device, &project, "Core")
-        .await
-        .expect("device creates the team");
-    store
-        .add_project_team_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect("device adds a team member");
-
-    // A device token cannot empty the project to reopen the solo-merge path.
-    let removal = store
-        .remove_project_team_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect_err("removing a member is web-only");
-    assert!(removal.to_string().contains(cairn_core::WEB_ONLY_ERROR));
-    let merge = store
-        .confirm_branch_merge(
-            &device,
-            &project,
-            &branches[0].0,
-            &branches[0].1,
-            "c1",
-            "gate",
-        )
-        .await
-        .expect_err("members still need the web console");
-    assert!(merge.to_string().contains(cairn_core::WEB_ONLY_ERROR));
-    store
-        .remove_project_team_member(&owner.token, &project, "gate-other@example.test")
-        .await
-        .expect("the web session removes the member");
-    store
-        .confirm_branch_merge(
-            &device,
-            &project,
-            &branches[0].0,
-            &branches[0].1,
-            "c1",
-            "gate",
-        )
-        .await
-        .expect("a solo project merges with the device again");
-
-    // An invite that is still uncommitted holds a key-share lock on the project row. The
-    // device merge must wait for it, then see the member and refuse.
-    let mut held = pool.begin().await.expect("begin");
-    sqlx::query(
-        "INSERT INTO cairn_project_members (owner_person_id, project_id, member_person_id)
-         VALUES ($1, $2, $3)",
-    )
-    .bind(&owner.account.person_id)
-    .bind(&project)
-    .bind(&other.account.person_id)
-    .execute(&mut *held)
-    .await
-    .expect("uncommitted invite");
-    let merger = tokio::spawn({
-        let (store, device, project) = (store.clone(), device.clone(), project.clone());
-        let (branch_id, memory_id) = branches[1].clone();
-        async move {
-            store
-                .confirm_branch_merge(&device, &project, &branch_id, &memory_id, "c2", "race")
-                .await
-        }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    assert!(
-        !merger.is_finished(),
-        "the merge must wait for the in-flight invite"
-    );
-    held.commit().await.expect("commit");
-    let raced = merger
-        .await
-        .expect("merge finishes")
-        .expect_err("the committed member closes the device merge path");
-    assert!(raced.to_string().contains(cairn_core::WEB_ONLY_ERROR));
 }
 
 #[tokio::test]
@@ -3587,50 +3030,945 @@ async fn postgres_push_gives_the_session_its_context_so_the_summary_is_scoped() 
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_share_policy_is_readable_by_the_owner_only() {
+async fn postgres_init_project_creates_once_and_defaults_the_name() {
     let (_pool, store) = pool_and_store().await;
     let pw = "correct horse battery staple";
     let owner = store
-        .bootstrap_account("policy-read-owner@example.test", pw)
+        .bootstrap_account("init-owner@example.test", pw)
         .await
         .expect("owner");
-    let member = store
-        .register_account("policy-read-member@example.test", pw)
+    let other = store
+        .register_account("init-other@example.test", pw)
         .await
-        .expect("member");
+        .expect("other");
+    let (created, is_new) = store
+        .init_project(&owner.token, " repo-a ", None)
+        .await
+        .expect("init");
+    assert!(is_new);
+    assert_eq!(
+        (created.repository.as_str(), created.name.as_str()),
+        ("repo-a", "repo-a")
+    );
+    let (again, is_new) = store
+        .init_project(&owner.token, "repo-a", Some("Renamed"))
+        .await
+        .expect("again");
+    assert!(!is_new);
+    assert_eq!(again.project_id, created.project_id);
+    let (theirs, is_new) = store
+        .init_project(&other.token, "repo-a", Some("Named"))
+        .await
+        .expect("other init");
+    assert!(is_new);
+    assert_ne!(theirs.project_id, created.project_id);
+    assert_eq!(theirs.name, "Named");
+    assert!(store.init_project(&owner.token, "  ", None).await.is_err());
+    assert!(
+        store
+            .init_project(&owner.token, &"r".repeat(513), None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_admin_lists_accounts_and_passwords_reset_and_change_revoke_sessions() {
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let fresh = "a brand new passphrase";
+    let admin = store
+        .bootstrap_account("pw-admin@example.test", pw)
+        .await
+        .expect("admin");
+    let user = store
+        .register_account("pw-user@example.test", pw)
+        .await
+        .expect("user");
+    let second = store
+        .login("pw-user@example.test", pw)
+        .await
+        .expect("second session");
+    let device = device_for(&store, &user, "pw-device").await;
+
+    // Listing is admin web session only.
+    let listed = store.accounts(&admin.token).await.expect("list");
+    assert_eq!(
+        listed.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(),
+        ["pw-admin@example.test", "pw-user@example.test"]
+    );
+    assert!(listed[0].is_admin && !listed[1].is_admin);
+    for (token, expected) in [
+        (&user.token, cairn_core::ADMIN_ONLY_ERROR),
+        (&device, cairn_core::WEB_ONLY_ERROR),
+    ] {
+        let refused = store.accounts(token).await.expect_err("refused");
+        assert!(refused.to_string().contains(expected), "{refused}");
+        let refused = store
+            .reset_account_password(token, &user.account.person_id, fresh)
+            .await
+            .expect_err("refused");
+        assert!(refused.to_string().contains(expected), "{refused}");
+    }
+    assert!(
+        store
+            .reset_account_password(&admin.token, &user.account.person_id, "short")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .reset_account_password(&admin.token, "person-missing", fresh)
+            .await
+            .is_err()
+    );
+    store
+        .authenticate_session(&user.token)
+        .await
+        .expect("untouched");
+
+    // The reset ends every web session of that user, keeps devices, and is audited.
+    store
+        .reset_account_password(&admin.token, &user.account.person_id, fresh)
+        .await
+        .expect("reset");
+    for token in [&user.token, &second.token] {
+        assert!(store.authenticate_session(token).await.is_err());
+    }
+    store
+        .authenticate_account(&device)
+        .await
+        .expect("device stays valid");
+    store
+        .authenticate_session(&admin.token)
+        .await
+        .expect("admin session stays");
+    assert!(store.login("pw-user@example.test", pw).await.is_err());
+    let relogin = store
+        .login("pw-user@example.test", fresh)
+        .await
+        .expect("new password");
+    let audit = store
+        .audit_events(&relogin.token, 100)
+        .await
+        .expect("audit");
+    assert!(
+        audit
+            .iter()
+            .any(|event| event.action == "account_password_reset")
+    );
+    let (leaked,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cairn_audit_events WHERE metadata::text LIKE $1")
+            .bind(format!("%{fresh}%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(leaked, 0);
+
+    // A change needs the current password and keeps only the current session.
+    let other = store
+        .login("pw-user@example.test", fresh)
+        .await
+        .expect("other session");
+    let wrong = store
+        .change_password(&relogin.token, "not the password", pw)
+        .await
+        .expect_err("wrong current password");
+    assert!(wrong.is_unauthorized(), "{wrong}");
+    assert!(
+        store
+            .change_password(&relogin.token, fresh, "short")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .change_password(&device, fresh, pw)
+            .await
+            .expect_err("device")
+            .to_string()
+            .contains(cairn_core::WEB_ONLY_ERROR)
+    );
+    store
+        .authenticate_session(&other.token)
+        .await
+        .expect("still valid");
+    store
+        .change_password(&relogin.token, fresh, pw)
+        .await
+        .expect("change");
+    store
+        .authenticate_session(&relogin.token)
+        .await
+        .expect("current kept");
+    assert!(store.authenticate_session(&other.token).await.is_err());
+    store
+        .authenticate_account(&device)
+        .await
+        .expect("device stays valid");
+    assert!(store.login("pw-user@example.test", fresh).await.is_err());
+    store
+        .login("pw-user@example.test", pw)
+        .await
+        .expect("changed password");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_shared_decisions_scopes_permissions_preview_transfer_and_source_independence() {
+    use cairn_core::{LifecycleInput, MemoryKind, Sensitivity};
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let admin = store
+        .bootstrap_account("admin@example.test", pw)
+        .await
+        .unwrap();
+    let owner = store
+        .register_account("owner@example.test", pw)
+        .await
+        .unwrap();
+    let author = store
+        .register_account("author@example.test", pw)
+        .await
+        .unwrap();
+    let reader = store
+        .register_account("reader@example.test", pw)
+        .await
+        .unwrap();
     let project = store
-        .register_project(&owner.token, "policy-read", "Policy Read", None)
+        .register_project(&owner.token, "host/org/repo", "Repo", None)
         .await
-        .expect("project");
+        .unwrap();
+    for account in [&author, &reader] {
+        store
+            .join_project(&account.token, &project.project_id)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .project_people(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
     store
-        .invite_project_member(
-            &owner.token,
-            &project.project_id,
-            "policy-read-member@example.test",
+        .register_project(
+            &reader.token,
+            "host/org/repo",
+            "Separate initialized project",
+            None,
         )
         .await
-        .expect("invite");
-    let policy = |token: String| {
-        let store = store.clone();
-        let project_id = project.project_id.clone();
-        async move { store.share_policy(&token, &project_id).await }
+        .unwrap();
+    let ctx = WorkContext {
+        repository: Some(project.repository.clone()),
+        branch: Some("feature".into()),
+        files: vec!["src/lib.rs".into()],
+        ..WorkContext::default()
     };
-    assert_eq!(
-        policy(owner.token.clone()).await.expect("default"),
-        cairn_core::ProjectSharePolicy::Manual
-    );
-    store
-        .set_project_share_policy(
-            &owner.token,
-            &project.project_id,
-            "auto_nonsensitive_project_memory",
+    let source = store
+        .remember_with_kind(
+            &author.token,
+            "mixneedle mixneedle project decision",
+            vec![],
+            ctx.clone(),
+            LifecycleInput::default(),
+            MemoryKind::Explicit,
         )
         .await
-        .expect("set policy");
-    assert_eq!(
-        policy(owner.token.clone()).await.expect("auto"),
-        cairn_core::ProjectSharePolicy::AutoNonsensitiveProjectMemory
+        .unwrap();
+    let preview = store
+        .preview_promotion(
+            &author.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.content, source.content);
+    assert_eq!(preview.context.files, source.context.files);
+    assert!(preview.source_event_ids.is_empty());
+    assert!(preview.promoted_from.is_none());
+    assert!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .is_empty()
     );
-    let denied = policy(member.token.clone()).await.expect_err("member");
-    assert!(denied.to_string().contains("does not own"), "{denied}");
+    let decision = store
+        .promote_memory(
+            &author.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+        )
+        .await
+        .unwrap();
+    for account in [&owner, &author, &reader] {
+        assert_eq!(
+            store
+                .project_memories(&account.token, &project.project_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    assert!(
+        store
+            .verify_project_memory(
+                &reader.token,
+                &project.project_id,
+                &decision.memory_id,
+                "bad"
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .correct(
+                &reader.token,
+                &decision.memory_id,
+                "bad",
+                vec![],
+                WorkContext::default(),
+                LifecycleInput::default()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .delete_memory(&reader.token, &decision.memory_id)
+            .await
+            .is_err()
+    );
+    store
+        .verify_project_memory(
+            &owner.token,
+            &project.project_id,
+            &decision.memory_id,
+            "verified",
+        )
+        .await
+        .unwrap();
+    store
+        .correct(
+            &author.token,
+            &source.memory_id,
+            "private source correction",
+            vec![],
+            WorkContext::default(),
+            LifecycleInput::default(),
+        )
+        .await
+        .unwrap();
+    store
+        .forget(&author.token, &source.memory_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let global = store
+        .remember_with_kind(
+            &reader.token,
+            "mixneedle global preference",
+            vec![],
+            WorkContext::default(),
+            LifecycleInput::default(),
+            MemoryKind::Lesson,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .preview_promotion(
+                &reader.token,
+                &project.project_id,
+                &global.memory_id,
+                "release"
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .promote_memory(
+                &reader.token,
+                &project.project_id,
+                &global.memory_id,
+                "release"
+            )
+            .await
+            .is_err()
+    );
+    let repo_note = store
+        .remember_with_kind(
+            &reader.token,
+            "mixneedle repo note",
+            vec![],
+            WorkContext {
+                repository: Some(project.repository.clone()),
+                branch: Some("private-feature".into()),
+                worktree: Some("/private/worktree".into()),
+                ..WorkContext::default()
+            },
+            LifecycleInput::default(),
+            MemoryKind::Explicit,
+        )
+        .await
+        .unwrap();
+    let filter = RecallFilter {
+        session_id: None,
+        context: Some(WorkContext {
+            project_id: Some(project.project_id.clone()),
+            repository: Some(project.repository.clone()),
+            ..WorkContext::default()
+        }),
+    };
+    let results = store
+        .search(&reader.token, "mixneedle", 20, &filter)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert!(
+        results
+            .iter()
+            .any(|r| r.memory_id == decision.memory_id && r.source == "project")
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r.memory_id == global.memory_id && r.source == "personal")
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r.memory_id == repo_note.memory_id && r.source == "personal")
+    );
+    assert!(!results.iter().any(|r| r.memory_id == source.memory_id));
+    let wrong = RecallFilter {
+        session_id: None,
+        context: Some(WorkContext {
+            project_id: Some("wrong-project".into()),
+            ..ctx.clone()
+        }),
+    };
+    assert!(
+        !store
+            .search(&reader.token, "mixneedle", 20, &wrong)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.source == "project")
+    );
+    assert_eq!(
+        store
+            .context(&reader.token, "mixneedle", 20, &filter)
+            .await
+            .unwrap()
+            .results
+            .len(),
+        3
+    );
+    assert_eq!(
+        store
+            .why_changed_context(&reader.token, "mixneedle", 20, &filter)
+            .await
+            .unwrap()
+            .results
+            .len(),
+        3
+    );
+    let secret = store
+        .remember_with_kind(
+            &author.token,
+            "secret material",
+            vec![],
+            ctx.clone(),
+            LifecycleInput {
+                sensitivity: Some(Sensitivity::Secret),
+                ..LifecycleInput::default()
+            },
+            MemoryKind::Explicit,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .promote_memory(
+                &author.token,
+                &project.project_id,
+                &secret.memory_id,
+                "secret"
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .preview_promotion(
+                &author.token,
+                &project.project_id,
+                &secret.memory_id,
+                "secret"
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .transfer_project(
+                &reader.token,
+                &project.project_id,
+                &author.account.person_id
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .transfer_project(&owner.token, &project.project_id, &admin.account.person_id)
+            .await
+            .is_err()
+    );
+    store
+        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
+        .await
+        .unwrap();
+    let inherited = store
+        .project_entities(&reader.token, &project.project_id)
+        .await
+        .unwrap();
+    let entity = inherited
+        .iter()
+        .find(|e| e.kind == "file" && e.key == "src/lib.rs")
+        .expect("new owner inherits project entities");
+    let repeated = store
+        .register_project_entity(
+            &reader.token,
+            &project.project_id,
+            cairn_core::ProjectEntityInput {
+                kind: entity.kind.clone(),
+                key: entity.key.clone(),
+                content: None,
+                source_memory_id: None,
+                commit: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.entity_id, entity.entity_id);
+
+    assert!(
+        !store
+            .freshness_history(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "new owner inherits verification history"
+    );
+    assert_eq!(
+        store
+            .project_people(&reader.token, &project.project_id)
+            .await
+            .unwrap()[0]
+            .person_id,
+        reader.account.person_id
+    );
+    store
+        .transfer_project(&admin.token, &project.project_id, &owner.account.person_id)
+        .await
+        .unwrap();
+    let corrected = store
+        .correct(
+            &owner.token,
+            &decision.memory_id,
+            "mixneedle corrected publication",
+            vec![],
+            WorkContext::default(),
+            LifecycleInput::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        corrected.published_by,
+        Some(author.account.person_id.clone())
+    );
+    assert_eq!(corrected.changed_by, Some(owner.account.person_id.clone()));
+    assert_eq!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()[0]
+            .memory_id,
+        corrected.memory_id
+    );
+    assert_eq!(
+        store
+            .project_maintenance(&reader.token, &project.project_id, None)
+            .await
+            .unwrap()
+            .active_memory_ids,
+        vec![corrected.memory_id.clone()]
+    );
+    store
+        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
+        .await
+        .unwrap();
+    let mut attempted = store.export_bundle(&owner.token).await.unwrap();
+    attempted.forgotten_ids.push(corrected.memory_id.clone());
+    let _ = store.import_bundle(&owner.token, attempted).await;
+    assert!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.memory_id == corrected.memory_id),
+        "a former owner cannot hide another author's decision through import"
+    );
+    store
+        .delete_memory(&author.token, &corrected.memory_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| m.memory_id != corrected.memory_id)
+    );
+    let mut bundle = store.export_bundle(&reader.token).await.unwrap();
+    bundle.memories = vec![decision.clone()];
+    bundle.memories[0].memory_id = "forged-import".into();
+    bundle.forgotten_ids.clear();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    store.import_bundle(&reader.token, bundle).await.unwrap();
+    assert!(
+        store
+            .project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| m.memory_id != "forged-import")
+    );
+    let publication: Option<String> = sqlx::query_scalar(
+        "SELECT published_by FROM cairn_memories WHERE memory_id='forged-import'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(publication.is_none());
+    let renamed = store
+        .remember_with_kind(
+            &reader.token,
+            "renameneedle same project after remote rename",
+            vec![],
+            WorkContext {
+                repository: Some("host/org/renamed".into()),
+                project_id: Some(project.project_id.clone()),
+                ..WorkContext::default()
+            },
+            LifecycleInput::default(),
+            MemoryKind::Explicit,
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .personal_project_memories(&reader.token, &project.project_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.memory_id == renamed.memory_id)
+    );
+    store
+        .preview_promotion(
+            &reader.token,
+            &project.project_id,
+            &renamed.memory_id,
+            "rename",
+        )
+        .await
+        .unwrap();
+    store
+        .promote_memory(
+            &reader.token,
+            &project.project_id,
+            &renamed.memory_id,
+            "rename",
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .search(
+                &reader.token,
+                "renameneedle",
+                10,
+                &RecallFilter {
+                    context: Some(WorkContext {
+                        repository: Some("host/org/renamed".into()),
+                        project_id: Some(project.project_id.clone()),
+                        ..WorkContext::default()
+                    }),
+                    ..RecallFilter::default()
+                }
+            )
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.source == "project")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_personal_capture_attachment_and_branch_records() {
+    let (_, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store
+        .bootstrap_account("owner@example.test", pw)
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", pw)
+        .await
+        .unwrap();
+    let dev = device_for(&store, &member, "personal-device").await;
+    let input = ObservationInput {
+        event_id: "personal".into(),
+        session_id: "s".into(),
+        content: "personal note".into(),
+        role: "agent".into(),
+        source: "test".into(),
+        importance: None,
+        lifecycle: Default::default(),
+        context: WorkContext {
+            repository: Some("repo".into()),
+            ..WorkContext::default()
+        },
+    };
+    let capture = store.sync_push(&dev, input.clone()).await.unwrap();
+    assert_eq!(capture.project_attachment.unwrap().status, "personal");
+    assert!(store.projects(&member.token).await.unwrap().is_empty());
+    let mut broken = input.clone();
+    broken.event_id = "unknown".into();
+    broken.context.project_id = Some("project-unknown".into());
+    let result = store.sync_push(&dev, broken).await.unwrap();
+    assert!(result.project_attachment.unwrap().warning.is_some());
+    assert!(store.projects(&member.token).await.unwrap().is_empty());
+    let project = store
+        .register_project(&owner.token, "repo", "Repo", None)
+        .await
+        .unwrap();
+    let mut attached = input;
+    attached.event_id = "attached".into();
+    attached.context.project_id = Some(project.project_id.clone());
+    attached.context.branch = Some("feature".into());
+    assert_eq!(
+        store
+            .sync_push(&dev, attached.clone())
+            .await
+            .unwrap()
+            .project_attachment
+            .unwrap()
+            .status,
+        "attached"
+    );
+    assert!(store.sync_push(&dev, attached).await.unwrap().duplicate);
+    assert_eq!(
+        store
+            .project_people(&owner.token, &project.project_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let member_branch = store
+        .branches(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    assert_eq!(member_branch.len(), 1);
+    assert!(
+        store
+            .branches(&owner.token, &project.project_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let source = store
+        .remember_with_kind(
+            &member.token,
+            "branch evidence",
+            vec![],
+            WorkContext {
+                repository: Some("repo".into()),
+                branch: Some("feature".into()),
+                ..WorkContext::default()
+            },
+            Default::default(),
+            cairn_core::MemoryKind::Explicit,
+        )
+        .await
+        .unwrap();
+    let merged = store
+        .confirm_branch_merge(
+            &dev,
+            &project.project_id,
+            &member_branch[0].branch_id,
+            &source.memory_id,
+            "mc",
+            "record merge",
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.branch.status, "merged");
+    assert!(
+        store
+            .close_branch(
+                &owner.token,
+                &project.project_id,
+                &member_branch[0].branch_id,
+                "not mine"
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_promotion_precondition_and_foreign_source_supersession() {
+    use cairn_core::{LifecycleInput, MemoryKind, publication_fingerprint};
+    let (_, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store.bootstrap_account("o@example.test", pw).await.unwrap();
+    let member = store.register_account("m@example.test", pw).await.unwrap();
+    let project = store
+        .register_project(&owner.token, "repo", "Repo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let ctx = WorkContext {
+        repository: Some("repo".into()),
+        ..WorkContext::default()
+    };
+    let device = device_for(&store, &owner, "preview-device").await;
+    store
+        .start_session(&owner.token, "preview", ctx.clone())
+        .await
+        .unwrap();
+    let first = ObservationInput {
+        event_id: "first".into(),
+        session_id: "preview".into(),
+        content: "first payload".into(),
+        role: "agent".into(),
+        source: "test".into(),
+        importance: None,
+        lifecycle: Default::default(),
+        context: ctx.clone(),
+    };
+    store.sync_push(&device, first.clone()).await.unwrap();
+    let source = store.end_session(&owner.token, "preview").await.unwrap();
+    let preview = store
+        .preview_promotion(
+            &owner.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+        )
+        .await
+        .unwrap();
+    let fingerprint = publication_fingerprint(&preview).unwrap();
+    store
+        .start_session(&owner.token, "preview", ctx.clone())
+        .await
+        .unwrap();
+    let mut second = first;
+    second.event_id = "second".into();
+    second.content = "changed payload".into();
+    store.sync_push(&device, second).await.unwrap();
+    store.end_session(&owner.token, "preview").await.unwrap();
+    assert!(matches!(
+        store
+            .promote_memory_checked(
+                &owner.token,
+                &project.project_id,
+                &source.memory_id,
+                "publish",
+                Some(&fingerprint)
+            )
+            .await,
+        Err(PostgresError::Conflict(_))
+    ));
+    let preview = store
+        .preview_promotion(
+            &owner.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+        )
+        .await
+        .unwrap();
+    let fingerprint = publication_fingerprint(&preview).unwrap();
+    let original = store
+        .promote_memory_checked(
+            &owner.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+            Some(&fingerprint),
+        )
+        .await
+        .unwrap();
+    let mut forged = cairn_core::build_explicit_memory_record(
+        "member independent decision",
+        vec![],
+        ctx,
+        LifecycleInput::default(),
+        MemoryKind::Correction,
+    )
+    .unwrap();
+    forged.supersedes = Some(source.memory_id.clone());
+    let mut bundle = store.export_bundle(&member.token).await.unwrap();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    bundle.memories = vec![forged.clone()];
+    store.import_bundle(&member.token, bundle).await.unwrap();
+    let independent = store
+        .promote_memory(
+            &member.token,
+            &project.project_id,
+            &forged.memory_id,
+            "publish independently",
+        )
+        .await
+        .unwrap();
+    assert!(independent.supersedes.is_none());
+    let rows = store
+        .project_memories(&owner.token, &project.project_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|m| m.memory_id == original.memory_id));
 }

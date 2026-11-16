@@ -2,7 +2,7 @@
 //! that `cairn setup` stored (or `CAIRN_URL` / `CAIRN_DEVICE_TOKEN`). Humans use the web console.
 
 use cairn_client::tools::{self, Tool};
-use cairn_client::{Client, Config, Error, config_path, mcp, update, write_private};
+use cairn_client::{Client, Config, Error, config_path, mcp, project, update, write_private};
 use serde_json::{Map, Value, json};
 use std::env;
 use std::fs;
@@ -85,7 +85,7 @@ const COMMANDS: &[Command] = &[
     command(
         "promote",
         "memory_promote",
-        &["projectId", "memoryId", "reason"],
+        &["projectId", "memoryId", "reason", "previewFingerprint"],
         3,
     ),
     command(
@@ -101,37 +101,26 @@ const COMMANDS: &[Command] = &[
         1,
     ),
     command(
-        "project-invite",
-        "memory_project_invite",
-        &["projectId", "email"],
-        2,
+        "project-members",
+        "memory_project_members",
+        &["projectId"],
+        1,
     ),
     command(
-        "project-share",
-        "memory_project_share",
-        &["projectId", "memoryId", "email"],
+        "project-verify",
+        "memory_project_verify",
+        &["projectId", "memoryId", "commit"],
         3,
     ),
-    command("project-shared", "memory_project_shared", &["projectId"], 1),
-    command(
-        "project-revoke",
-        "memory_project_revoke",
-        &["projectId", "memoryId", "email"],
-        3,
-    ),
-    command(
-        "project-team-create",
-        "memory_project_team_create",
-        &["projectId", "name"],
-        2,
-    ),
-    command("project-team", "memory_project_team", &["projectId"], 1),
-    command(
-        "project-team-add",
-        "memory_project_team_add",
-        &["projectId", "email"],
-        2,
-    ),
+    Command {
+        defaults: &[("dryRun", "true")],
+        ..command(
+            "promote-preview",
+            "memory_promote",
+            &["projectId", "memoryId", "reason"],
+            3,
+        )
+    },
     command("delete-memory", "memory_delete", &["id"], 1),
     command("export", "memory_export", &["output"], 1),
     command("import", "memory_import", &["input"], 1),
@@ -143,6 +132,7 @@ fn usage() -> ! {
     eprintln!(
         "Usage:\n\
   cairn setup <server-url>      (reads the device token from stdin)\n\
+  cairn init [name]             (create this repository's project, write .cairn/project.json)\n\
   cairn mcp\n\
   cairn update [--check]        (install the latest release; --check only reports)\n\
   cairn --version\n\
@@ -161,16 +151,12 @@ fn usage() -> ! {
   cairn import <input>\n\
   cairn project-register <repository> <name> [default-branch]\n\
   cairn project-list\n\
-  cairn promote <project-id> <memory-id> <reason>\n\
+  cairn promote <project-id> <memory-id> <reason> [preview-fingerprint]\n\
+  cairn promote-preview <project-id> <memory-id> <reason>\n\
+  cairn project-members <project-id>\n\
+  cairn project-verify <project-id> <memory-id> <commit>\n\
   cairn project-memories <project-id>\n\
   cairn project-freshness <project-id>\n\
-  cairn project-invite <project-id> <email>\n\
-  cairn project-share <project-id> <memory-id> <email>\n\
-  cairn project-shared <project-id>\n\
-  cairn project-revoke <project-id> <memory-id> <email>\n\
-  cairn project-team-create <project-id> <name>\n\
-  cairn project-team <project-id>\n\
-  cairn project-team-add <project-id> <email>\n\
   cairn delete-memory <memory-id>\n\
 Create the device token in the web console; it is an agent credential. Account and device\n\
 management stay in the web console."
@@ -183,6 +169,7 @@ fn main() {
     update::remove_old_exe();
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&args[1..]),
+        Some("init") => init(&args[1..]),
         Some("mcp") => Config::load().and_then(mcp::run_stdio),
         Some("version" | "--version") => {
             println!("cairn {}", update::VERSION);
@@ -229,6 +216,43 @@ fn setup(args: &[String]) -> Result<(), Error> {
             "cairn: warning: hook scripts were not installed ({error}); `cairn update` retries"
         ),
     }
+    Ok(())
+}
+
+/// Creates (or finds) the caller's project for this repository and writes
+/// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
+fn init(args: &[String]) -> Result<(), Error> {
+    if args.len() > 1 {
+        usage();
+    }
+    let cwd = env::current_dir()
+        .map_err(|error| Error::Input(format!("cannot read the current directory: {error}")))?;
+    let top = project::toplevel(&cwd)
+        .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
+    let repository = project::repository_name(&top);
+    let mut body = json!({ "repository": repository });
+    if let Some(id) = project::read_project_id(&cwd)? {
+        body["project_id"] = json!(id);
+    }
+    if let Some(name) = args.first().filter(|name| !name.is_empty()) {
+        body["name"] = json!(name);
+    }
+    let client = Client::new(Config::load()?);
+    let created = client.post("/cairn-memory/projects/init", &body)?;
+    let project_id = created["project_id"]
+        .as_str()
+        .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
+    let written = project::write(&top, project_id, &repository)?;
+    if !written {
+        println!("already initialized, you are a member");
+    }
+    let path = top.join(".cairn/project.json");
+    println!(
+        "Cairn project {project_id} ({repository}) {}: {}",
+        if written { "written" } else { "already set" },
+        path.display()
+    );
+    println!("Commit .cairn/project.json so teammates who capture here join the project.");
     Ok(())
 }
 
@@ -311,7 +335,13 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
         }
     }
     for (key, value) in command.defaults {
-        arguments.entry(*key).or_insert_with(|| json!(value));
+        arguments.entry(*key).or_insert_with(|| {
+            if *key == "dryRun" {
+                json!(*value == "true")
+            } else {
+                json!(value)
+            }
+        });
     }
     if command.context {
         let context: Map<String, Value> = CONTEXT_KEYS

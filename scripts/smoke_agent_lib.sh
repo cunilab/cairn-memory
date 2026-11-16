@@ -2,6 +2,10 @@
 # and device tokens through the web API as the web console does, and points `cairn` at it with
 # a device token. The agent side never holds an account session.
 
+# `cairn` lets CAIRN_URL and CAIRN_DEVICE_TOKEN (and the hook's CAIRN_OUTBOX) override its config:
+# a shell that has them set for a real server would send these smoke writes there.
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+
 repo="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$repo"
 smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/cairn-agent-smoke.XXXXXX")"

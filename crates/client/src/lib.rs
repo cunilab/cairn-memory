@@ -3,6 +3,7 @@
 //! session and never touches a store file.
 
 pub mod mcp;
+pub mod project;
 pub mod tools;
 pub mod update;
 

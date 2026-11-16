@@ -10,6 +10,13 @@ status: draft
 - **Milestone:** Layer 3 — Personal Cross-Device Memory
 - **Related:** [Roadmap](../roadmap.md), [ADR 0003](0003-server-authoritative-postgres.md), [ADR 0007](0007-layer3-local-trusted-device-slice.md), [Layer 3 authentication contract](../contracts/auth-layer3.md)
 
+## Supersession — 2026-11-16
+
+[ADR 0013](0013-shared-project-decisions-and-personal-memory-scopes.md) supersedes
+this ADR's membership-based device merge gate: branch bookkeeping is personal,
+and devices can record their person's merges. Ownership transfer remains a web
+session operation for the owner/admin. Account/device credential separation stays.
+
 ## Context
 
 The local trusted-device slice uses opaque prototype device tokens and an
@@ -85,7 +92,7 @@ the personal-memory path is complete.
   identified or changed.
 - Account import accepts a memory row with a `project_id` only for a project the
   caller owns. A foreign, missing or unowned project rejects the whole import with
-  `account does not own the project` and writes nothing, so an outsider or invited
+  `account does not own the project` and writes nothing, so an outsider or
   member cannot add a row to another person's project. Import does not create or map
   a project or strip the link; a cross-store restore needs the matching project
   registered first. The owner-facing project views (list, share candidates,
@@ -104,7 +111,7 @@ the personal-memory path is complete.
   keeps its cascade. PostgreSQL scopes forget by person already and is not
   reviewed here.
 - File-store `project_maintenance` is owner-only: after authentication the caller
-  must own a project that has an owner record, so a member, a removed member, an
+  must own a project that has an owner record, so a member, an
   outsider and an ownerless project are refused with `account does not own the
   project`. Members use explicit sharing, not a member-scoped maintenance report.
   An ownerless project is claimed by the first account that registers the same
@@ -114,7 +121,7 @@ the personal-memory path is complete.
 - File-store project registry operations are owner-only too: branch and worktree
   registration and listing, entity registration and listing, freshness history,
   branch merge confirmation and branch close use the same strict owned-project
-  check after authentication, so a member, a removed member, an outsider and an
+  check after authentication, so a member, an outsider and an
   ownerless project are refused with `account does not own the project`. Merge
   confirmation also rejects a source memory another account owns, like
   promotion, and its existing-promotion lookup, like promotion's, considers only
@@ -171,8 +178,7 @@ bearer, which could not be told apart from a person.
 4. A device token is refused with `403` and `web console session required;
    device tokens cannot do this` for account bootstrap, register, sign-in,
    sign-out, audit, device create, list, rotate and revoke, and for branch merge
-   confirmation on a project that has any member besides its owner, invited or
-   team. A solo-project merge is allowed. A revoked device token is `401` on
+   confirmation on a project that has any member besides its owner. A solo-project merge is allowed. A revoked device token is `401` on
    every route.
 5. The first account is created from the web console on an empty server;
    `GET /cairn-memory/health` reports `bootstrap_required` so the console can

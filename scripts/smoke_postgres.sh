@@ -23,6 +23,8 @@ log_path = os.path.join(
     f"cairn-postgres-smoke-{os.getpid()}.log",
 )
 log = open(log_path, "w+", encoding="utf-8")
+# Build before measuring HTTP readiness; feature changes can trigger a cold link.
+subprocess.run(["cargo", "build", "-q", "-p", "cairn-server"], cwd=root, check=True)
 process = subprocess.Popen(
     [
         "cargo",
@@ -348,7 +350,7 @@ try:
         {"currentCommit": "merge999"},
         account_token,
     )
-    assert promoted["memory_id"] in report["superseded_memory_ids"]
+    assert report["superseded_memory_ids"] == []
     assert project_correction["memory_id"] in report["active_memory_ids"]
     assert promoted["memory_id"] not in report["active_memory_ids"]
     _, exported = call("/cairn-memory/export", {}, account_token)
@@ -402,293 +404,66 @@ try:
         },
         account_token,
     )
-    _, invited = call(
+    # Membership comes from the committed project file: the member's capture carries the
+    # project id. There is no invite route.
+    expect_error(
         f"/cairn-memory/projects/{project['project_id']}/members",
         {"email": "postgres-member@example.test"},
         account_token,
+        405,
     )
-    assert invited["person_id"] == member["account"]["person_id"]
-    try:
+    _, member_device = call(
+        "/cairn-memory/devices/register", {"name": "postgres member agent"}, member_token
+    )
+    for event_id in ("member-join-1", "member-join-2"):
         call(
-            f"/cairn-memory/projects/{project['project_id']}/shares",
+            "/cairn-memory/observe",
             {
-                "memoryId": private_memory["memory_id"],
-                "email": "postgres-member@example.test",
+                "eventId": event_id,
+                "sessionId": "member-join",
+                "content": "joined by project file",
+                "role": "agent",
+                "source": "smoke",
+                "context": {
+                    "repository": "cairn",
+                    "project_id": project["project_id"],
+                },
             },
-            account_token,
+            member_device["token"],
         )
-    except urllib.error.HTTPError as error:
-        assert error.code == 400, error.code
-    else:
-        raise AssertionError("private observation share unexpectedly succeeded")
-    call(
-        f"/cairn-memory/projects/{project['project_id']}/shares",
-        {
-            "memoryId": shared_promoted["memory_id"],
-            "email": "postgres-member@example.test",
-        },
-        account_token,
-    )
-    _, member_shared = call(
-        f"/cairn-memory/projects/{project['project_id']}/shared",
-        token=member_token,
-    )
-    assert [item["memory_id"] for item in member_shared] == [shared_promoted["memory_id"]]
-    _, member_projects = call("/cairn-memory/projects", token=member_token)
-    assert any(
-        item["project_id"] == project["project_id"] for item in member_projects
-    )
-    _, member_search = call(
-        "/cairn-memory/search",
-        {"query": "private observation", "limit": 5},
-        member_token,
-    )
-    assert member_search == []
-    expect_unauthorized(
-        f"/cairn-memory/projects/{project['project_id']}/memories",
-        None,
-        member_token,
-    )
-    expect_unauthorized(
-        "/cairn-memory/correct",
-        {
-            "targetId": shared_promoted["memory_id"],
-            "content": "A member must not rewrite the shared decision.",
-        },
-        member_token,
-    )
-    expect_unauthorized(
-        "/cairn-memory/forget",
-        {"id": shared_promoted["memory_id"]},
-        member_token,
-    )
-    call(
-        f"/cairn-memory/projects/{project['project_id']}/shares/{shared_promoted['memory_id']}/revoke",
-        {"email": "postgres-member@example.test"},
-        account_token,
-    )
-    _, after_revoke = call(
-        f"/cairn-memory/projects/{project['project_id']}/shared",
-        token=member_token,
-    )
-    assert after_revoke == []
-    _, owner_memories = call(
-        f"/cairn-memory/projects/{project['project_id']}/memories",
-        token=account_token,
-    )
-    assert any(item["memory_id"] == shared_promoted["memory_id"] for item in owner_memories)
-    _, share_audit = call("/cairn-memory/auth/audit", token=account_token)
-    share_actions = {event["action"] for event in share_audit}
-    assert "project_memory_shared" in share_actions
-    assert "project_memory_share_revoked" in share_actions
-
-    _, candidate_source = call(
-        "/cairn-memory/remember",
-        {
-            "content": "manual policy keeps this project decision unshared",
-            "context": {"repository": "cairn", "commit": "abc1234"},
-        },
-        account_token,
-    )
-    _, candidate_promoted = call(
-        "/cairn-memory/promote",
-        {
-            "projectId": project["project_id"],
-            "memoryId": candidate_source["memory_id"],
-            "reason": "Manual policy must not share this decision",
-        },
-        account_token,
-    )
-    _, before_policy = call(
-        f"/cairn-memory/projects/{project['project_id']}/shared",
-        token=member_token,
-    )
-    assert all(
-        item["memory_id"] != candidate_promoted["memory_id"] for item in before_policy
-    )
-    _, candidates = call(
-        f"/cairn-memory/projects/{project['project_id']}/share-candidates?email=postgres-member%40example.test",
-        token=account_token,
-    )
-    candidate = next(
-        item for item in candidates if item["memory_id"] == candidate_promoted["memory_id"]
-    )
-    assert "not shared" in candidate["reason"]
-    assert "manual" in candidate["not_auto_shared_reason"]
-    call(
-        f"/cairn-memory/projects/{project['project_id']}/policy",
-        {"policy": "auto_nonsensitive_project_memory"},
-        account_token,
-    )
-    # The owner's project list carries the policy; the member's does not.
-    owner_list = call("/cairn-memory/projects", token=account_token)[1]
-    listed = next(item for item in owner_list if item["project_id"] == project["project_id"])
-    assert listed["role"] == "owner"
-    assert listed["share_policy"] == "auto_nonsensitive_project_memory"
-    member_list = call("/cairn-memory/projects", token=member_token)[1]
-    listed = next(item for item in member_list if item["project_id"] == project["project_id"])
-    assert listed["role"] == "member" and "share_policy" not in listed
-    _, auto_source = call(
-        "/cairn-memory/remember",
-        {
-            "content": "nonsensitive repository decision is ready for collaborators",
-            "context": {"repository": "cairn", "commit": "def5678"},
-        },
-        account_token,
-    )
-    _, auto_promoted = call(
-        "/cairn-memory/promote",
-        {
-            "projectId": project["project_id"],
-            "memoryId": auto_source["memory_id"],
-            "reason": "Automatic policy shares this nonsensitive decision",
-        },
-        account_token,
-    )
-    _, private_note = call(
-        "/cairn-memory/remember",
-        {"content": "private observation stays on the owner account"},
-        account_token,
-    )
-    _, after_policy = call(
-        f"/cairn-memory/projects/{project['project_id']}/shared",
-        token=member_token,
-    )
-    shared_ids = {item["memory_id"] for item in after_policy}
-    assert auto_promoted["memory_id"] in shared_ids
-    assert private_note["memory_id"] not in shared_ids
-    auto_read = next(
-        item for item in after_policy if item["memory_id"] == auto_promoted["memory_id"]
-    )
-    assert auto_read["share_reason"] == "auto_nonsensitive_project_memory"
-    assert auto_read["promoted_from"] is None
-    assert auto_source["memory_id"] not in json.dumps(auto_read)
-    _, private_search = call(
-        "/cairn-memory/search",
-        {"query": "private observation", "limit": 5},
-        member_token,
-    )
-    assert private_search == []
-    call(
-        f"/cairn-memory/projects/{project['project_id']}/policy",
-        {"policy": "manual"},
-        account_token,
-    )
-    _, after_manual = call(
-        f"/cairn-memory/projects/{project['project_id']}/shared",
-        token=member_token,
-    )
-    assert any(item["memory_id"] == auto_promoted["memory_id"] for item in after_manual)
-
-    _, stranger = call(
-        "/cairn-memory/auth/register",
-        {
-            "email": "postgres-stranger@example.test",
-            "password": "correct horse battery staple",
-        },
-        account_token,
-    )
-    stranger_token = stranger["token"]
+    _, member_listed = call("/cairn-memory/projects", token=member_token)
+    assert [item["project_id"] for item in member_listed] == [project["project_id"]]
+    for reader in (account_token, member_token):
+        _, people = call(
+            f"/cairn-memory/projects/{project['project_id']}/members", token=reader
+        )
+        assert [(p["role"], p["email"]) for p in people][1:] == [
+            ("member", "postgres-member@example.test")
+        ]
+        assert people[0]["role"] == "owner"
+        assert all(set(p) == {"person_id", "email", "role", "joined_at"} for p in people)
     project_id = project["project_id"]
-    team = f"/cairn-memory/projects/{project_id}/team"
-    team_members = f"/cairn-memory/projects/{project_id}/team/members"
-    shared_path = f"/cairn-memory/projects/{project_id}/shared"
-    expect_error(team, None, stranger_token, 400)
-    expect_error(shared_path, None, stranger_token, 400)
-    expect_unauthorized(team, {"name": "Platform"}, member_token)
-    expect_unauthorized(
-        f"/cairn-memory/projects/{project_id}/shares",
-        {
-            "memoryId": auto_promoted["memory_id"],
-            "email": "postgres-member@example.test",
-        },
-        member_token,
-    )
-    expect_unauthorized(
-        f"/cairn-memory/projects/{project_id}/shares/{auto_promoted['memory_id']}/revoke",
-        {"email": "postgres-member@example.test"},
-        member_token,
-    )
-    expect_unauthorized(
-        "/cairn-memory/correct",
-        {
-            "targetId": auto_promoted["memory_id"],
-            "content": "A member must not rewrite the shared decision.",
-        },
-        member_token,
-    )
-    expect_unauthorized(
-        "/cairn-memory/forget",
-        {"id": auto_promoted["memory_id"]},
-        member_token,
-    )
-    expect_unauthorized(
-        "/cairn-memory/delete",
-        {"id": auto_promoted["memory_id"]},
-        member_token,
-    )
-    _, created_team = call(team, {"name": "Platform"}, account_token)
-    assert created_team["name"] == "Platform"
-    _, added_member = call(
-        team_members,
-        {"email": "postgres-member@example.test"},
-        account_token,
-    )
-    assert added_member["email"] == "postgres-member@example.test"
-    _, listed_team = call(team, token=member_token)
-    assert listed_team["members"][0]["email"] == "postgres-member@example.test"
-    expect_error(team, None, stranger_token, 400)
-    _, forgotten_note = call(
-        "/cairn-memory/remember",
-        {"content": "owner forget tombstone stays stored"},
-        account_token,
-    )
-    call("/cairn-memory/forget", {"id": forgotten_note["memory_id"]}, account_token)
-    call(
-        f"/cairn-memory/projects/{project_id}/team/members/remove",
-        {"email": "postgres-member@example.test"},
-        account_token,
-    )
-    _, former_shared = call(shared_path, token=member_token)
-    assert former_shared == []
-    _, before_delete = call("/cairn-memory/export", {}, account_token)
-    assert any(
-        memory["memory_id"] == auto_promoted["memory_id"]
-        for memory in before_delete["memories"]
-    )
-    call("/cairn-memory/delete", {"id": auto_promoted["memory_id"]}, account_token)
-    _, after_delete_memories = call(
-        f"/cairn-memory/projects/{project_id}/memories",
-        token=account_token,
-    )
-    assert all(
-        memory["memory_id"] != auto_promoted["memory_id"]
-        for memory in after_delete_memories
-    )
-    _, deleted_search = call(
-        "/cairn-memory/search",
-        {"query": "nonsensitive repository decision", "limit": 5},
-        account_token,
-    )
-    assert all(
-        item["memory_id"] != auto_promoted["memory_id"] for item in deleted_search
-    )
-    _, after_delete = call("/cairn-memory/export", {}, account_token)
-    assert any(
-        memory["memory_id"] == auto_promoted["memory_id"]
-        for memory in after_delete["memories"]
-    )
-    assert auto_promoted["memory_id"] in after_delete["forgottenIds"]
-    _, team_audit = call("/cairn-memory/auth/audit", token=account_token)
-    team_actions = {event["action"] for event in team_audit}
-    assert "project_team_created" in team_actions
-    assert "project_team_member_added" in team_actions
-    assert "project_team_member_removed" in team_actions
-    assert "memory_delete_retained" in team_actions
-    assert "memory_forget" in team_actions
-    audit_text = json.dumps(team_audit)
-    assert "nonsensitive repository decision is ready for collaborators" not in audit_text
-    assert "correct horse battery staple" not in audit_text
+    path = f"/cairn-memory/projects/{project_id}"
+    _, decisions = call(path + "/memories", token=member_token)
+    assert any(m["memory_id"] == shared_promoted["memory_id"] for m in decisions)
+    assert all(m["memory_id"] != private_memory["memory_id"] for m in decisions)
+    _, recall = call("/cairn-memory/context", {"query":"repository cache", "context":{"project_id":project_id,"repository":"cairn"}}, member_token)
+    assert any(r["memory_id"] == shared_promoted["memory_id"] and r["source"] == "project" for r in recall["results"])
+    for route in ("team", "shares", "shared", "policy", "share-candidates", "revocations"):
+        expect_error(path + "/" + route, None, member_token, 404)
+        expect_error(path + "/" + route, {}, account_token, 404)
+    expect_error("/cairn-memory/projects/verify", {"projectId":project_id,"memoryId":shared_promoted["memory_id"],"commit":"bad"}, member_token, 400)
+    _, own = call("/cairn-memory/remember", {"content":"member's publication", "context":{"repository":"cairn"}},member_token)
+    _, preview = call("/cairn-memory/promote", {"projectId":project_id,"memoryId":own["memory_id"],"reason":"publish","dryRun":True},member_token)
+    assert preview["content"] == own["content"]
+    _, member_decision = call("/cairn-memory/promote", {"projectId":project_id,"memoryId":own["memory_id"],"reason":"publish"},member_token)
+    call("/cairn-memory/correct", {"targetId":own["memory_id"],"content":"private corrected source"},member_token)
+    _, decisions = call(path + "/memories", token=account_token)
+    assert any(m["memory_id"] == member_decision["memory_id"] for m in decisions)
+    call(path + "/ownership", {"personId":member["account"]["person_id"]},account_token)
+    _, people = call(path + "/members",token=account_token)
+    assert people[0]["person_id"] == member["account"]["person_id"]
+    call(path + "/ownership", {"personId":account["account"]["person_id"]},account_token)
 
     # A device token is an agent credential for this account; device management and
     # account auth stay web-session only.

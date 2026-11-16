@@ -2,116 +2,78 @@
 set -eu
 
 . "$(dirname "$0")/smoke_agent_lib.sh"
-
 as_member() { XDG_CONFIG_HOME="$smoke_dir/member" "$@"; }
-
-# The memory's repository comes from start, capture, and end. capture copies
-# the session context onto the observation, and end merges that observation
-# context. end_session does not copy the session repository by itself.
-
+as_reader() { XDG_CONFIG_HOME="$smoke_dir/reader" "$@"; }
 start_server 3133
 create_agent owner owner@example.test bootstrap
 create_agent member member@example.test register
+create_agent reader reader@example.test register
 use_agent owner
-
-project="$(cairn project-register cairn-demo "Cairn Demo" main)"
-project_id="$(PROJECT_JSON="$project" python3 -c 'import json, os; print(json.loads(os.environ["PROJECT_JSON"])["project_id"])')"
-
-cairn start private-session >/dev/null
-cairn capture private-session evt-private "private observation stays on the owner account" >/dev/null
-private_ended="$(cairn end private-session)"
-private_id="$(PRIVATE_JSON="$private_ended" python3 -c 'import json, os; print(json.loads(os.environ["PRIVATE_JSON"])["memory_id"])')"
-
-cairn start layer5-session cairn-demo "" "" abc1234 >/dev/null
-cairn capture layer5-session evt-layer5 "repository cache decision is ready for the project" >/dev/null
-ended="$(cairn end layer5-session)"
-memory_id="$(ENDED_JSON="$ended" python3 -c 'import json, os; print(json.loads(os.environ["ENDED_JSON"])["memory_id"])')"
-
-promoted="$(cairn promote "$project_id" "$memory_id" "Share the promoted repository decision")"
-promoted_id="$(PROMOTED_JSON="$promoted" python3 -c 'import json, os; print(json.loads(os.environ["PROMOTED_JSON"])["memory_id"])')"
-
-cairn project-invite "$project_id" member@example.test >/dev/null
-cairn project-share "$project_id" "$promoted_id" member@example.test >/dev/null
-
-shared="$(as_member cairn project-shared "$project_id")"
-SHARED_JSON="$shared" PROMOTED_ID="$promoted_id" PRIVATE_ID="$private_id" python3 - <<'PY'
-import json
-import os
-
-memories = json.loads(os.environ["SHARED_JSON"])
-assert [memory["memory_id"] for memory in memories] == [os.environ["PROMOTED_ID"]]
-assert all(memory["memory_id"] != os.environ["PRIVATE_ID"] for memory in memories)
+[ "$(cairn project-list)" = '[]' ]
+checkout="$smoke_dir/checkout"
+git init -q "$checkout"
+git -C "$checkout" remote add origin git@EXAMPLE.TEST:acme/cairn-demo.git
+(cd "$checkout" && cairn init >/dev/null)
+project_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$checkout/.cairn/project.json")"
+repository=example.test/acme/cairn-demo
+(cd "$checkout" && as_member cairn init) | grep -q 'already initialized, you are a member'
+(cd "$checkout" && as_reader cairn capture join-reader reader-event 'reader joined' >/dev/null)
+(cd "$checkout" && as_member cairn start source-session "$repository" main >/dev/null)
+(cd "$checkout" && as_member cairn capture source-session source-event 'climodel shared decision because the regression passed' >/dev/null)
+ended="$(as_member cairn end source-session)"
+memory_id="$(printf '%s' "$ended" | json_field '["memory_id"]')"
+preview="$(as_member cairn promote-preview "$project_id" "$memory_id" 'publish full payload')"
+PREVIEW="$preview" python3 - <<'PY'
+import json,os
+p=json.loads(os.environ['PREVIEW'])
+assert 'climodel shared decision' in p['content']
+assert p['published_by'] and not p['source_event_ids']
 PY
-
-search="$(cairn search "private observation" 5 cairn-demo)"
-SEARCH_JSON="$search" PRIVATE_ID="$private_id" python3 - <<'PY'
-import json
-import os
-
-results = json.loads(os.environ["SEARCH_JSON"])
-assert all(result["memory_id"] != os.environ["PRIVATE_ID"] for result in results)
+[ "$(as_reader cairn project-memories "$project_id")" = '[]' ]
+promoted="$(as_member cairn promote "$project_id" "$memory_id" 'publish full payload')"
+promoted_id="$(printf '%s' "$promoted" | json_field '["memory_id"]')"
+for who in owner member reader; do
+  decisions="$(XDG_CONFIG_HOME="$smoke_dir/$who" cairn project-memories "$project_id")"
+  DECISIONS="$decisions" ID="$promoted_id" python3 - <<'PY'
+import json,os
+rows=json.loads(os.environ['DECISIONS'])
+assert len(rows)==1 and rows[0]['memory_id']==os.environ['ID']
+assert rows[0]['promoted_from'] is None
 PY
-
-cairn project-revoke "$project_id" "$promoted_id" member@example.test >/dev/null
-after="$(as_member cairn project-shared "$project_id")"
-AFTER_JSON="$after" python3 - <<'PY'
-import json
-import os
-
-assert json.loads(os.environ["AFTER_JSON"]) == []
+done
+as_member cairn lesson 'climodel prefer clear tests' >/dev/null
+recall="$(cd "$checkout" && as_member cairn context climodel 10)"
+RECALL="$recall" python3 - <<'PY'
+import json,os
+rows=json.loads(os.environ['RECALL'])['results']
+assert {r['source'] for r in rows}=={'personal','project'}
 PY
-
-cairn project-share "$project_id" "$promoted_id" member@example.test >/dev/null
-team="$(cairn project-team-create "$project_id" Platform)"
-TEAM_JSON="$team" python3 - <<'PY'
-import json
-import os
-
-assert json.loads(os.environ["TEAM_JSON"])["name"] == "Platform"
-PY
-cairn project-team-add "$project_id" member@example.test >/dev/null
-listed="$(as_member cairn project-team "$project_id")"
-LISTED_JSON="$listed" python3 - <<'PY'
-import json
-import os
-
-team = json.loads(os.environ["LISTED_JSON"])
-assert team["name"] == "Platform"
-assert [member["email"] for member in team["members"]] == ["member@example.test"]
-PY
-if as_member cairn project-team-create "$project_id" Other >/dev/null 2>&1; then
-  printf '%s\n' "member team create should fail" >&2
-  exit 1
-fi
-# Removing a member is web-only: the owner's device token is refused, the web session works.
-remove_url="$base/cairn-memory/projects/$project_id/team/members/remove"
-remove_body='{"email":"member@example.test"}'
-status="$(curl -sS -o "$smoke_dir/remove.out" -w '%{http_code}' -X POST "$remove_url" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $(device_of owner)" -d "$remove_body")"
-if [ "$status" != "403" ] || ! grep -q "device tokens cannot do this" "$smoke_dir/remove.out"; then
-  printf '%s\n' "device token should be refused with 403 on team member removal" >&2
-  exit 1
-fi
-curl -fsS -X POST "$remove_url" -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $(session_of owner)" -d "$remove_body" >/dev/null
-former="$(as_member cairn project-shared "$project_id")"
-FORMER_JSON="$former" python3 - <<'PY'
-import json
-import os
-
-assert json.loads(os.environ["FORMER_JSON"]) == []
+if as_reader cairn project-verify "$project_id" "$promoted_id" bad >/dev/null 2>&1; then exit 1; fi
+if as_reader cairn correct "$promoted_id" bad >/dev/null 2>&1; then exit 1; fi
+if as_reader cairn delete-memory "$promoted_id" >/dev/null 2>&1; then exit 1; fi
+cairn project-verify "$project_id" "$promoted_id" verified >/dev/null
+as_member cairn correct "$memory_id" 'climodel private source correction' >/dev/null
+[ "$(as_reader cairn project-memories "$project_id" | json_field '.__len__()')" = 1 ]
+for route in team shared shares policy share-candidates revocations; do
+  for method in GET POST; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" "$base/cairn-memory/projects/$project_id/$route" -H 'Content-Type: application/json' -H "Authorization: Bearer $(session_of owner)" -d '{}')"
+    [ "$status" = 404 ] || { printf '%s\n' "$method $route returned $status" >&2; exit 1; }
+  done
+done
+for old in project-share project-shared project-revoke project-team project-team-create; do
+  if cairn "$old" "$project_id" >/dev/null 2>&1; then exit 1; fi
+done
+people="$(as_reader cairn project-members "$project_id")"
+PEOPLE="$people" python3 - <<'PY'
+import json,os
+p=json.loads(os.environ['PEOPLE'])
+assert len(p)==3 and p[0]['role']=='owner'
 PY
 cairn delete-memory "$promoted_id" >/dev/null
-export_path="$smoke_dir/export.json"
-cairn export "$export_path"
-EXPORT_PATH="$export_path" PROMOTED_ID="$promoted_id" python3 - <<'PY'
-import json
-import os
-
-bundle = json.load(open(os.environ["EXPORT_PATH"]))
-promoted_id = os.environ["PROMOTED_ID"]
-assert any(memory["memory_id"] == promoted_id for memory in bundle["memories"])
-assert promoted_id in bundle["forgottenIds"]
+[ "$(as_reader cairn project-memories "$project_id")" = '[]' ]
+as_member cairn export "$smoke_dir/personal.json"
+python3 - "$smoke_dir/personal.json" <<'PY'
+import json,sys
+assert all(m.get('published_by') is None for m in json.load(open(sys.argv[1]))['memories'])
 PY
-
-echo "Layer 5 CLI smoke check passed"
+echo 'Layer 5 shared project CLI smoke check passed'

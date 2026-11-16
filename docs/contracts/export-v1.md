@@ -57,8 +57,9 @@ additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
 - Imported observation and memory content is redacted before it is persisted. The same redaction applies to session and record `WorkContext`
   lists (`files`, `symbols`, `commands`, `tests`, `services`, `handoffs`, and
   `runbooks`) and to memory `next_steps`, `unresolved_work`, and
-  `promotion_reason`. Repository, branch, worktree, commit, ids, timestamps,
-  and provenance links are unchanged. Redaction follows
+  `promotion_reason`. Repository, branch, worktree, commit, row IDs and timestamps are unchanged;
+  private supersession links remain. Publication links and attribution are stripped
+  as described below. Redaction follows
   [lifecycle classification](lifecycle-v1.md). Import keeps the bundle's
   sensitivity label and does not apply the capture sensitivity floor. A kept
   `public` label is the bundle label after those strings were redacted. It is
@@ -97,20 +98,16 @@ additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
   is owned by someone, with no payload or owner. Unscoped import (the library call) and
   a store with no accounts (REST: without a bearer) merge every entry. Tombstones already stored are not
   rewritten.
-- File-store account import accepts a memory row that carries a `project_id` only when that
-  project exists and the caller owns it. An outsider, an invited member, a missing
-  project and a project with no owner record all reject the whole import with
-  `account does not own the project`, and nothing is written. The bundle holds no
-  project record, and import does not create a project, map one, or strip the
-  link, so restoring into another store needs the matching project registered by
-  the same account first. Unscoped import (the library call) and a store with no
-  accounts (REST: without a bearer) keep the row as it is. PostgreSQL does not make this check (see the
-  next bullet).
+- Every import strips `published_by`, change attribution, `project_id`,
+  `promoted_from` and promotion reason. All imported rows are personal; a forged
+  project tag or publication marker cannot publish a decision. Personal exports
+  exclude published decisions and do not back up project identity, membership or
+  governance. Project decisions are read online; explicit re-promotion is required.
 - PostgreSQL import runs in one transaction keyed to the authenticated person.
-  It does not apply the file-store rules on session `person_id`, `forgottenIds`
-  ownership, or `project_id` ownership. It ignores a bundle session's
+  It does not apply the file-store rules on session `person_id` or `forgottenIds`
+  ownership. It ignores a bundle session's
   `person_id`, stores every `forgottenIds` entry as a tombstone for that person
-  only, and does not check `project_id`. Read from source, not run: an
+  only, and strips publication state through the shared normalizer. Read from source, not run: an
   observation needs its session in the bundle or already stored, and a memory id
   already held by another person fails the whole import in the insert, as a
   database error (HTTP 500), not with the ownership error. Format and version
@@ -144,8 +141,8 @@ result keys are `imported_sessions`, `imported_observations`,
 ownership rejection returns HTTP 401. PostgreSQL has no such rejection, and its
 database errors return HTTP 500.
 
-This remains a Layer 1/2 local format. Encryption, promotion, and cross-device
-conflict policy are later concerns. File-store account import rejects a session
+This remains a personal-memory format. Project publication and governance are
+outside its backup and restore boundary. File-store account import rejects a session
 `person_id` that is not the caller's, as the
 [Layer 3 auth contract](auth-layer3.md) states. An account export, file or
 PostgreSQL, holds the memories and observations that person owns and the sessions

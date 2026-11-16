@@ -325,7 +325,7 @@ class OfflineHookTests(unittest.TestCase):
             result = run_hook("http://127.0.0.1:9", payload, path, CAIRN_DEVICE_TOKEN=DEVICE)
             self.assertEqual(result.returncode, 0, result.stderr)
             queued = json.loads(path.read_text(encoding="utf-8"))["events"][0]["payload"]
-            self.assertEqual(queued["context"], {"repository": "widget-svc", "branch": "main"})
+            self.assertEqual(queued["context"], {"repository": "example.test/acme/widget-svc", "branch": "main"})
 
     def test_timeout_after_store_replays_as_one_duplicate(self):
         stub = Stub(mode="stall")

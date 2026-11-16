@@ -1,33 +1,87 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
+import Link from "next/link";
+import { SearchIcon } from "lucide-react";
 import { AppSidebar } from "@/components/app-sidebar";
-import { SiteHeader } from "@/components/site-header";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { CommandPalette } from "@/components/command-palette";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import { Button } from "@/components/ui/button";
+import { Kbd } from "@/components/ui/kbd";
+import { Separator } from "@/components/ui/separator";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+
+export type Crumb = { label: string; href?: string };
 
 export function ConsoleShell({
-  title,
-  action,
+  crumbs,
   children,
 }: {
-  title: string;
-  action?: ReactNode;
+  crumbs: Crumb[];
   children: ReactNode;
 }) {
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const page = crumbs[crumbs.length - 1];
+  const trail = crumbs.slice(0, -1);
   return (
-    <SidebarProvider
-      className="flex-1"
-      style={
-        {
-          "--sidebar-width": "calc(var(--spacing) * 72)",
-          "--header-height": "calc(var(--spacing) * 12)",
-        } as React.CSSProperties
-      }
-    >
-      <AppSidebar variant="inset" />
-      <SidebarInset>
-        <SiteHeader title={title} action={action} />
-        <div className="flex flex-1 flex-col gap-6 px-4 py-6 lg:px-6">{children}</div>
+    <SidebarProvider className="flex-1">
+      <AppSidebar />
+      <SidebarInset className="min-w-0">
+        <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-b bg-background/85 px-3 backdrop-blur supports-[backdrop-filter]:bg-background/70 md:px-4">
+          <SidebarTrigger className="-ml-1" />
+          <Separator orientation="vertical" className="mx-1 h-4 data-vertical:self-auto" />
+          <Breadcrumb className="min-w-0 flex-1">
+            <BreadcrumbList className="flex-nowrap">
+              {trail.map((crumb) => (
+                <Fragment key={crumb.label}>
+                  <BreadcrumbItem className="hidden sm:inline-flex">
+                    {crumb.href ? (
+                      <BreadcrumbLink render={<Link href={crumb.href} />}>{crumb.label}</BreadcrumbLink>
+                    ) : (
+                      crumb.label
+                    )}
+                  </BreadcrumbItem>
+                  <BreadcrumbSeparator className="hidden sm:block" />
+                </Fragment>
+              ))}
+              <BreadcrumbItem className="min-w-0">
+                <BreadcrumbPage className="truncate">{page.label}</BreadcrumbPage>
+              </BreadcrumbItem>
+            </BreadcrumbList>
+          </Breadcrumb>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="hidden w-56 justify-start gap-2 text-muted-foreground sm:inline-flex"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <SearchIcon />
+            <span>Jump to…</span>
+            <Kbd className="ml-auto">⌘K</Kbd>
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="sm:hidden"
+            aria-label="Jump to a page or project"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <SearchIcon />
+          </Button>
+        </header>
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8">
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

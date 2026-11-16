@@ -3,10 +3,12 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { cn } from "cn";
+import { CairnLogo, CairnMark } from "@/components/cairn-logo";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { cairn } from "@/lib/cairn";
 import { signInFailureMessage } from "@/lib/session";
 
@@ -68,75 +70,82 @@ export function LoginForm({
   }
 
   return (
-    <div className={cn("flex flex-col gap-6", className)} {...props}>
-      <Card className="overflow-hidden p-0 py-0">
-        <CardContent className="grid p-0 md:grid-cols-2">
-          <form
-            onSubmit={onSubmit}
-            className="p-6 md:p-8"
-            aria-describedby={error ? "sign-in-error" : undefined}
-          >
-            <FieldGroup>
-              <div className="flex flex-col gap-2">
-                <h1 className="text-2xl font-semibold tracking-tight">
-                  {bootstrap ? "Create the first account" : "Sign in"}
-                </h1>
-                <p className="text-sm text-muted-foreground">
-                  {bootstrap
-                    ? "This server has no account yet. The account you create here owns it. Use a password of at least 12 characters."
-                    : "Use your Cairn account email and password."}
-                </p>
-              </div>
-              <Field>
-                <FieldLabel htmlFor="email">Email</FieldLabel>
-                <Input
-                  id="email"
-                  name="email"
-                  type="email"
-                  autoComplete="username"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  required
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="password">Password</FieldLabel>
-                <Input
-                  id="password"
-                  name="password"
-                  type="password"
-                  autoComplete={bootstrap ? "new-password" : "current-password"}
-                  value={password}
-                  onChange={(event) => setPassword(event.target.value)}
-                  required
-                />
-              </Field>
-              {error ? (
-                <p id="sign-in-error" role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
-              ) : null}
-              <Field>
-                <Button type="submit" disabled={pending || !ready}>
-                  {bootstrap
-                    ? pending
-                      ? "Creating account…"
-                      : "Create account"
-                    : pending
-                      ? "Signing in…"
-                      : "Sign in"}
-                </Button>
-              </Field>
-            </FieldGroup>
-          </form>
-          <div className="relative hidden min-h-80 flex-col justify-between bg-muted p-8 md:flex">
-            <p className="text-sm font-medium">Cairn</p>
-            <p className="max-w-xs text-sm text-muted-foreground">
-              Project memory stays with the account that owns it.
+    <div
+      className={cn(
+        "grid overflow-hidden rounded-xl border bg-card shadow-sm md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]",
+        className,
+      )}
+      {...props}
+    >
+      <form
+        onSubmit={onSubmit}
+        className="flex flex-col gap-6 p-6 md:p-10"
+        aria-describedby={error ? "sign-in-error" : undefined}
+      >
+        <CairnLogo className="md:hidden" />
+        <FieldGroup>
+          <div className="flex flex-col gap-1.5">
+            <h1 className="text-2xl font-semibold">
+              {bootstrap ? "Create the first account" : "Sign in"}
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              {bootstrap
+                ? "This server has no account yet. The account you create here owns it. Use a password of at least 12 characters."
+                : "Use your Cairn account email and password."}
             </p>
           </div>
-        </CardContent>
-      </Card>
+          <Field>
+            <FieldLabel htmlFor="email">Email</FieldLabel>
+            <Input
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="password">Password</FieldLabel>
+            <Input
+              id="password"
+              name="password"
+              type="password"
+              autoComplete={bootstrap ? "new-password" : "current-password"}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </Field>
+          {error ? (
+            <Alert id="sign-in-error" variant="destructive">
+              <AlertDescription className="text-destructive">{error}</AlertDescription>
+            </Alert>
+          ) : null}
+          <Field>
+            <Button type="submit" size="lg" disabled={pending || !ready}>
+              {pending ? <Spinner aria-hidden /> : null}
+              {bootstrap
+                ? pending
+                  ? "Creating account…"
+                  : "Create account"
+                : pending
+                  ? "Signing in…"
+                  : "Sign in"}
+            </Button>
+          </Field>
+        </FieldGroup>
+      </form>
+      <div className="relative hidden min-h-96 flex-col justify-between overflow-hidden border-l bg-sidebar p-10 md:flex">
+        <CairnLogo />
+        <CairnMark
+          className="pointer-events-none absolute -right-10 -bottom-10 size-72 opacity-[0.14] [transform:rotate(8deg)]"
+        />
+        <p className="relative max-w-xs text-lg leading-snug font-medium text-balance">
+          Project memory stays with the account that owns it.
+        </p>
+      </div>
     </div>
   );
 }

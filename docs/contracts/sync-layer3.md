@@ -155,7 +155,9 @@ command is unchanged. The client rule is the [hook contract](./hook-v1.md).
 
 An empty PostgreSQL push is a context equal to `WorkContext::default()`. When
 this person's `(person_id, session_id)` row already exists, the push copies
-that stored context before normalize. It does not copy another person's row.
+that stored context before normalize. It does not copy another person's row. A context
+that sets only `project_id` (what `cairn capture` sends) counts as empty for this copy and keeps
+its `project_id`; the file store does the same on `observe` and `sync/push`.
 When no session exists, the push inserts a session with the pushed context so the
 observation foreign key holds, and a push with a real context fills an existing
 empty row under the same rule as a start (a real context is never replaced). A partial context, including one that sets only `files`,
@@ -452,12 +454,12 @@ unsupported context keys stay unredacted. Older spool bytes are not rewritten.
 
 ## Evidence
 
-- `crates/core/src/lib.rs` stores devices, cursors, sync events, rotation, and
+- `crates/core/src/devices.rs` and `crates/core/src/sync.rs` store devices, cursors, sync events, rotation, and
   revocation.
 - `crates/server/src/lib.rs` exposes the authenticated REST boundary.
 - `crates/storage/src/lib.rs` implements the PostgreSQL Layer 3 repository.
 - `migrations/0001_layer3_personal_memory.sql` defines the canonical tables.
-- `crates/core/src/lib.rs` and `crates/storage/src/lib.rs` expose sync diagnostics.
+- `crates/core/src/sync.rs` and `crates/storage/src/lib.rs` expose sync diagnostics.
 - `scripts/cairn_outbox.py` implements the bounded local replay spool.
 - `scripts/smoke_outbox.py` checks new queue-file bytes for `content` and the
   seven context lists, replay order, the 256 cap, duplicate event ids,

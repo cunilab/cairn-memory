@@ -1,653 +1,418 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { ColumnDef } from "@tanstack/react-table";
+import { MoreHorizontalIcon } from "lucide-react";
+import { toast } from "sonner";
+import { IdText, RoleBadge } from "@/components/badges";
 import { ConsoleShell } from "@/components/console-shell";
-import { ProjectOwnerActions } from "@/components/project-owner-actions";
-import { ProjectReports } from "@/components/project-reports";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { DataTable } from "@/components/data-table";
+import { FormDialog } from "@/components/form-dialog";
+import { PageHeader } from "@/components/page-header";
+import { ProjectBranches } from "@/components/project-branches";
+import { ProjectMemories } from "@/components/project-memories";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
-import { deleteDecisionImpact, revokeShareImpact } from "@/lib/action-copy";
+import { deleteDecisionImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
-import { memoryReadPath } from "@/lib/memory-path";
+import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
-import { isAbsentTeam } from "@/lib/team";
-import type { ListedProject, ProjectBranch, ProjectMemory, ProjectTeam } from "@/lib/types";
+import type { ListedProject, ProjectBranch, ProjectMember, ProjectMemory } from "@/lib/types";
 
-function field(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === "") {
-    return "—";
-  }
-  return String(value);
-}
-
-type ConfirmAction = { kind: "delete" | "revoke"; memoryId: string };
-
-function roleLabel(role: string): string {
-  if (role === "owner") {
-    return "Owner";
-  }
-  if (role === "member") {
-    return "Member";
-  }
-  return role;
-}
+type Action = { kind: "verify" | "correct" | "delete"; memory: ProjectMemory };
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
+  const generation = useRef(0);
+  const account = useAccount();
   const [project, setProject] = useState<ListedProject | null>(null);
-  const [memories, setMemories] = useState<ProjectMemory[]>([]);
+  const [decisions, setDecisions] = useState<ProjectMemory[]>([]);
   const [branches, setBranches] = useState<ProjectBranch[]>([]);
-  const [team, setTeam] = useState<ProjectTeam | null>(null);
-  const [teamError, setTeamError] = useState<string | null>(null);
+  const [members, setMembers] = useState<ProjectMember[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
-  const [teamName, setTeamName] = useState("");
-  const [pending, setPending] = useState(false);
-  const [sessionRequired, setSessionRequired] = useState(false);
-  const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
-  const [dialogAction, setDialogAction] = useState<ConfirmAction | null>(null);
-  const confirming = useRef(false);
-  const loadGeneration = useRef(0);
-
-  function beginLoad(): number {
-    loadGeneration.current += 1;
-    return loadGeneration.current;
-  }
-
-  function isCurrent(generation: number): boolean {
-    return generation === loadGeneration.current;
-  }
-
-  useResetOnHide(() => {
-    beginLoad();
-    confirming.current = false;
-    setProject(null);
-    setMemories([]);
-    setBranches([]);
-    setTeam(null);
-    setTeamError(null);
-    setError(null);
-    setActionError(null);
-    setNotice(null);
-    setEmail("");
-    setTeamName("");
-    setPending(false);
-    setSessionRequired(false);
-    setConfirm(null);
-    setDialogAction(null);
-  });
-
-  function openConfirm(next: ConfirmAction) {
-    setActionError(null);
-    setNotice(null);
-    setDialogAction(next);
-    setConfirm(next);
-  }
-
-  const requireSignIn = useCallback(() => {
-    setSessionRequired(true);
-    setProject(null);
-    setMemories([]);
-    setBranches([]);
-    setTeam(null);
-    setTeamError(null);
-    setError(null);
-    setActionError(null);
-    setNotice(null);
-    router.replace("/");
-  }, [router]);
-
-  const applyProject = useCallback(
-    (result: {
-      current: ListedProject;
-      decisions: ProjectMemory[];
-      nextBranches: ProjectBranch[];
-      nextTeam: ProjectTeam | null;
-      nextTeamError: string | null;
-    }) => {
-      setProject(result.current);
-      setMemories(result.decisions);
-      setBranches(result.nextBranches);
-      setTeam(result.nextTeam);
-      setTeamError(result.nextTeamError);
-      setError(null);
-    },
-    [],
-  );
+  const [action, setAction] = useState<Action | null>(null);
+  const [detail, setDetail] = useState<ProjectMemory | null>(null);
+  const [transfer, setTransfer] = useState<ProjectMember | null>(null);
+  const path = `projects/${encodeURIComponent(projectId)}`;
+  const requireSignIn = useCallback(() => router.replace("/"), [router]);
 
   const fetchProject = useCallback(async () => {
     const listed = await cairn<ListedProject[]>("projects");
-    const current = listed.find((item) => item.project_id === projectId);
-    if (!current) {
-      throw new Error("Project is not on this account.");
-    }
-    const decisions = await cairn<ProjectMemory[]>(memoryReadPath(projectId, current.role));
-    const nextBranches =
-      current.role === "owner"
-        ? await cairn<ProjectBranch[]>(`projects/${encodeURIComponent(projectId)}/branches`)
-        : [];
-    let nextTeam: ProjectTeam | null = null;
-    let nextTeamError: string | null = null;
-    try {
-      nextTeam = await cairn<ProjectTeam>(
-        `projects/${encodeURIComponent(projectId)}/team`,
-      );
-    } catch (cause) {
-      if (cause instanceof SessionRequiredError) {
-        throw cause;
-      }
-      const message = cause instanceof Error ? cause.message : "Team request failed";
-      if (!isAbsentTeam(message)) {
-        nextTeamError = message;
-      }
-    }
-    return { current, decisions, nextBranches, nextTeam, nextTeamError };
-  }, [projectId]);
+    const current = listed.find((p) => p.project_id === projectId);
+    if (!current) throw new Error("Project is not on this account.");
+    const [nextDecisions, nextMembers, nextBranches] = await Promise.all([
+      cairn<ProjectMemory[]>(`${path}/memories`),
+      cairn<ProjectMember[]>(`${path}/members`),
+      cairn<ProjectBranch[]>(`${path}/branches`),
+    ]);
+    return { current, nextDecisions, nextMembers, nextBranches };
+  }, [projectId, path]);
+
+  const apply = useCallback((result: Awaited<ReturnType<typeof fetchProject>>) => {
+    setBranches(result.nextBranches);
+    setProject(result.current);
+    setDecisions(result.nextDecisions);
+    setMembers(result.nextMembers);
+    setError(null);
+  }, []);
+
+  useResetOnHide(() => {
+    generation.current += 1;
+    setBranches([]);
+    setProject(null);
+    setDecisions([]);
+    setMembers([]);
+    setError(null);
+    setAction(null);
+    setDetail(null);
+    setTransfer(null);
+  });
 
   useEffect(() => {
     let cancelled = false;
-    const generation = beginLoad();
+    const expected = generation.current;
     fetchProject()
       .then((result) => {
-        if (cancelled || !isCurrent(generation)) {
-          return;
-        }
-        applyProject(result);
+        if (!cancelled && generation.current === expected) apply(result);
       })
       .catch((cause: unknown) => {
-        if (cancelled || !isCurrent(generation)) {
-          return;
-        }
+        if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
           requireSignIn();
           return;
         }
-        setError(cause instanceof Error ? cause.message : "Could not load the project");
+        setError(cause instanceof Error ? cause.message : "Could not load project");
       });
     return () => {
       cancelled = true;
     };
-  }, [applyProject, fetchProject, projectId, requireSignIn]);
+  }, [fetchProject, apply, requireSignIn]);
 
-  const owner = project?.role === "owner";
-
-  async function run(action: () => Promise<unknown>, success?: string): Promise<boolean> {
-    const generation = beginLoad();
-    setPending(true);
-    setActionError(null);
-    setNotice(null);
-    try {
-      await action();
-      const result = await fetchProject();
-      if (isCurrent(generation)) {
-        applyProject(result);
-        setNotice(success ?? null);
-        return true;
-      }
-    } catch (cause) {
-      if (!isCurrent(generation)) {
-        return false;
-      }
-      if (cause instanceof SessionRequiredError) {
-        requireSignIn();
-        return false;
-      }
-      setActionError(cause instanceof Error ? cause.message : "Request failed");
-    } finally {
-      if (isCurrent(generation)) {
-        setPending(false);
-      }
-    }
-    return false;
-  }
-
-  async function confirmAction() {
-    if (!confirm || confirming.current) {
-      return;
-    }
-    if (confirm.kind === "revoke" && email.trim() === "") {
-      return;
-    }
-    const action = confirm;
-    const generation = beginLoad();
-    confirming.current = true;
-    setPending(true);
-    setActionError(null);
-    try {
-      if (action.kind === "delete") {
-        await cairn("delete", {
-          method: "POST",
-          body: JSON.stringify({ id: action.memoryId }),
-        });
-        setMemories((current) =>
-          current.filter((item) => item.memory_id !== action.memoryId),
-        );
-      } else {
-        await cairn(
-          `projects/${encodeURIComponent(projectId)}/shares/${encodeURIComponent(action.memoryId)}/revoke`,
-          {
-            method: "POST",
-            body: JSON.stringify({ email }),
-          },
-        );
-      }
-    } catch (cause) {
-      if (isCurrent(generation)) {
+  const submit = useCallback(
+    async (write: () => Promise<unknown>, success: string) => {
+      const expected = generation.current;
+      await write();
+      try {
+        const result = await fetchProject();
+        if (generation.current === expected) {
+          apply(result);
+          toast.success(success);
+        }
+      } catch (cause) {
+        if (generation.current !== expected) return;
         if (cause instanceof SessionRequiredError) {
           requireSignIn();
-        } else {
-          setActionError(cause instanceof Error ? cause.message : "Request failed");
+          return;
         }
+        setDecisions([]);
+        setBranches([]);
+        setMembers([]);
+        setError(`${success} Reload failed. Refresh this page; do not repeat the action.`);
       }
-      if (generation === loadGeneration.current) {
-        confirming.current = false;
-        setPending(false);
-      }
-      return;
-    }
-    try {
-      const result = await fetchProject();
-      if (isCurrent(generation)) {
-        applyProject(result);
-        setConfirm(null);
-      }
-    } catch (cause) {
-      if (!isCurrent(generation)) {
-        return;
-      }
-      if (cause instanceof SessionRequiredError) {
-        requireSignIn();
-        return;
-      }
-      setConfirm(null);
-      setError(
-        action.kind === "delete"
-          ? "The decision was hidden, but the project could not be reloaded. Do not delete it again."
-          : "The share was revoked, but the project could not be reloaded. Do not revoke it again.",
-      );
-    } finally {
-      if (generation === loadGeneration.current) {
-        confirming.current = false;
-        setPending(false);
-      }
-    }
-  }
+    },
+    [apply, fetchProject, requireSignIn],
+  );
+  const owner = project?.role === "owner";
+  const nameOf = useCallback(
+    (id?: string | null) => members.find((m) => m.person_id === id)?.email ?? id ?? "—",
+    [members],
+  );
 
-  async function logout() {
-    try {
-      await cairn("auth/logout", { method: "POST" });
-    } catch (cause) {
-      if (cause instanceof SessionRequiredError) {
-        requireSignIn();
-        return;
-      }
-      setActionError(cause instanceof Error ? cause.message : "Logout failed");
-      return;
-    }
-    router.replace("/");
-  }
+  const columns = useMemo<ColumnDef<ProjectMemory>[]>(
+    () => [
+      {
+        id: "decision",
+        header: "Decision",
+        accessorFn: (m) => `${m.memory_id} ${m.content}`,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              className="line-clamp-2 text-left text-sm break-words hover:underline focus-visible:ring-2"
+              onClick={() => setDetail(row.original)}
+            >
+              {row.original.content}
+            </button>
+            <IdText id={row.original.memory_id} />
+          </div>
+        ),
+      },
+      {
+        id: "author",
+        header: "Author",
+        accessorFn: (m) => nameOf(m.published_by),
+        meta: { className: "hidden md:table-cell" },
+      },
+      {
+        id: "changed",
+        header: "Last changed by",
+        accessorFn: (m) => nameOf(m.changed_by),
+        meta: { className: "hidden lg:table-cell" },
+      },
+      {
+        id: "verified",
+        header: "Verified at",
+        accessorFn: (m) => m.verified_commit ?? "—",
+        meta: { className: "hidden lg:table-cell" },
+      },
+      {
+        id: "created",
+        header: "Published",
+        accessorFn: (m) => Number(m.created_at ?? 0),
+        cell: ({ row }) => (
+          <span className="text-xs text-muted-foreground">
+            {formatTime(row.original.created_at)}
+          </span>
+        ),
+        meta: { className: "hidden md:table-cell" },
+      },
+      {
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        enableSorting: false,
+        cell: ({ row }) => {
+          const memory = row.original;
+          if (!owner && memory.published_by !== account?.person_id) return null;
+          return (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Actions for ${memory.memory_id}`}
+                  />
+                }
+              >
+                <MoreHorizontalIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setAction({ kind: "verify", memory })}>
+                  Verify
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setAction({ kind: "correct", memory })}>
+                  Correct
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => setAction({ kind: "delete", memory })}
+                >
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          );
+        },
+      },
+    ],
+    [account?.person_id, owner, nameOf],
+  );
 
-  if (sessionRequired) {
-    return (
-      <main className="mx-auto flex min-h-svh w-full max-w-sm flex-1 items-center px-6">
-        <p className="text-sm text-muted-foreground">Sign in is required.</p>
-      </main>
-    );
-  }
+  const memberColumns = useMemo<ColumnDef<ProjectMember>[]>(
+    () => [
+      { id: "person", header: "Member", accessorKey: "email" },
+      { id: "role", header: "Role", cell: ({ row }) => <RoleBadge role={row.original.role} /> },
+      {
+        id: "transfer",
+        header: "",
+        enableSorting: false,
+        cell: ({ row }) =>
+          (owner || account?.is_admin) && row.original.role !== "owner" ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setTransfer(row.original)}
+            >
+              Transfer ownership
+            </Button>
+          ) : null,
+      },
+    ],
+    [owner, account?.is_admin],
+  );
 
   return (
     <ConsoleShell
-      title={project?.name ?? (error ? "Project unavailable" : "Project")}
-      action={
-        <Button type="button" variant="outline" onClick={() => void logout()}>
-          Log out
-        </Button>
-      }
+      crumbs={[{ label: "Projects", href: "/projects" }, { label: project?.name ?? "Project" }]}
     >
-      <div className="flex min-w-0 flex-col gap-6">
-      {project ? (
-        <p className="break-all text-sm text-muted-foreground">
-          {project.repository} · {roleLabel(project.role)} · {project.project_id}
-        </p>
-      ) : null}
-      {!project && !error ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading project…
-        </p>
-      ) : null}
+      <PageHeader
+        title={project?.name ?? "Project"}
+        description={
+          project
+            ? `${project.repository} · Decisions are visible to every member.`
+            : "Loading project…"
+        }
+      />
       {error ? (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       ) : null}
-      {notice ? (
-        <p
-          role="status"
-          ref={(element) => element?.scrollIntoView({ block: "nearest" })}
-          className="text-sm text-muted-foreground"
-        >
-          {notice}
-        </p>
-      ) : null}
-      {actionError ? (
-        // The owner form sits far below the buttons, so bring the failure into view.
-        <p
-          role="alert"
-          ref={(element) => element?.scrollIntoView({ block: "nearest" })}
-          className="text-sm text-destructive"
-        >
-          {actionError}
-        </p>
-      ) : null}
-
       {project ? (
-      <>
-      <section className="flex min-w-0 flex-col gap-3">
-        <h2 className="text-base font-medium">Decisions</h2>
-        {project && memories.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {owner ? "No decisions." : "No shared decisions."}
-          </p>
-        ) : null}
-        <ul className="flex flex-col gap-3">
-          {memories.map((memory) => (
-            <li key={memory.memory_id} className="min-w-0">
-              <Card className="min-w-0">
-                <CardHeader>
-                  <CardTitle className="break-all">{memory.memory_id}</CardTitle>
-                </CardHeader>
-                <CardContent className="flex min-w-0 flex-col gap-3">
-                  <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">
-                    {memory.content}
-                  </p>
-                  <dl className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
-                    <dt className="text-muted-foreground">Scope</dt>
-                    <dd className="min-w-0 break-all">{field(memory.scope)}</dd>
-                    <dt className="text-muted-foreground">Verified commit</dt>
-                    <dd className="min-w-0 break-all">{field(memory.verified_commit)}</dd>
-                    <dt className="text-muted-foreground">Freshness</dt>
-                    <dd className="min-w-0 break-all">{field(memory.lifecycle?.freshness)}</dd>
-                    <dt className="text-muted-foreground">Supersedes</dt>
-                    <dd className="min-w-0 break-all">{field(memory.supersedes)}</dd>
-                    {memory.share_reason ? (
-                      <>
-                        <dt className="text-muted-foreground">Share reason</dt>
-                        <dd className="min-w-0 break-all">{memory.share_reason}</dd>
-                      </>
-                    ) : null}
-                  </dl>
-                  {owner ? (
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={pending}
-                        onClick={() =>
-                          void run(() =>
-                            cairn(`projects/${encodeURIComponent(projectId)}/shares`, {
-                              method: "POST",
-                              body: JSON.stringify({
-                                memory_id: memory.memory_id,
-                                email,
-                              }),
-                            }),
-                            "Decision shared.",
-                          )
-                        }
-                      >
-                        Share decision
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={pending}
-                        onClick={() => {
-                          openConfirm({ kind: "revoke", memoryId: memory.memory_id });
-                        }}
-                      >
-                        Revoke share
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        disabled={pending}
-                        onClick={() => {
-                          openConfirm({ kind: "delete", memoryId: memory.memory_id });
-                        }}
-                      >
-                        Delete memory
-                      </Button>
-                    </div>
-                  ) : null}
-                </CardContent>
-              </Card>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="flex min-w-0 flex-col gap-3">
-        <h2 className="text-base font-medium">Team</h2>
-        {teamError ? (
-          <p role="alert" className="text-sm text-destructive">
-            {teamError}
-          </p>
-        ) : null}
-        {team ? (
-          <Card className="min-w-0">
-            <CardHeader>
-              <CardTitle className="break-words">{team.name}</CardTitle>
-              <CardDescription className="break-all">{team.project_id}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {team.members.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No team members.</p>
-              ) : (
-                <ul className="text-sm">
-                  {team.members.map((member) => (
-                    <li key={member.person_id} className="break-all">
-                      {member.email}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        ) : null}
-        {!team && !teamError ? (
-          <p className="text-sm text-muted-foreground">
-            {owner
-              ? "No team yet. Create one with the form below."
-              : "This project has no team."}
-          </p>
-        ) : null}
-      </section>
-
-      {owner ? (
-        <ProjectReports
-          projectId={projectId}
-          memberEmails={team?.members.map((member) => member.email) ?? []}
-          decisions={memories}
-          onSessionRequired={requireSignIn}
-        />
-      ) : null}
-
-      {owner ? (
-        <ProjectOwnerActions
-          projectId={projectId}
-          sharePolicy={project.share_policy}
-          branches={branches}
-          decisions={memories}
-          pending={pending}
-          run={run}
-          onSessionRequired={requireSignIn}
-        />
-      ) : null}
-
-      {owner ? (
-        <section className="flex flex-col gap-4">
-          <h2 className="text-base font-medium">Owner actions</h2>
-          <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="member-email">Member email</FieldLabel>
-            <Input
-              id="member-email"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              autoComplete="off"
+        <Tabs defaultValue="decisions">
+          <TabsList>
+            <TabsTrigger value="decisions">Decisions</TabsTrigger>
+            <TabsTrigger value="memories">Memories</TabsTrigger>
+            <TabsTrigger value="members">Members</TabsTrigger>
+          </TabsList>
+          <TabsContent value="decisions">
+            <DataTable
+              label="decisions"
+              data={decisions}
+              columns={columns}
+              getRowId={(m) => m.memory_id}
+              filterPlaceholder="Filter decisions"
+              empty={
+                <p className="p-6 text-sm text-muted-foreground">
+                  No project decisions yet. Promote one of your memories to publish it to every
+                  member.
+                </p>
+              }
             />
-          </Field>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/members`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                  "Member invited.",
-                )
-              }
-            >
-              Invite member
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team/members`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                  "Team member added.",
-                )
-              }
-            >
-              Add member
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team/members/remove`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                )
-              }
-            >
-              Remove member
-            </Button>
-          </div>
-          {team ? null : (
-            <form
-              className="flex flex-col gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team`, {
-                    method: "POST",
-                    body: JSON.stringify({ name: teamName }),
-                  }),
-                  "Team created.",
-                );
-              }}
-            >
-              <Field>
-                <FieldLabel htmlFor="team-name">Team name</FieldLabel>
-                <Input
-                  id="team-name"
-                  value={teamName}
-                  onChange={(event) => setTeamName(event.target.value)}
-                  required
-                />
-              </Field>
-              <Button type="submit" disabled={pending}>
-                Create team
-              </Button>
-            </form>
-          )}
-          </FieldGroup>
-        </section>
+          </TabsContent>
+          <TabsContent value="memories">
+            <ProjectMemories
+              projectId={projectId}
+              repository={project.repository}
+              submit={submit}
+              onSessionRequired={requireSignIn}
+            />
+            <ProjectBranches
+              projectId={projectId}
+              branches={branches}
+              submit={submit}
+              onSessionRequired={requireSignIn}
+            />
+          </TabsContent>
+          <TabsContent value="members">
+            <DataTable
+              label="members"
+              data={members}
+              columns={memberColumns}
+              getRowId={(m) => m.person_id}
+              filterPlaceholder="Filter members"
+              empty={<p>No members found.</p>}
+            />
+          </TabsContent>
+        </Tabs>
       ) : null}
-      </>
-      ) : null}
-      <AlertDialog
-        open={confirm !== null}
-        onOpenChange={(open) => {
-          if (pending || open) {
-            return;
-          }
-          setConfirm(null);
-          setActionError(null);
+      <FormDialog
+        open={action !== null}
+        onOpenChange={(open) => !open && setAction(null)}
+        title={
+          action?.kind === "verify"
+            ? "Verify decision"
+            : action?.kind === "correct"
+              ? "Correct decision"
+              : "Delete decision"
+        }
+        description={
+          <>
+            {action?.kind === "delete"
+              ? deleteDecisionImpact(action.memory.memory_id)
+              : "The author and project owner can update this decision for every member. Changes record your identity."}
+            <span className="mt-2 block font-mono text-xs break-all">
+              {action?.memory.memory_id}
+            </span>
+          </>
+        }
+        submitLabel={action?.kind === "delete" ? "Delete decision" : "Save"}
+        onSubmit={async (data) => {
+          if (!action) return;
+          const { kind, memory } = action;
+          const route =
+            kind === "verify" ? "projects/verify" : kind === "correct" ? "correct" : "delete";
+          const body =
+            kind === "verify"
+              ? { projectId, memoryId: memory.memory_id, commit: String(data.get("commit")) }
+              : kind === "correct"
+                ? { targetId: memory.memory_id, content: String(data.get("content")) }
+                : { id: memory.memory_id };
+          await submit(
+            () => cairn(route, { method: "POST", body: JSON.stringify(body) }),
+            "Decision updated.",
+          );
         }}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {dialogAction?.kind === "revoke" ? "Revoke this share?" : "Delete this decision?"}
-            </AlertDialogTitle>
-            <AlertDialogDescription className="text-left [overflow-wrap:anywhere]">
-              {dialogAction?.kind === "revoke"
-                ? revokeShareImpact(dialogAction.memoryId, email)
-                : dialogAction
-                  ? deleteDecisionImpact(dialogAction.memoryId)
-                  : ""}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {actionError ? (
-            <p role="alert" className="text-sm text-destructive">
-              {actionError}
+        {action?.kind === "verify" ? (
+          <Field>
+            <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
+            <Input id="verify-commit" name="commit" required />
+          </Field>
+        ) : action?.kind === "correct" ? (
+          <Field>
+            <FieldLabel htmlFor="correction">Corrected decision</FieldLabel>
+            <Textarea
+              id="correction"
+              name="content"
+              defaultValue={action.memory.content}
+              required
+            />
+          </Field>
+        ) : null}
+      </FormDialog>
+      <FormDialog
+        open={transfer !== null}
+        onOpenChange={(open) => !open && setTransfer(null)}
+        title="Transfer ownership"
+        description={`Make ${transfer?.email ?? "this member"} the project owner. You remain a member; your private memories and branch records stay yours.`}
+        submitLabel="Transfer ownership"
+        onSubmit={async () => {
+          if (transfer)
+            await submit(
+              () =>
+                cairn(`${path}/ownership`, {
+                  method: "POST",
+                  body: JSON.stringify({ personId: transfer.person_id }),
+                }),
+              "Project ownership transferred.",
+            );
+        }}
+      >
+        <p className="text-sm text-muted-foreground">
+          The new owner can manage every project decision and transfer ownership again.
+        </p>
+      </FormDialog>
+      <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
+        <SheetContent className="overflow-y-auto">
+          <SheetHeader>
+            <SheetTitle>Project decision</SheetTitle>
+            <SheetDescription>{detail?.memory_id}</SheetDescription>
+          </SheetHeader>
+          <div className="space-y-4 p-4">
+            <p className="whitespace-pre-wrap break-words">{detail?.content}</p>
+            <p className="text-sm text-muted-foreground">
+              Author: {nameOf(detail?.published_by)}
+              <br />
+              Last changed by: {nameOf(detail?.changed_by)}
             </p>
-          ) : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              disabled={
-                pending || (confirm?.kind === "revoke" && email.trim() === "")
-              }
-              onClick={() => void confirmAction()}
-            >
-              {pending
-                ? "Working…"
-                : dialogAction?.kind === "revoke"
-                  ? "Revoke share"
-                  : "Delete memory"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      </div>
+          </div>
+        </SheetContent>
+      </Sheet>
     </ConsoleShell>
   );
 }
