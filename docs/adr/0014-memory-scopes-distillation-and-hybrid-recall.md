@@ -71,11 +71,70 @@ The owner decided the following.
    memory changes ranking for everyone. For global memory any user may give
    feedback and it affects everyone.
 
-## Open: memory record shape
+## Memory record shape (decided 2026-11-17)
 
-The fields of a memory (title, description, reason and others) are being
-decided by the owner and will be added to this section. Until then no storage
-format or contract change follows from this ADR.
+Decision 7. A memory has common fields plus per-type fields.
+
+**Common fields**
+
+- `title`: short; highest recall weight.
+- `summary`: 1-3 sentences, the what.
+- `details`: optional body.
+- `reason`: the why.
+- `applies_to`: paths/globs, branch, language/tool; used to select memories for
+  the files being worked on.
+- `evidence`: files, symbols, commands, commit, links to source captures.
+- `tags` / entities.
+- `status`: active, stale or superseded, plus `supersedes`.
+- `pinned` / importance.
+- author, created, changed.
+
+**Per-type fields**
+
+| Type | Fields |
+|---|---|
+| decision | context, alternatives considered, consequences |
+| rule | rule, exceptions |
+| gotcha | symptom, cause, fix |
+| procedure | ordered steps, when to use |
+| fact | statement, source |
+| preference (personal behaviour) | preference, example |
+
+**Required** when an agent saves via MCP/CLI: `title`, `summary`, `reason`.
+Everything else is optional.
+
+**Constraint.** Rule-based distillation (no LLM) can reliably fill only
+`title`, `evidence`, `applies_to` and `tags`. `reason`, alternatives, cause and
+fix come from the agent.
+
+## Agent instructions and agent-written memories (decided 2026-11-17)
+
+Decision 8.
+
+- Today setup installs hooks and MCP with only a one-line MCP instruction;
+  nothing tells the agent when or how to save.
+- **Agents with hooks** (e.g. Claude Code SessionStart/PostToolUse/Stop):
+  instructions are injected by hook.
+  - Session start: a short note (1-2 lines: Cairn exists, use its memory tools).
+  - First real work in the session (first file edit or command): the full but
+    compact instructions, once: three scopes, required fields, per-type
+    fields, when to save.
+  - Both injections are token-bounded.
+- **Agents without hooks** (e.g. OpenCode): the instructions go in the first
+  file the agent reads (`AGENTS.md` or the agent's equivalent).
+- **Session end**: only if the session had real work (edited files or ran
+  commands), the hook asks the agent to save what is worth remembering
+  (decisions, rules, gotchas, procedures, preferences) with title, summary,
+  reason, scope and per-type fields. No server-side LLM.
+- Rule-based distillation stays as fallback (session note, handoff, evidence,
+  touched files).
+- Implementation must verify, per agent (Claude Code, Codex, OpenCode and any
+  other agent `cairn setup` supports), from official docs which hook events
+  exist and whether they can inject context or ask the agent to continue.
+  Unsupported means instruction-file fallback. No assumptions.
+
+The record shape is a storage and public-contract change; it lands with the
+checklist items below (pre-release, no data compatibility).
 
 ## Trust and limits
 
@@ -98,6 +157,10 @@ format or contract change follows from this ADR.
 - [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
 - [ ] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
 - [ ] 6. Helpful/stale feedback affecting shared ranking.
+- [ ] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
+- [ ] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
+- [ ] 9. Start / first-work / end hooks with token bounds.
+- [ ] 10. Per-agent capability verification from official docs (hook events, context injection, continue request).
 
 ## Evidence
 
