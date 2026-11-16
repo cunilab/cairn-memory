@@ -517,6 +517,5 @@ pub fn hash_token(token: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Device use is recorded at most this often, so read-only calls do not churn state.
 #[cfg(test)]
 mod tests;

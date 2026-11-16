@@ -212,6 +212,7 @@ impl MemoryStore {
     }
 }
 
+/// Device use is recorded at most this often, so read-only calls do not churn state.
 const LAST_SEEN_THROTTLE_SECS: u64 = 60;
 
 pub(crate) fn touch_last_seen(device: &mut Device) {
