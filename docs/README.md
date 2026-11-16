@@ -43,6 +43,7 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [ADR 0010 — Correction keeps linked history](./adr/0010-correction-keeps-linked-history.md) | CM-ADR-0010 | A correction keeps the old memory stored and linked; normal recall returns the new memory |
 | [ADR 0011 — Explicit project memory share](./adr/0011-explicit-project-memory-share.md) | CM-ADR-0011 | Committed-file membership, one promoted memory grant, member read, and revoke |
 | [ADR 0013 — Shared project decisions and personal memory scopes](./adr/0013-shared-project-decisions-and-personal-memory-scopes.md) | CM-ADR-0013 | Common project decisions, private scopes, publication, owner transfer and ID-based admission risk |
+| [ADR 0014 — Memory scopes, distillation and hybrid recall](./adr/0014-memory-scopes-distillation-and-hybrid-recall.md) | CM-ADR-0014 | Proposed: project/personal/global scopes, rule-based distillation, hybrid recall, retention and capture hygiene |
 | [ADR 0012 — GitHub Releases and CLI self-update](./adr/0012-github-releases-and-self-update.md) | CM-ADR-0012 | Raw release assets, SHA256SUMS, `cairn update`, and the daily notice with their security limits |
 | [Collaborative memory specification](./specs/collaborative-memory.md) | CM-SPEC-001 | Cross-device and cross-person memory behavior |
 | [Memory context and promotion](./specs/memory-context-and-promotion.md) | CM-SPEC-002 | Scope escalation, branch/worktree context, and context packing |
