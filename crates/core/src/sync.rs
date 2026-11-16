@@ -17,6 +17,8 @@ pub struct SyncEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncPushResult {
+    #[serde(default)]
+    pub project_attachment: Option<crate::projects::ProjectAttachment>,
     pub accepted: bool,
     pub duplicate: bool,
     pub cursor: u64,
@@ -62,6 +64,18 @@ pub(crate) struct SyncDeletionRecord {
 impl MemoryStore {
     pub fn sync_push(
         &mut self,
+        token: &str,
+        input: ObservationInput,
+    ) -> Result<SyncPushResult, StoreError> {
+        let account = self.authenticate_account(token)?;
+        let mut result = self.sync_push_inner(token, input)?;
+        result.project_attachment =
+            Some(self.attach_context(&account.person_id, &result.observation.context));
+        Ok(result)
+    }
+
+    fn sync_push_inner(
+        &mut self,
         auth_token: &str,
         input: ObservationInput,
     ) -> Result<SyncPushResult, StoreError> {
@@ -100,6 +114,7 @@ impl MemoryStore {
                     return Err(changed_replay(&input.event_id));
                 }
                 return Ok(SyncPushResult {
+                    project_attachment: None,
                     accepted: true,
                     duplicate: true,
                     cursor,
@@ -147,6 +162,7 @@ impl MemoryStore {
                 return Err(error);
             }
             return Ok(SyncPushResult {
+                project_attachment: None,
                 accepted: true,
                 duplicate: false,
                 cursor,
@@ -225,13 +241,9 @@ impl MemoryStore {
             return Err(error);
         }
         // The push is acknowledged. Housekeeping failures must not turn it into an error.
-        if let Err(error) =
-            self.auto_register_project(&device.person_id, &capture.observation.context)
-        {
-            eprintln!("cairn: automatic project registration failed: {error}");
-        }
         self.finish_idle_sessions(&device.person_id);
         Ok(SyncPushResult {
+            project_attachment: None,
             accepted: true,
             duplicate: false,
             cursor,

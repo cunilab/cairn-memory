@@ -39,6 +39,7 @@ pub struct RecallResult {
     pub promotion_reason: Option<String>,
     #[serde(default)]
     pub verified_commit: Option<String>,
+    pub source: String,
     pub score: f32,
 }
 
@@ -93,15 +94,26 @@ impl MemoryStore {
         query: &str,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
+        self.ranked_matches_in(query, filter, &self.state.memories)
+    }
+
+    fn ranked_matches_in(
+        &self,
+        query: &str,
+        filter: &RecallFilter,
+        memories: &[Memory],
+    ) -> Result<Vec<RecallResult>, StoreError> {
         if query.trim().is_empty() {
             return Err(StoreError::Validation("query must not be empty".to_owned()));
         }
 
         let terms = tokenize(query);
-        let superseded = self.live_superseded_targets();
-        let mut results: Vec<RecallResult> = self
-            .state
-            .memories
+        let superseded = superseded_targets(
+            memories,
+            &self.state.forgotten_ids,
+            &self.memory_owner_map(),
+        );
+        let mut results: Vec<RecallResult> = memories
             .iter()
             .filter(|memory| self.memory_is_recalled(memory, &superseded))
             .filter(|memory| memory_matches_filter(memory, filter))
@@ -111,7 +123,7 @@ impl MemoryStore {
                     recall_result_with(
                         memory,
                         score,
-                        &self.state.memories,
+                        memories,
                         &self.state.forgotten_ids,
                         filter,
                         &superseded,
@@ -165,9 +177,34 @@ impl MemoryStore {
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
         let account = self.authenticate_account(account_token)?;
-        let mut results = self.ranked_matches(query, filter)?;
-        self.retain_account_recall(&account.person_id, &mut results);
-        prefer_newer_contradiction(&mut results, &self.state.memories);
+        let mut eligible = self
+            .state
+            .memories
+            .iter()
+            .filter(|m| {
+                if let Some(project_id) =
+                    m.project_id.as_deref().filter(|_| m.published_by.is_some())
+                {
+                    self.project_owner_id(project_id).is_some()
+                        && (self.project_owner_id(project_id).as_deref()
+                            == Some(account.person_id.as_str())
+                            || self.state.project_members.iter().any(|r| {
+                                r.project_id == project_id
+                                    && r.member_person_id == account.person_id
+                            }))
+                } else {
+                    self.memory_owned_by(&m.memory_id, &account.person_id)
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for m in &mut eligible {
+            if m.published_by.is_some() {
+                m.promoted_from = None;
+            }
+        }
+        let mut results = self.ranked_matches_in(query, filter, &eligible)?;
+        prefer_newer_contradiction(&mut results, &eligible);
         results.truncate(limit);
         Ok(results)
     }
@@ -338,13 +375,11 @@ impl MemoryStore {
     /// Ids a live successor hides, built once per request. The owner map is the only
     /// place file ownership enters supersession; see `superseded_targets`.
     pub(crate) fn live_superseded_targets(&self) -> HashSet<&str> {
-        let mut hidden = superseded_targets(
+        superseded_targets(
             &self.state.memories,
             &self.state.forgotten_ids,
             &self.memory_owner_map(),
-        );
-        hidden.extend(stale_copies(&self.state.memories, &hidden.clone()));
-        hidden
+        )
     }
 
     pub(crate) fn memory_owner_map(&self) -> HashMap<&str, &str> {
@@ -358,29 +393,24 @@ impl MemoryStore {
         owners
     }
 
-    /// Rows with this project id that belong in the owner's project views: rows the project
-    /// owner owns, and rows with no owner (local or pre-account data). A row another person
-    /// owns is stored but not shown, so it cannot appear in or hide anything in the owner's
-    /// list, share candidates, conflicts or maintenance. Import cannot add one now; old data
-    /// may hold one. Nothing is deleted.
+    /// Explicit publications only. A private/imported project tag is never authority.
     pub(crate) fn project_rows(&self, project_id: &str) -> Vec<Memory> {
-        let project_owner = self.project_owner_id(project_id);
-        let owners = self.memory_owner_map();
         self.state
             .memories
             .iter()
-            .filter(|memory| {
-                memory.project_id.as_deref() == Some(project_id)
-                    && owners
-                        .get(memory.memory_id.as_str())
-                        .is_none_or(|owner| project_owner.as_deref().is_none_or(|p| p == *owner))
+            .filter(|m| {
+                m.project_id.as_deref() == Some(project_id)
+                    && m.published_by.is_some()
+                    && m.lifecycle.sensitivity != crate::Sensitivity::Secret
             })
             .cloned()
             .collect()
     }
 
-    fn memory_is_recalled(&self, memory: &Memory, superseded: &HashSet<&str>) -> bool {
-        !self.memory_is_forgotten(memory)
+    pub(crate) fn memory_is_recalled(&self, memory: &Memory, superseded: &HashSet<&str>) -> bool {
+        (memory.published_by.is_none()
+            || memory.lifecycle.sensitivity != crate::Sensitivity::Secret)
+            && !self.memory_is_forgotten(memory)
             && !is_expired(&memory.lifecycle)
             && !superseded.contains(memory.memory_id.as_str())
     }
@@ -491,7 +521,14 @@ fn recall_result_with(
     superseded_ids: &HashSet<&str>,
 ) -> RecallResult {
     let (stale, stale_reason) = stale_signal(memory, filter);
-    let contradiction_ids = contradiction_ids(memory, all_memories, forgotten_ids, superseded_ids);
+    let contradiction_ids = contradiction_ids(memory, all_memories, forgotten_ids, superseded_ids)
+        .into_iter()
+        .filter(|id| {
+            all_memories
+                .iter()
+                .any(|m| m.memory_id == *id && memory_matches_filter(m, filter))
+        })
+        .collect::<Vec<_>>();
     RecallResult {
         memory_id: memory.memory_id.clone(),
         content: memory.content.clone(),
@@ -511,6 +548,12 @@ fn recall_result_with(
         promoted_from: live_origin(memory, all_memories, forgotten_ids, superseded_ids),
         promotion_reason: memory.promotion_reason.clone(),
         verified_commit: memory.verified_commit.clone(),
+        source: if memory.published_by.is_some() {
+            "project"
+        } else {
+            "personal"
+        }
+        .to_owned(),
         score,
     }
 }
@@ -702,33 +745,28 @@ pub(crate) fn superseded_targets<'a>(
     forgotten_ids: &HashSet<String>,
     owners: &HashMap<&str, &str>,
 ) -> HashSet<&'a str> {
+    let publications = memories
+        .iter()
+        .filter(|m| m.published_by.is_some())
+        .map(|m| (m.memory_id.as_str(), m.project_id.as_deref()))
+        .collect::<HashMap<_, _>>();
     memories
         .iter()
         .filter_map(|candidate| {
             let target = live_superseded_target(candidate, forgotten_ids)?;
+            let project_correction = candidate.published_by.is_some()
+                && publications
+                    .get(target)
+                    .is_some_and(|project| *project == candidate.project_id.as_deref());
+            if publications.contains_key(target) && !project_correction {
+                return None;
+            }
             let foreign = owners
                 .get(candidate.memory_id.as_str())
                 .is_some_and(|successor| owners.get(target) != Some(successor));
-            (!foreign).then_some(target)
+            (!foreign || project_correction).then_some(target)
         })
         .collect()
-}
-
-/// Promoted copies whose personal origin a live correction supersedes. The copy was made
-/// from the old text, so it is hidden like the origin (ADR 0010).
-pub(crate) fn stale_copies<'a>(
-    memories: &'a [Memory],
-    superseded: &HashSet<&str>,
-) -> impl Iterator<Item = &'a str> {
-    memories
-        .iter()
-        .filter(|memory| {
-            memory
-                .promoted_from
-                .as_deref()
-                .is_some_and(|origin| superseded.contains(origin))
-        })
-        .map(|memory| memory.memory_id.as_str())
 }
 
 pub(crate) fn contradiction_ids(
@@ -762,6 +800,12 @@ pub(crate) fn contradiction_ids(
 }
 
 fn same_scope_context(left: &Memory, right: &Memory) -> bool {
+    if left.published_by.is_some()
+        && right.published_by.is_some()
+        && left.project_id != right.project_id
+    {
+        return false;
+    }
     if left.scope != right.scope {
         return false;
     }
@@ -809,6 +853,13 @@ fn topic_tokens(content: &str) -> HashSet<String> {
 }
 
 pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
+    if memory.published_by.is_some() {
+        return filter
+            .context
+            .as_ref()
+            .and_then(|c| c.project_id.as_ref())
+            .is_some_and(|id| memory.project_id.as_ref() == Some(id));
+    }
     if filter.session_id.is_none() && filter.context.is_none() {
         return true;
     }
@@ -822,17 +873,23 @@ pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
             .is_some_and(|repository| memory.context.repository.as_ref() == Some(repository)),
         MemoryScope::Branch => filter.context.as_ref().is_some_and(|context| {
             context.repository.is_some()
-                && context.branch.is_some()
                 && memory.context.repository == context.repository
-                && memory.context.branch == context.branch
+                && context
+                    .branch
+                    .as_ref()
+                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
         }),
         MemoryScope::Worktree => filter.context.as_ref().is_some_and(|context| {
             context.repository.is_some()
-                && context.branch.is_some()
-                && context.worktree.is_some()
                 && memory.context.repository == context.repository
-                && memory.context.branch == context.branch
-                && memory.context.worktree == context.worktree
+                && context
+                    .branch
+                    .as_ref()
+                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
+                && context
+                    .worktree
+                    .as_ref()
+                    .is_none_or(|worktree| memory.context.worktree.as_ref() == Some(worktree))
         }),
         MemoryScope::Session => filter
             .session_id

@@ -38,6 +38,8 @@ pub struct Observation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureResult {
+    #[serde(default)]
+    pub project_attachment: Option<crate::projects::ProjectAttachment>,
     pub accepted: bool,
     pub duplicate: bool,
     pub observation: Observation,
@@ -61,6 +63,7 @@ impl MemoryStore {
                 return Err(changed_replay(&input.event_id));
             }
             return Ok(CaptureResult {
+                project_attachment: None,
                 accepted: true,
                 duplicate: true,
                 observation: existing.clone(),
@@ -85,12 +88,13 @@ impl MemoryStore {
         } else {
             input.context.clone()
         };
-        context.project_id = input.context.project_id.clone().or(context.project_id);
+        context.project_id = input.context.project_id.clone();
         let mut normalized_input = input;
         normalized_input.context = context;
         let observation = normalize_observation(&normalized_input)?;
         self.state.observations.push(observation.clone());
         Ok(CaptureResult {
+            project_attachment: None,
             accepted: true,
             duplicate: false,
             observation,
@@ -127,6 +131,18 @@ impl MemoryStore {
     }
 
     pub fn capture_for_account(
+        &mut self,
+        token: &str,
+        input: ObservationInput,
+    ) -> Result<CaptureResult, StoreError> {
+        let account = self.authenticate_account(token)?;
+        let mut result = self.capture_for_account_inner(token, input)?;
+        result.project_attachment =
+            Some(self.attach_context(&account.person_id, &result.observation.context));
+        Ok(result)
+    }
+
+    fn capture_for_account_inner(
         &mut self,
         account_token: &str,
         input: ObservationInput,
@@ -175,9 +191,6 @@ impl MemoryStore {
             return Err(error);
         }
         // The capture is acknowledged. Housekeeping failures must not turn it into an error.
-        if let Err(error) = self.auto_register_project(&person_id, &result.observation.context) {
-            eprintln!("cairn: automatic project registration failed: {error}");
-        }
         self.finish_idle_sessions(&person_id);
         Ok(result)
     }

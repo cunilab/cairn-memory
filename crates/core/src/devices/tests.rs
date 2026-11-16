@@ -37,7 +37,7 @@ fn device_token_is_an_agent_credential_scoped_to_its_account() -> Result<(), Sto
     let foreign = store
         .project_memories(&other_device.token, &project_id)
         .expect_err("another account's device is outside the project");
-    assert!(foreign.to_string().contains("does not own"));
+    assert!(foreign.to_string().contains("not a project member"));
 
     // A device push is owned by the account, so account reads and session end see it.
     store.start_session_for_account(&device.token, "device-session", context())?;
@@ -64,7 +64,7 @@ fn device_token_is_an_agent_credential_scoped_to_its_account() -> Result<(), Sto
     }
     assert!(store.authenticate_session(&owner.token).is_ok());
 
-    // A solo project merges with a device token; a shared project does not.
+    // Device credentials may record personal branch merges regardless of membership.
     let branch =
         store.register_branch(&device.token, &project_id, "feat/auth", None, None, None)?;
     let source = remember_with_context(&mut store, &device.token, "solo merge source")?;
@@ -89,17 +89,14 @@ fn device_token_is_an_agent_credential_scoped_to_its_account() -> Result<(), Sto
         LifecycleInput::default(),
         MemoryKind::Explicit,
     )?;
-    let refused = store
-        .confirm_branch_merge(
-            &device.token,
-            &project_id,
-            &shared_branch.branch_id,
-            &shared_source.memory_id,
-            "c2",
-            "shared",
-        )
-        .expect_err("a shared project needs the web console");
-    assert!(refused.to_string().contains(WEB_ONLY_ERROR));
+    store.confirm_branch_merge(
+        &device.token,
+        &project_id,
+        &shared_branch.branch_id,
+        &shared_source.memory_id,
+        "c2",
+        "shared",
+    )?;
     store.confirm_branch_merge(
         &owner.token,
         &project_id,

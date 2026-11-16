@@ -247,6 +247,12 @@ fn account_search_limits_owned_matches_and_hides_foreign_contradiction_ids()
         "quotadelta widget does apply",
     )?;
     assert!(quota_neg.memory_id < quota_pos.memory_id);
+    // Keep ownership/limit assertions independent of second-boundary timing.
+    for memory in &mut store.state.memories {
+        if memory.memory_id == quota_neg.memory_id || memory.memory_id == quota_pos.memory_id {
+            memory.created_at = "100".to_owned();
+        }
+    }
     let quota = store.search_for_account(&owner.token, "quotadelta", 5, &filter)?;
     assert_eq!(quota.len(), 2);
     let neg = quota

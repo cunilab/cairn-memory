@@ -1,6 +1,5 @@
 use crate::accounts::Account;
 use crate::projects::validate_project_text;
-use crate::sharing::{ProjectTeam, ProjectTeamMember, ProjectTeamRecord};
 use crate::store::MemoryStore;
 use crate::types::StoreError;
 use serde::{Deserialize, Serialize};
@@ -39,7 +38,7 @@ pub(crate) fn owner_matches(
     owners
         .iter()
         .find(|record| record.project_id == project_id)
-        .is_none_or(|record| record.person_id == person_id)
+        .is_some_and(|record| record.person_id == person_id)
 }
 
 impl MemoryStore {
@@ -151,13 +150,6 @@ impl MemoryStore {
         if owner == account.person_id {
             return Ok(());
         }
-        if self.state.project_shares.iter().any(|share| {
-            share.memory_id == target_id && share.member_person_id == account.person_id
-        }) {
-            return Err(StoreError::Validation(
-                "account does not own the memory".to_owned(),
-            ));
-        }
         Err(StoreError::Validation(format!(
             "unknown memory or event: {target_id}"
         )))
@@ -179,68 +171,17 @@ impl MemoryStore {
                 "unknown project: {project_id}"
             )));
         }
-        if self.project_owner_id(project_id).as_deref() == Some(account.person_id.as_str())
-            || self.state.project_members.iter().any(|record| {
-                record.project_id == project_id && record.member_person_id == account.person_id
-            })
+        if self.project_owner_id(project_id).is_some()
+            && (self.project_owner_id(project_id).as_deref() == Some(account.person_id.as_str())
+                || self.state.project_members.iter().any(|record| {
+                    record.project_id == project_id && record.member_person_id == account.person_id
+                }))
         {
             return Ok(());
         }
         Err(StoreError::Validation(
             "account is not a project member".to_owned(),
         ))
-    }
-
-    /// The team's members are the project's members (people who joined by capture).
-    pub(crate) fn team_view(&self, team: &ProjectTeamRecord) -> Result<ProjectTeam, StoreError> {
-        let mut members = Vec::new();
-        for record in self
-            .state
-            .project_members
-            .iter()
-            .filter(|record| record.project_id == team.project_id)
-        {
-            let email = self
-                .state
-                .accounts
-                .iter()
-                .find(|account| account.account.person_id == record.member_person_id)
-                .map(|account| account.account.email.clone())
-                .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))?;
-            members.push(ProjectTeamMember {
-                person_id: record.member_person_id.clone(),
-                email,
-                created_at: record.created_at.clone(),
-            });
-        }
-        members.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then(left.person_id.cmp(&right.person_id))
-        });
-        Ok(ProjectTeam {
-            project_id: team.project_id.clone(),
-            name: team.name.clone(),
-            created_at: team.created_at.clone(),
-            members,
-        })
-    }
-
-    /// `require_project_owner`, and the project must have an owner record that is this
-    /// account. A project with no owner record is not maintainable until the existing
-    /// registration claims it, the same as account import.
-    pub(crate) fn require_owned_project(
-        &self,
-        account: &Account,
-        project_id: &str,
-    ) -> Result<(), StoreError> {
-        self.require_project_owner(account, project_id)?;
-        if self.project_owner_id(project_id).is_none() {
-            return Err(StoreError::Validation(
-                "account does not own the project".to_owned(),
-            ));
-        }
-        Ok(())
     }
 
     pub(crate) fn require_project_owner(
@@ -259,10 +200,7 @@ impl MemoryStore {
                 "unknown project: {project_id}"
             )));
         }
-        if self
-            .project_owner_id(project_id)
-            .is_some_and(|owner| owner != account.person_id)
-        {
+        if self.project_owner_id(project_id).as_deref() != Some(account.person_id.as_str()) {
             return Err(StoreError::Validation(
                 "account does not own the project".to_owned(),
             ));
