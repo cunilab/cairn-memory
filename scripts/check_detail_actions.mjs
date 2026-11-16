@@ -78,18 +78,19 @@ async function api(url, path, payload, token) {
 
 async function decision(apiUrl, token, projectId, suffix, content) {
   const sessionId = `action-${suffix}`;
-  await api(apiUrl, "/cairn-memory/session/start", {
-    session_id: sessionId,
-    context: { repository: "cairn-demo", commit: "abc1234" },
-  });
-  await api(apiUrl, "/cairn-memory/observe", {
-    event_id: `evt-${suffix}`,
-    session_id: sessionId,
-    content,
-    role: "agent",
-    source: "hook",
-  });
-  const ended = await api(apiUrl, "/cairn-memory/session/end", { session_id: sessionId });
+  await api(
+    apiUrl,
+    "/cairn-memory/session/start",
+    { session_id: sessionId, context: { repository: "cairn-demo", commit: "abc1234" } },
+    token,
+  );
+  await api(
+    apiUrl,
+    "/cairn-memory/observe",
+    { event_id: `evt-${suffix}`, session_id: sessionId, content, role: "agent", source: "hook" },
+    token,
+  );
+  const ended = await api(apiUrl, "/cairn-memory/session/end", { session_id: sessionId }, token);
   const promoted = await api(
     apiUrl,
     "/cairn-memory/promote",
@@ -110,6 +111,12 @@ function assert(condition, message, report) {
   if (!condition) {
     report.failures.push(message);
   }
+}
+
+// Decision actions live in a row menu: open it, then pick the item by name.
+async function rowAction(page, row, name) {
+  await row.getByRole("button", { name: /^Actions for / }).click();
+  await page.getByRole("menuitem", { name }).click();
 }
 
 async function signIn(page, web, email) {
@@ -225,14 +232,14 @@ try {
   await page.goto(`${web}/projects/${projectId}`);
   await page.getByText("must remain").waitFor();
   const before = posts.length;
-  const cancelCard = page.locator("li").filter({ hasText: "must remain" });
-  await cancelCard.getByRole("button", { name: "Delete memory" }).click();
+  const cancelCard = page.getByRole("row").filter({ hasText: "must remain" });
+  await rowAction(page, cancelCard, "Delete memory");
   const dialog = page.getByRole("alertdialog");
   await dialog.waitFor();
   assert(posts.length === before, "opening delete sends no POST", report);
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
-  await cancelCard.getByRole("button", { name: "Delete memory" }).click();
+  await rowAction(page, cancelCard, "Delete memory");
   await dialog.waitFor();
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await dialog.waitFor({ state: "hidden" });
@@ -245,7 +252,7 @@ try {
       body: JSON.stringify({ error: "database unavailable" }),
     });
   });
-  await cancelCard.getByRole("button", { name: "Delete memory" }).click();
+  await rowAction(page, cancelCard, "Delete memory");
   await dialog.waitFor();
   const failedTarget = await dialog.innerText();
   await dialog.getByRole("button", { name: "Delete memory" }).click();
@@ -271,8 +278,8 @@ try {
   held = new Promise((resolve) => {
     releaseHold = resolve;
   });
-  const deleteCard = page.locator("li").filter({ hasText: "Disposable delete decision" });
-  await deleteCard.getByRole("button", { name: "Delete memory" }).click();
+  const deleteCard = page.getByRole("row").filter({ hasText: "Disposable delete decision" });
+  await rowAction(page, deleteCard, "Delete memory");
   await dialog.waitFor();
   const confirm = dialog.getByRole("button", { name: "Delete memory" });
   const pendingClick = confirm.click();
@@ -304,8 +311,8 @@ try {
     }
     await route.continue();
   });
-  const refreshCard = page.locator("li").filter({ hasText: "reload fails" });
-  await refreshCard.getByRole("button", { name: "Delete memory" }).click();
+  const refreshCard = page.getByRole("row").filter({ hasText: "reload fails" });
+  await rowAction(page, refreshCard, "Delete memory");
   await dialog.waitFor();
   const refreshPostsBefore = posts.filter((item) => item.startsWith("POST delete")).length;
   await dialog.getByRole("button", { name: "Delete memory" }).click();
@@ -323,8 +330,8 @@ try {
   await page.unroute(`**/api/cairn/projects/${projectId}/memories`);
 
   await page.locator("#member-email").fill("member@example.test");
-  const revokeCard = page.locator("li").filter({ hasText: "Disposable revoke decision stays" });
-  await revokeCard.getByRole("button", { name: "Revoke share" }).click();
+  const revokeCard = page.getByRole("row").filter({ hasText: "Disposable revoke decision stays" });
+  await rowAction(page, revokeCard, "Revoke share");
   await dialog.waitFor();
   assert(
     (await dialog.innerText()).includes("Share this decision again to show it to this member."),
@@ -347,11 +354,11 @@ try {
     report,
   );
   await page.locator("#member-email").fill("member@example.test");
-  const restoredCard = page.locator("li").filter({ hasText: "Disposable revoke decision stays" });
+  const restoredCard = page.getByRole("row").filter({ hasText: "Disposable revoke decision stays" });
   const shareResponse = page.waitForResponse(
     (response) => response.url().includes("/shares") && response.request().method() === "POST",
   );
-  await restoredCard.getByRole("button", { name: "Share decision" }).click();
+  await rowAction(page, restoredCard, "Share decision");
   const shared = await shareResponse;
   assert(shared.ok(), "sharing the revoked decision again is accepted", report);
 
@@ -369,8 +376,9 @@ try {
     report,
   );
   assert(
-    (await page.getByRole("button", { name: "Delete memory" }).count()) === 0,
-    "member has no delete control",
+    (await page.getByRole("button", { name: /^Actions for / }).count()) === 0 &&
+      (await page.getByRole("menuitem", { name: "Delete memory" }).count()) === 0,
+    "member has no row actions or delete control",
     report,
   );
 
