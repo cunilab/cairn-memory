@@ -123,7 +123,7 @@ try:
         "tools/call",
         {
             "name": "memory_recall",
-            "arguments": {"query": "MCP smoke", "limit": 5},
+            "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
     assert len(recalled["result"]["structuredContent"]["results"]) == 1
@@ -133,7 +133,7 @@ try:
         "tools/call",
         {
             "name": "memory_why_changed",
-            "arguments": {"query": "MCP smoke", "limit": 5},
+            "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
     why_result = why_changed["result"]["structuredContent"]["results"][0]
@@ -158,7 +158,7 @@ try:
         "tools/call",
         {
             "name": "memory_recall",
-            "arguments": {"query": "MCP smoke", "limit": 5},
+            "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
     assert recalled["result"]["structuredContent"]["results"] == []

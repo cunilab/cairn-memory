@@ -214,7 +214,12 @@ fn scenario(url: &str, label: &str) {
     }
 
     // Capture, session end, and recall.
-    let project = agent.json(&["project-register", "cairn-demo", "Cairn Demo", "main"]);
+    let project = agent.json(&[
+        "project-register",
+        "example.test/acme/cairn-demo",
+        "Cairn Demo",
+        "main",
+    ]);
     let project_id = project["project_id"].as_str().unwrap().to_owned();
     assert_eq!(
         agent.json(&["project-list"])[0]["project_id"],
@@ -231,7 +236,14 @@ fn scenario(url: &str, label: &str) {
     let private = agent.json(&["end", "private-session"]);
     let private_id = private["memory_id"].as_str().unwrap().to_owned();
 
-    agent.json(&["start", "shared-session", "cairn-demo", "", "", "abc1234"]);
+    agent.json(&[
+        "start",
+        "shared-session",
+        "example.test/acme/cairn-demo",
+        "",
+        "",
+        "abc1234",
+    ]);
     let captured = agent.json(&[
         "capture",
         "shared-session",
@@ -247,9 +259,17 @@ fn scenario(url: &str, label: &str) {
     ]);
     assert_eq!(replay["duplicate"], true);
     let ended = agent.json(&["end", "shared-session"]);
-    assert_eq!(ended["context"]["repository"], "cairn-demo");
+    assert_eq!(
+        ended["context"]["repository"],
+        "example.test/acme/cairn-demo"
+    );
     let memory_id = ended["memory_id"].as_str().unwrap();
-    let context = agent.json(&["context", "cache decision", "5", "cairn-demo"]);
+    let context = agent.json(&[
+        "context",
+        "cache decision",
+        "5",
+        "example.test/acme/cairn-demo",
+    ]);
     assert!(context.to_string().contains("cache decision"));
     let lesson = agent.json(&["lesson", "Keep device tokens out of logs."]);
     assert_eq!(lesson["kind"], "lesson");
@@ -297,7 +317,7 @@ fn scenario(url: &str, label: &str) {
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
         written,
-        json!({"project_id": project_id, "repository": "cairn-demo"})
+        json!({"project_id": project_id, "repository": "example.test/acme/cairn-demo"})
     );
     assert!(
         agent.run_in(&checkout, &["init"]).status.success(),
@@ -305,12 +325,12 @@ fn scenario(url: &str, label: &str) {
     );
     std::fs::write(
         &file,
-        r#"{"project_id": "project-other", "repository": "cairn-demo"}"#,
+        r#"{"project_id": "project-other", "repository": "example.test/acme/cairn-demo"}"#,
     )
     .unwrap();
     let refused = agent.run_in(&checkout, &["init"]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("project-other"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unknown project"));
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -336,13 +356,7 @@ fn scenario(url: &str, label: &str) {
         teammate.json(&["project-list"])[0]["project_id"],
         project_id.as_str()
     );
-    agent.json(&[
-        "project-share",
-        &project_id,
-        &promoted_id,
-        "member@example.test",
-    ]);
-    let shared = teammate.json(&["project-shared", &project_id]);
+    let shared = teammate.json(&["project-memories", &project_id]);
     let ids: Vec<_> = shared
         .as_array()
         .unwrap()
@@ -351,13 +365,6 @@ fn scenario(url: &str, label: &str) {
         .collect();
     assert_eq!(ids, [json!(promoted_id)]);
     assert!(!shared.to_string().contains(&private_id));
-    agent.json(&[
-        "project-revoke",
-        &project_id,
-        &promoted_id,
-        "member@example.test",
-    ]);
-    assert_eq!(teammate.json(&["project-shared", &project_id]), json!([]));
     assert_eq!(
         agent
             .json(&["project-memories", &project_id])
@@ -392,7 +399,15 @@ fn scenario(url: &str, label: &str) {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"memory_observe"));
-    for removed in ["memory_project_invite", "memory_project_team_add"] {
+    for removed in [
+        "memory_project_invite",
+        "memory_project_team_add",
+        "memory_project_share",
+        "memory_project_shared",
+        "memory_project_revoke",
+        "memory_project_team",
+        "memory_project_team_create",
+    ] {
         assert!(!names.contains(&removed), "{removed}");
     }
     assert_eq!(
