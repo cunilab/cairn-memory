@@ -53,15 +53,12 @@ export type ProjectMemory = {
   created_at?: string;
 };
 
-export type ProjectTeam = {
-  project_id: string;
-  name: string;
-  created_at: string;
-  members: Array<{
-    person_id: string;
-    email: string;
-    created_at: string;
-  }>;
+export type ProjectMember = {
+  person_id: string;
+  email: string;
+  role: "owner" | "member";
+  /** Unix seconds as a string. */
+  joined_at: string;
 };
 
 export type LifecycleSummary = {

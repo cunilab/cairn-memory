@@ -119,26 +119,6 @@ if (signInFailureMessage("authentication rate limit exceeded") !== "authenticati
 JS
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import { isAbsentTeam } from "./apps/web/lib/team.ts";
-
-if (!isAbsentTeam("validation error: project has no team space")) {
-  throw new Error("a project with no team must be the empty state");
-}
-for (const message of [
-  "validation error: project already has a team space",
-  "validation error: account is not a project member",
-  "validation error: unknown project: project-1",
-  "project has no team space",
-  "database unavailable",
-  "",
-]) {
-  if (isAbsentTeam(message)) {
-    throw new Error(`team failure must stay visible: ${message}`);
-  }
-}
-JS
-
-node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
 import { deleteDecisionImpact, revokeShareImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
 
 const deleted = deleteDecisionImpact("memory-1");
@@ -496,6 +476,17 @@ match = [item for item in projects if item["project_id"] == os.environ["PROJECT_
 assert len(match) == 1
 assert match[0]["role"] == "owner"
 assert match[0]["name"] == "Cairn Demo"
+PY
+
+# The member list the Team & sharing tab reads: owner first, then members who joined by capturing.
+members_body="$workdir/members.body"
+curl -fsS -o "$members_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/members"
+MEMBERS_BODY="$members_body" python3 - <<'PY'
+import json, os
+rows = json.load(open(os.environ["MEMBERS_BODY"], encoding="utf-8"))
+assert [row["role"] for row in rows] == ["owner", "member"], rows
+assert rows[0]["email"] == "owner@example.test" and rows[1]["email"] == "member@example.test", rows
+assert all({"person_id", "email", "role", "joined_at"} <= set(row) for row in rows)
 PY
 
 devices_page="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/devices")"

@@ -54,8 +54,7 @@ import { cairn } from "@/lib/cairn";
 import { memoryReadPath } from "@/lib/memory-path";
 import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
-import { isAbsentTeam } from "@/lib/team";
-import type { ListedProject, ProjectBranch, ProjectMemory, ProjectTeam } from "@/lib/types";
+import type { ListedProject, ProjectBranch, ProjectMember, ProjectMemory } from "@/lib/types";
 
 function field(value: string | number | null | undefined): string {
   if (value === null || value === undefined || value === "") {
@@ -71,8 +70,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [project, setProject] = useState<ListedProject | null>(null);
   const [memories, setMemories] = useState<ProjectMemory[]>([]);
   const [branches, setBranches] = useState<ProjectBranch[]>([]);
-  const [team, setTeam] = useState<ProjectTeam | null>(null);
-  const [teamError, setTeamError] = useState<string | null>(null);
+  const [members, setMembers] = useState<ProjectMember[]>([]);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
@@ -100,8 +99,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setProject(null);
     setMemories([]);
     setBranches([]);
-    setTeam(null);
-    setTeamError(null);
+    setMembers([]);
+    setMembersError(null);
     setError(null);
     setActionError(null);
     setEmail("");
@@ -124,8 +123,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setProject(null);
     setMemories([]);
     setBranches([]);
-    setTeam(null);
-    setTeamError(null);
+    setMembers([]);
+    setMembersError(null);
     setError(null);
     setActionError(null);
     router.replace("/");
@@ -136,14 +135,14 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       current: ListedProject;
       decisions: ProjectMemory[];
       nextBranches: ProjectBranch[];
-      nextTeam: ProjectTeam | null;
-      nextTeamError: string | null;
+      nextMembers: ProjectMember[];
+      nextMembersError: string | null;
     }) => {
       setProject(result.current);
       setMemories(result.decisions);
       setBranches(result.nextBranches);
-      setTeam(result.nextTeam);
-      setTeamError(result.nextTeamError);
+      setMembers(result.nextMembers);
+      setMembersError(result.nextMembersError);
       setError(null);
     },
     [],
@@ -160,22 +159,17 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       current.role === "owner"
         ? await cairn<ProjectBranch[]>(`projects/${encodeURIComponent(projectId)}/branches`)
         : [];
-    let nextTeam: ProjectTeam | null = null;
-    let nextTeamError: string | null = null;
+    let nextMembers: ProjectMember[] = [];
+    let nextMembersError: string | null = null;
     try {
-      nextTeam = await cairn<ProjectTeam>(
-        `projects/${encodeURIComponent(projectId)}/team`,
-      );
+      nextMembers = await cairn<ProjectMember[]>(`projects/${encodeURIComponent(projectId)}/members`);
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
         throw cause;
       }
-      const message = cause instanceof Error ? cause.message : "Team request failed";
-      if (!isAbsentTeam(message)) {
-        nextTeamError = message;
-      }
+      nextMembersError = cause instanceof Error ? cause.message : "Members request failed";
     }
-    return { current, decisions, nextBranches, nextTeam, nextTeamError };
+    return { current, decisions, nextBranches, nextMembers, nextMembersError };
   }, [projectId]);
 
   useEffect(() => {
@@ -204,6 +198,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   }, [applyProject, fetchProject, projectId, requireSignIn]);
 
   const owner = project?.role === "owner";
+  // The owner already sees every decision, so only members are share targets.
+  const sharable = members.filter((member) => member.role === "member");
 
   async function run(action: () => Promise<unknown>, success?: string): Promise<boolean> {
     const generation = beginLoad();
@@ -560,7 +556,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                       title="The member that Share decision and Revoke share act on"
                     />
                     <datalist id="member-emails">
-                      {team?.members.map((member) => (
+                      {sharable.map((member) => (
                         <option key={member.person_id} value={member.email} />
                       ))}
                     </datalist>
@@ -601,7 +597,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             <TabsContent value="reports" className="min-w-0">
               <ProjectReports
                 projectId={projectId}
-                memberEmails={team?.members.map((member) => member.email) ?? []}
+                memberEmails={sharable.map((member) => member.email)}
                 decisions={memories}
                 onSessionRequired={requireSignIn}
               />
@@ -609,9 +605,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           ) : null}
 
           <TabsContent value="team" className="flex min-w-0 flex-col gap-4">
-            {teamError ? (
+            {membersError ? (
               <Alert variant="destructive">
-                <AlertDescription className="text-destructive">{teamError}</AlertDescription>
+                <AlertDescription className="text-destructive">{membersError}</AlertDescription>
               </Alert>
             ) : null}
             <p className="max-w-prose text-sm text-muted-foreground">
@@ -626,24 +622,28 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                   <h2>Members</h2>
                 </CardTitle>
                 <CardDescription>
-                  {team ? `${team.members.length} ${team.members.length === 1 ? "member" : "members"}` : "People who work on this project."}
+                  {members.length} {members.length === 1 ? "person" : "people"} work on this project.
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {team && team.members.length > 0 ? (
+                {members.length > 0 ? (
                   <ul className="flex flex-col gap-2 text-sm">
-                    {team.members.map((member) => (
+                    {members.map((member) => (
                       <li key={member.person_id} className="flex min-w-0 items-center gap-2.5">
                         <Avatar className="size-6 rounded-md">
                           <AvatarFallback className="rounded-md text-xs">
                             {member.email.slice(0, 1).toUpperCase()}
                           </AvatarFallback>
                         </Avatar>
-                        <span className="break-all">{member.email}</span>
+                        <span className="min-w-0 flex-1 break-all">{member.email}</span>
+                        <RoleBadge role={member.role} />
+                        <span className="hidden text-xs whitespace-nowrap text-muted-foreground sm:inline">
+                          Joined {formatTime(member.joined_at)}
+                        </span>
                       </li>
                     ))}
                   </ul>
-                ) : !teamError ? (
+                ) : !membersError ? (
                   <Empty className="border border-dashed p-6">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">

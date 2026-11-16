@@ -493,7 +493,7 @@ try {
   await page.getByRole("menuitem", { name: "Theme" }).click();
   await page.getByRole("menuitemradio", { name: "Dark" }).click();
   assert(await isDark(), "choosing Dark applies the dark class", report);
-  await page.reload();
+  await page.reload({ waitUntil: "domcontentloaded" });
   assert(await isDark(), "the theme survives a reload without a flash", report);
   await accountMenu();
   await page.getByRole("menuitem", { name: "Theme" }).click();
