@@ -52,7 +52,7 @@ export function ProjectMemories({
           bundle.memories.filter(
             (memory) =>
               memory.context?.repository === repository &&
-              memory.scope !== "project" &&
+              !memory.project_id &&
               memory.lifecycle?.sensitivity !== "secret" &&
               !forgotten.has(memory.memory_id),
           ),

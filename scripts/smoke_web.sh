@@ -168,6 +168,49 @@ if (!missingEmail.includes("member email") || !missingEmail.includes("No request
 }
 JS
 
+# The inline theme script sets the dark class before paint: stored choice first, OS preference for System.
+node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
+import { THEME_SCRIPT } from "./apps/web/lib/theme.ts";
+
+function run(stored, osDark, blocked = false) {
+  const classes = new Set();
+  const listeners = {};
+  const sandbox = {
+    document: {
+      documentElement: {
+        classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) },
+      },
+    },
+    localStorage: {
+      getItem: () => {
+        if (blocked) {
+          throw new Error("blocked");
+        }
+        return stored;
+      },
+    },
+    matchMedia: () => ({ matches: osDark, addEventListener: () => {} }),
+    addEventListener: (name, fn) => (listeners[name] = fn),
+  };
+  new Function(...Object.keys(sandbox), THEME_SCRIPT)(...Object.values(sandbox));
+  return classes.has("dark");
+}
+const cases = [
+  ["dark", false, false, true],
+  ["light", true, false, false],
+  ["system", true, false, true],
+  ["system", false, false, false],
+  [null, true, false, true],
+  [null, false, false, false],
+  [null, true, true, true],
+];
+for (const [stored, osDark, blocked, want] of cases) {
+  if (run(stored, osDark, blocked) !== want) {
+    throw new Error(`theme ${stored} os-dark=${osDark} blocked=${blocked} should be dark=${want}`);
+  }
+}
+JS
+
 if [ ! -d apps/web/node_modules/next ]; then
   npm install --prefix apps/web
 fi
@@ -225,8 +268,8 @@ curl -fsS -H 'content-type: application/json' \
 
 project_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"repository":"cairn-demo","name":"Cairn Demo","default_branch":"main"}' \
-  "${api}/cairn-memory/projects")"
+  -d '{"repository":"cairn-demo","name":"Cairn Demo"}' \
+  "${api}/cairn-memory/projects/init")"
 project_id="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project_id"])')"
 
 curl -fsS -H 'content-type: application/json' \
@@ -263,10 +306,19 @@ promoted_json="$(curl -fsS -H 'content-type: application/json' \
   "${api}/cairn-memory/promote")"
 promoted_id="$(printf '%s' "$promoted_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
 
+# Membership is automatic: capturing with the project id in the context joins the project.
+member_login="$(curl -fsS -H 'content-type: application/json' \
+  -d "{\"email\":\"member@example.test\",\"password\":\"${password}\"}" \
+  "${api}/cairn-memory/auth/login")"
+member_session="$(printf '%s' "$member_login" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+member_device="$(curl -fsS -H 'content-type: application/json' \
+  -H "authorization: Bearer ${member_session}" -d '{"name":"member agent"}' \
+  "${api}/cairn-memory/devices/register" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 curl -fsS -H 'content-type: application/json' \
-  -H "authorization: Bearer ${device_token}" \
-  -d '{"email":"member@example.test"}' \
-  "${api}/cairn-memory/projects/${project_id}/members" >/dev/null
+  -H "authorization: Bearer ${member_device}" \
+  -d "{\"eventId\":\"member-join\",\"sessionId\":\"member-join\",\"content\":\"joined by project file\",\"role\":\"agent\",\"source\":\"smoke\",\"context\":{\"repository\":\"cairn-demo\",\"project_id\":\"${project_id}\"}}" \
+  "${api}/cairn-memory/observe" >/dev/null
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
   -d "{\"memory_id\":\"${promoted_id}\",\"email\":\"member@example.test\"}" \
@@ -358,6 +410,73 @@ anon_register_code="$(curl -sS -o /dev/null -D "$workdir/anon-register.headers" 
   "${web}/api/cairn/auth/register")"
 if [ "$anon_register_code" != "401" ] || grep -qi 'set-cookie:' "$workdir/anon-register.headers"; then
   printf '%s\n' "anonymous register status: ${anon_register_code}" >&2
+  exit 1
+fi
+
+# Admin account list, admin password reset (204, signs the user out) and self-service password change.
+accounts_body="$workdir/accounts.body"
+curl -fsS -o "$accounts_body" -b "$owner_jar" "${web}/api/cairn/auth/accounts"
+ACCOUNTS_BODY="$accounts_body" python3 - <<'PY'
+import json, os
+rows = json.load(open(os.environ["ACCOUNTS_BODY"], encoding="utf-8"))
+by_email = {row["email"]: row for row in rows}
+for row in rows:
+    assert {"person_id", "email", "is_admin", "created_at"} <= set(row), row
+assert by_email["owner@example.test"]["is_admin"] is True
+assert by_email["member@example.test"]["is_admin"] is False
+assert "proxy-register@example.test" in by_email
+open(os.environ["ACCOUNTS_BODY"] + ".id", "w").write(by_email["proxy-register@example.test"]["person_id"])
+PY
+reset_id="$(cat "$accounts_body.id")"
+reset_password="reset horse battery staple"
+reg_jar="$workdir/proxy-register.cookies"
+curl -fsS -o /dev/null -c "$reg_jar" -H 'content-type: application/json' \
+  -d "{\"email\":\"proxy-register@example.test\",\"password\":\"${password}\"}" \
+  "${web}/api/cairn/auth/login"
+reset_code="$(curl -sS -o "$workdir/reset.body" -b "$owner_jar" -w '%{http_code}' \
+  -H 'content-type: application/json' -d "{\"password\":\"${reset_password}\"}" \
+  "${web}/api/cairn/auth/accounts/${reset_id}/password")"
+if [ "$reset_code" != "204" ] || [ -s "$workdir/reset.body" ]; then
+  printf '%s\n' "admin password reset status: ${reset_code}" >&2
+  exit 1
+fi
+signed_out_code="$(curl -sS -o /dev/null -b "$reg_jar" -w '%{http_code}' "${web}/api/cairn/projects")"
+old_login_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
+  -d "{\"email\":\"proxy-register@example.test\",\"password\":\"${password}\"}" \
+  "${web}/api/cairn/auth/login")"
+if [ "$signed_out_code" != "401" ] || [ "$old_login_code" != "401" ]; then
+  printf '%s\n' "reset must sign the user out and drop the old password: ${signed_out_code} ${old_login_code}" >&2
+  exit 1
+fi
+curl -fsS -o /dev/null -c "$reg_jar" -H 'content-type: application/json' \
+  -d "{\"email\":\"proxy-register@example.test\",\"password\":\"${reset_password}\"}" \
+  "${web}/api/cairn/auth/login"
+wrong_current_code="$(curl -sS -o /dev/null -b "$reg_jar" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -d '{"current_password":"not the password","new_password":"changed horse battery staple"}' \
+  "${web}/api/cairn/auth/password")"
+if [ "$wrong_current_code" != "401" ]; then
+  printf '%s\n' "wrong current password status: ${wrong_current_code}" >&2
+  exit 1
+fi
+change_code="$(curl -sS -o "$workdir/change.body" -b "$reg_jar" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -d "{\"current_password\":\"${reset_password}\",\"new_password\":\"changed horse battery staple\"}" \
+  "${web}/api/cairn/auth/password")"
+if [ "$change_code" != "204" ] || [ -s "$workdir/change.body" ]; then
+  printf '%s\n' "password change status: ${change_code}" >&2
+  exit 1
+fi
+curl -fsS -o /dev/null -H 'content-type: application/json' \
+  -d '{"email":"proxy-register@example.test","password":"changed horse battery staple"}' \
+  "${web}/api/cairn/auth/login"
+member_accounts_jar="$workdir/member-accounts.cookies"
+curl -fsS -o /dev/null -c "$member_accounts_jar" -H 'content-type: application/json' \
+  -d "{\"email\":\"member@example.test\",\"password\":\"${password}\"}" \
+  "${web}/api/cairn/auth/login"
+member_accounts_code="$(curl -sS -o /dev/null -b "$member_accounts_jar" -w '%{http_code}' "${web}/api/cairn/auth/accounts")"
+if [ "$member_accounts_code" != "403" ]; then
+  printf '%s\n' "a non-admin must not list accounts: ${member_accounts_code}" >&2
   exit 1
 fi
 
@@ -493,6 +612,11 @@ for page in accounts "projects/${project_id}"; do
     exit 1
   fi
 done
+
+if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
+  printf '%s\n' "the page does not carry the theme script" >&2
+  exit 1
+fi
 
 for report in diagnose "projects/${project_id}/conflicts" "projects/${project_id}/freshness" \
   "projects/${project_id}/revocations" \

@@ -32,6 +32,8 @@ export type PersonalMemory = {
   kind?: string;
   created_at?: string;
   scope: string;
+  /** Set on a project decision, never on a personal memory. */
+  project_id?: string | null;
   context?: { branch?: string | null; repository?: string | null };
   lifecycle?: { sensitivity?: string };
 };

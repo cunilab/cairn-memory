@@ -174,16 +174,34 @@ try {
   );
   const project = await api(
     apiUrl,
-    "/cairn-memory/projects",
-    { repository: "cairn-demo", name: "Cairn Demo", default_branch: "main" },
+    "/cairn-memory/projects/init",
+    { repository: "cairn-demo", name: "Cairn Demo" },
     token,
   );
   const projectId = project.project_id;
+  // Membership is automatic: the member captures with the project id in the context.
+  const memberLogin = await api(apiUrl, "/cairn-memory/auth/login", {
+    email: "member@example.test",
+    password,
+  });
+  const memberDevice = await api(
+    apiUrl,
+    "/cairn-memory/devices/register",
+    { name: "member agent" },
+    memberLogin.token,
+  );
   await api(
     apiUrl,
-    `/cairn-memory/projects/${projectId}/members`,
-    { email: "member@example.test" },
-    token,
+    "/cairn-memory/observe",
+    {
+      eventId: "member-join",
+      sessionId: "member-join",
+      content: "joined by project file",
+      role: "agent",
+      source: "smoke",
+      context: { repository: "cairn-demo", project_id: projectId },
+    },
+    memberDevice.token,
   );
   const deleteId = await decision(
     apiUrl,
@@ -212,6 +230,13 @@ try {
     projectId,
     "refresh",
     "Disposable refresh decision is hidden before reload fails.",
+  );
+  const promoteText = "Disposable memory promoted from the Memories tab.";
+  await api(
+    apiUrl,
+    "/cairn-memory/remember",
+    { content: promoteText, kind: "decision", concepts: [], context: { repository: "cairn-demo" } },
+    token,
   );
   report.fixture = { projectId, deleteId, revokeId, cancelId, refreshId };
 
@@ -361,6 +386,119 @@ try {
   await rowAction(page, restoredCard, "Share decision");
   const shared = await shareResponse;
   assert(shared.ok(), "sharing the revoked decision again is accepted", report);
+
+  // Decisions row menu: verify against a commit. The commit field is required.
+  await page.goto(`${web}/projects/${projectId}`);
+  const verifyRow = page.getByRole("row").filter({ hasText: "must remain" });
+  await verifyRow.waitFor();
+  await rowAction(page, verifyRow, "Verify against commit");
+  const formDialog = page.getByRole("dialog");
+  await formDialog.waitFor();
+  await formDialog.getByRole("button", { name: "Verify decision" }).click();
+  assert(await formDialog.isVisible(), "verify without a commit keeps the dialog open", report);
+  await formDialog.getByLabel("Commit").fill("abc1234");
+  await formDialog.getByRole("button", { name: "Verify decision" }).click();
+  await formDialog.waitFor({ state: "hidden" });
+  await verifyRow.getByText("abc1234").waitFor();
+  assert(true, "verify dialog records the commit on the decision row", report);
+
+  // Memories tab: promote a personal memory from its row menu.
+  await page.getByRole("tab", { name: "Memories" }).click();
+  const memoryRow = page.getByRole("row").filter({ hasText: promoteText });
+  await memoryRow.waitFor();
+  await rowAction(page, memoryRow, "Promote to decision");
+  await formDialog.waitFor();
+  await formDialog.getByLabel("Reason").fill("Promoted from the console");
+  await formDialog.getByRole("button", { name: "Promote", exact: true }).click();
+  await formDialog.waitFor({ state: "hidden" });
+  await page.getByRole("tab", { name: /^Decisions/ }).click();
+  await page.getByRole("tabpanel").getByText(promoteText).waitFor();
+  assert(true, "promoting from the Memories tab adds a decision", report);
+
+  // Accounts: new user dialog, row menu password reset, both with inline validation.
+  await page.goto(`${web}/accounts`);
+  await page.getByRole("button", { name: "New user" }).click();
+  const userDialog = page.getByRole("dialog");
+  await userDialog.getByLabel("Email").fill("ui-user@example.test");
+  await userDialog.getByLabel("Password", { exact: true }).fill("short");
+  await userDialog.getByLabel("Confirm password", { exact: true }).fill("short");
+  await userDialog.getByRole("button", { name: "Create user" }).click();
+  assert(
+    (await userDialog.getByRole("alert").innerText()).includes("at least 12"),
+    "a short password is rejected in the dialog",
+    report,
+  );
+  await userDialog.getByLabel("Password", { exact: true }).fill(password);
+  await userDialog.getByLabel("Confirm password", { exact: true }).fill(password);
+  await userDialog.getByRole("button", { name: "Create user" }).click();
+  await userDialog.waitFor({ state: "hidden" });
+  const userRow = page.getByRole("row").filter({ hasText: "ui-user@example.test" });
+  await userRow.waitFor();
+  assert((await userRow.innerText()).includes("User"), "new account is listed with the User role", report);
+  assert(
+    (await page.getByRole("row").filter({ hasText: "owner@example.test" }).innerText()).includes("Admin"),
+    "the bootstrap account is listed as Admin",
+    report,
+  );
+  const resetPassword = "reset horse battery staple";
+  await rowAction(page, userRow, "Reset password");
+  await userDialog.getByLabel("New password", { exact: true }).fill(resetPassword);
+  await userDialog.getByLabel("Confirm password", { exact: true }).fill("something else entirely");
+  await userDialog.getByRole("button", { name: "Reset password" }).click();
+  assert(
+    (await userDialog.getByRole("alert").innerText()).includes("do not match"),
+    "a mismatched reset password is rejected in the dialog",
+    report,
+  );
+  await userDialog.getByLabel("Confirm password", { exact: true }).fill(resetPassword);
+  await userDialog.getByRole("button", { name: "Reset password" }).click();
+  await userDialog.waitFor({ state: "hidden" });
+  await api(apiUrl, "/cairn-memory/auth/login", { email: "ui-user@example.test", password: resetPassword });
+  const oldStillWorks = await api(apiUrl, "/cairn-memory/auth/login", {
+    email: "ui-user@example.test",
+    password,
+  }).then(
+    () => true,
+    () => false,
+  );
+  assert(!oldStillWorks, "reset replaces the old password and the new one signs in", report);
+
+  // Profile: change password (a wrong current password stays in the dialog) and the theme switch.
+  await api(apiUrl, "/cairn-memory/auth/register", { email: "ui-profile@example.test", password }, token);
+  await signIn(page, web, "ui-profile@example.test");
+  const accountMenu = async () => {
+    await page.locator("[data-slot=sidebar-footer] button").first().click();
+  };
+  await accountMenu();
+  await page.getByRole("menuitem", { name: "Change password" }).click();
+  await userDialog.getByLabel("Current password", { exact: true }).fill("not the current password");
+  await userDialog.getByLabel("New password", { exact: true }).fill("profile horse battery staple");
+  await userDialog.getByLabel("Confirm new password").fill("profile horse battery staple");
+  await userDialog.getByRole("button", { name: "Change password" }).click();
+  assert(
+    (await userDialog.getByRole("alert").innerText()).includes("current password is incorrect"),
+    "a wrong current password shows an inline error",
+    report,
+  );
+  await userDialog.getByLabel("Current password", { exact: true }).fill(password);
+  await userDialog.getByRole("button", { name: "Change password" }).click();
+  await userDialog.waitFor({ state: "hidden" });
+  await api(apiUrl, "/cairn-memory/auth/login", {
+    email: "ui-profile@example.test",
+    password: "profile horse battery staple",
+  });
+  assert(true, "changing the password signs in with the new one", report);
+  const isDark = () => page.evaluate(() => document.documentElement.classList.contains("dark"));
+  await accountMenu();
+  await page.getByRole("menuitem", { name: "Theme" }).click();
+  await page.getByRole("menuitemradio", { name: "Dark" }).click();
+  assert(await isDark(), "choosing Dark applies the dark class", report);
+  await page.reload();
+  assert(await isDark(), "the theme survives a reload without a flash", report);
+  await accountMenu();
+  await page.getByRole("menuitem", { name: "Theme" }).click();
+  await page.getByRole("menuitemradio", { name: "Light" }).click();
+  assert(!(await isDark()), "choosing Light removes the dark class", report);
 
   await signIn(page, web, "member@example.test");
   await page.goto(`${web}/projects/${projectId}`);
