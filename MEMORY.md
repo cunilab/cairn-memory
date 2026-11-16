@@ -77,6 +77,14 @@ replacement for the project documentation.
 - **Reason:** One permissioned source of truth serves many people, agents and devices; a client-local canonical store would need conflict-prone sync between canonical stores. The user corrected an earlier reading that treated local and remote as equally canonical.
 - **Evidence:** `docs/adr/0003-server-authoritative-postgres.md` (decisions 1, 2 and 6); `docs/product.md` (server authoritative, edge tolerant); `docs/architecture.md`; `docs/contracts/sync-layer3.md` (local outbox); `docs/contracts/hook-v1.md`; `scripts/cairn_hook.py`; `scripts/cairn_outbox.py`; `crates/server/src/main.rs`; `crates/storage/tests/postgres.rs`; `scripts/smoke_postgres.sh`
 
+### 2026-11-17 — v0.1.4 scope changes require fresh stores
+
+- **Type:** runtime constraint
+- **Status:** active
+- **Summary:** ADR 0014 items 0 and 7 use only project, personal behaviour and server-wide global memory. Older private `global` rows cannot be reinterpreted safely; reset pre-release databases and file stores before using this build. The base PostgreSQL migration and scope enum intentionally provide no legacy upgrade path.
+- **Reason:** Adding the new record column alone would expose old private global notes to every server user.
+- **Evidence:** `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`; `migrations/0001_layer3_personal_memory.sql`; `docs/evidence.md` (stage 1 checks).
+
 ## Lessons and recurring corrections
 
 Add only durable lessons here. Corrections to the agent’s working approach
@@ -213,8 +221,9 @@ should include the reason they matter and the evidence that supports them.
 ### 2026-11-03 — Explicit project promotion is the first Layer 4 slice
 
 - **Type:** decision
-- **Status:** active
+- **Status:** superseded
 - **Summary:** Project registration and `POST /cairn-memory/promote` create an explicit project-scoped decision while preserving source evidence and a redacted reason; branch/worktree/commit context is cleared, secret/forgotten/expired/repository-mismatched sources fail closed, repeated promotion is idempotent, and explicit merge/close transitions resolve registered branches and worktrees.
+- **Superseded by:** ADR 0014 items 0 and 7 (2026-11-17): direct project captures and explicit project/personal/global saves; no promotion step.
 - **Reason:** Project memory must not broaden automatically from branch relevance; the owner must authorize the scope transition and be able to inspect why it happened.
 - **Evidence:** `docs/adr/0009-explicit-project-promotion.md`; `docs/contracts/project-layer4.md`; `crates/core/src/lib.rs`; `crates/storage/src/lib.rs`; `migrations/0003_layer4_projects.sql`; `migrations/0004_layer4_freshness.sql`; `migrations/0005_layer4_project_entities.sql`; `migrations/0006_layer4_branch_resolution.sql`; project promotion/freshness/entity/merge tests
 

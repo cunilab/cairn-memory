@@ -217,27 +217,17 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         )
         .await
         .expect("store branch memory");
-    let promoted = store
-        .promote_memory(
-            &account.token,
-            &project.project_id,
-            &branch_memory.memory_id,
-            "Confirmed by the cache regression test",
-        )
-        .await
-        .expect("promote branch memory");
+    let promoted = save_project_note(
+        &store,
+        &account.token,
+        &project.project_id,
+        &branch_memory.content,
+        branch_memory.context.clone(),
+    )
+    .await;
     assert_eq!(promoted.kind, cairn_core::MemoryKind::Decision);
     assert_eq!(promoted.scope, cairn_core::MemoryScope::Project);
-    assert_eq!(
-        promoted.project_id.as_deref(),
-        Some(project.project_id.as_str())
-    );
-    assert_eq!(
-        promoted.promoted_from.as_deref(),
-        Some(branch_memory.memory_id.as_str())
-    );
-    assert_eq!(promoted.context.branch, None);
-    assert_eq!(promoted.verified_commit.as_deref(), Some("abc1234"));
+    assert!(promoted.promoted_from.is_none());
     let verified = store
         .verify_project_memory(
             &account.token,
@@ -254,7 +244,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             &account.token,
             &project.project_id,
             &branch.branch_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             "merge999",
             "Confirmed after merge into main",
         )
@@ -277,7 +267,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             &account.token,
             &project.project_id,
             &branch.branch_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             "merge999",
             "Confirmed after merge into main",
         )
@@ -292,16 +282,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             .len(),
         1
     );
-    let repeated = store
-        .promote_memory(
-            &account.token,
-            &project.project_id,
-            &branch_memory.memory_id,
-            "Confirmed by the cache regression test",
-        )
-        .await
-        .expect("repeat promotion");
-    assert_eq!(repeated.memory_id, promoted.memory_id);
     let entities = store
         .project_entities(&account.token, &project.project_id)
         .await
@@ -329,7 +309,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .iter()
         .map(|event| event.action.as_str())
         .collect::<Vec<_>>();
-    assert!(actions.contains(&"promotion"));
     assert!(actions.contains(&"verification"));
     assert!(actions.contains(&"merge"));
     let stale = store
@@ -348,7 +327,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .confirm_memory(
             &account.token,
             &project.project_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             Some("confirm123"),
             "Confirmed from the registry check",
         )
@@ -793,7 +772,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
         summary.memory_id,
         format!("memory-{}-sess-inherit", account.account.person_id)
     );
-    assert_eq!(summary.scope, cairn_core::MemoryScope::Worktree);
+    assert_eq!(summary.scope, cairn_core::MemoryScope::Personal);
     assert_eq!(summary.context.branch.as_deref(), Some("main"));
     assert_eq!(summary.context.worktree.as_deref(), Some("wt-main"));
 
@@ -830,7 +809,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
         .end_session(&account.token, "sess-late")
         .await
         .expect("summarize the repaired session");
-    assert_eq!(late_summary.scope, cairn_core::MemoryScope::Worktree);
+    assert_eq!(late_summary.scope, cairn_core::MemoryScope::Personal);
     assert_eq!(late_summary.context, placed("repair"));
     let reopened = store
         .start_session(&account.token, "sess-late", placed("after-end"))
@@ -929,7 +908,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
                     source: "import".to_owned(),
                     importance: None,
                     lifecycle: cairn_core::Lifecycle::default(),
-                    scope: cairn_core::MemoryScope::Session,
+                    scope: cairn_core::MemoryScope::Personal,
                     context: WorkContext::default(),
                     captured_at: "0".to_owned(),
                 }],
@@ -1365,7 +1344,7 @@ async fn postgres_context_omissions_count_every_eligible_match_past_the_cap() {
         )
         .await;
     }
-    for (branch, expected) in [("feat-x", total + 2), ("feat-y", total)] {
+    for (branch, expected) in [("feat-x", total + 2), ("feat-y", total + 2)] {
         let filter = RecallFilter {
             context: Some(placed(branch)),
             ..Default::default()
@@ -1887,19 +1866,10 @@ async fn join_project(
     account: &cairn_core::AuthSessionResult,
     project_id: &str,
 ) {
-    let device = device_for(store, account, &format!("join-{project_id}")).await;
-    let context = WorkContext {
-        project_id: Some(project_id.to_owned()),
-        ..WorkContext::default()
-    };
-    push_in(
-        store,
-        &device,
-        "join",
-        &format!("join-{project_id}"),
-        context,
-    )
-    .await;
+    store
+        .join_project(&account.token, project_id)
+        .await
+        .unwrap();
 }
 
 async fn age(pool: &PgPool, person_id: &str, session_id: &str) {
@@ -2182,59 +2152,6 @@ async fn postgres_capture_stays_personal_until_an_explicit_project_attaches() {
         .await,
         1
     );
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_repromoting_a_forgotten_copy_creates_a_live_copy() {
-    let (_pool, store) = pool_and_store().await;
-    let owner = store
-        .bootstrap_account("repromote@example.test", "correct horse battery staple")
-        .await
-        .expect("owner");
-    let project = store
-        .register_project(&owner.token, "repromote-pg", "R", None)
-        .await
-        .expect("project");
-    let ctx = WorkContext {
-        repository: Some("repromote-pg".to_owned()),
-        ..WorkContext::default()
-    };
-    let source = store
-        .remember_with_kind(
-            &owner.token,
-            "repromote personal fact",
-            Vec::new(),
-            ctx,
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .expect("source");
-    let first = store
-        .promote_memory(&owner.token, &project.project_id, &source.memory_id, "why")
-        .await
-        .expect("first");
-    store
-        .forget(&owner.token, &first.memory_id)
-        .await
-        .expect("forget copy");
-    let second = store
-        .promote_memory(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "again",
-        )
-        .await
-        .expect("second");
-    assert_ne!(second.memory_id, first.memory_id);
-    let listed = store
-        .project_memories(&owner.token, &project.project_id)
-        .await
-        .expect("listed");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].memory_id, second.memory_id);
 }
 
 #[tokio::test]
@@ -2581,21 +2498,18 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
             .register_branch(&device, &project, name, None, None, None)
             .await
             .expect("branch");
-        let memory = store
-            .remember_with_kind(
-                &device,
-                &format!("decision on {name}"),
-                Vec::new(),
-                WorkContext {
-                    repository: Some("acme/devices".to_owned()),
-                    branch: Some(name.to_owned()),
-                    ..WorkContext::default()
-                },
-                Default::default(),
-                cairn_core::MemoryKind::Explicit,
-            )
-            .await
-            .expect("memory");
+        let memory = save_project_note(
+            &store,
+            &device,
+            &project,
+            &format!("decision on {name}"),
+            WorkContext {
+                repository: Some("acme/devices".to_owned()),
+                branch: Some(name.to_owned()),
+                ..WorkContext::default()
+            },
+        )
+        .await;
         merges.push((branch.branch_id, memory.memory_id));
     }
     store
@@ -2736,7 +2650,7 @@ async fn postgres_push_adopts_an_observation_that_has_no_sync_event() {
         source: "test".to_owned(),
         importance: None,
         lifecycle: cairn_core::Lifecycle::default(),
-        scope: cairn_core::MemoryScope::Session,
+        scope: cairn_core::MemoryScope::Personal,
         context: WorkContext::default(),
         captured_at: "0".to_owned(),
     };
@@ -3020,7 +2934,7 @@ async fn postgres_push_gives_the_session_its_context_so_the_summary_is_scoped() 
         .fetch_one(&pool)
         .await
         .expect("summary row");
-        assert_eq!(scope, "branch", "{session}");
+        assert_eq!(scope, "personal", "{session}");
         assert!(
             hits.iter().any(|hit| hit.memory_id == summary_id),
             "a repository/branch-filtered recall finds the {session} summary"
@@ -3222,529 +3136,6 @@ async fn postgres_admin_lists_accounts_and_passwords_reset_and_change_revoke_ses
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_shared_decisions_scopes_permissions_preview_transfer_and_source_independence() {
-    use cairn_core::{LifecycleInput, MemoryKind, Sensitivity};
-    let (pool, store) = pool_and_store().await;
-    let pw = "correct horse battery staple";
-    let admin = store
-        .bootstrap_account("admin@example.test", pw)
-        .await
-        .unwrap();
-    let owner = store
-        .register_account("owner@example.test", pw)
-        .await
-        .unwrap();
-    let author = store
-        .register_account("author@example.test", pw)
-        .await
-        .unwrap();
-    let reader = store
-        .register_account("reader@example.test", pw)
-        .await
-        .unwrap();
-    let project = store
-        .register_project(&owner.token, "host/org/repo", "Repo", None)
-        .await
-        .unwrap();
-    for account in [&author, &reader] {
-        store
-            .join_project(&account.token, &project.project_id)
-            .await
-            .unwrap();
-    }
-    assert_eq!(
-        store
-            .project_people(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .len(),
-        3
-    );
-    store
-        .register_project(
-            &reader.token,
-            "host/org/repo",
-            "Separate initialized project",
-            None,
-        )
-        .await
-        .unwrap();
-    let ctx = WorkContext {
-        repository: Some(project.repository.clone()),
-        branch: Some("feature".into()),
-        files: vec!["src/lib.rs".into()],
-        ..WorkContext::default()
-    };
-    let source = store
-        .remember_with_kind(
-            &author.token,
-            "mixneedle mixneedle project decision",
-            vec![],
-            ctx.clone(),
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    let preview = store
-        .preview_promotion(
-            &author.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    assert_eq!(preview.content, source.content);
-    assert_eq!(preview.context.files, source.context.files);
-    assert!(preview.source_event_ids.is_empty());
-    assert!(preview.promoted_from.is_none());
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let decision = store
-        .promote_memory(
-            &author.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    for account in [&owner, &author, &reader] {
-        assert_eq!(
-            store
-                .project_memories(&account.token, &project.project_id)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-    assert!(
-        store
-            .verify_project_memory(
-                &reader.token,
-                &project.project_id,
-                &decision.memory_id,
-                "bad"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .correct(
-                &reader.token,
-                &decision.memory_id,
-                "bad",
-                vec![],
-                WorkContext::default(),
-                LifecycleInput::default()
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .delete_memory(&reader.token, &decision.memory_id)
-            .await
-            .is_err()
-    );
-    store
-        .verify_project_memory(
-            &owner.token,
-            &project.project_id,
-            &decision.memory_id,
-            "verified",
-        )
-        .await
-        .unwrap();
-    store
-        .correct(
-            &author.token,
-            &source.memory_id,
-            "private source correction",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-        )
-        .await
-        .unwrap();
-    store
-        .forget(&author.token, &source.memory_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    let global = store
-        .remember_with_kind(
-            &reader.token,
-            "mixneedle global preference",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-            MemoryKind::Lesson,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .preview_promotion(
-                &reader.token,
-                &project.project_id,
-                &global.memory_id,
-                "release"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .promote_memory(
-                &reader.token,
-                &project.project_id,
-                &global.memory_id,
-                "release"
-            )
-            .await
-            .is_err()
-    );
-    let repo_note = store
-        .remember_with_kind(
-            &reader.token,
-            "mixneedle repo note",
-            vec![],
-            WorkContext {
-                repository: Some(project.repository.clone()),
-                branch: Some("private-feature".into()),
-                worktree: Some("/private/worktree".into()),
-                ..WorkContext::default()
-            },
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    let filter = RecallFilter {
-        session_id: None,
-        context: Some(WorkContext {
-            project_id: Some(project.project_id.clone()),
-            repository: Some(project.repository.clone()),
-            ..WorkContext::default()
-        }),
-    };
-    let results = store
-        .search(&reader.token, "mixneedle", 20, &filter)
-        .await
-        .unwrap();
-    assert_eq!(results.len(), 3);
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == decision.memory_id && r.source == "project")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == global.memory_id && r.source == "personal")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == repo_note.memory_id && r.source == "personal")
-    );
-    assert!(!results.iter().any(|r| r.memory_id == source.memory_id));
-    let wrong = RecallFilter {
-        session_id: None,
-        context: Some(WorkContext {
-            project_id: Some("wrong-project".into()),
-            ..ctx.clone()
-        }),
-    };
-    assert!(
-        !store
-            .search(&reader.token, "mixneedle", 20, &wrong)
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.source == "project")
-    );
-    assert_eq!(
-        store
-            .context(&reader.token, "mixneedle", 20, &filter)
-            .await
-            .unwrap()
-            .results
-            .len(),
-        3
-    );
-    assert_eq!(
-        store
-            .why_changed_context(&reader.token, "mixneedle", 20, &filter)
-            .await
-            .unwrap()
-            .results
-            .len(),
-        3
-    );
-    let secret = store
-        .remember_with_kind(
-            &author.token,
-            "secret material",
-            vec![],
-            ctx.clone(),
-            LifecycleInput {
-                sensitivity: Some(Sensitivity::Secret),
-                ..LifecycleInput::default()
-            },
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .promote_memory(
-                &author.token,
-                &project.project_id,
-                &secret.memory_id,
-                "secret"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .preview_promotion(
-                &author.token,
-                &project.project_id,
-                &secret.memory_id,
-                "secret"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .transfer_project(
-                &reader.token,
-                &project.project_id,
-                &author.account.person_id
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .transfer_project(&owner.token, &project.project_id, &admin.account.person_id)
-            .await
-            .is_err()
-    );
-    store
-        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
-        .await
-        .unwrap();
-    let inherited = store
-        .project_entities(&reader.token, &project.project_id)
-        .await
-        .unwrap();
-    let entity = inherited
-        .iter()
-        .find(|e| e.kind == "file" && e.key == "src/lib.rs")
-        .expect("new owner inherits project entities");
-    let repeated = store
-        .register_project_entity(
-            &reader.token,
-            &project.project_id,
-            cairn_core::ProjectEntityInput {
-                kind: entity.kind.clone(),
-                key: entity.key.clone(),
-                content: None,
-                source_memory_id: None,
-                commit: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(repeated.entity_id, entity.entity_id);
-
-    assert!(
-        !store
-            .freshness_history(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "new owner inherits verification history"
-    );
-    assert_eq!(
-        store
-            .project_people(&reader.token, &project.project_id)
-            .await
-            .unwrap()[0]
-            .person_id,
-        reader.account.person_id
-    );
-    store
-        .transfer_project(&admin.token, &project.project_id, &owner.account.person_id)
-        .await
-        .unwrap();
-    let corrected = store
-        .correct(
-            &owner.token,
-            &decision.memory_id,
-            "mixneedle corrected publication",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        corrected.published_by,
-        Some(author.account.person_id.clone())
-    );
-    assert_eq!(corrected.changed_by, Some(owner.account.person_id.clone()));
-    assert_eq!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()[0]
-            .memory_id,
-        corrected.memory_id
-    );
-    assert_eq!(
-        store
-            .project_maintenance(&reader.token, &project.project_id, None)
-            .await
-            .unwrap()
-            .active_memory_ids,
-        vec![corrected.memory_id.clone()]
-    );
-    store
-        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
-        .await
-        .unwrap();
-    let mut attempted = store.export_bundle(&owner.token).await.unwrap();
-    attempted.forgotten_ids.push(corrected.memory_id.clone());
-    let _ = store.import_bundle(&owner.token, attempted).await;
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.memory_id == corrected.memory_id),
-        "a former owner cannot hide another author's decision through import"
-    );
-    store
-        .delete_memory(&author.token, &corrected.memory_id)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .all(|m| m.memory_id != corrected.memory_id)
-    );
-    let mut bundle = store.export_bundle(&reader.token).await.unwrap();
-    bundle.memories = vec![decision.clone()];
-    bundle.memories[0].memory_id = "forged-import".into();
-    bundle.forgotten_ids.clear();
-    bundle.sessions.clear();
-    bundle.observations.clear();
-    store.import_bundle(&reader.token, bundle).await.unwrap();
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .all(|m| m.memory_id != "forged-import")
-    );
-    let publication: Option<String> = sqlx::query_scalar(
-        "SELECT published_by FROM cairn_memories WHERE memory_id='forged-import'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(publication.is_none());
-    let renamed = store
-        .remember_with_kind(
-            &reader.token,
-            "renameneedle same project after remote rename",
-            vec![],
-            WorkContext {
-                repository: Some("host/org/renamed".into()),
-                project_id: Some(project.project_id.clone()),
-                ..WorkContext::default()
-            },
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .personal_project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.memory_id == renamed.memory_id)
-    );
-    store
-        .preview_promotion(
-            &reader.token,
-            &project.project_id,
-            &renamed.memory_id,
-            "rename",
-        )
-        .await
-        .unwrap();
-    store
-        .promote_memory(
-            &reader.token,
-            &project.project_id,
-            &renamed.memory_id,
-            "rename",
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .search(
-                &reader.token,
-                "renameneedle",
-                10,
-                &RecallFilter {
-                    context: Some(WorkContext {
-                        repository: Some("host/org/renamed".into()),
-                        project_id: Some(project.project_id.clone()),
-                        ..WorkContext::default()
-                    }),
-                    ..RecallFilter::default()
-                }
-            )
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.source == "project")
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
 async fn postgres_personal_capture_attachment_and_branch_records() {
     let (_, store) = pool_and_store().await;
     let pw = "correct horse battery staple";
@@ -3818,21 +3209,18 @@ async fn postgres_personal_capture_attachment_and_branch_records() {
             .unwrap()
             .is_empty()
     );
-    let source = store
-        .remember_with_kind(
-            &member.token,
-            "branch evidence",
-            vec![],
-            WorkContext {
-                repository: Some("repo".into()),
-                branch: Some("feature".into()),
-                ..WorkContext::default()
-            },
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
+    let source = save_project_note(
+        &store,
+        &member.token,
+        &project.project_id,
+        "branch evidence",
+        WorkContext {
+            repository: Some("repo".into()),
+            branch: Some("feature".into()),
+            ..WorkContext::default()
+        },
+    )
+    .await;
     let merged = store
         .confirm_branch_merge(
             &dev,
@@ -3856,127 +3244,6 @@ async fn postgres_personal_capture_attachment_and_branch_records() {
             .await
             .is_err()
     );
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_promotion_precondition_and_foreign_source_supersession() {
-    use cairn_core::{LifecycleInput, MemoryKind, publication_fingerprint};
-    let (_, store) = pool_and_store().await;
-    let pw = "correct horse battery staple";
-    let owner = store.bootstrap_account("o@example.test", pw).await.unwrap();
-    let member = store.register_account("m@example.test", pw).await.unwrap();
-    let project = store
-        .register_project(&owner.token, "repo", "Repo", None)
-        .await
-        .unwrap();
-    store
-        .join_project(&member.token, &project.project_id)
-        .await
-        .unwrap();
-    let ctx = WorkContext {
-        repository: Some("repo".into()),
-        ..WorkContext::default()
-    };
-    let device = device_for(&store, &owner, "preview-device").await;
-    store
-        .start_session(&owner.token, "preview", ctx.clone())
-        .await
-        .unwrap();
-    let first = ObservationInput {
-        event_id: "first".into(),
-        session_id: "preview".into(),
-        content: "first payload".into(),
-        role: "agent".into(),
-        source: "test".into(),
-        importance: None,
-        lifecycle: Default::default(),
-        context: ctx.clone(),
-    };
-    store.sync_push(&device, first.clone()).await.unwrap();
-    let source = store.end_session(&owner.token, "preview").await.unwrap();
-    let preview = store
-        .preview_promotion(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    let fingerprint = publication_fingerprint(&preview).unwrap();
-    store
-        .start_session(&owner.token, "preview", ctx.clone())
-        .await
-        .unwrap();
-    let mut second = first;
-    second.event_id = "second".into();
-    second.content = "changed payload".into();
-    store.sync_push(&device, second).await.unwrap();
-    store.end_session(&owner.token, "preview").await.unwrap();
-    assert!(matches!(
-        store
-            .promote_memory_checked(
-                &owner.token,
-                &project.project_id,
-                &source.memory_id,
-                "publish",
-                Some(&fingerprint)
-            )
-            .await,
-        Err(PostgresError::Conflict(_))
-    ));
-    let preview = store
-        .preview_promotion(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    let fingerprint = publication_fingerprint(&preview).unwrap();
-    let original = store
-        .promote_memory_checked(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-            Some(&fingerprint),
-        )
-        .await
-        .unwrap();
-    let mut forged = cairn_core::build_explicit_memory_record(
-        "member independent decision",
-        vec![],
-        ctx,
-        LifecycleInput::default(),
-        MemoryKind::Correction,
-    )
-    .unwrap();
-    forged.supersedes = Some(source.memory_id.clone());
-    let mut bundle = store.export_bundle(&member.token).await.unwrap();
-    bundle.sessions.clear();
-    bundle.observations.clear();
-    bundle.forgotten_ids.clear();
-    bundle.memories = vec![forged.clone()];
-    store.import_bundle(&member.token, bundle).await.unwrap();
-    let independent = store
-        .promote_memory(
-            &member.token,
-            &project.project_id,
-            &forged.memory_id,
-            "publish independently",
-        )
-        .await
-        .unwrap();
-    assert!(independent.supersedes.is_none());
-    let rows = store
-        .project_memories(&owner.token, &project.project_id)
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|m| m.memory_id == original.memory_id));
 }
 
 #[tokio::test]
@@ -4072,4 +3339,102 @@ async fn postgres_rename_is_owner_only_audited_and_checks_name_before_join() {
         store.projects(&member.token).await.unwrap()[0].name,
         "Useful name"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_structured_save_requires_fields_and_round_trips_types() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let admin = store
+        .bootstrap_account("admin@shape.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for field in ["scope", "title", "summary", "reason"] {
+        let mut input = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason"});
+        input.as_object_mut().unwrap().remove(field);
+        let error = store
+            .save(&admin.token, serde_json::from_value(input).unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(field), "{error}");
+    }
+    for (kind, fields) in [
+        (
+            "decision",
+            serde_json::json!({"decision_context":"constraints", "alternatives":["other"], "consequences":"tradeoff"}),
+        ),
+        (
+            "rule",
+            serde_json::json!({"rule":"borrow", "exceptions":"owned transfer"}),
+        ),
+        (
+            "gotcha",
+            serde_json::json!({"symptom":"failure", "cause":"race", "fix":"lock"}),
+        ),
+        (
+            "procedure",
+            serde_json::json!({"steps":["first","second"], "when":"release"}),
+        ),
+        (
+            "fact",
+            serde_json::json!({"statement":"verified", "source":"check"}),
+        ),
+        (
+            "preference",
+            serde_json::json!({"preference":"concise", "example":"one paragraph"}),
+        ),
+    ] {
+        let mut input = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason", "kind":kind, "details":"Body", "applies_to":["src/**"], "evidence":["cargo test"], "tags":["rust"], "entities":["Memory"], "pinned":true, "importance":90, "status":"active"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let memory = store
+            .save(&admin.token, serde_json::from_value(input.clone()).unwrap())
+            .await
+            .unwrap();
+        let found = store
+            .memories(&admin.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == memory.memory_id)
+            .unwrap();
+        let output = serde_json::to_value(found).unwrap();
+        for (key, value) in input.as_object().unwrap() {
+            assert_eq!(&output[key], value, "{kind}.{key}");
+        }
+    }
+}
+
+async fn save_project_note(
+    store: &PostgresStore,
+    token: &str,
+    project_id: &str,
+    title: &str,
+    context: WorkContext,
+) -> cairn_core::Memory {
+    store.save(token, serde_json::from_value(serde_json::json!({"scope":"project","kind":"decision","title":title,"summary":title,"reason":"Verified fixture","context":WorkContext {project_id:Some(project_id.to_owned()), ..context}})).unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_record_title_has_highest_lexical_weight() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let account = store
+        .bootstrap_account("rank@shape.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for (title, summary) in [("Ordinary", "weightneedle"), ("weightneedle", "Ordinary")] {
+        store.save(&account.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":title,"summary":summary,"reason":"verified"})).unwrap()).await.unwrap();
+    }
+    let rows = store
+        .search(&account.token, "weightneedle", 2, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(rows[0].fields.title, "weightneedle");
 }

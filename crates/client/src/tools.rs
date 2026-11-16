@@ -114,15 +114,19 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
             }
         }
     }
+    if matches!(tool.name, "memory_save" | "memory_lesson_save")
+        && body.get("scope").and_then(Value::as_str) == Some("project")
+        && let Ok(cwd) = std::env::current_dir()
+        && let Some(id) = crate::project::project_id(&cwd)
+    {
+        let context = body.entry("context").or_insert_with(|| json!({}));
+        if let Some(context) = context.as_object_mut() {
+            context.entry("project_id").or_insert_with(|| json!(id));
+        }
+    }
     let path = fill_path(tool.path, &mut body)?;
     if tool.name == "memory_lesson_save" {
-        body.insert("kind".to_owned(), json!("lesson"));
-        let concepts = body.entry("concepts").or_insert_with(|| json!([]));
-        if let Some(concepts) = concepts.as_array_mut()
-            && !concepts.iter().any(|item| item == "lesson")
-        {
-            concepts.push(json!("lesson"));
-        }
+        body.entry("kind").or_insert_with(|| json!("gotcha"));
     }
     let route = format!("/cairn-memory{path}");
     let mut result = match tool.method {
@@ -179,14 +183,59 @@ fn encode_byte(byte: u8) -> String {
 
 fn build_tools() -> Vec<Tool> {
     let content_schema = || {
-        object_schema(
-            &[
-                ("content", string_schema()),
-                ("concepts", array_schema()),
-                ("lifecycle", lifecycle_schema()),
-            ],
-            &["content"],
-        )
+        let mut properties = vec![
+            (
+                "scope",
+                json!({"type":"string", "enum":["project", "personal", "global"]}),
+            ),
+            (
+                "kind",
+                json!({"type":"string", "enum":["decision","rule","gotcha","procedure","fact","preference","explicit","lesson"]}),
+            ),
+            ("lifecycle", lifecycle_schema()),
+            ("context", json!({"type":"object"})),
+            ("pinned", json!({"type":"boolean"})),
+            (
+                "importance",
+                json!({"type":"integer", "minimum":0, "maximum":100}),
+            ),
+            (
+                "status",
+                json!({"type":"string", "enum":["active","stale","superseded"]}),
+            ),
+        ];
+        for field in [
+            "title",
+            "summary",
+            "details",
+            "reason",
+            "supersedes",
+            "decision_context",
+            "consequences",
+            "rule",
+            "exceptions",
+            "symptom",
+            "cause",
+            "fix",
+            "when",
+            "statement",
+            "source",
+            "preference",
+            "example",
+        ] {
+            properties.push((field, string_schema()));
+        }
+        for field in [
+            "applies_to",
+            "evidence",
+            "tags",
+            "entities",
+            "alternatives",
+            "steps",
+        ] {
+            properties.push((field, array_schema()));
+        }
+        object_schema(&properties, &["scope", "title", "summary", "reason"])
     };
     let project_schema = || object_schema(&[("projectId", string_schema())], &["projectId"]);
     use Method::{Get, Post};
@@ -379,23 +428,18 @@ fn build_tools() -> Vec<Tool> {
             ),
         ),
         spec(
-            "memory_promote",
-            "Publish your own memory to all project members; use dryRun first to preview the full copy.",
-            Post,
-            "/promote",
-            object_schema(
-                &[
-                    ("projectId", string_schema()),
-                    ("memoryId", string_schema()),
-                    ("reason", string_schema()),
-                    ("previewFingerprint", string_schema()),
-                    (
-                        "dryRun",
-                        json!({"type":"boolean", "description":"Preview the full publication payload without writing."}),
-                    ),
-                ],
-                &["projectId", "memoryId", "reason"],
-            ),
+            "memory_list",
+            "List readable project, personal and global memories.",
+            Get,
+            "/memories",
+            object_schema(&[], &[]),
+        ),
+        spec(
+            "memory_get",
+            "Read every field of a visible memory.",
+            Get,
+            "/memories/{memoryId}",
+            object_schema(&[("memoryId", string_schema())], &["memoryId"]),
         ),
         spec(
             "memory_project_memories",

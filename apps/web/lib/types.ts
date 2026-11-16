@@ -25,34 +25,49 @@ export type Account = {
 
 export type AccountRow = Required<Account> & { created_at: string };
 
-export type PersonalMemory = {
-  memory_id: string;
-  content: string;
-  kind?: string;
-  created_at?: string;
-  scope: string;
-  /** Set on a project decision, never on a personal memory. */
-  project_id?: string | null;
-  context?: { branch?: string | null; repository?: string | null };
-  lifecycle?: { sensitivity?: string };
-};
-
 export type ProjectMemory = {
   memory_id: string;
+  title: string;
+  summary: string;
+  details?: string | null;
+  reason: string;
+  applies_to: string[];
+  evidence: string[];
+  tags: string[];
+  entities: string[];
+  status: "active" | "stale" | "superseded";
+  pinned: boolean;
+  importance?: number | null;
+  author?: string | null;
+  decision_context?: string | null;
+  alternatives: string[];
+  consequences?: string | null;
+  rule?: string | null;
+  exceptions?: string | null;
+  symptom?: string | null;
+  cause?: string | null;
+  fix?: string | null;
+  steps: string[];
+  when?: string | null;
+  statement?: string | null;
+  source?: string | null;
+  preference?: string | null;
+  example?: string | null;
   content: string;
   kind?: string;
-  scope: string;
+  scope: "project" | "personal" | "global";
   verified_commit?: string | null;
   supersedes?: string | null;
-  lifecycle?: {
-    freshness?: number;
-    sensitivity?: string;
-  };
+  project_id?: string | null;
+  context?: { branch?: string | null; repository?: string | null };
+  lifecycle?: { freshness?: number; sensitivity?: string; importance?: number };
   published_by?: string | null;
   changed_by?: string | null;
   changed_at?: string | null;
   created_at?: string;
 };
+
+export type PersonalMemory = ProjectMemory;
 
 export type ProjectMember = {
   person_id: string;

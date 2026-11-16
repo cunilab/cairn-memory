@@ -73,7 +73,10 @@ const COMMANDS: &[Command] = &[
         ..command("unresolved", "memory_unresolved", &["limit"], 0)
     },
     command("forget", "memory_forget", &["id"], 1),
-    command("lesson", "memory_lesson_save", &["content"], 1),
+    command("save", "memory_save", &["record"], 0),
+    command("lesson", "memory_lesson_save", &["record"], 0),
+    command("memories", "memory_list", &[], 0),
+    command("memory", "memory_get", &["memoryId"], 1),
     command("correct", "memory_correct", &["targetId", "content"], 2),
     command(
         "project-register",
@@ -82,12 +85,6 @@ const COMMANDS: &[Command] = &[
         2,
     ),
     command("project-list", "memory_project_list", &[], 0),
-    command(
-        "promote",
-        "memory_promote",
-        &["projectId", "memoryId", "reason", "previewFingerprint"],
-        3,
-    ),
     command(
         "project-memories",
         "memory_project_memories",
@@ -112,15 +109,6 @@ const COMMANDS: &[Command] = &[
         &["projectId", "memoryId", "commit"],
         3,
     ),
-    Command {
-        defaults: &[("dryRun", "true")],
-        ..command(
-            "promote-preview",
-            "memory_promote",
-            &["projectId", "memoryId", "reason"],
-            3,
-        )
-    },
     command("delete-memory", "memory_delete", &["id"], 1),
     command("export", "memory_export", &["output"], 1),
     command("import", "memory_import", &["input"], 1),
@@ -146,14 +134,13 @@ fn print_usage() {
   cairn resume [limit] [repository] [branch] [worktree] [commit]\n\
   cairn unresolved [limit] [repository] [branch] [worktree] [commit]\n\
   cairn forget <memory-or-event-id>\n\
-  cairn lesson <content>\n\
+  cairn save|lesson [JSON-record] (or stdin)\n\
+  cairn memories | memory <memory-id>\n\
   cairn correct <memory-or-event-id> <content>\n\
   cairn export <output>\n\
   cairn import <input>\n\
   cairn project-register <repository> <name> [default-branch]\n\
   cairn project-list\n\
-  cairn promote <project-id> <memory-id> <reason> [preview-fingerprint]\n\
-  cairn promote-preview <project-id> <memory-id> <reason>\n\
   cairn project-members <project-id>\n\
   cairn project-verify <project-id> <memory-id> <commit>\n\
   cairn project-memories <project-id>\n\
@@ -404,6 +391,27 @@ fn run(command: &Command, args: &[String]) -> Result<(), Error> {
 }
 
 fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Value>, Error> {
+    if matches!(command.name, "save" | "lesson") {
+        let raw = match args {
+            [] => {
+                let mut raw = String::new();
+                io::Read::read_to_string(&mut io::stdin(), &mut raw)
+                    .map_err(|e| Error::Input(e.to_string()))?;
+                raw
+            }
+            [raw] => raw.clone(),
+            _ => {
+                return Err(Error::Input(
+                    "save/lesson takes one JSON record or stdin".to_owned(),
+                ));
+            }
+        };
+        return serde_json::from_str::<Value>(&raw)
+            .map_err(|e| Error::Input(format!("memory record is not valid JSON: {e}")))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| Error::Input("memory record must be a JSON object".to_owned()));
+    }
     let present = |index: usize| args.get(index).filter(|value| !value.is_empty());
     let mut arguments = Map::new();
     for (index, key) in command.args.iter().enumerate() {

@@ -69,6 +69,20 @@ try:
     tools = call(2, "tools/list", {})
     names = {tool["name"] for tool in tools["result"]["tools"]}
     assert {"memory_save", "memory_recall", "memory_observe"} <= names
+    assert "memory_promote" not in names
+    schema = next(t["inputSchema"] for t in tools["result"]["tools"] if t["name"] == "memory_save")
+    assert {"scope", "title", "summary", "reason"} <= set(schema["required"])
+    record = {"scope":"global", "kind":"procedure", "title":"Scoped record", "summary":"Typed RPC record", "reason":"Round trip verification", "steps":["one", "two"], "when":"testing", "pinned":True}
+    for index, field in enumerate(["scope", "title", "summary", "reason"]):
+        missing = dict(record)
+        del missing[field]
+        response = call(20 + index, "tools/call", {"name":"memory_save", "arguments":missing})
+        assert response["result"]["isError"] is True
+        assert field in response["result"]["content"][0]["text"]
+    saved = call(24, "tools/call", {"name":"memory_save", "arguments":record})["result"]["structuredContent"]
+    loaded = call(25, "tools/call", {"name":"memory_get", "arguments":{"memoryId":saved["memory_id"]}})["result"]["structuredContent"]
+    for field, value in record.items():
+        assert loaded[field] == value, (field, loaded)
 
     call(
         3,

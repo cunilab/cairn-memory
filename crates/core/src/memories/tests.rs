@@ -1,9 +1,7 @@
 use crate::lifecycle::{LifecycleInput, MemoryKind};
 use crate::recall::RecallFilter;
 use crate::store::MemoryStore;
-use crate::test_support::{
-    HeldStoreDir, context, owned_project, remember_owned, temp_store_dir, temp_store_path,
-};
+use crate::test_support::{HeldStoreDir, context, remember_owned, temp_store_dir, temp_store_path};
 use crate::types::{StoreError, WorkContext};
 use std::fs;
 
@@ -124,104 +122,83 @@ fn lessons_and_corrections_preserve_kind_and_supersession() -> Result<(), StoreE
 }
 
 #[test]
-fn correction_of_a_project_memory_keeps_project_id_and_hides_the_old_listing()
--> Result<(), StoreError> {
-    let path = temp_store_path("correction-project");
-    let mut store = MemoryStore::open(&path)?;
-    let account = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let project =
-        store.register_project(&account.token, "cairn", "Cairn", Some("main".to_owned()))?;
-    let source = store.remember_for_account(
-        &account.token,
-        "The cache decision passed.",
-        Vec::new(),
-        WorkContext {
-            repository: Some("cairn".to_owned()),
-            ..WorkContext::default()
-        },
-        LifecycleInput::default(),
-        MemoryKind::Explicit,
-    )?;
-    let promoted = store.promote_memory(
-        &account.token,
-        &project.project_id,
-        &source.memory_id,
-        "Confirmed by the cache regression test",
-    )?;
-    let correction = store.correct_for_account(
-        &account.token,
-        &promoted.memory_id,
-        "The cache decision passed after review.",
-        Vec::new(),
-        WorkContext::default(),
-        LifecycleInput {
-            confidence: Some(10),
-            ..LifecycleInput::default()
-        },
-    )?;
+fn structured_save_requires_scope_title_summary_reason_and_preserves_type_fields() {
+    let path = temp_store_path("structured-save");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let admin = store
+        .bootstrap_account("admin@shape.test", "correct horse battery staple")
+        .unwrap();
+    for field in ["scope", "title", "summary", "reason"] {
+        let mut value = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason"});
+        value.as_object_mut().unwrap().remove(field);
+        let input = serde_json::from_value(value).unwrap();
+        let error = store.save_for_account(&admin.token, input).unwrap_err();
+        assert!(error.to_string().contains(field), "{error}");
+    }
+    for (kind, fields) in [
+        (
+            "decision",
+            serde_json::json!({"decision_context":"constraints", "alternatives":["other"], "consequences":"tradeoff"}),
+        ),
+        (
+            "rule",
+            serde_json::json!({"rule":"borrow", "exceptions":"owned transfer"}),
+        ),
+        (
+            "gotcha",
+            serde_json::json!({"symptom":"failure", "cause":"race", "fix":"lock"}),
+        ),
+        (
+            "procedure",
+            serde_json::json!({"steps":["first","second"], "when":"release"}),
+        ),
+        (
+            "fact",
+            serde_json::json!({"statement":"verified", "source":"check"}),
+        ),
+        (
+            "preference",
+            serde_json::json!({"preference":"concise", "example":"one paragraph"}),
+        ),
+    ] {
+        let mut input = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason", "kind":kind, "details":"Body", "applies_to":["src/**"], "evidence":["cargo test"], "tags":["rust"], "entities":["Memory"], "pinned":true, "importance":90, "status":"active"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let memory = store
+            .save_for_account(&admin.token, serde_json::from_value(input.clone()).unwrap())
+            .unwrap();
+        let output = serde_json::to_value(memory).unwrap();
+        for (key, value) in input.as_object().unwrap() {
+            assert_eq!(&output[key], value, "{kind}.{key}");
+        }
+    }
+    drop(store);
+    let store = MemoryStore::open(&path).unwrap();
     assert_eq!(
-        correction.project_id.as_deref(),
-        Some(project.project_id.as_str())
-    );
-    assert_eq!(correction.lifecycle.confidence, 100);
-    let listed = store.project_memories(&account.token, &project.project_id)?;
-    assert!(
-        listed
-            .iter()
-            .any(|memory| memory.memory_id == correction.memory_id)
-    );
-    assert!(
-        listed
-            .iter()
-            .all(|memory| memory.memory_id != promoted.memory_id)
-    );
-    assert!(
         store
-            .export()
-            .memories
-            .iter()
-            .any(|memory| memory.memory_id == promoted.memory_id)
+            .search_for_account(&admin.token, "Reason", 20, &RecallFilter::default())
+            .unwrap()
+            .len(),
+        6
     );
-    let report = store.project_maintenance(&account.token, &project.project_id, None)?;
-    assert!(report.superseded_memory_ids.is_empty());
-    assert!(
-        report
-            .active_memory_ids
-            .iter()
-            .any(|id| id == &correction.memory_id)
-    );
-    assert!(
-        report
-            .active_memory_ids
-            .iter()
-            .all(|id| id != &promoted.memory_id)
-    );
-
-    fs::remove_file(path)?;
-    Ok(())
+    let _ = fs::remove_file(path);
 }
 
 #[test]
-fn promoting_a_correction_does_not_supersede_a_forgotten_copy() -> Result<(), StoreError> {
-    let path = temp_store_path("prior-copy-live");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let (project_id, copy) = owned_project(&mut store, &owner.token, "priorcopy fact")?;
-    let source_id = copy.promoted_from.clone().expect("origin");
-    store.forget_for_account(&owner.token, &copy.memory_id)?;
-    let correction = store.correct_for_account(
-        &owner.token,
-        &source_id,
-        "priorcopy corrected fact",
-        Vec::new(),
-        context(),
-        LifecycleInput::default(),
-    )?;
-    let promoted = store.promote_memory(&owner.token, &project_id, &correction.memory_id, "why")?;
-    assert_eq!(
-        promoted.supersedes, None,
-        "a forgotten copy is not a predecessor"
-    );
-    fs::remove_file(path)?;
-    Ok(())
+fn record_title_has_highest_lexical_weight() {
+    let path = temp_store_path("title-weight");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let account = store
+        .bootstrap_account("rank@shape.test", "correct horse battery staple")
+        .unwrap();
+    for (title, summary) in [("Ordinary", "weightneedle"), ("weightneedle", "Ordinary")] {
+        store.save_for_account(&account.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":title,"summary":summary,"reason":"verified"})).unwrap()).unwrap();
+    }
+    let rows = store
+        .search_for_account(&account.token, "weightneedle", 2, &RecallFilter::default())
+        .unwrap();
+    assert_eq!(rows[0].fields.title, "weightneedle");
+    fs::remove_file(path).unwrap();
 }

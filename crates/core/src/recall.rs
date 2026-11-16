@@ -9,6 +9,8 @@ const MAX_RELATIONSHIPS: usize = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RecallResult {
+    #[serde(flatten)]
+    pub fields: crate::MemoryFields,
     pub memory_id: String,
     pub content: String,
     pub source_event_ids: Vec<String>,
@@ -169,6 +171,37 @@ impl MemoryStore {
         }
     }
 
+    pub fn memories_for_account(&self, token: &str) -> Result<Vec<Memory>, StoreError> {
+        let account = self.authenticate_account(token)?;
+        let mut memories = self
+            .state
+            .memories
+            .iter()
+            .filter(|m| match m.scope {
+                MemoryScope::Global => true,
+                MemoryScope::Project if m.project_id.is_some() => m
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|id| self.require_project_reader(&account, id).is_ok()),
+                _ => self.memory_owned_by(&m.memory_id, &account.person_id),
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let owners = self.memory_owner_map();
+        let hidden = superseded_targets(&memories, &self.state.forgotten_ids, &owners);
+        memories = memories
+            .iter()
+            .filter(|m| self.memory_is_recalled(m, &hidden))
+            .cloned()
+            .collect();
+        memories.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(a.memory_id.cmp(&b.memory_id))
+        });
+        Ok(memories)
+    }
+
     pub fn search_for_account(
         &self,
         account_token: &str,
@@ -182,8 +215,13 @@ impl MemoryStore {
             .memories
             .iter()
             .filter(|m| {
-                if let Some(project_id) =
-                    m.project_id.as_deref().filter(|_| m.published_by.is_some())
+                if m.scope == MemoryScope::Global {
+                    return true;
+                }
+                if let Some(project_id) = m
+                    .project_id
+                    .as_deref()
+                    .filter(|_| m.scope == MemoryScope::Project)
                 {
                     self.project_owner_id(project_id).is_some()
                         && (self.project_owner_id(project_id).as_deref()
@@ -398,18 +436,13 @@ impl MemoryStore {
         self.state
             .memories
             .iter()
-            .filter(|m| {
-                m.project_id.as_deref() == Some(project_id)
-                    && m.published_by.is_some()
-                    && m.lifecycle.sensitivity != crate::Sensitivity::Secret
-            })
+            .filter(|m| m.project_id.as_deref() == Some(project_id) && m.published_by.is_some())
             .cloned()
             .collect()
     }
 
     pub(crate) fn memory_is_recalled(&self, memory: &Memory, superseded: &HashSet<&str>) -> bool {
-        (memory.published_by.is_none()
-            || memory.lifecycle.sensitivity != crate::Sensitivity::Secret)
+        memory.fields.status != crate::MemoryStatus::Superseded
             && !self.memory_is_forgotten(memory)
             && !is_expired(&memory.lifecycle)
             && !superseded.contains(memory.memory_id.as_str())
@@ -530,6 +563,7 @@ fn recall_result_with(
         })
         .collect::<Vec<_>>();
     RecallResult {
+        fields: memory.fields.clone(),
         memory_id: memory.memory_id.clone(),
         content: memory.content.clone(),
         source_event_ids: memory.source_event_ids.clone(),
@@ -539,7 +573,9 @@ fn recall_result_with(
         project_id: memory.project_id.clone(),
         next_steps: memory.next_steps.clone(),
         unresolved_work: memory.unresolved_work.clone(),
-        decision_reason: extract_decision_reason(&memory.content),
+        decision_reason: (!memory.fields.reason.is_empty())
+            .then(|| memory.fields.reason.clone())
+            .or_else(|| extract_decision_reason(&memory.content)),
         relationships: code_relationships(memory),
         stale,
         stale_reason,
@@ -548,10 +584,10 @@ fn recall_result_with(
         promoted_from: live_origin(memory, all_memories, forgotten_ids, superseded_ids),
         promotion_reason: memory.promotion_reason.clone(),
         verified_commit: memory.verified_commit.clone(),
-        source: if memory.published_by.is_some() {
-            "project"
-        } else {
-            "personal"
+        source: match memory.scope {
+            MemoryScope::Project => "project",
+            MemoryScope::Global => "global",
+            _ => "personal",
         }
         .to_owned(),
         score,
@@ -583,7 +619,7 @@ pub(crate) fn live_origin(
 /// rank before building results.
 pub fn why_changed_priority(memory: &Memory) -> (bool, usize) {
     (
-        extract_decision_reason(&memory.content).is_some(),
+        !memory.fields.reason.is_empty() || extract_decision_reason(&memory.content).is_some(),
         code_relationships(memory).len(),
     )
 }
@@ -688,13 +724,13 @@ fn push_relationship(
 }
 
 fn stale_signal(memory: &Memory, filter: &RecallFilter) -> (bool, Option<String>) {
-    if memory.lifecycle.freshness < 50 {
+    if memory.fields.status == crate::MemoryStatus::Stale || memory.lifecycle.freshness < 50 {
         return (true, Some("memory freshness is below 50".to_owned()));
     }
     let Some(current) = filter.context.as_ref() else {
         return (false, None);
     };
-    if matches!(memory.scope, MemoryScope::Branch | MemoryScope::Worktree)
+    if memory.scope == MemoryScope::Personal
         && memory.context.repository == current.repository
         && memory.context.commit.is_some()
         && current.commit.is_some()
@@ -732,7 +768,9 @@ fn live_superseded_target<'a>(
     forgotten_ids: &HashSet<String>,
 ) -> Option<&'a str> {
     let target = candidate.supersedes.as_deref()?;
-    (!memory_forgotten(candidate, forgotten_ids) && !is_expired(&candidate.lifecycle))
+    (!memory_forgotten(candidate, forgotten_ids)
+        && !is_expired(&candidate.lifecycle)
+        && candidate.fields.status != crate::MemoryStatus::Superseded)
         .then_some(target)
 }
 
@@ -754,6 +792,12 @@ pub(crate) fn superseded_targets<'a>(
         .iter()
         .filter_map(|candidate| {
             let target = live_superseded_target(candidate, forgotten_ids)?;
+            if memories.iter().any(|m| {
+                m.memory_id == target
+                    && (m.scope != candidate.scope || m.project_id != candidate.project_id)
+            }) {
+                return None;
+            }
             let project_correction = candidate.published_by.is_some()
                 && publications
                     .get(target)
@@ -764,7 +808,11 @@ pub(crate) fn superseded_targets<'a>(
             let foreign = owners
                 .get(candidate.memory_id.as_str())
                 .is_some_and(|successor| owners.get(target) != Some(successor));
-            (!foreign || project_correction).then_some(target)
+            let global_correction = candidate.scope == MemoryScope::Global
+                && memories
+                    .iter()
+                    .any(|m| m.memory_id == target && m.scope == MemoryScope::Global);
+            (!foreign || project_correction || global_correction).then_some(target)
         })
         .collect()
 }
@@ -811,17 +859,12 @@ fn same_scope_context(left: &Memory, right: &Memory) -> bool {
     }
     match left.scope {
         MemoryScope::Global => true,
-        MemoryScope::Project => left.context.repository == right.context.repository,
-        MemoryScope::Branch => {
-            left.context.repository == right.context.repository
-                && left.context.branch == right.context.branch
-        }
-        MemoryScope::Worktree => {
+        MemoryScope::Project => left.project_id == right.project_id,
+        MemoryScope::Personal => {
             left.context.repository == right.context.repository
                 && left.context.branch == right.context.branch
                 && left.context.worktree == right.context.worktree
         }
-        MemoryScope::Session => left.session_id == right.session_id,
     }
 }
 
@@ -853,48 +896,40 @@ fn topic_tokens(content: &str) -> HashSet<String> {
 }
 
 pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
-    if memory.published_by.is_some() {
-        return filter
-            .context
-            .as_ref()
-            .and_then(|c| c.project_id.as_ref())
-            .is_some_and(|id| memory.project_id.as_ref() == Some(id));
-    }
     if filter.session_id.is_none() && filter.context.is_none() {
         return true;
     }
-
     match memory.scope {
         MemoryScope::Global => true,
         MemoryScope::Project => filter
             .context
             .as_ref()
-            .and_then(|context| context.repository.as_ref())
-            .is_some_and(|repository| memory.context.repository.as_ref() == Some(repository)),
-        MemoryScope::Branch => filter.context.as_ref().is_some_and(|context| {
-            context.repository.is_some()
-                && memory.context.repository == context.repository
-                && context
-                    .branch
+            .and_then(|c| c.project_id.as_ref())
+            .is_some_and(|id| memory.project_id.as_ref() == Some(id)),
+        MemoryScope::Personal => {
+            if !matches!(
+                memory.kind,
+                MemoryKind::SessionSummary | MemoryKind::Capture
+            ) {
+                return true;
+            }
+            if let Some(id) = &filter.session_id
+                && memory.session_id != *id
+            {
+                return false;
+            }
+            filter.context.as_ref().is_none_or(|c| {
+                c.repository
                     .as_ref()
-                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
-        }),
-        MemoryScope::Worktree => filter.context.as_ref().is_some_and(|context| {
-            context.repository.is_some()
-                && memory.context.repository == context.repository
-                && context
-                    .branch
-                    .as_ref()
-                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
-                && context
-                    .worktree
-                    .as_ref()
-                    .is_none_or(|worktree| memory.context.worktree.as_ref() == Some(worktree))
-        }),
-        MemoryScope::Session => filter
-            .session_id
-            .as_ref()
-            .is_some_and(|session_id| memory.session_id == *session_id),
+                    .is_none_or(|r| memory.context.repository.as_ref() == Some(r))
+                    && c.branch
+                        .as_ref()
+                        .is_none_or(|r| memory.context.branch.as_ref() == Some(r))
+                    && c.worktree
+                        .as_ref()
+                        .is_none_or(|r| memory.context.worktree.as_ref() == Some(r))
+            })
+        }
     }
 }
 
@@ -921,10 +956,11 @@ fn score_memory(memory: &Memory, terms: &[String]) -> f32 {
     )
     .to_ascii_lowercase();
 
+    let title = memory.fields.title.to_ascii_lowercase();
     terms
         .iter()
         .map(|term| {
-            let count = haystack.matches(term).count();
+            let count = haystack.matches(term).count() + 3 * title.matches(term).count();
             count as f32
         })
         .sum()

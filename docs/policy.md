@@ -45,7 +45,7 @@ The memory autopilot may:
 - keep high-value durable memory;
 - let low-value temporary material expire or remain outside normal recall;
 - detect contradictions, stale facts, and likely corrections;
-- suggest promotion from session or branch scope to project scope.
+- retain evidence and the explicit scope selected by the agent.
 
 Every durable memory must retain source IDs and enough evidence to answer:
 
@@ -57,36 +57,17 @@ Every durable memory must retain source IDs and enough evidence to answer:
 
 ## Default scopes
 
-| Scope | Default behavior |
+The current boundary is [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md), items 0 and 7; [the scope contract](contracts/project-layer4.md#memory-scopes-and-record) owns exact wire fields and permissions.
+
+| Scope | Visibility and control |
 | --- | --- |
-| Session | Temporary and private to the person, agent, and authorized operators |
-| Branch/worktree | Private branch context; not a project-wide fact until promoted |
-| Personal | Person-owned durable memory available to the person's authorized agents and devices |
-| Project | Explicitly promoted or policy-approved project knowledge with evidence and freshness |
-| Team/organization | Later collaboration layers; never an implicit result of personal summarization |
+| Project | All members read notes, raw captures and summaries from initialized repositories; author or current owner edits |
+| Personal behaviour | Private to the person, including preferences and habits; no personal-per-repository namespace |
+| Global | All server users read; author or administrator edits and deletes |
 
-Derived memory cannot become more visible than its least-visible source unless an explicit authorized promotion changes the scope.
+Agents explicitly choose scope on save. Initialized-repository capture directly creates project memory; there is no promotion, preview or approval step. Redaction runs before storage. Project members can read raw capture content after redaction, including sensitive/secret classifications; redaction is best effort.
 
-## Sharing and promotion
-
-The default is **no automatic personal-to-project sharing**.
-
-Promotion may happen when:
-
-- the person explicitly approves it;
-- a branch is merged and the configured project policy allows the promotion;
-- independent evidence confirms the fact and an explicit policy allows that path.
-
-The first collaborative release requires approval for project promotion by default. Automatic sharing is a later opt-in policy, and only applies when identity, source visibility, sensitivity, evidence quality, membership, and destination policy all pass. Ambiguity fails closed into a private candidate or review exception.
-
-Every promoted or shared memory keeps:
-
-- source event IDs;
-- contributing actors and devices;
-- source scope and destination scope;
-- the policy or person that authorized the transition;
-- freshness, confidence, and conflict state;
-- the reason the item was promoted or shared.
+Summaries mixing personal captures or different projects stay personal rather than broadening the source visibility. Import restores personal records, never project/global publication. A personal export excludes project and global memory records and is not a server backup.
 
 ## Correction, forget, and deletion
 
@@ -94,7 +75,7 @@ Every promoted or shared memory keeps:
 - **Forget** removes an item from normal retrieval and records a tombstone or equivalent suppression state.
 - **Delete** uses the same tombstone as forget. The stored record and export copy stay. The audit action `memory_delete_retained` records that the delete was retained. Delete does not purge other devices. Offline purge remains open.
 - **Revoke** stops future access for the affected device, actor, or membership and records whether cached clients acknowledged the purge instruction.
-- A correction or forget action by the owner must outrank an automated relevance or promotion suggestion.
+- A correction or forget action by the owner must outrank an automated relevance suggestion.
 
 ## Viewer behavior
 
@@ -105,7 +86,7 @@ The viewer is not a manual memory-management application. It should show:
 - the source trail and scope;
 - uncertain, stale, conflicting, sensitive, or failed items;
 - sync and provider health;
-- the small set of actions that require a person: correct, forget, export, promote, share, or revoke.
+- the small set of actions that require a person: correct, forget, export, or revoke.
 
 The normal path is automatic. The UI is for inspection and exceptions.
 

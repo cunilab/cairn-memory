@@ -263,7 +263,6 @@ fn scenario(url: &str, label: &str) {
         ended["context"]["repository"],
         "example.test/acme/cairn-demo"
     );
-    let memory_id = ended["memory_id"].as_str().unwrap();
     let context = agent.json(&[
         "context",
         "cache decision",
@@ -271,16 +270,11 @@ fn scenario(url: &str, label: &str) {
         "example.test/acme/cairn-demo",
     ]);
     assert!(context.to_string().contains("cache decision"));
-    let lesson = agent.json(&["lesson", "Keep device tokens out of logs."]);
-    assert_eq!(lesson["kind"], "lesson");
+    let lesson = agent.json(&["lesson", r#"{"scope":"personal","title":"Credential handling","summary":"Keep device tokens out of logs.","reason":"Avoid exposure","kind":"gotcha","fix":"redact"}"#]);
+    assert_eq!(lesson["kind"], "gotcha");
 
-    // Promote, share with another account's agent, revoke.
-    let promoted = agent.json(&[
-        "promote",
-        &project_id,
-        memory_id,
-        "Confirmed by the agent flow test",
-    ]);
+    let record = json!({"scope":"project","kind":"decision","title":"repository cache decision","summary":"Ready for the project","reason":"Agent flow verification","context":{"project_id":project_id,"repository":"example.test/acme/cairn-demo"}}).to_string();
+    let promoted = agent.json(&["save", &record]);
     assert_eq!(promoted["scope"], "project");
     let promoted_id = promoted["memory_id"].as_str().unwrap().to_owned();
     // Membership comes from the committed project file: the owner runs `cairn init` in the
@@ -436,7 +430,7 @@ fn scenario(url: &str, label: &str) {
         .iter()
         .map(|memory| memory["memory_id"].clone())
         .collect();
-    assert_eq!(ids, [json!(promoted_id)]);
+    assert!(ids.contains(&json!(promoted_id)));
     assert!(!shared.to_string().contains(&private_id));
     assert_eq!(
         agent
@@ -444,7 +438,7 @@ fn scenario(url: &str, label: &str) {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
 
     // The member's device cannot act as the owner.
@@ -506,7 +500,7 @@ fn scenario(url: &str, label: &str) {
         listed["structuredContent"][0]["project_id"],
         project_id.as_str()
     );
-    let missing = mcp.tool("memory_promote", json!({"projectId": project_id}));
+    let missing = mcp.tool("memory_save", json!({"scope":"project"}));
     assert_eq!(missing["isError"], true);
     assert!(!listed.to_string().contains(&owner_token));
     drop(mcp);
@@ -741,8 +735,9 @@ fn help_and_flag_errors_never_make_a_request() {
         "correct",
         "project-register",
         "project-list",
-        "promote",
-        "promote-preview",
+        "save",
+        "memories",
+        "memory",
         "project-members",
         "project-verify",
         "project-memories",

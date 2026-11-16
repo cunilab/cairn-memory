@@ -161,7 +161,7 @@ fn account_search_limits_owned_matches_and_hides_foreign_contradiction_ids()
     let limit_one = store.search_for_account(&owner.token, "ranktoken", 1, &filter)?;
     assert_eq!(limit_one.len(), 1);
     assert_eq!(limit_one[0].memory_id, owned_early.memory_id);
-    assert_eq!(limit_one[0].score, 1.0);
+    assert_eq!(limit_one[0].score, 4.0);
     assert!(!limit_one[0].content.contains("foreignmarker"));
     assert!(!limit_one[0].content.contains("unownedmarker"));
 
@@ -357,8 +357,8 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     )?;
     let owner_handoff = store.end_session_for_account(&owner.token, "handoff-topic")?;
     let member_handoff = store.end_session_for_account(&member.token, "handoff-topic")?;
-    assert_eq!(owner_handoff.scope, MemoryScope::Session);
-    assert_eq!(member_handoff.scope, MemoryScope::Session);
+    assert_eq!(owner_handoff.scope, MemoryScope::Personal);
+    assert_eq!(member_handoff.scope, MemoryScope::Personal);
     assert_eq!(owner_handoff.session_id, member_handoff.session_id);
 
     store.start_session_for_account(&owner.token, "branch-neg", branch.clone())?;
@@ -391,8 +391,8 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     let owner_neg = store.end_session_for_account(&owner.token, "branch-neg")?;
     let owner_pos = store.end_session_for_account(&owner.token, "branch-pos")?;
     let member_branch = store.end_session_for_account(&member.token, "branch-neg")?;
-    assert_eq!(owner_neg.scope, MemoryScope::Branch);
-    assert_eq!(owner_pos.scope, MemoryScope::Branch);
+    assert_eq!(owner_neg.scope, MemoryScope::Personal);
+    assert_eq!(owner_pos.scope, MemoryScope::Personal);
 
     let hides_foreign = |pack: &ContextPack| {
         let json = serde_json::to_string(pack).expect("pack json");
@@ -891,9 +891,9 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
         WorkContext::default(),
     )?;
 
-    assert_eq!(project.scope, MemoryScope::Project);
-    assert_eq!(branch.scope, MemoryScope::Worktree);
-    assert_eq!(global.scope, MemoryScope::Global);
+    assert_eq!(project.scope, MemoryScope::Personal);
+    assert_eq!(branch.scope, MemoryScope::Personal);
+    assert_eq!(global.scope, MemoryScope::Personal);
 
     let main_filter = RecallFilter {
         session_id: None,
@@ -906,7 +906,7 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
         .collect();
     assert!(main_ids.contains(project.memory_id.as_str()));
     assert!(main_ids.contains(global.memory_id.as_str()));
-    assert!(!main_ids.contains(branch.memory_id.as_str()));
+    assert!(main_ids.contains(branch.memory_id.as_str()));
 
     let branch_filter = RecallFilter {
         session_id: None,

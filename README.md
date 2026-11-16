@@ -88,20 +88,18 @@ rejected before any request. See the [project contract](docs/contracts/project-l
 Repositories without the file create no project: captures remain private personal
 repository memory. Broken/unknown files warn while personal capture continues.
 
-Every live published project decision is visible to every member in the console,
-REST, CLI, MCP and normal agent recall. Members can promote their own live memories
-after a full preview; secret-marked sources cannot be promoted. The source stays
-private and later source correction/forget does not change the published copy.
-Authors and the current owner can verify, correct and delete decisions, with
-attribution. Owners and admins can transfer ownership to an existing member.
-There are no selective grants, share policies, dismissals or team spaces.
+Memories have three explicit scopes: **project** (all members, including initialized-repository captures and summaries), **personal** (private behaviour and preferences), and **global** (all server users; author/admin edits). There is no personal-per-repository scope or promote step. Redaction runs before storage; project members can read raw captures.
 
-Personal memory without repository context is global (preferences, habits, lessons,
-working style); repository/branch/worktree memory stays private to the person.
-Recall ranks eligible personal memories and that project's decisions together,
-with `source: personal | project`; project matching uses its ID. A renamed remote
-keeps project-tagged sources promotable and decisions discoverable by that ID. Decisions are read
-online, outside personal sync/export. Imports restore personal memory only.
+Agents save a structured record with required title, summary, reason and scope:
+
+```sh
+cairn save '{"scope":"personal","kind":"preference","title":"Concise answers","summary":"Use short paragraphs.","reason":"Reduce reading time.","preference":"concise"}'
+# Or pipe one JSON record to cairn save / cairn lesson.
+cairn memories
+cairn memory memory-id
+```
+
+Common fields and typed decision/rule/gotcha/procedure/fact/preference fields are available through CLI, MCP and REST, and visible in the console's Memories list/detail. See [the record contract](docs/contracts/project-layer4.md#memory-scopes-and-record). Existing lexical recall searches title, summary, details and reason; later ADR 0014 stages are still planned. Project owners/admins can transfer ownership to a member. Project identity and shared records are read online; personal export/import is not a project backup. Development stores require a reset for this pre-release schema.
 
 **Joining trusts possession of the project ID.** Any admin-created account on the
 configured server with a copied/leaked ID can join permanently, read all decisions

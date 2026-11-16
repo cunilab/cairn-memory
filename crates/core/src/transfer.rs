@@ -61,7 +61,8 @@ impl MemoryStore {
             .iter()
             .filter(|memory| {
                 person_id.is_none_or(|person_id| {
-                    memory.published_by.is_none()
+                    memory.scope == crate::MemoryScope::Personal
+                        && memory.published_by.is_none()
                         && self.memory_owned_by(&memory.memory_id, person_id)
                 })
             })
@@ -141,9 +142,12 @@ impl MemoryStore {
             }
         }
         for memory in &mut bundle.memories {
+            memory.fields.author = Some(person_id.clone());
             memory.published_by = None;
-            memory.changed_by = None;
-            memory.changed_at = None;
+            memory.scope = crate::MemoryScope::Personal;
+            if memory.changed_by.is_some() {
+                memory.changed_by = Some(person_id.clone());
+            }
             memory.project_id = None;
             memory.promoted_from = None;
             memory.promotion_reason = None;
@@ -318,6 +322,7 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
         session.context = redact_work_context(&session.context);
     }
     for observation in &mut bundle.observations {
+        observation.scope = crate::MemoryScope::Personal;
         if observation.event_id.trim().is_empty() || observation.session_id.trim().is_empty() {
             return Err(StoreError::Validation(
                 "export observation ids must not be empty".to_owned(),
@@ -335,8 +340,7 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
     }
     for memory in &mut bundle.memories {
         memory.published_by = None;
-        memory.changed_by = None;
-        memory.changed_at = None;
+        memory.scope = crate::MemoryScope::Personal;
         memory.project_id = None;
         memory.promoted_from = None;
         memory.promotion_reason = None;

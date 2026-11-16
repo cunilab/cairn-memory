@@ -1,28 +1,46 @@
 ---
 id: CM-CONTRACT-009
-title: "Layer 4 Project Registration and Promotion"
+title: "Memory Scopes and Project Registration"
 status: proposed
 ---
 
-# Layer 4 Project Registration and Promotion
+# Memory Scopes and Project Registration
 
-The model and trust decision are [ADR 0013](../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
-This is the current contract for both file and PostgreSQL stores.
+The current scope and record contract is [ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md), items 0 and 7. Project identity and governance retain [ADR 0013](../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+Both file and PostgreSQL adapters implement this contract. Pre-release stores must be reset; no legacy data compatibility is supported.
 
-## Personal and project boundaries
+## Memory scopes and record
 
-Personal memory without repository context has `scope: global`; explicit
-remember/lesson save without `context.repository` puts it there. A repository,
-branch or worktree context gives private repository continuity. A project tag
-never publishes a capture, summary or imported row. Only an explicit publication
-transition sets `published_by`. Secret-marked memories cannot be published.
+| `scope` | Visibility | Mutation |
+| --- | --- | --- |
+| `project` | All members of `context.project_id`, including raw captures and summaries | Author or current project owner |
+| `personal` | Only the author; personal behaviour, habits and preferences | Author |
+| `global` | Every authenticated user on this server | Author or administrator |
 
-Recall in a checkout combines eligible global personal memory, that repository's
-personal continuity and that initialized project's decisions in one relevance
-ranking. Repository-only queries include private branch/worktree captures; explicit
-branch/worktree filters narrow personal continuity. Published decisions
-match `context.project_id`, not repository name, and carry `source: project`;
-personal results carry `source: personal`. Resume/unresolved remain personal.
+`personal` means personal behaviour, never personal-per-repository memory.
+Agents explicitly supply scope on `POST /cairn-memory/remember` (`memory_save`, CLI `save` or `lesson`).
+A project save requires membership and `context.project_id`. Personal and global notes follow the person/server regardless of repository context; `context` retains provenance and optional `applies_to` records applicability.
+Captures carrying a valid initialized project ID are stored as project records (`kind: capture`), with summaries also project-visible. There is no publication or promotion step.
+Redaction applies before storage to common fields, typed fields, context and captures. Shared captures are readable after redaction even when classified sensitive or secret; redaction is best effort.
+
+Required on explicit save: nonblank `title`, `summary`, `reason`, plus `scope`.
+Missing fields return a validation error naming the field. Fields are flat snake_case:
+
+- Common: `title`, `summary`, optional `details`, `reason`, `applies_to`, `evidence`, `tags`, `entities`, `status` (`active`, `stale`, `superseded`), `supersedes`, `pinned`, `importance` (0–100; also reflected in the existing lifecycle object), server-assigned `author`, `created_at`, `changed_by`, `changed_at`.
+- `decision`: `decision_context`, `alternatives`, `consequences`. `context` remains the structured work context; `decision_context` is the decision's rationale context.
+- `rule`: `rule`, `exceptions`.
+- `gotcha`: `symptom`, `cause`, `fix`.
+- `procedure`: ordered `steps`, `when`.
+- `fact`: `statement`, `source`.
+- `preference` (personal only): `preference`, `example`.
+
+`alternatives`, `steps`, `applies_to`, `evidence`, `tags`, `entities` are string arrays. Other typed fields are optional strings. `kind` defaults to `explicit`; all typed fields are optional. Capture/session records may omit agent-authored rationale. `content` remains a derived lexical body including title, summary, details and reason. Title matches have the highest lexical weight in both stores. Recall stays lexical in this stage, with `source: project | personal | global`; no embeddings or distillation are added.
+
+```json
+{"scope":"project","kind":"decision","title":"Serialize writes","summary":"Use a transaction for memory updates.","reason":"Prevent concurrent updates from losing data.","context":{"project_id":"project-…"},"decision_context":"Multiple agents write concurrently","alternatives":["independent writes"],"consequences":"short lock duration","evidence":["cargo test"],"pinned":true}
+```
+
+`GET /cairn-memory/memories` lists all live records the caller may read; `GET /cairn-memory/memories/{id}` returns every field of a readable record. The console Memories page shows title, summary and scope; its detail sheet shows the full record. Project lists use the same record shape.
 
 ## Init and membership
 
@@ -74,54 +92,30 @@ The next capture or duplicate replay retries attachment. Broken/unreadable files
 warn on CLI/hook stderr. Init refuses a broken file instead of overwriting it.
 
 Possession of an ID is enough to join: no SCM proof, invite or member removal.
-Any account on that server with the ID can read all decisions and the email roster.
+Any account on that server with the ID can read all project records and the email roster.
 Removing the file or Git access does not remove membership; see the ADR's risk.
 
 ## Read surfaces
 
 | Route under `/cairn-memory/` | Result |
 | --- | --- |
+| `GET memories`, `GET memories/{id}` | All readable live records, or one full record |
 | `GET projects` | The caller's projects and owner/member roles |
-| `GET projects/{id}/memories` | One role-neutral live decision list |
-| `GET projects/{id}/personal-memories` | The caller's live private repository memories |
+| `GET projects/{id}/memories` | All live project notes, captures and summaries |
 | `GET projects/{id}/members` | Owner first, then members, with emails |
-| `GET projects/{id}/conflicts` | Conflicts among the common live decision list |
-| `POST projects/{id}/maintenance` | Common live decisions, with current-commit freshness |
+| `GET projects/{id}/conflicts` | Conflicts among live project memories |
+| `POST projects/{id}/maintenance` | Live memories with current-commit freshness |
 | `GET projects/{id}/freshness` | Owner-only verification history |
 
-Forgotten, expired, secret and superseded decisions are excluded from live lists,
-recall and maintenance. Private source corrections never suppress a publication.
-A live project correction suppresses its predecessor; deleting that successor may
-reveal the predecessor again. No ownerless legacy project is supported.
-
-## Promotion and preview
-
-`POST promote` takes `projectId`, `memoryId`, `reason`, optional `dryRun: true`.
-Any member may promote their own live repository memory, matching either the
-canonical locator or its committed project ID after a remote rename. Other
-people's memories, global preferences, secret, expired, forgotten and superseded
-sources are refused.
-The full copy includes content, lifecycle, evidence/context lists, next steps and
-unresolved work. It clears private event/session provenance and branch/worktree
-fields, retains verification evidence, records `published_by` and the actor,
-and leaves the private source unchanged. Repeated live publication is idempotent.
-
-Dry run validates the same transition and returns the full copied payload without
-writing, plus `previewFingerprint`. Echo that fingerprint on promotion to refuse
-a changed source with `409` and request a new preview. The console always does so.
-A merge preview may supply its selected `commit`; merge accepts the same precondition. Request-generated identifiers/timestamps are allocated per request. Web
-publication requires this full preview; CLI offers `promote-preview`, and MCP
-`memory_promote` accepts `dryRun`. A correction's explicit later publication links
-to the earlier published copy rather than to a private source ID.
+Forgotten, expired and superseded records are excluded from normal reads.
+A live successor hides its predecessor within its scope and project; deletion of the successor can reveal the predecessor.
 
 ## Changes and governance
 
 The author and current owner may call `POST projects/verify` with
 `projectId`, `memoryId`, `commit`, `POST correct` with `targetId`, `content`, or
-`POST delete` with `id`. Other members read only. Project corrections remain
-project-visible, retain original `published_by`, and record `changed_by` and
-`changed_at`. Delete is retained and never cascades into private sources.
-Personal source correction, expiry and forget do not change published decisions.
+`POST delete` with `id`. Other members read only. Project corrections remain project-visible and retain their author. Global corrections keep global scope and require the author or administrator. Delete is retained.
+Corrections retain typed fields and author attribution, and record the actor.
 
 `POST projects/{id}/ownership` takes `{"personId":"person-…"}`. The owner's or
 admin's web session may transfer to an existing member, with an audit event.
@@ -157,9 +151,7 @@ command (the server's unchanged-name path adds no duplicate audit).
 Branches and worktrees are registered/listed at `projects/{id}/branches` and
 `projects/{id}/worktrees`, scoped to the caller. Identical names for two people
 are independent. `branches/{branch}/close` takes `reason`; `branches/{branch}/merge`
-takes `memoryId`, `commit`, `reason`. "Record merge" publishes the caller's selected
-branch evidence and records only their branch/worktrees, with a preview in the
-console. Devices can record merges regardless of the project's member count.
+takes `memoryId`, `commit`, `reason`. "Record merge" references and verifies the caller's existing project-scoped branch evidence and records only their branch/worktrees. It creates no copy. Devices can record merges regardless of the project's member count.
 Closed branches cannot be merged; merged branches cannot be closed. Repeat merges
 are idempotent for the same source/commit. Evidence entities remain available via
 `projects/{id}/entities`; they do not turn private memory into a publication.
@@ -168,10 +160,8 @@ are idempotent for the same source/commit. Evidence entities remain available vi
 
 `team`, `shares`, `shares/{memory}/revoke`, `shared`, `policy`, `share-candidates`,
 `share-candidates/{memory}/dismiss`, and `revocations` under a project are removed,
-including CLI/MCP equivalents. The member roster replaces team spaces. The embedded
+including CLI/MCP equivalents. `promote`, `promote-preview`, `memory_promote` and `projects/{id}/personal-memories` are also removed (HTTP 404/405); they have no replacement publication step. The member roster replaces team spaces. The embedded
 viewer has no project actions and directs users to the web console.
 
 Decisions are read online. Personal sync is not a project decision feed, and personal
-export does not back up projects, roster or governance. Import strips publication
-attribution and links and brings rows in as personal memory; publication requires
-an explicit new promotion. Development stores require no old-data migration.
+export does not back up projects, roster or governance. Import strips project association and brings rows in as personal memory. Development stores require no old-data migration.

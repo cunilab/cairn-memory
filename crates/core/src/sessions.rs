@@ -319,6 +319,20 @@ impl MemoryStore {
             &session.context,
             &observations,
         )?;
+        if memory.project_id.as_deref().is_some_and(|id| {
+            person_id.as_deref().is_none_or(|person| {
+                self.project_owner_id(id).as_deref() != Some(person)
+                    && !self
+                        .state
+                        .project_members
+                        .iter()
+                        .any(|m| m.project_id == id && m.member_person_id == person)
+            })
+        }) {
+            memory.scope = MemoryScope::Personal;
+            memory.project_id = None;
+            memory.published_by = None;
+        }
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
         }
@@ -456,15 +470,7 @@ pub(crate) fn keeps_expired_source(memory: &Memory) -> bool {
     if memory.lifecycle.retention != Retention::Durable || is_expired(&memory.lifecycle) {
         return false;
     }
-    matches!(
-        memory.kind,
-        MemoryKind::Explicit
-            | MemoryKind::Lesson
-            | MemoryKind::Correction
-            | MemoryKind::Decision
-            | MemoryKind::SessionSummary
-    ) || memory.project_id.is_some()
-        || memory.scope == MemoryScope::Project
+    true
 }
 
 pub fn derive_session_memory(
@@ -485,6 +491,12 @@ pub fn derive_session_memory(
     }
     let digest = build_session_digest(observations);
     let mut memory = Memory {
+        fields: crate::MemoryFields {
+            title: format!("Session {session_id}"),
+            summary: digest.content.clone(),
+            author: person_id.map(str::to_owned),
+            ..Default::default()
+        },
         memory_id: session_memory_id(person_id, session_id),
         session_id: session_id.to_owned(),
         content: digest.content,
@@ -496,18 +508,36 @@ pub fn derive_session_memory(
         lifecycle: Lifecycle::durable_from(observations),
         kind: MemoryKind::SessionSummary,
         scope: session_scope(session_context),
-        project_id: None,
+        project_id: session_context.project_id.clone(),
         next_steps: digest.next_steps,
         unresolved_work: digest.unresolved_work,
         supersedes: None,
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,
-        published_by: None,
+        published_by: session_context
+            .project_id
+            .as_ref()
+            .and(person_id)
+            .map(str::to_owned),
         changed_by: None,
         changed_at: None,
         created_at: timestamp(),
     };
+    memory.project_id = memory.context.project_id.clone().filter(|id| {
+        observations
+            .iter()
+            .all(|o| o.scope == MemoryScope::Project && o.context.project_id.as_ref() == Some(id))
+    });
+    memory.scope = if memory.project_id.is_some() {
+        MemoryScope::Project
+    } else {
+        MemoryScope::Personal
+    };
+    memory.published_by = memory.project_id.as_ref().and(person_id).map(str::to_owned);
+    memory.fields.importance = Some(memory.lifecycle.importance);
+    memory.changed_by = person_id.map(str::to_owned);
+    memory.changed_at = Some(memory.created_at.clone());
     redact_memory_metadata(&mut memory);
     Ok(memory)
 }
@@ -552,6 +582,10 @@ fn merge_context(observations: &[Observation]) -> WorkContext {
     let mut context = WorkContext::default();
     for observation in observations {
         let source = &observation.context;
+        context.project_id = context
+            .project_id
+            .clone()
+            .or_else(|| source.project_id.clone());
         context.repository = context
             .repository
             .clone()
@@ -581,22 +615,15 @@ fn merge_context_items(target: &mut Vec<String>, source: &[String]) {
 }
 
 fn session_scope(context: &WorkContext) -> MemoryScope {
-    if context.repository.is_some() && context.branch.is_some() && context.worktree.is_some() {
-        MemoryScope::Worktree
-    } else if context.repository.is_some() && context.branch.is_some() {
-        MemoryScope::Branch
-    } else if context.repository.is_some() {
+    if context.project_id.is_some() {
         MemoryScope::Project
     } else {
-        MemoryScope::Session
+        MemoryScope::Personal
     }
 }
 
 pub(crate) fn memory_scope(context: &WorkContext) -> MemoryScope {
-    match session_scope(context) {
-        MemoryScope::Session => MemoryScope::Global,
-        scope => scope,
-    }
+    session_scope(context)
 }
 
 #[cfg(test)]

@@ -284,10 +284,17 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        for expected in ["memory_observe", "memory_recall", "memory_promote"] {
+        for expected in [
+            "memory_observe",
+            "memory_recall",
+            "memory_save",
+            "memory_get",
+            "memory_list",
+        ] {
             assert!(names.contains(&expected), "{expected}");
         }
         for removed in [
+            "memory_promote",
             "memory_account_bootstrap",
             "memory_account_register",
             "memory_project_invite",
@@ -310,7 +317,7 @@ mod tests {
             missing["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("content")
+                .contains("scope")
         );
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));

@@ -12,9 +12,9 @@ use cairn_core::{
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson,
     ProjectWorktree, RecallFilter, RecallResult, Session, SyncDeletion, SyncDiagnostics, SyncEvent,
     SyncPullResult, SyncPushResult, WorkContext, build_context_pack, build_explicit_memory_record,
-    build_project_decision, carry_summary_state, competing_project_memories, derive_session_memory,
-    memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
-    now_seconds, prefer_newer_contradiction, publication_fingerprint, random_token, recall_result,
+    carry_summary_state, competing_project_memories, derive_session_memory, memory_matches_filter,
+    normalize_email, normalize_export_bundle, normalize_observation, now_seconds,
+    prefer_newer_contradiction, publication_fingerprint, random_token, recall_result,
     redact_sensitive_content, redact_work_context, sensitivity_including_context,
     session_memory_id, validate_password, why_changed_priority,
 };
@@ -676,6 +676,45 @@ impl PostgresStore {
         session_from_row(&row)
     }
 
+    pub async fn save(
+        &self,
+        token: &str,
+        input: cairn_core::SaveMemoryInput,
+    ) -> Result<Memory, PostgresError> {
+        let account = self.authenticate_account(token).await?;
+        let memory = cairn_core::build_saved_memory(input, &account.person_id)?;
+        let mut tx = self.pool.begin().await?;
+        if let Some(id) = memory.project_id.as_deref() {
+            sqlx::query("SELECT project_id FROM cairn_projects WHERE project_id = $1 FOR SHARE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            self.require_project_reader(&account.person_id, id).await?;
+        }
+        if let Some(id) = memory.supersedes.as_deref() {
+            let target = editable_memory_tx(&mut tx, &account.person_id, id)
+                .await?
+                .ok_or_else(|| PostgresError::Validation("unknown supersedes memory".to_owned()))?
+                .0;
+            if target.scope != memory.scope || target.project_id != memory.project_id {
+                return Err(PostgresError::Validation(
+                    "supersedes must stay in the same scope and project".to_owned(),
+                ));
+            }
+        }
+        insert_memory(&mut tx, &account.person_id, &memory).await?;
+        if let Some(id) = memory.project_id.as_deref() {
+            index_project_memory_tx(&mut tx, &account.person_id, id, &memory).await?;
+        }
+        tx.commit().await?;
+        Ok(memory)
+    }
+
+    pub async fn memories(&self, token: &str) -> Result<Vec<Memory>, PostgresError> {
+        let account = self.authenticate_account(token).await?;
+        self.all_memories_for_person(&account.person_id).await
+    }
+
     pub async fn remember_with_kind(
         &self,
         account_token: &str,
@@ -686,7 +725,8 @@ impl PostgresStore {
         kind: MemoryKind,
     ) -> Result<Memory, PostgresError> {
         let account = self.authenticate_account(account_token).await?;
-        let memory = build_explicit_memory_record(content, concepts, context, lifecycle, kind)?;
+        let mut memory = build_explicit_memory_record(content, concepts, context, lifecycle, kind)?;
+        memory.fields.author = Some(account.person_id.clone());
         let mut transaction = self.pool.begin().await?;
         insert_memory(&mut transaction, &account.person_id, &memory).await?;
         transaction.commit().await?;
@@ -831,6 +871,14 @@ impl PostgresStore {
         }
         let mut memory =
             derive_session_memory(Some(person_id), session_id, &session.context, &observations)?;
+        if let Some(id) = memory.project_id.as_deref() {
+            let member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cairn_projects p WHERE p.project_id = $1 AND (p.person_id = $2 OR EXISTS (SELECT 1 FROM cairn_project_members pm WHERE pm.project_id = p.project_id AND pm.member_person_id = $2)))").bind(id).bind(person_id).fetch_one(&mut *transaction).await?;
+            if !member {
+                memory.scope = MemoryScope::Personal;
+                memory.project_id = None;
+                memory.published_by = None;
+            }
+        }
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
         }
@@ -1017,7 +1065,7 @@ impl PostgresStore {
         let mut transaction = self.pool.begin().await?;
         if let Some((memory, original_person)) =
             editable_memory_tx(&mut transaction, &account.person_id, item_id).await?
-            && memory.published_by.is_some()
+            && (memory.published_by.is_some() || memory.scope == MemoryScope::Global)
         {
             insert_forget(&mut transaction, &original_person, item_id).await?;
             sqlx::query("UPDATE cairn_memories SET changed_by = $1, changed_at = $2 WHERE person_id = $3 AND memory_id = $4").bind(&account.person_id).bind(now_seconds().to_string()).bind(&original_person).bind(item_id).execute(&mut *transaction).await?;
@@ -1313,7 +1361,7 @@ impl PostgresStore {
         let target = editable_memory_tx(&mut tx, &account.person_id, target_id).await?;
         let person_id;
         if let Some((memory, original_person)) = target {
-            if memory.published_by.is_some() || context == WorkContext::default() {
+            {
                 replacement.context = memory.context;
                 replacement.scope = memory.scope;
                 replacement.lifecycle.sensitivity = sensitivity_including_context(
@@ -1321,6 +1369,20 @@ impl PostgresStore {
                     &replacement.context,
                 );
             }
+            replacement.fields = memory.fields;
+            if replacement.fields.reason.trim().is_empty() {
+                replacement.fields.title = redact_sensitive_content(content)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect();
+            }
+            replacement.fields.summary = cairn_core::redact_sensitive_content(content);
+            replacement.fields.details = Some(cairn_core::redact_sensitive_content(content));
+            replacement.changed_by = Some(account.person_id.clone());
+            replacement.changed_at = Some(now_seconds().to_string());
             replacement.project_id = memory.project_id;
             replacement.published_by = memory.published_by;
             person_id = original_person;
@@ -1343,11 +1405,6 @@ impl PostgresStore {
             person_id = account.person_id.clone();
         }
         if replacement.published_by.is_some() {
-            if replacement.lifecycle.sensitivity == cairn_core::Sensitivity::Secret {
-                return Err(PostgresError::Validation(
-                    "secret memories cannot be published".to_owned(),
-                ));
-            }
             replacement.changed_by = Some(account.person_id.clone());
             replacement.changed_at = Some(now_seconds().to_string());
             replacement.source_event_ids.clear();
@@ -1898,7 +1955,7 @@ impl PostgresStore {
                         .await?
                 {
                     let memory = memory_from_row(&row)?;
-                    if memory.promoted_from.as_deref() == Some(memory_id) {
+                    if memory.memory_id == memory_id {
                         transaction.commit().await?;
                         return Ok(ProjectMergeResult { branch, memory });
                     }
@@ -1915,7 +1972,7 @@ impl PostgresStore {
         }
 
         let source_query = format!(
-            "{} WHERE m.person_id = $1 AND m.memory_id = $2 AND m.published_by IS NULL AND {} AND {} FOR UPDATE",
+            "{} WHERE m.person_id = $1 AND m.memory_id = $2 AND m.scope = 'project' AND {} AND {} FOR UPDATE",
             memory_select_sql(),
             live_memory_sql(),
             not_superseded_by_live_memory_sql(false)
@@ -1957,41 +2014,15 @@ impl PostgresStore {
                 .is_some_and(|expires_at| expires_at <= now_seconds())
         {
             return Err(PostgresError::Validation(
-                "forgotten or expired memories cannot be promoted".to_owned(),
+                "forgotten or expired memories cannot be selected for merge".to_owned(),
             ));
         }
-        if source.lifecycle.sensitivity == cairn_core::Sensitivity::Secret {
+        if source.project_id.as_deref() != Some(project_id) {
             return Err(PostgresError::Validation(
-                "secret memories cannot be promoted".to_owned(),
+                "merge requires an existing project-scoped memory".to_owned(),
             ));
         }
-
-        let duplicate_query = format!(
-            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND {}",
-            memory_select_sql(),
-            live_memory_sql()
-        );
-        let existing = sqlx::query(&duplicate_query)
-            .bind(&account.person_id)
-            .bind(project_id)
-            .bind(memory_id)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        let mut promoted = if let Some(row) = existing {
-            memory_from_row(&row)?
-        } else {
-            let mut promoted =
-                build_project_decision(source, &project, &account.person_id, reason)?;
-            promoted.supersedes = prior_project_copy(
-                &mut transaction,
-                &account.person_id,
-                project_id,
-                promoted.supersedes.as_deref(),
-            )
-            .await?;
-            insert_memory(&mut transaction, &account.person_id, &promoted).await?;
-            promoted
-        };
+        let mut promoted = source;
         let previous_commit = promoted.verified_commit.clone();
         promoted.verified_commit = Some(commit.to_owned());
         promoted.lifecycle.freshness = 100;
@@ -2179,7 +2210,7 @@ impl PostgresStore {
         self.require_project_reader(&account.person_id, project_id)
             .await?;
         let query = format!(
-            "{} WHERE m.project_id = $1 AND m.published_by IS NOT NULL AND m.lifecycle->>'sensitivity' <> 'secret' AND {} AND {} ORDER BY m.created_at DESC, m.memory_id",
+            "{} WHERE m.project_id = $1 AND m.scope = 'project' AND {} AND {} ORDER BY m.created_at DESC, m.memory_id",
             memory_select_sql(),
             live_memory_sql(),
             not_superseded_by_live_memory_sql(true)
@@ -2316,166 +2347,6 @@ impl PostgresStore {
         Ok(())
     }
 
-    pub async fn personal_project_memories(
-        &self,
-        token: &str,
-        project_id: &str,
-    ) -> Result<Vec<Memory>, PostgresError> {
-        let account = self.authenticate_account(token).await?;
-        self.require_project_reader(&account.person_id, project_id)
-            .await?;
-        let project = self
-            .projects(token)
-            .await?
-            .into_iter()
-            .find(|p| p.project_id == project_id)
-            .ok_or_else(|| PostgresError::Validation("unknown project".to_owned()))?;
-        Ok(self
-            .all_memories_for_person(&account.person_id)
-            .await?
-            .into_iter()
-            .filter(|m| {
-                m.published_by.is_none()
-                    && (m.context.project_id.as_deref() == Some(project_id)
-                        || m.context.repository.as_deref() == Some(project.repository.as_str()))
-            })
-            .collect())
-    }
-
-    pub async fn preview_promotion(
-        &self,
-        token: &str,
-        project_id: &str,
-        memory_id: &str,
-        reason: &str,
-    ) -> Result<Memory, PostgresError> {
-        let account = self.authenticate_account(token).await?;
-        self.require_project_reader(&account.person_id, project_id)
-            .await?;
-        let project = self
-            .projects(token)
-            .await?
-            .into_iter()
-            .find(|p| p.project_id == project_id)
-            .ok_or_else(|| PostgresError::Validation("unknown project".to_owned()))?;
-        let source = self
-            .all_memories_for_person(&account.person_id)
-            .await?
-            .into_iter()
-            .find(|m| m.memory_id == memory_id && m.published_by.is_none())
-            .ok_or_else(|| PostgresError::Validation("unknown live personal memory".to_owned()))?;
-        let mut decision = build_project_decision(source, &project, &account.person_id, reason)?;
-        let mut tx = self.pool.begin().await?;
-        decision.supersedes = prior_project_copy(
-            &mut tx,
-            &account.person_id,
-            project_id,
-            decision.supersedes.as_deref(),
-        )
-        .await?;
-        decision.promoted_from = None;
-        Ok(decision)
-    }
-
-    pub async fn promote_memory(
-        &self,
-        token: &str,
-        project_id: &str,
-        memory_id: &str,
-        reason: &str,
-    ) -> Result<Memory, PostgresError> {
-        self.promote_memory_checked(token, project_id, memory_id, reason, None)
-            .await
-    }
-
-    pub async fn promote_memory_checked(
-        &self,
-        token: &str,
-        project_id: &str,
-        memory_id: &str,
-        reason: &str,
-        expected_preview: Option<&str>,
-    ) -> Result<Memory, PostgresError> {
-        let account = self.authenticate_account(token).await?;
-        self.require_project_reader(&account.person_id, project_id)
-            .await?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('cairn-promote:' || $1 || ':' || $2, 0))").bind(project_id).bind(memory_id).execute(&mut *tx).await?;
-        let project_row = sqlx::query("SELECT project_id, repository, name, default_branch, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at, EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at FROM cairn_projects WHERE project_id = $1 FOR SHARE").bind(project_id).fetch_one(&mut *tx).await?;
-        let project = project_from_row(&project_row)?;
-        let query = format!(
-            "{} WHERE m.person_id = $1 AND m.memory_id = $2 AND m.published_by IS NULL AND {} AND {} FOR UPDATE",
-            memory_select_sql(),
-            live_memory_sql(),
-            not_superseded_by_live_memory_sql(false)
-        );
-        let row = sqlx::query(&query)
-            .bind(&account.person_id)
-            .bind(memory_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| PostgresError::Validation("unknown live personal memory".to_owned()))?;
-        let source = memory_from_row(&row)?;
-        let query = format!(
-            "{} WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND m.published_by IS NOT NULL AND {} AND {}",
-            memory_select_sql(),
-            live_memory_sql(),
-            not_superseded_by_live_memory_sql(true)
-        );
-        if let Some(row) = sqlx::query(&query)
-            .bind(&account.person_id)
-            .bind(project_id)
-            .bind(memory_id)
-            .fetch_optional(&mut *tx)
-            .await?
-        {
-            return memory_from_row(&row);
-        }
-        let mut decision = build_project_decision(source, &project, &account.person_id, reason)?;
-        decision.supersedes = prior_project_copy(
-            &mut tx,
-            &account.person_id,
-            project_id,
-            decision.supersedes.as_deref(),
-        )
-        .await?;
-        if let Some(expected) = expected_preview
-            && publication_fingerprint(&decision)? != expected
-        {
-            return Err(PostgresError::Conflict(
-                "publication changed; preview it again".to_owned(),
-            ));
-        }
-        insert_memory(&mut tx, &account.person_id, &decision).await?;
-        index_project_memory_tx(&mut tx, &account.person_id, project_id, &decision).await?;
-        if let Some(commit) = &decision.verified_commit {
-            insert_freshness_event_tx(
-                &mut tx,
-                &account.person_id,
-                FreshnessEventInsert {
-                    project_id,
-                    memory_id: &decision.memory_id,
-                    previous_commit: None,
-                    commit,
-                    action: "promotion",
-                    reason: Some(redact_sensitive_content(reason)),
-                },
-            )
-            .await?;
-        }
-        record_audit(
-            &mut tx,
-            &account.person_id,
-            None,
-            "memory_promote",
-            Some(memory_id),
-            serde_json::json!({"project_id": project_id, "promotion_id": decision.memory_id}),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(decision)
-    }
-
     pub async fn rename_project(
         &self,
         token: &str,
@@ -2587,11 +2458,21 @@ impl PostgresStore {
         project_id: &str,
         memory_id: &str,
         commit: Option<&str>,
-        reason: &str,
+        _reason: &str,
     ) -> Result<Memory, PostgresError> {
-        let promoted = self
-            .promote_memory(account_token, project_id, memory_id, reason)
+        let account = self.authenticate_account(account_token).await?;
+        self.require_project_reader(&account.person_id, project_id)
             .await?;
+        let promoted = self
+            .project_memories(account_token, project_id)
+            .await?
+            .into_iter()
+            .find(|m| m.memory_id == memory_id)
+            .ok_or_else(|| {
+                PostgresError::Validation(
+                    "confirmation requires an existing project memory".to_owned(),
+                )
+            })?;
         match commit.map(str::trim).filter(|value| !value.is_empty()) {
             Some(commit) => {
                 self.verify_project_memory(account_token, project_id, &promoted.memory_id, commit)
@@ -2676,7 +2557,7 @@ impl PostgresStore {
             .fetch_all(&self.pool)
             .await?;
         let memory_query = format!(
-            "{} WHERE m.person_id = $1 AND m.published_by IS NULL ORDER BY m.created_at, m.memory_id",
+            "{} WHERE m.person_id = $1 AND m.scope = 'personal' AND m.published_by IS NULL ORDER BY m.created_at, m.memory_id",
             memory_select_sql()
         );
         let memory_rows = sqlx::query(&memory_query)
@@ -2720,6 +2601,12 @@ impl PostgresStore {
     ) -> Result<ImportResult, PostgresError> {
         let account = self.authenticate_account(account_token).await?;
         normalize_export_bundle(&mut bundle)?;
+        for memory in &mut bundle.memories {
+            memory.fields.author = Some(account.person_id.clone());
+            if memory.changed_by.is_some() {
+                memory.changed_by = Some(account.person_id.clone());
+            }
+        }
         let mut transaction = self.pool.begin().await?;
         let mut result = ImportResult {
             imported_sessions: 0,
@@ -3132,9 +3019,18 @@ impl PostgresStore {
                 .auto_register_project(&account.person_id, context)
                 .await
             {
-                Ok(()) => cairn_core::ProjectAttachment {
-                    status: "attached".to_owned(),
-                    warning: None,
+                Ok(()) => match self
+                    .store_project_capture(&account.person_id, &result.observation)
+                    .await
+                {
+                    Ok(()) => cairn_core::ProjectAttachment {
+                        status: "attached".to_owned(),
+                        warning: None,
+                    },
+                    Err(error) => cairn_core::ProjectAttachment {
+                        status: "personal".to_owned(),
+                        warning: Some(error.to_string()),
+                    },
                 },
                 Err(error) => {
                     eprintln!("cairn: {error}");
@@ -3145,7 +3041,40 @@ impl PostgresStore {
                 }
             }
         });
+        result.observation.scope = if result
+            .project_attachment
+            .as_ref()
+            .is_some_and(|a| a.status == "attached")
+        {
+            MemoryScope::Project
+        } else {
+            MemoryScope::Personal
+        };
         Ok(result)
+    }
+
+    async fn store_project_capture(
+        &self,
+        person: &str,
+        observation: &Observation,
+    ) -> Result<(), PostgresError> {
+        let memory = cairn_core::capture_memory(observation, person);
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&memory.memory_id)
+            .execute(&mut *tx)
+            .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cairn_memories WHERE memory_id = $1)")
+                .bind(&memory.memory_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !exists {
+            insert_memory(&mut tx, person, &memory).await?;
+        }
+        sqlx::query("UPDATE cairn_observations SET scope = 'project' WHERE person_id = $1 AND event_id = $2 AND scope <> 'project'").bind(person).bind(&observation.event_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn sync_push_inner(
@@ -3174,8 +3103,19 @@ impl PostgresStore {
                 input.context = row.try_get::<Json<WorkContext>, _>("context")?.0;
             }
         }
-        input.context.project_id = sent_project;
-        let observation = normalize_observation(&input)?;
+        input.context.project_id = sent_project.or(input.context.project_id);
+        let mut observation = normalize_observation(&input)?;
+        if let Some(id) = observation.context.project_id.as_deref() {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM cairn_projects WHERE project_id = $1)",
+            )
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !valid {
+                observation.scope = MemoryScope::Personal;
+            }
+        }
         let lifecycle = serde_json::to_value(&observation.lifecycle)?;
         let context = serde_json::to_value(&observation.context)?;
         let event_query = sync_select_event_sql();
@@ -3582,9 +3522,9 @@ async fn insert_memory(
         "INSERT INTO cairn_memories
             (memory_id, person_id, session_id, content, source_event_ids, context,
              lifecycle, kind, scope, project_id, next_steps, unresolved_work,
-             supersedes, promoted_from, promotion_reason, verified_commit, created_at, published_by, changed_by, changed_at)
+             supersedes, promoted_from, promotion_reason, verified_commit, created_at, published_by, changed_by, changed_at, record)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                  to_timestamp($17::double precision), $18, $19, $20)",
+                  to_timestamp($17::double precision), $18, $19, $20, $21)",
     )
     .bind(&memory.memory_id)
     .bind(person_id)
@@ -3611,6 +3551,7 @@ async fn insert_memory(
     .bind(&memory.published_by)
     .bind(&memory.changed_by)
     .bind(&memory.changed_at)
+    .bind(Json(&memory.fields))
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -3843,8 +3784,9 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
     format!(
         "NOT EXISTS (
              SELECT 1 FROM cairn_memories newer
-             WHERE newer.person_id = m.person_id
-               AND newer.supersedes = m.memory_id {project_clause}
+             WHERE (newer.person_id = m.person_id OR (m.scope = 'global' AND newer.scope = 'global'))
+               AND newer.supersedes = m.memory_id AND newer.scope = m.scope
+               AND COALESCE(newer.record->>'status', 'active') <> 'superseded' {project_clause}
                AND ((m.published_by IS NULL AND newer.published_by IS NULL) OR
                     (m.published_by IS NOT NULL AND newer.published_by IS NOT NULL AND newer.project_id = m.project_id))
                AND NOT EXISTS (
@@ -3861,32 +3803,8 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
 
 /// The earlier project copy of the memory a promoted correction supersedes. The copy links
 /// to it instead of to the personal id, which a member must never see.
-async fn prior_project_copy(
-    transaction: &mut Transaction<'_, Postgres>,
-    person_id: &str,
-    project_id: &str,
-    corrected: Option<&str>,
-) -> Result<Option<String>, PostgresError> {
-    let Some(corrected) = corrected else {
-        return Ok(None);
-    };
-    Ok(sqlx::query_scalar::<_, String>(&format!(
-        "SELECT m.memory_id FROM cairn_memories m
-             WHERE m.person_id = $1 AND m.project_id = $2 AND m.promoted_from = $3 AND {}
-             ORDER BY m.created_at LIMIT 1",
-        live_memory_sql()
-    ))
-    .bind(person_id)
-    .bind(project_id)
-    .bind(corrected)
-    .fetch_optional(&mut **transaction)
-    .await?)
-}
-
-/// Predicate on an aliased memory `m`: not forgotten and not expired. A forgotten copy is a
-/// tombstone, so promoting again creates a new copy.
 fn live_memory_sql() -> &'static str {
-    "NOT EXISTS (SELECT 1 FROM cairn_forgotten_items f
+    "COALESCE(m.record->>'status', 'active') <> 'superseded' AND NOT EXISTS (SELECT 1 FROM cairn_forgotten_items f
                  WHERE f.person_id = m.person_id AND (f.item_id = m.memory_id OR f.item_id IN (SELECT jsonb_array_elements_text(m.source_event_ids))))
      AND (m.lifecycle->>'expiresAt' IS NULL OR
           (m.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)"
@@ -3920,8 +3838,8 @@ async fn editable_memory_tx(
     }
     let query = format!(
         "{} WHERE m.memory_id = $2 AND {} AND
-          (m.published_by IS NULL OR m.published_by = $1 OR EXISTS
-            (SELECT 1 FROM cairn_projects p WHERE p.project_id = m.project_id AND p.person_id = $1))
+          (m.person_id = $1 OR (m.scope = 'global' AND EXISTS (SELECT 1 FROM cairn_accounts a WHERE a.person_id = $1 AND a.is_admin)) OR
+           (m.scope = 'project' AND EXISTS (SELECT 1 FROM cairn_projects p WHERE p.project_id = m.project_id AND p.person_id = $1)))
           FOR UPDATE OF m",
         memory_select_sql(),
         recall_access_sql()
@@ -3936,14 +3854,14 @@ async fn editable_memory_tx(
 }
 
 fn recall_access_sql() -> String {
-    "((m.published_by IS NULL AND m.person_id = $1) OR
-       (m.published_by IS NOT NULL AND m.lifecycle->>'sensitivity' <> 'secret' AND EXISTS
+    "(m.scope = 'global' OR (m.scope <> 'project' AND m.person_id = $1) OR
+       (m.scope = 'project' AND EXISTS
         (SELECT 1 FROM cairn_projects p WHERE p.project_id = m.project_id AND
          (p.person_id = $1 OR EXISTS (SELECT 1 FROM cairn_project_members pm WHERE pm.project_id = p.project_id AND pm.member_person_id = $1)))))".to_owned()
 }
 
 fn memory_select_sql() -> &'static str {
-    "SELECT m.memory_id, m.person_id, m.session_id, m.content,
+    "SELECT m.record, m.memory_id, m.person_id, m.session_id, m.content,
             m.source_event_ids, m.context, m.lifecycle, m.kind, m.scope,
             m.project_id, m.next_steps, m.unresolved_work, m.supersedes,
             m.promoted_from, m.promotion_reason,
@@ -3998,7 +3916,7 @@ fn memory_search_select_sql() -> String {
 }
 
 fn memory_select_columns() -> &'static str {
-    "SELECT m.memory_id, m.person_id, m.session_id, m.content,
+    "SELECT m.record, m.memory_id, m.person_id, m.session_id, m.content,
             m.source_event_ids, m.context, m.lifecycle, m.kind, m.scope,
             m.project_id, m.next_steps, m.unresolved_work, m.supersedes,
             m.promoted_from, m.promotion_reason,
@@ -4022,6 +3940,9 @@ fn observation_select_sql() -> &'static str {
 
 fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
     Ok(Memory {
+        fields: row
+            .try_get::<Json<cairn_core::MemoryFields>, _>("record")?
+            .0,
         memory_id: row.try_get("memory_id")?,
         session_id: row.try_get("session_id")?,
         content: row.try_get("content")?,
@@ -4050,60 +3971,38 @@ fn append_filter_conditions(
     binds: &mut Vec<String>,
 ) {
     if filter.session_id.is_none() && filter.context.is_none() {
-        conditions.push("m.published_by IS NULL".to_owned());
         return;
     }
-    let mut alternatives = vec!["(m.scope = 'global' AND m.published_by IS NULL)".to_owned()];
+    let mut personal = vec!["m.scope = 'personal'".to_owned()];
+    if let Some(id) = &filter.session_id {
+        binds.push(id.clone());
+        personal.push(format!("m.session_id = ${}", binds.len()));
+    }
+    if let Some(context) = &filter.context {
+        for (key, value) in [
+            ("repository", &context.repository),
+            ("branch", &context.branch),
+            ("worktree", &context.worktree),
+        ] {
+            if let Some(value) = value {
+                binds.push(value.clone());
+                personal.push(format!("m.context->>'{key}' = ${}", binds.len()));
+            }
+        }
+    }
+    let mut alternatives = vec![
+        "m.scope = 'global'".to_owned(),
+        "(m.scope = 'personal' AND m.kind NOT IN ('session_summary', 'capture'))".to_owned(),
+        format!("({})", personal.join(" AND ")),
+    ];
     if let Some(id) = filter.context.as_ref().and_then(|c| c.project_id.as_ref()) {
         binds.push(id.clone());
         alternatives.push(format!(
-            "(m.published_by IS NOT NULL AND m.project_id = ${})",
+            "(m.scope = 'project' AND m.project_id = ${})",
             binds.len()
         ));
     }
-    if let Some(session_id) = &filter.session_id {
-        binds.push(session_id.clone());
-        alternatives.push(format!(
-            "(m.scope = 'session' AND m.session_id = ${})",
-            binds.len()
-        ));
-    }
-    if let Some(context) = &filter.context
-        && let Some(repository) = &context.repository
-    {
-        binds.push(repository.clone());
-        let repository_bind = binds.len();
-        alternatives.push(format!(
-            "(m.scope = 'project' AND m.context->>'repository' = ${repository_bind})"
-        ));
-        let mut scoped = format!("m.context->>'repository' = ${repository_bind}");
-        if let Some(branch) = &context.branch {
-            binds.push(branch.clone());
-            scoped.push_str(&format!(" AND m.context->>'branch' = ${}", binds.len()));
-        }
-        alternatives.push(format!("(m.scope = 'branch' AND {scoped})"));
-        if let Some(worktree) = &context.worktree {
-            binds.push(worktree.clone());
-            scoped.push_str(&format!(" AND m.context->>'worktree' = ${}", binds.len()));
-        }
-        alternatives.push(format!("(m.scope = 'worktree' AND {scoped})"));
-    }
-    let personal = alternatives
-        .iter()
-        .filter(|v| !v.contains("m.published_by IS NOT NULL"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let projects = alternatives
-        .iter()
-        .filter(|v| v.contains("m.published_by IS NOT NULL"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut clauses = vec![format!(
-        "(m.published_by IS NULL AND ({}))",
-        personal.join(" OR ")
-    )];
-    clauses.extend(projects);
-    conditions.push(format!("({})", clauses.join(" OR ")));
+    conditions.push(format!("({})", alternatives.join(" OR ")));
 }
 
 fn import_conflict(kind: &str, id: &str) -> PostgresError {
@@ -4320,10 +4219,8 @@ fn observation_from_row(row: &PgRow) -> Result<Observation, PostgresError> {
 
 fn parse_scope(value: &str) -> Result<MemoryScope, PostgresError> {
     match value {
-        "session" => Ok(MemoryScope::Session),
-        "worktree" => Ok(MemoryScope::Worktree),
-        "branch" => Ok(MemoryScope::Branch),
         "project" => Ok(MemoryScope::Project),
+        "personal" => Ok(MemoryScope::Personal),
         "global" => Ok(MemoryScope::Global),
         other => Err(PostgresError::Validation(format!(
             "unknown memory scope: {other}"
@@ -4338,6 +4235,12 @@ fn parse_memory_kind(value: String) -> Result<MemoryKind, PostgresError> {
         "lesson" => Ok(MemoryKind::Lesson),
         "correction" => Ok(MemoryKind::Correction),
         "decision" => Ok(MemoryKind::Decision),
+        "rule" => Ok(MemoryKind::Rule),
+        "gotcha" => Ok(MemoryKind::Gotcha),
+        "procedure" => Ok(MemoryKind::Procedure),
+        "fact" => Ok(MemoryKind::Fact),
+        "preference" => Ok(MemoryKind::Preference),
+        "capture" => Ok(MemoryKind::Capture),
         other => Err(PostgresError::Validation(format!(
             "unknown memory kind: {other}"
         ))),
@@ -4350,16 +4253,20 @@ fn memory_kind_name(kind: &MemoryKind) -> &'static str {
         MemoryKind::Explicit => "explicit",
         MemoryKind::Lesson => "lesson",
         MemoryKind::Correction => "correction",
+        MemoryKind::Rule => "rule",
+        MemoryKind::Gotcha => "gotcha",
+        MemoryKind::Procedure => "procedure",
+        MemoryKind::Fact => "fact",
+        MemoryKind::Preference => "preference",
+        MemoryKind::Capture => "capture",
         MemoryKind::Decision => "decision",
     }
 }
 
 fn scope_name(scope: &MemoryScope) -> &'static str {
     match scope {
-        MemoryScope::Session => "session",
-        MemoryScope::Worktree => "worktree",
-        MemoryScope::Branch => "branch",
         MemoryScope::Project => "project",
+        MemoryScope::Personal => "personal",
         MemoryScope::Global => "global",
     }
 }

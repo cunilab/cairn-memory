@@ -1,10 +1,8 @@
 use crate::accounts::{AccountStatus, WEB_ONLY_ERROR, hash_token};
 use crate::devices::DEVICE_TOKEN_PREFIX;
-use crate::lifecycle::{LifecycleInput, MemoryKind};
 use crate::store::MemoryStore;
-use crate::test_support::{
-    context, join_project, observation_for, owned_project, remember_with_context, temp_store_path,
-};
+use crate::test_support::save_project_memory;
+use crate::test_support::{context, join_project, observation_for, owned_project, temp_store_path};
 use crate::types::StoreError;
 use std::fs;
 
@@ -67,7 +65,13 @@ fn device_token_is_an_agent_credential_scoped_to_its_account() -> Result<(), Sto
     // Device credentials may record personal branch merges regardless of membership.
     let branch =
         store.register_branch(&device.token, &project_id, "feat/auth", None, None, None)?;
-    let source = remember_with_context(&mut store, &device.token, "solo merge source")?;
+    let source = save_project_memory(
+        &mut store,
+        &device.token,
+        &project_id,
+        "solo merge source",
+        context(),
+    )?;
     store.confirm_branch_merge(
         &device.token,
         &project_id,
@@ -81,13 +85,12 @@ fn device_token_is_an_agent_credential_scoped_to_its_account() -> Result<(), Sto
         store.register_branch(&owner.token, &project_id, "feat/shared", None, None, None)?;
     let mut shared_context = context();
     shared_context.branch = Some("feat/shared".to_owned());
-    let shared_source = store.remember_for_account(
+    let shared_source = save_project_memory(
+        &mut store,
         &owner.token,
+        &project_id,
         "shared merge source",
-        Vec::new(),
         shared_context,
-        LifecycleInput::default(),
-        MemoryKind::Explicit,
     )?;
     store.confirm_branch_merge(
         &device.token,

@@ -34,12 +34,15 @@ pub use lifecycle::{
     Lifecycle, LifecycleInput, LifecycleSummary, MemoryKind, MemoryScope, Retention, Sensitivity,
     sensitivity_including_context,
 };
-pub use memories::{Memory, build_explicit_memory_record};
+pub use memories::{
+    Memory, MemoryFields, MemoryStatus, SaveMemoryInput, build_explicit_memory_record,
+    build_saved_memory, capture_memory,
+};
 pub use privacy::{redact_memory_metadata, redact_sensitive_content, redact_work_context};
 pub use projects::{
     Project, ProjectAttachment, ProjectBranch, ProjectEntity, ProjectEntityInput,
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMergeResult, ProjectWorktree,
-    build_project_decision, publication_fingerprint,
+    publication_fingerprint,
 };
 pub use recall::{
     CodeRelationship, ContextPack, RecallFilter, RecallResult, build_context_pack,

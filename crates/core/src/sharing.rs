@@ -1,5 +1,5 @@
 use crate::accounts::{Account, StoredAuditEvent, hash_token, random_token};
-use crate::lifecycle::{MemoryScope, is_expired};
+use crate::lifecycle::MemoryScope;
 use crate::memories::Memory;
 use crate::recall::{contradiction_ids, superseded_targets};
 use crate::store::MemoryStore;
@@ -71,27 +71,6 @@ impl MemoryStore {
         Ok(people)
     }
 
-    pub(crate) fn prior_project_copy(
-        &self,
-        project_id: &str,
-        corrected: Option<&str>,
-        person_id: &str,
-    ) -> Option<String> {
-        let corrected = corrected?;
-        if !self.memory_owned_by(corrected, person_id) {
-            return None;
-        }
-        self.project_rows(project_id)
-            .into_iter()
-            .find(|memory| {
-                memory.promoted_from.as_deref() == Some(corrected)
-                    && memory.published_by.as_deref() == Some(person_id)
-                    && !self.memory_is_forgotten(memory)
-                    && !is_expired(&memory.lifecycle)
-            })
-            .map(|memory| memory.memory_id)
-    }
-
     pub(crate) fn live_project_memories(&self, project_id: &str) -> Vec<Memory> {
         let rows = self.project_rows(project_id);
         let owners = self.memory_owner_map();
@@ -110,6 +89,19 @@ impl MemoryStore {
         account: &Account,
         target_id: &str,
     ) -> Result<(), StoreError> {
+        if let Some(memory) = self
+            .state
+            .memories
+            .iter()
+            .find(|m| m.memory_id == target_id && m.scope == MemoryScope::Global)
+        {
+            if account.is_admin || self.memory_owned_by(&memory.memory_id, &account.person_id) {
+                return Ok(());
+            }
+            return Err(StoreError::Validation(
+                "only the global memory author or administrator may edit".to_owned(),
+            ));
+        }
         if let Some(memory) = self
             .state
             .memories

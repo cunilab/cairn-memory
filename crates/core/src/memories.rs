@@ -12,6 +12,8 @@ pub(crate) const MAX_MEMORY_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Memory {
+    #[serde(flatten)]
+    pub fields: MemoryFields,
     pub memory_id: String,
     pub session_id: String,
     pub content: String,
@@ -47,7 +49,256 @@ pub struct Memory {
     pub created_at: String,
 }
 
+/// Common and typed note fields, flattened in the public memory record.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MemoryFields {
+    pub title: String,
+    pub summary: String,
+    pub details: Option<String>,
+    pub reason: String,
+    pub applies_to: Vec<String>,
+    pub evidence: Vec<String>,
+    pub tags: Vec<String>,
+    pub entities: Vec<String>,
+    pub status: MemoryStatus,
+    pub pinned: bool,
+    pub importance: Option<u8>,
+    pub author: Option<String>,
+    pub decision_context: Option<String>,
+    pub alternatives: Vec<String>,
+    pub consequences: Option<String>,
+    pub rule: Option<String>,
+    pub exceptions: Option<String>,
+    pub symptom: Option<String>,
+    pub cause: Option<String>,
+    pub fix: Option<String>,
+    pub steps: Vec<String>,
+    pub when: Option<String>,
+    pub statement: Option<String>,
+    pub source: Option<String>,
+    pub preference: Option<String>,
+    pub example: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStatus {
+    #[default]
+    Active,
+    Stale,
+    Superseded,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SaveMemoryInput {
+    #[serde(flatten)]
+    pub fields: MemoryFields,
+    pub scope: Option<MemoryScope>,
+    #[serde(default)]
+    pub kind: MemoryKind,
+    #[serde(default)]
+    pub context: WorkContext,
+    #[serde(default)]
+    pub lifecycle: LifecycleInput,
+    pub supersedes: Option<String>,
+}
+
+/// Shared validation and redaction for the two storage adapters.
+pub fn build_saved_memory(mut input: SaveMemoryInput, author: &str) -> Result<Memory, StoreError> {
+    if let Some(importance) = input.fields.importance {
+        input.lifecycle.importance = Some(importance);
+    }
+    let scope = input.scope.ok_or_else(|| {
+        StoreError::Validation("scope is required (project, personal, global)".to_owned())
+    })?;
+    if !matches!(
+        scope,
+        MemoryScope::Project | MemoryScope::Personal | MemoryScope::Global
+    ) {
+        return Err(StoreError::Validation(
+            "scope must be project, personal or global".to_owned(),
+        ));
+    }
+    for (name, value) in [
+        ("title", &input.fields.title),
+        ("summary", &input.fields.summary),
+        ("reason", &input.fields.reason),
+    ] {
+        if value.trim().is_empty() {
+            return Err(StoreError::Validation(format!("{name} is required")));
+        }
+    }
+    if input.kind == MemoryKind::Preference && scope != MemoryScope::Personal {
+        return Err(StoreError::Validation(
+            "preference requires personal scope".to_owned(),
+        ));
+    }
+    if scope == MemoryScope::Project && input.context.project_id.is_none() {
+        return Err(StoreError::Validation(
+            "project scope requires context.project_id".to_owned(),
+        ));
+    }
+    let raw = serde_json::to_value(&input.fields)?;
+    let text = serde_json::to_string(&raw)?;
+    if text.len() > MAX_OBSERVATION_BYTES {
+        return Err(StoreError::Validation(
+            "memory fields exceed the 65536 byte limit".to_owned(),
+        ));
+    }
+    let mut fields = raw;
+    redact_field_values(&mut fields);
+    let mut fields: MemoryFields = serde_json::from_value(fields)?;
+    fields.author = Some(author.to_owned());
+    let body = format!(
+        "{}\n{}\n{}\n{}",
+        fields.title,
+        fields.summary,
+        fields.details.as_deref().unwrap_or_default(),
+        fields.reason
+    );
+    let context = input.context;
+    let mut memory = build_explicit_memory_record(
+        &body,
+        fields.tags.clone(),
+        context,
+        input.lifecycle,
+        input.kind,
+    )?;
+    // Inspect every supplied text field before redaction, including typed evidence.
+    memory.lifecycle.sensitivity = Lifecycle::explicit(
+        &LifecycleInput {
+            sensitivity: Some(memory.lifecycle.sensitivity.clone()),
+            ..LifecycleInput::default()
+        },
+        &text,
+        &[],
+        &memory.context,
+    )
+    .sensitivity;
+    memory.fields = fields;
+    memory.fields.importance = Some(memory.lifecycle.importance);
+    memory.scope = scope;
+    memory.supersedes = input.supersedes;
+    if memory.scope == MemoryScope::Project {
+        memory.project_id = memory.context.project_id.clone();
+        memory.published_by = Some(author.to_owned());
+    }
+    memory.changed_by = Some(author.to_owned());
+    memory.changed_at = Some(memory.created_at.clone());
+    Ok(memory)
+}
+
+fn redact_field_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redact_sensitive_content(text),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_field_values),
+        serde_json::Value::Object(values) => values.values_mut().for_each(redact_field_values),
+        _ => {}
+    }
+}
+
+/// A raw capture is a readable project record without a publication step.
+pub fn capture_memory(observation: &crate::Observation, author: &str) -> Memory {
+    Memory {
+        fields: MemoryFields {
+            title: observation
+                .content
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect(),
+            summary: observation.content.clone(),
+            author: Some(author.to_owned()),
+            importance: Some(observation.lifecycle.importance),
+            evidence: vec![observation.event_id.clone()],
+            ..MemoryFields::default()
+        },
+        memory_id: format!("capture-{author}-{}", observation.event_id),
+        session_id: observation.session_id.clone(),
+        content: observation.content.clone(),
+        source_event_ids: vec![observation.event_id.clone()],
+        context: observation.context.clone(),
+        lifecycle: observation.lifecycle.clone(),
+        kind: MemoryKind::Capture,
+        scope: MemoryScope::Project,
+        project_id: observation.context.project_id.clone(),
+        next_steps: Vec::new(),
+        unresolved_work: Vec::new(),
+        supersedes: None,
+        promoted_from: None,
+        promotion_reason: None,
+        verified_commit: None,
+        published_by: Some(author.to_owned()),
+        changed_by: Some(author.to_owned()),
+        changed_at: Some(observation.captured_at.clone()),
+        created_at: observation.captured_at.clone(),
+    }
+}
+
 impl MemoryStore {
+    pub fn save(&mut self, input: SaveMemoryInput) -> Result<Memory, StoreError> {
+        if self.has_accounts() {
+            return Err(StoreError::Validation(
+                "account authentication required".to_owned(),
+            ));
+        }
+        let mut memory = build_saved_memory(input, "local")?;
+        if memory.scope != MemoryScope::Personal {
+            return Err(StoreError::Validation(
+                "account authentication required for shared scopes".to_owned(),
+            ));
+        }
+        memory.fields.author = None;
+        self.state.memories.push(memory.clone());
+        if let Err(error) = self.persist() {
+            self.unstage_memory(&memory);
+            return Err(error);
+        }
+        Ok(memory)
+    }
+
+    pub fn save_for_account(
+        &mut self,
+        token: &str,
+        input: SaveMemoryInput,
+    ) -> Result<Memory, StoreError> {
+        let account = self.authenticate_account(token)?;
+        let memory = build_saved_memory(input, &account.person_id)?;
+        if let Some(id) = memory.project_id.as_deref() {
+            self.require_project_reader(&account, id)?;
+        }
+        if let Some(id) = memory.supersedes.as_deref() {
+            self.reject_member_mutation(&account, id)?;
+            let target = self
+                .state
+                .memories
+                .iter()
+                .find(|m| m.memory_id == id)
+                .ok_or_else(|| StoreError::Validation("unknown supersedes memory".to_owned()))?;
+            if target.scope != memory.scope || target.project_id != memory.project_id {
+                return Err(StoreError::Validation(
+                    "supersedes must stay in the same scope and project".to_owned(),
+                ));
+            }
+        }
+        let entities_before = self.state.project_entities.len();
+        self.state.memories.push(memory.clone());
+        self.record_memory_owner(&account.person_id, &memory.memory_id);
+        self.record_generated_source_owners(&account.person_id, &memory);
+        if let Some(id) = memory.project_id.as_deref() {
+            self.index_project_memory(id, &memory);
+        }
+        if let Err(error) = self.persist() {
+            self.unstage_memory(&memory);
+            self.state.project_entities.truncate(entities_before);
+            return Err(error);
+        }
+        Ok(memory)
+    }
+
     pub fn remember(
         &mut self,
         content: &str,
@@ -137,7 +388,13 @@ impl MemoryStore {
     ) -> Result<Memory, StoreError> {
         let account = self.authenticate_account(account_token)?;
         // The row and its owner records land in one rename; a failed rename leaves none.
-        let memory = self.stage_explicit_memory(content, concepts, context, lifecycle, kind)?;
+        let mut memory = self.stage_explicit_memory(content, concepts, context, lifecycle, kind)?;
+        memory.fields.author = Some(account.person_id.clone());
+        *self
+            .state
+            .memories
+            .last_mut()
+            .expect("staged explicit memory") = memory.clone();
         self.record_memory_owner(&account.person_id, &memory.memory_id);
         self.record_generated_source_owners(&account.person_id, &memory);
         if let Err(error) = self.persist() {
@@ -243,7 +500,26 @@ impl MemoryStore {
         };
         let mut lifecycle = Lifecycle::explicit(&lifecycle, content, &concepts, &source_context);
         lifecycle.confidence = 100;
+        let mut fields = self
+            .state
+            .memories
+            .iter()
+            .find(|m| m.memory_id == target_id)
+            .map(|m| m.fields.clone())
+            .unwrap_or_default();
+        if fields.title.is_empty() || fields.reason.trim().is_empty() {
+            fields.title = redact_sensitive_content(content)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect();
+        }
+        fields.summary = redact_sensitive_content(content);
+        fields.details = Some(redact_sensitive_content(content));
         let memory = Memory {
+            fields,
             memory_id: format!("memory-correction-{suffix}"),
             session_id: format!("session-correction-{suffix}"),
             content: build_explicit_memory(content, concepts),
@@ -289,27 +565,39 @@ impl MemoryStore {
             .memories
             .iter()
             .find(|m| m.memory_id == target_id)
-            .filter(|m| m.published_by.is_some())
             .cloned();
         let mut memory = self.stage_correction(target_id, content, concepts, context, lifecycle)?;
         if let Some(target) = publication {
-            if memory.lifecycle.sensitivity == crate::Sensitivity::Secret {
-                self.unstage_memory(&memory);
-                return Err(StoreError::Validation(
-                    "secret memories cannot be published".to_owned(),
-                ));
+            memory.fields = target.fields;
+            if memory.fields.reason.trim().is_empty() {
+                memory.fields.title = redact_sensitive_content(content)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect();
             }
-            memory.scope = MemoryScope::Project;
+            memory.fields.summary = redact_sensitive_content(content);
+            memory.fields.details = Some(redact_sensitive_content(content));
+            memory.scope = target.scope;
             memory.context = target.context;
             memory.project_id = target.project_id;
             memory.published_by = target.published_by;
             memory.changed_by = Some(account.person_id.clone());
             memory.changed_at = Some(timestamp());
-            memory.source_event_ids.clear();
+            if memory.scope == MemoryScope::Project {
+                memory.source_event_ids.clear();
+            }
             *self.state.memories.last_mut().expect("staged correction") = memory.clone();
         }
         // A project correction keeps its author's storage identity after ownership transfer.
-        let owner_id = memory.published_by.as_deref().unwrap_or(&account.person_id);
+        let owner_id = memory
+            .fields
+            .author
+            .as_deref()
+            .or(memory.published_by.as_deref())
+            .unwrap_or(&account.person_id);
         self.record_memory_owner(owner_id, &memory.memory_id);
         self.record_generated_source_owners(owner_id, &memory);
         if let Err(error) = self.persist() {
@@ -358,6 +646,19 @@ pub fn build_explicit_memory_record(
     let record_lifecycle = Lifecycle::explicit(&lifecycle, content, &concepts, &context);
     let stored_context = redact_work_context(&context);
     Ok(Memory {
+        fields: MemoryFields {
+            title: redact_sensitive_content(content)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect(),
+            summary: redact_sensitive_content(content),
+            importance: Some(record_lifecycle.importance),
+            details: None,
+            ..MemoryFields::default()
+        },
         memory_id: format!("memory-explicit-{suffix}"),
         session_id: format!("session-explicit-{suffix}"),
         content: build_explicit_memory(content, concepts),

@@ -36,15 +36,19 @@ pub enum MemoryKind {
     Lesson,
     Correction,
     Decision,
+    Rule,
+    Gotcha,
+    Procedure,
+    Fact,
+    Preference,
+    Capture,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
     #[default]
-    Session,
-    Worktree,
-    Branch,
+    Personal,
     Project,
     Global,
 }
@@ -232,11 +236,9 @@ impl MemoryStore {
         self.reject_member_mutation(&account, id)?;
         let person_id = account.person_id.clone();
         // Only an id this person owns. An unowned legacy id reads like an unknown one.
-        let published = self
-            .state
-            .memories
-            .iter()
-            .any(|m| m.memory_id == id && m.published_by.is_some());
+        let published = self.state.memories.iter().any(|m| {
+            m.memory_id == id && (m.published_by.is_some() || m.scope == MemoryScope::Global)
+        });
         if !published && self.item_owner(id).as_deref() != Some(person_id.as_str()) {
             return Err(StoreError::Validation(format!(
                 "unknown memory or event: {id}"

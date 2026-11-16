@@ -6,6 +6,7 @@ import { useState } from "react";
 import {
   ChevronsUpDownIcon,
   FolderIcon,
+  BrainIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   LockKeyholeIcon,
@@ -56,6 +57,7 @@ const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
 const WORKSPACE = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboardIcon },
+  { href: "/memories", label: "Memories", icon: BrainIcon },
   { href: "/projects", label: "Projects", icon: FolderIcon },
   { href: "/devices", label: "Devices", icon: KeyRoundIcon },
 ];

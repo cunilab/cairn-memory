@@ -473,7 +473,7 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
         source: "test".to_owned(),
         importance: None,
         lifecycle: Lifecycle::default(),
-        scope: MemoryScope::Session,
+        scope: MemoryScope::Personal,
         context: secret_context.clone(),
         captured_at: "1".to_owned(),
     };
@@ -630,11 +630,12 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
                 sensitivity: Sensitivity::Public,
                 ..Lifecycle::default()
             },
-            scope: MemoryScope::Session,
+            scope: MemoryScope::Personal,
             context: metadata_secret_context(),
             captured_at: "10".to_owned(),
         }],
         memories: vec![Memory {
+            fields: Default::default(),
             memory_id: "memory-import-meta".to_owned(),
             session_id: "sess-import-meta".to_owned(),
             content: "ordinary import memory".to_owned(),

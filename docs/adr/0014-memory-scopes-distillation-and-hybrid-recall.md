@@ -17,7 +17,7 @@ capture hygiene. Cairn's current split into project, personal-per-repo and
 personal-global memory, plus an explicit promote step, makes members do manual
 work that the product direction (minimal human interaction) rejects.
 
-This is a proposal. When accepted it supersedes the scope, personal-memory and
+Items 0 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
 promotion parts of [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md)
 (decisions 1, 2 and 5 there, and the `source: personal | project` labelling in
 decision 7). The rest of ADR 0013 remains. Pre-release rules still apply: no
@@ -145,19 +145,18 @@ checklist items below (pre-release, no data compatibility).
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Nothing here is implemented or measured yet; claims about recall quality
-  need recorded evidence before acceptance.
+- Only scope and record-shape items 0 and 7 are implemented; no recall-quality benchmark, distillation, hybrid retrieval, retention score, feedback or instruction injection is claimed. See the recorded stage 1 checks in [evidence](../evidence.md#v014-stage-1--memory-scopes-and-record-shape).
 
 ## Implementation checklist
 
-- [ ] 0. Three scopes: scope parameter in MCP/CLI, per-repo personal scope and promote removed, captures in initialized repos go to project memory.
+- [x] 0. Three scopes: scope parameter in MCP/CLI, per-repo personal scope and promote removed, captures in initialized repos go to project memory.
 - [ ] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
 - [ ] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
 - [ ] 3. Bounded, data-fenced session-start brief from the hook.
 - [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
 - [ ] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
 - [ ] 6. Helpful/stale feedback affecting shared ranking.
-- [ ] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
+- [x] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
 - [ ] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
 - [ ] 9. Start / first-work / end hooks with token bounds.
 - [ ] 10. Per-agent capability verification from official docs (hook events, context injection, continue request).
@@ -168,3 +167,5 @@ Source research: fact notes on akitaonrails/ai-memory and mempalace (decay with
 access reinforcement, RRF ranking, sanitization hooks, opt-in assistant
 capture). Related: [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md),
 [ADR 0010](./0010-correction-keeps-linked-history.md).
+
+Stage 1 implementation evidence: `crates/core/src/memories.rs`, `capture.rs`, `recall.rs`, `sessions.rs`; `crates/storage/src/lib.rs`; both server routers; `crates/client/src/tools.rs`; and `apps/web/app/memories/page.tsx`. Scoped HTTP tests run identically on both adapters in `crates/server/tests/project_model.rs`; typed round trips and title-weight regressions are in the core sibling tests and PostgreSQL integration tests. The development base migration now stores the flat record in `record` JSONB and derives a title-weighted lexical index. Reset older databases/file stores before running this build: old private `global` values must never be interpreted as server-wide global notes.

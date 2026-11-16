@@ -616,6 +616,7 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
         sessions: vec![],
         observations: vec![],
         memories: vec![Memory {
+            fields: Default::default(),
             memory_id: "memory-import-secret".to_owned(),
             session_id: "session-import-secret".to_owned(),
             content: "api_key=should-not-persist".to_owned(),

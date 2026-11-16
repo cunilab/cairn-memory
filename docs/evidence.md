@@ -98,3 +98,25 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - The golden corpus defines expected behavior but has not been scored against a running implementation.
 - Retention durations and the future encrypted-cache implementation remain policy-configurable follow-up work; the Layer 3 policy forbids unencrypted response caches and defines tombstone/revocation purge behavior. The first authentication model is resolved by ADR 0008.
 - Project maintenance and cross-person membership are implemented: the maintenance report lists stale and superseded project memories, and a teammate joins a project through the committed `.cairn/project.json`, an owner can share a promoted memory with that member, and keep a project team. The promotion and merge boundary is defined in [CM-CONTRACT-009](contracts/project-layer4.md) and [ADR 0009](adr/0009-explicit-project-promotion.md). Offline purge of a device that never syncs again, encryption, and federation remain unimplemented.
+
+## v0.1.4 stage 1 — memory scopes and record shape
+
+Verified 2026-11-17 on branch `v0.1.4`, limited to [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md) items 0 and 7. No live Cairn server was contacted. Every verification shell cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN` and `CAIRN_OUTBOX`; server smokes used disposable loopback file stores, and PostgreSQL used a disposable local PostgreSQL 17 container and fresh database per test.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check`, `cargo check --workspace` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed; ignored database tests executed separately |
+| `scripts/ci_postgres_tests.sh` | 29 tests passed, zero failed; scratch databases dropped |
+| `python3 scripts/smoke_hook_auth.py` | 25 tests passed |
+| `python3 scripts/smoke_hook_offline.py` | 23 tests passed |
+| `python3 scripts/smoke_outbox.py` | 32 tests passed |
+| `scripts/smoke_layer4_cli.sh`, `scripts/smoke_layer5_cli.sh`, `scripts/smoke_mcp.sh` | Passed |
+| Web `npm run typecheck`, `npm run lint`, `npm run build` | Passed |
+| `scripts/smoke_web.sh` | Passed, including the Memories page route |
+| `python3 scripts/validate_phase0.py` | Passed |
+
+New assertions cover project-member access to captures and summaries, private personal behaviour, server-wide global reads, author/admin global mutation, required save fields, all six typed field groups, title weighting, full list/get records, removed promotion/private-repository routes and tools, and private fallback for mixed-source summaries. Title-weight tests failed first on both stores, then passed after the lexical-index change; required-save tests were added before the save entrypoints were implemented. Obsolete publication-copy/preview tests were removed with those entrypoints; retained capture, authentication, ownership, sync, lifecycle, import, branch and rename checks remain in the suites.
+
+This is a pre-release schema change, not an in-place upgrade: start a fresh PostgreSQL database and file store. The edited development base migration adds `record`, personal defaults and a weighted lexical index. Applying only the column change to an old database is unsafe because its old private `global` rows require reclassification. No legacy repair or live migration was executed. Browser visual inspection and later ADR 0014 stages were not run or implemented.

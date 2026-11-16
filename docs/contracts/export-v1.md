@@ -36,8 +36,7 @@ The session, observation, and memory entries use the serialized domain types.
 Row fields are snake_case (`session_id`, `source_event_ids`), except that a
 row's `lifecycle` object uses `expiresAt`. The envelope keys are camelCase
 (`exportedAt`, `forgottenIds`). Memory and recall-related entries may include the
-additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
-`global`). Memory entries also include lifecycle, `kind`, `next_steps`,
+additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entries include the structured common and per-type fields from [the scope contract](project-layer4.md#memory-scopes-and-record), lifecycle, `kind`, `next_steps`,
 `unresolved_work`, `project_id`, `promoted_from`, `promotion_reason`,
 `verified_commit`, `source_event_ids`, and optional `supersedes` fields.
 `forgottenIds` is the authoritative suppression set for imported state.

@@ -88,10 +88,18 @@ impl MemoryStore {
         } else {
             input.context.clone()
         };
-        context.project_id = input.context.project_id.clone();
+        context.project_id = input.context.project_id.clone().or(context.project_id);
         let mut normalized_input = input;
         normalized_input.context = context;
-        let observation = normalize_observation(&normalized_input)?;
+        let mut observation = normalize_observation(&normalized_input)?;
+        if observation
+            .context
+            .project_id
+            .as_deref()
+            .is_none_or(|id| self.project_owner_id(id).is_none())
+        {
+            observation.scope = MemoryScope::Personal;
+        }
         self.state.observations.push(observation.clone());
         Ok(CaptureResult {
             project_attachment: None,
@@ -138,8 +146,69 @@ impl MemoryStore {
         let account = self.authenticate_account(token)?;
         let mut result = self.capture_for_account_inner(token, input)?;
         result.project_attachment =
-            Some(self.attach_context(&account.person_id, &result.observation.context));
+            Some(self.attach_capture(&account.person_id, &mut result.observation));
         Ok(result)
+    }
+
+    pub(crate) fn attach_capture(
+        &mut self,
+        person_id: &str,
+        observation: &mut Observation,
+    ) -> crate::ProjectAttachment {
+        let mut attachment = self.attach_context(person_id, &observation.context);
+        if attachment.status != "attached" {
+            observation.scope = MemoryScope::Personal;
+            return attachment;
+        }
+        let memory = crate::capture_memory(observation, person_id);
+        if self
+            .state
+            .memories
+            .iter()
+            .any(|m| m.memory_id == memory.memory_id)
+        {
+            observation.scope = MemoryScope::Project;
+            return attachment;
+        }
+        let previous_scope = self
+            .state
+            .observations
+            .iter()
+            .find(|o| o.event_id == observation.event_id)
+            .map(|o| o.scope.clone());
+        if let Some(stored) = self
+            .state
+            .observations
+            .iter_mut()
+            .find(|o| o.event_id == observation.event_id)
+        {
+            stored.scope = MemoryScope::Project;
+        }
+        self.state.memories.push(memory.clone());
+        self.record_memory_owner(person_id, &memory.memory_id);
+        if let Err(error) = self.persist() {
+            self.state
+                .memories
+                .retain(|m| m.memory_id != memory.memory_id);
+            self.state
+                .memory_owners
+                .retain(|m| m.memory_id != memory.memory_id);
+            if let Some(scope) = previous_scope
+                && let Some(stored) = self
+                    .state
+                    .observations
+                    .iter_mut()
+                    .find(|o| o.event_id == observation.event_id)
+            {
+                stored.scope = scope;
+            }
+            attachment.status = "personal".to_owned();
+            attachment.warning = Some(error.to_string());
+            observation.scope = MemoryScope::Personal;
+        } else {
+            observation.scope = MemoryScope::Project;
+        }
+        attachment
     }
 
     fn capture_for_account_inner(
@@ -212,7 +281,11 @@ pub fn normalize_observation(input: &ObservationInput) -> Result<Observation, St
         source: input.source.clone(),
         importance: input.importance.clone(),
         lifecycle,
-        scope: MemoryScope::Session,
+        scope: if input.context.project_id.is_some() {
+            MemoryScope::Project
+        } else {
+            MemoryScope::Personal
+        },
         context: redact_work_context(&input.context),
         captured_at: timestamp(),
     })

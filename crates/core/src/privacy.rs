@@ -45,6 +45,41 @@ pub fn redact_work_context(context: &WorkContext) -> WorkContext {
 /// Redacts human-readable memory metadata on a new row. Ids, timestamps,
 /// commits, and provenance links stay.
 pub fn redact_memory_metadata(memory: &mut Memory) {
+    let fields = &mut memory.fields;
+    for text in [&mut fields.title, &mut fields.summary, &mut fields.reason] {
+        *text = redact_sensitive_content(text);
+    }
+    for text in [
+        &mut fields.details,
+        &mut fields.decision_context,
+        &mut fields.consequences,
+        &mut fields.rule,
+        &mut fields.exceptions,
+        &mut fields.symptom,
+        &mut fields.cause,
+        &mut fields.fix,
+        &mut fields.when,
+        &mut fields.statement,
+        &mut fields.source,
+        &mut fields.preference,
+        &mut fields.example,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *text = redact_sensitive_content(text);
+    }
+    for texts in [
+        &mut fields.applies_to,
+        &mut fields.evidence,
+        &mut fields.tags,
+        &mut fields.entities,
+        &mut fields.alternatives,
+        &mut fields.steps,
+    ] {
+        *texts = redact_string_list(texts);
+    }
+
     memory.context = redact_work_context(&memory.context);
     memory.next_steps = redact_string_list(&memory.next_steps);
     memory.unresolved_work = redact_string_list(&memory.unresolved_work);

@@ -27,7 +27,7 @@ fn captures_and_recalls_evidence_backed_session_memory() -> Result<(), StoreErro
     let memory = store.end_session("sess-auth-001")?;
     assert!(memory.content.contains("missing signature"));
     assert_eq!(memory.source_event_ids.len(), 2);
-    assert_eq!(memory.scope, MemoryScope::Worktree);
+    assert_eq!(memory.scope, MemoryScope::Personal);
     assert_eq!(memory.context.symbols, context().symbols);
     assert_eq!(memory.context.commands, context().commands);
     assert_eq!(memory.context.tests, context().tests);
@@ -41,7 +41,7 @@ fn captures_and_recalls_evidence_backed_session_memory() -> Result<(), StoreErro
             .source_event_ids
             .contains(&"evt-session-003".to_owned())
     );
-    assert_eq!(results[0].scope, MemoryScope::Worktree);
+    assert_eq!(results[0].scope, MemoryScope::Personal);
     assert!(
         !store
             .search("SessionMiddleware validate_cookie", 5)?
@@ -538,7 +538,7 @@ fn a_push_gives_the_session_its_context_so_the_summary_is_repository_scoped()
 
     for session in ["created", "filled"] {
         let summary = summaries(&store, session).remove(0);
-        assert_eq!(summary.scope, MemoryScope::Branch, "{session}");
+        assert_eq!(summary.scope, MemoryScope::Personal, "{session}");
         assert_eq!(summary.context.branch.as_deref(), Some("feat/hook"));
     }
     let filter = RecallFilter {
@@ -571,4 +571,34 @@ fn a_start_after_a_push_fills_the_empty_session_context() -> Result<(), StoreErr
     assert_eq!(again.context.branch.as_deref(), Some("feat/auth"));
     fs::remove_file(path)?;
     Ok(())
+}
+
+#[test]
+fn summaries_never_broaden_personal_or_mixed_project_sources() {
+    let source = |project: Option<&str>, event: &str| {
+        let mut input = crate::test_support::observation_for("mixed", event, "captured evidence");
+        input.context.project_id = project.map(str::to_owned);
+        crate::normalize_observation(&input).unwrap()
+    };
+    let first = source(Some("project-a"), "first");
+    let summary = crate::derive_session_memory(
+        Some("author"),
+        "mixed",
+        &first.context,
+        std::slice::from_ref(&first),
+    )
+    .unwrap();
+    assert_eq!(summary.scope, crate::MemoryScope::Project);
+    for other in [source(None, "personal"), source(Some("project-b"), "other")] {
+        let summary = crate::derive_session_memory(
+            Some("author"),
+            "mixed",
+            &first.context,
+            &[first.clone(), other],
+        )
+        .unwrap();
+        assert_eq!(summary.scope, crate::MemoryScope::Personal);
+        assert!(summary.project_id.is_none());
+        assert!(summary.published_by.is_none());
+    }
 }

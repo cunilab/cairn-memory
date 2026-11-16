@@ -20,6 +20,10 @@ This decision supersedes the sharing, private-project registration and
 personal-origin suppression parts of ADR 0011 and ADR 0009, and the team-space
 and visibility-escalation parts of ADR 0002. ADR 0010's linked-history rule remains.
 
+## Superseded scope and publication rules
+
+ADR 0014 items 0 and 7 supersede decisions 1, 2 and 5 and the two-source labels in decision 7: three scopes, direct project captures/saves, no promotion, and structured records. Remaining governance and identity rules continue to apply. Historical publication text below is not the current scope contract.
+
 ## Decision
 
 1. Every live published project decision is readable and usable by every member,

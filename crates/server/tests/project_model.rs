@@ -47,426 +47,201 @@ async fn ok(router: &Router, method: &str, path: &str, body: Value, token: Optio
 }
 async fn scenario(router: Router) {
     let pw = "correct horse battery staple";
-    let owner = ok(
+    let admin = ok(
         &router,
         "POST",
         "auth/bootstrap",
-        json!({"email":"owner@example.test","password":pw}),
+        json!({"email":"admin@scope.test","password":pw}),
         None,
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
-    let member = ok(
+    let admin_token = admin["token"].as_str().unwrap();
+    let author = ok(
         &router,
         "POST",
         "auth/register",
-        json!({"email":"member@example.test","password":pw}),
-        Some(token),
+        json!({"email":"author@scope.test","password":pw}),
+        Some(admin_token),
     )
     .await;
-    let reader = ok(
+    let stranger = ok(
         &router,
         "POST",
         "auth/register",
-        json!({"email":"reader@example.test","password":pw}),
-        Some(token),
+        json!({"email":"stranger@scope.test","password":pw}),
+        Some(admin_token),
     )
     .await;
-    let member_token = member["token"].as_str().unwrap();
-    let reader_token = reader["token"].as_str().unwrap();
-    let device = ok(
-        &router,
-        "POST",
-        "devices/register",
-        json!({"name":"Member agent"}),
-        Some(member_token),
-    )
-    .await;
-    let device_token = device["token"].as_str().unwrap();
-    let captured=ok(&router,"POST","observe",json!({"eventId":"no-file","sessionId":"s","content":"personal repository capture","role":"agent","source":"test","context":{"repository":"host/org/repo"}}),Some(device_token)).await;
-    assert_eq!(captured["project_attachment"]["status"], "personal");
-    assert_eq!(
-        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await,
-        json!([])
-    );
-    let warning=ok(&router,"POST","observe",json!({"eventId":"unknown-file","sessionId":"s","content":"still personal","role":"agent","source":"test","context":{"repository":"host/org/repo","project_id":"unknown-project"}}),Some(device_token)).await;
-    assert!(warning["project_attachment"]["warning"].is_string());
-    assert_eq!(
-        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await,
-        json!([])
-    );
+    let author_token = author["token"].as_str().unwrap();
+    let stranger_token = stranger["token"].as_str().unwrap();
     let project = ok(
         &router,
         "POST",
         "projects/init",
-        json!({"repository":"host/org/repo"}),
-        Some(token),
+        json!({"repository":"example.test/acme/scopes","name":"Scopes"}),
+        Some(admin_token),
     )
     .await;
-    let id = project["project_id"].as_str().unwrap();
-    assert_eq!(project["name"], "repo");
-    let rename_path = format!("projects/{id}/rename");
-    for who in [None, Some(member_token), Some(device_token)] {
-        assert!(
-            request(
-                &router,
-                "POST",
-                &rename_path,
-                json!({"name":"Refused"}),
-                who
-            )
-            .await
-            .0 >= 400
-        );
-    }
-    let mismatch = request(
+    let project_id = project["project_id"].as_str().unwrap();
+    ok(
         &router,
         "POST",
         "projects/init",
-        json!({"repository":"host/org/repo","project_id":id,"name":"Wrong"}),
-        Some(member_token),
+        json!({"repository":"example.test/acme/scopes","project_id":project_id}),
+        Some(author_token),
     )
     .await;
-    assert_eq!(mismatch.0, 400);
-    assert_eq!(
-        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await,
-        json!([])
-    );
-    for who in [member_token, reader_token] {
-        let joined = ok(
-            &router,
-            "POST",
-            "projects/init",
-            json!({"repository":"host/org/repo","project_id":id}),
-            Some(who),
-        )
-        .await;
-        assert_eq!(joined["project_id"], id);
-        assert_eq!(joined["created"], false);
-        assert_eq!(
-            ok(&router, "GET", "projects", Value::Null, Some(who))
-                .await
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
+    let context =
+        json!({"project_id":project_id,"repository":"example.test/acme/scopes","branch":"feature"});
+    for missing in ["title", "summary", "reason", "scope"] {
+        let mut input = json!({"title":"scopecheck title","summary":"scopecheck summary","reason":"scopecheck reason","scope":"personal"});
+        input.as_object_mut().unwrap().remove(missing);
+        let (status, body) = request(&router, "POST", "remember", input, Some(author_token)).await;
+        assert_eq!(status, 400, "{missing}: {body}");
+        assert!(body["error"].as_str().unwrap().contains(missing), "{body}");
     }
-    for who in [member_token, reader_token, device_token] {
-        assert_eq!(
-            request(
-                &router,
-                "POST",
-                &rename_path,
-                json!({"name":"Refused"}),
-                Some(who)
-            )
-            .await
-            .0,
-            401
-        );
-    }
-    let owner_device = ok(
+    let note = ok(&router,"POST","remember",json!({"scope":"project","kind":"decision","title":"scopecheck decision","summary":"Choose bounded writes","reason":"Avoid races","context":context,"decision_context":"Concurrent capture","alternatives":["unbounded"],"consequences":"small transactions","details":"verified details"}),Some(author_token)).await;
+    let personal = ok(&router,"POST","remember",json!({"scope":"personal","kind":"preference","title":"scopecheck behaviour","summary":"Use concise answers","reason":"Save attention","preference":"concise","example":"one paragraph"}),Some(author_token)).await;
+    let global = ok(&router,"POST","remember",json!({"scope":"global","kind":"gotcha","title":"scopecheck global","summary":"Reuse locks","reason":"Serialize writes","symptom":"race","cause":"missing lock","fix":"transaction"}),Some(author_token)).await;
+    let device = ok(&router,"POST","devices/register",json!({"deviceId":"scope-device","personId":author["account"]["person_id"],"name":"Scope device"}),Some(author_token)).await;
+    ok(
         &router,
         "POST",
-        "devices/register",
-        json!({"name":"Owner agent"}),
-        Some(token),
+        "session/start",
+        json!({"sessionId":"scope-session","context":context}),
+        Some(author_token),
     )
     .await;
-    for who in [token, owner_device["token"].as_str().unwrap()] {
-        let renamed = ok(
-            &router,
-            "POST",
-            &rename_path,
-            json!({"name": "Useful project name"}),
-            Some(who),
-        )
-        .await;
-        assert_eq!(renamed["name"], "Useful project name");
-        assert_eq!(renamed["project_id"], id);
-    }
-    assert_eq!(
-        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await[0]["name"],
-        "Useful project name"
-    );
-    let audit = ok(&router, "GET", "auth/audit", Value::Null, Some(token)).await;
-    assert_eq!(
-        audit
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|event| event["action"] == "project_renamed")
-            .count(),
-        1
-    );
-    assert_eq!(
-        request(
-            &router,
-            "POST",
-            "projects/init",
-            json!({"repository":"host/org/repo","project_id":id,"name":"repo"}),
-            Some(token)
-        )
-        .await
-        .0,
-        400
-    );
-    let path = format!("projects/{id}");
-    let content = "httpboundary complete decision payload ".repeat(40);
-    let source = ok(
+    let captured = ok(&router,"POST","observe",json!({"eventId":"scope-event","sessionId":"scope-session","content":"scopecheck raw capture","role":"user","source":"test","context":context}),Some(device["token"].as_str().unwrap())).await;
+    assert_eq!(captured["observation"]["scope"], "project");
+    let summary = ok(
         &router,
         "POST",
-        "remember",
-        json!({"content":content,"context":{"repository":"host/org/repo","files":["src/lib.rs"]}}),
-        Some(member_token),
+        "session/end",
+        json!({"sessionId":"scope-session"}),
+        Some(author_token),
     )
     .await;
-    let source_id = source["memory_id"].as_str().unwrap();
-    let preview = ok(
-        &router,
-        "POST",
-        "promote",
-        json!({"projectId":id,"memoryId":source_id,"reason":"publish","dryRun":true}),
-        Some(member_token),
-    )
-    .await;
-    assert!(preview["previewFingerprint"].is_string());
-    assert_eq!(request(&router,"POST","promote",json!({"projectId":id,"memoryId":source_id,"reason":"publish","previewFingerprint":"stale-preview"}),Some(member_token)).await.0,409);
-    assert_eq!(preview["content"], content);
-    assert_eq!(preview["context"]["files"], json!(["src/lib.rs"]));
-    assert_eq!(
-        ok(
-            &router,
-            "GET",
-            &format!("{path}/memories"),
-            Value::Null,
-            Some(reader_token)
-        )
-        .await,
-        json!([])
-    );
-    let decision = ok(
-        &router,
-        "POST",
-        "promote",
-        json!({"projectId":id,"memoryId":source_id,"reason":"publish","previewFingerprint":preview["previewFingerprint"]}),
-        Some(member_token),
-    )
-    .await;
-    let decision_id = decision["memory_id"].as_str().unwrap();
-    for who in [token, member_token, reader_token] {
+    for token in [admin_token, author_token] {
         let rows = ok(
             &router,
             "GET",
-            &format!("{path}/memories"),
+            &format!("projects/{project_id}/memories"),
             Value::Null,
-            Some(who),
+            Some(token),
         )
         .await;
-        assert_eq!(rows.as_array().unwrap().len(), 1);
-        assert_eq!(rows[0]["memory_id"], decision_id);
-        assert!(rows[0]["promoted_from"].is_null());
-    }
-    assert_eq!(
-        ok(
-            &router,
-            "GET",
-            &format!("{path}/personal-memories"),
-            Value::Null,
-            Some(reader_token)
-        )
-        .await,
-        json!([])
-    );
-    for (route, body) in [
-        (
-            "projects/verify",
-            json!({"projectId":id,"memoryId":decision_id,"commit":"bad"}),
-        ),
-        ("correct", json!({"targetId":decision_id,"content":"bad"})),
-        ("delete", json!({"id":decision_id})),
-    ] {
+        let rows = rows.as_array().unwrap();
+        assert!(rows.iter().any(|m| m["memory_id"] == note["memory_id"]));
         assert!(
-            request(&router, "POST", route, body, Some(reader_token))
-                .await
-                .0
-                >= 400
+            rows.iter()
+                .any(|m| m["kind"] == "capture" && m["summary"] == "scopecheck raw capture")
+        );
+        assert!(rows.iter().any(|m| m["memory_id"] == summary["memory_id"]));
+        let recalled = ok(
+            &router,
+            "POST",
+            "search",
+            json!({"query":"scopecheck","context":context}),
+            Some(token),
+        )
+        .await;
+        assert!(
+            recalled
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["memory_id"] == note["memory_id"])
         );
     }
-    let recalled = ok(
-        &router,
-        "POST",
-        "context",
-        json!({"query":"httpboundary","context":{"project_id":id,"repository":"host/org/repo"}}),
-        Some(reader_token),
-    )
-    .await;
-    assert_eq!(recalled["results"].as_array().unwrap().len(), 1);
-    assert_eq!(recalled["results"][0]["source"], "project");
-    assert_ne!(recalled["results"][0]["memory_id"], source_id);
-    ok(
-        &router,
-        "POST",
-        "correct",
-        json!({"targetId":source_id,"content":"private source correction"}),
-        Some(member_token),
-    )
-    .await;
-    assert_eq!(
-        ok(
+    for token in [admin_token, stranger_token] {
+        let rows = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["memory_id"] == global["memory_id"])
+        );
+        assert!(
+            !rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["memory_id"] == personal["memory_id"])
+        );
+        let (status, _) = request(
             &router,
             "GET",
-            &format!("{path}/memories"),
+            &format!("memories/{}", personal["memory_id"].as_str().unwrap()),
             Value::Null,
-            Some(reader_token)
+            Some(token),
         )
-        .await
-        .as_array()
-        .unwrap()
-        .len(),
-        1
-    );
-    let corrected = ok(
-        &router,
-        "POST",
-        "correct",
-        json!({"targetId":decision_id,"content":"httpboundary corrected publication"}),
-        Some(token),
-    )
-    .await;
-    assert_eq!(corrected["published_by"], member["account"]["person_id"]);
-    assert_eq!(corrected["changed_by"], owner["account"]["person_id"]);
+        .await;
+        assert!(!(200..300).contains(&status));
+    }
     let rows = ok(
         &router,
         "GET",
-        &format!("{path}/memories"),
+        "memories",
         Value::Null,
-        Some(reader_token),
+        Some(stranger_token),
     )
     .await;
-    assert_eq!(rows[0]["memory_id"], corrected["memory_id"]);
-    let secret=ok(&router,"POST","remember",json!({"content":"secret note","context":{"repository":"host/org/repo"},"lifecycle":{"sensitivity":"secret"}}),Some(member_token)).await;
-    for dry_run in [true, false] {
-        assert!(request(&router,"POST","promote",json!({"projectId":id,"memoryId":secret["memory_id"],"reason":"no","dryRun":dry_run}),Some(member_token)).await.0>=400);
-    }
-    let ownership = format!("{path}/ownership");
-    assert_eq!(
-        request(
-            &router,
-            "POST",
-            &ownership,
-            json!({"personId":reader["account"]["person_id"]}),
-            Some(device_token)
-        )
-        .await
-        .0,
-        403
-    );
     assert!(
-        request(
-            &router,
-            "POST",
-            &ownership,
-            json!({"personId":reader["account"]["person_id"]}),
-            Some(member_token)
-        )
-        .await
-        .0 >= 400
-    );
-    ok(
-        &router,
-        "POST",
-        &ownership,
-        json!({"personId":reader["account"]["person_id"]}),
-        Some(token),
-    )
-    .await;
-    assert_eq!(
-        ok(
-            &router,
-            "GET",
-            &format!("{path}/members"),
-            Value::Null,
-            Some(member_token)
-        )
-        .await[0]["person_id"],
-        reader["account"]["person_id"]
-    );
-    // The former owner is still the administrator; rename has no admin bypass.
-    assert_eq!(
-        request(
-            &router,
-            "POST",
-            &rename_path,
-            json!({"name":"Admin override"}),
-            Some(token)
-        )
-        .await
-        .0,
-        401
-    );
-    ok(
-        &router,
-        "POST",
-        &rename_path,
-        json!({"name":"Useful project name"}),
-        Some(reader_token),
-    )
-    .await;
-    ok(
-        &router,
-        "POST",
-        &ownership,
-        json!({"personId":owner["account"]["person_id"]}),
-        Some(token),
-    )
-    .await;
-    for route in [
-        "team",
-        "shares",
-        "shared",
-        "policy",
-        "share-candidates",
-        "revocations",
-        "team/members",
-    ] {
-        for method in ["GET", "POST"] {
-            assert_eq!(
-                request(
-                    &router,
-                    method,
-                    &format!("{path}/{route}"),
-                    json!({}),
-                    Some(token)
-                )
-                .await
-                .0,
-                404,
-                "{method} {route}"
-            );
-        }
-    }
-    assert_eq!(
-        request(
-            &router,
-            "POST",
-            &format!("{path}/members"),
-            json!({}),
-            Some(token)
-        )
-        .await
-        .0,
-        405
-    );
-    let exported = ok(&router, "POST", "export", json!({}), Some(member_token)).await;
-    assert!(
-        exported["memories"]
+        !rows
             .as_array()
             .unwrap()
             .iter()
-            .all(|m| m["published_by"].is_null())
+            .any(|m| m["scope"] == "project")
     );
+    for route in ["correct", "delete"] {
+        let body = if route == "correct" {
+            json!({"targetId":global["memory_id"],"content":"forbidden"})
+        } else {
+            json!({"id":global["memory_id"]})
+        };
+        let (status, _) = request(&router, "POST", route, body, Some(stranger_token)).await;
+        assert!(!(200..300).contains(&status));
+    }
+    let authored = ok(
+        &router,
+        "POST",
+        "correct",
+        json!({"targetId":global["memory_id"],"content":"scopecheck author corrected global"}),
+        Some(author_token),
+    )
+    .await;
+    assert_eq!(authored["author"], global["author"]);
+    let correction = ok(
+        &router,
+        "POST",
+        "correct",
+        json!({"targetId":authored["memory_id"],"content":"scopecheck corrected global"}),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(correction["scope"], "global");
+    ok(
+        &router,
+        "POST",
+        "delete",
+        json!({"id":correction["memory_id"]}),
+        Some(admin_token),
+    )
+    .await;
+    for method in ["GET", "POST"] {
+        let (status, _) = request(&router, method, "promote", json!({}), Some(author_token)).await;
+        assert!(matches!(status, 404 | 405));
+        let (status, _) = request(
+            &router,
+            method,
+            &format!("projects/{project_id}/personal-memories"),
+            json!({}),
+            Some(author_token),
+        )
+        .await;
+        assert!(matches!(status, 404 | 405));
+    }
 }
 
 #[tokio::test]
