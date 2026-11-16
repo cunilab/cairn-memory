@@ -27,6 +27,8 @@ export type Account = {
 export type PersonalMemory = {
   memory_id: string;
   content: string;
+  kind?: string;
+  created_at?: string;
   scope: string;
   context?: { branch?: string | null };
   lifecycle?: { sensitivity?: string };
@@ -35,6 +37,7 @@ export type PersonalMemory = {
 export type ProjectMemory = {
   memory_id: string;
   content: string;
+  kind?: string;
   scope: string;
   verified_commit?: string | null;
   supersedes?: string | null;
