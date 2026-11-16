@@ -21,7 +21,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { closeBranchImpact, mergeBranchImpact, sharePolicyImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
-import type { PersonalMemory, ProjectBranch, ProjectMemory } from "@/lib/types";
+import type { PersonalMemory, ProjectBranch } from "@/lib/types";
 
 const POLICIES = [
   { value: "manual", label: "Manual" },
@@ -114,7 +114,6 @@ export function ProjectOwnerActions({
   projectId,
   sharePolicy,
   branches,
-  decisions,
   pending,
   run,
   onSessionRequired,
@@ -122,7 +121,6 @@ export function ProjectOwnerActions({
   projectId: string;
   sharePolicy: string | null | undefined;
   branches: ProjectBranch[];
-  decisions: ProjectMemory[];
   pending: boolean;
   run: (action: () => Promise<unknown>, success?: string) => Promise<boolean>;
   onSessionRequired: () => void;
@@ -130,10 +128,6 @@ export function ProjectOwnerActions({
   const base = `projects/${encodeURIComponent(projectId)}`;
   const [memories, setMemories] = useState<PersonalMemory[]>([]);
   const [memoriesError, setMemoriesError] = useState<string | null>(null);
-  const [promoteId, setPromoteId] = useState("");
-  const [promoteReason, setPromoteReason] = useState("");
-  const [verifyId, setVerifyId] = useState("");
-  const [verifyCommit, setVerifyCommit] = useState("");
   const [mergeBranchId, setMergeBranchId] = useState("");
   const [mergeMemoryId, setMergeMemoryId] = useState("");
   const [mergeCommit, setMergeCommit] = useState("");
@@ -178,8 +172,6 @@ export function ProjectOwnerActions({
   const openBranches = branches.filter(
     (branch) => branch.status !== "merged" && branch.status !== "closed",
   );
-  const promote = pick(memories, (m) => m.memory_id, promoteId);
-  const verify = pick(decisions, (m) => m.memory_id, verifyId);
   const mergeBranch = pick(openBranches, (b) => b.branch_id, mergeBranchId);
   const mergeMemories = memories.filter(
     (memory) => memory.context?.branch === mergeBranch?.name,
@@ -260,123 +252,6 @@ export function ProjectOwnerActions({
             </ul>
           )}
         </ActionCard>
-
-        <form
-          className="min-w-0"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!promote) {
-              return;
-            }
-            void run(
-              () =>
-                cairn("promote", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    project_id: projectId,
-                    memory_id: promote.memory_id,
-                    reason: promoteReason,
-                  }),
-                }),
-              "Memory promoted to a project decision.",
-            ).then((ok) => ok && setPromoteReason(""));
-          }}
-        >
-          <ActionCard
-            title="Promote a memory"
-            description="Copy one of your personal memories into this project as a decision."
-            footer={
-              <Button type="submit" disabled={pending || !promote || promoteReason.trim() === ""}>
-                Promote memory
-              </Button>
-            }
-          >
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="promote-memory">Personal memory</FieldLabel>
-                <Choice
-                  id="promote-memory"
-                  value={promote?.memory_id ?? ""}
-                  options={memories.map((memory) => ({
-                    value: memory.memory_id,
-                    label: preview(memory),
-                  }))}
-                  empty="No personal memories"
-                  onChange={setPromoteId}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="promote-reason">Reason</FieldLabel>
-                <Input
-                  id="promote-reason"
-                  value={promoteReason}
-                  onChange={(event) => setPromoteReason(event.target.value)}
-                  autoComplete="off"
-                  required
-                />
-              </Field>
-            </FieldGroup>
-          </ActionCard>
-        </form>
-
-        <form
-          className="min-w-0"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!verify) {
-              return;
-            }
-            void run(
-              () =>
-                cairn("projects/verify", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    project_id: projectId,
-                    memory_id: verify.memory_id,
-                    commit: verifyCommit.trim(),
-                  }),
-                }),
-              "Decision verified.",
-            ).then((ok) => ok && setVerifyCommit(""));
-          }}
-        >
-          <ActionCard
-            title="Verify a decision"
-            description="Tie a decision to the commit where you checked that it still holds."
-            footer={
-              <Button type="submit" disabled={pending || !verify || verifyCommit.trim() === ""}>
-                Verify decision
-              </Button>
-            }
-          >
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="verify-memory">Decision</FieldLabel>
-                <Choice
-                  id="verify-memory"
-                  value={verify?.memory_id ?? ""}
-                  options={decisions.map((memory) => ({
-                    value: memory.memory_id,
-                    label: memory.memory_id,
-                  }))}
-                  empty="No decisions"
-                  onChange={setVerifyId}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
-                <Input
-                  id="verify-commit"
-                  className="font-mono"
-                  value={verifyCommit}
-                  onChange={(event) => setVerifyCommit(event.target.value)}
-                  autoComplete="off"
-                  required
-                />
-              </Field>
-            </FieldGroup>
-          </ActionCard>
-        </form>
 
         <form
           className="min-w-0"

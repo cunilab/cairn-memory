@@ -8,7 +8,9 @@ import { toast } from "sonner";
 import { Freshness, IdText, KindBadge, RoleBadge, ScopeBadge, SensitivityBadge } from "@/components/badges";
 import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
+import { FormDialog } from "@/components/form-dialog";
 import { PageHeader } from "@/components/page-header";
+import { ProjectMemories } from "@/components/project-memories";
 import { ProjectOwnerActions } from "@/components/project-owner-actions";
 import { ProjectReports } from "@/components/project-reports";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -34,7 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   Sheet,
@@ -74,12 +76,12 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
-  const [teamName, setTeamName] = useState("");
   const [pending, setPending] = useState(false);
   const [sessionRequired, setSessionRequired] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
   const [dialogAction, setDialogAction] = useState<ConfirmAction | null>(null);
   const [detail, setDetail] = useState<ProjectMemory | null>(null);
+  const [verifying, setVerifying] = useState<ProjectMemory | null>(null);
   const confirming = useRef(false);
   const loadGeneration = useRef(0);
 
@@ -103,12 +105,12 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setError(null);
     setActionError(null);
     setEmail("");
-    setTeamName("");
     setPending(false);
     setSessionRequired(false);
     setConfirm(null);
     setDialogAction(null);
     setDetail(null);
+    setVerifying(null);
   });
 
   function openConfirm(next: ConfirmAction) {
@@ -234,6 +236,28 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       }
     }
     return false;
+  }
+
+  /** A write from a dialog: errors throw into the dialog, then the project reloads. */
+  async function submit(action: () => Promise<unknown>, success: string) {
+    await action();
+    const generation = beginLoad();
+    try {
+      const result = await fetchProject();
+      if (isCurrent(generation)) {
+        applyProject(result);
+      }
+    } catch (cause) {
+      if (!isCurrent(generation)) {
+        return;
+      }
+      if (cause instanceof SessionRequiredError) {
+        requireSignIn();
+        return;
+      }
+      setError("The change was saved, but the project could not be reloaded. Reload the page.");
+    }
+    toast.success(success);
   }
 
   async function confirmAction() {
@@ -412,8 +436,11 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               >
                 <MoreHorizontalIcon />
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuContent align="end" className="w-52">
                 <DropdownMenuItem onClick={() => setDetail(row.original)}>View details</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setVerifying(row.original)}>
+                  Verify against commit
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => shareDecision(row.original.memory_id)}>
                   Share decision
                 </DropdownMenuItem>
@@ -486,6 +513,11 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               <Badge variant="secondary">{memories.length}</Badge>
             </TabsTrigger>
             {owner ? (
+              <TabsTrigger value="memories" className="flex-none px-3">
+                Memories
+              </TabsTrigger>
+            ) : null}
+            {owner ? (
               <TabsTrigger value="reports" className="flex-none px-3">
                 Reports
               </TabsTrigger>
@@ -501,6 +533,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           </TabsList>
 
           <TabsContent value="decisions" className="flex min-w-0 flex-col gap-4">
+            <p className="max-w-prose text-sm text-muted-foreground">
+              Settled project knowledge promoted from a memory. Shared with members you choose and
+              verifiable against a commit. Promoting keeps your personal memory.
+            </p>
             <DataTable
               label="decisions"
               data={memories}
@@ -541,7 +577,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                     <EmptyTitle>{owner ? "No decisions" : "No shared decisions"}</EmptyTitle>
                     <EmptyDescription>
                       {owner
-                        ? "Promote a memory from the Controls tab to record the first decision."
+                        ? "Promote a memory from the Memories tab to record the first decision."
                         : "Decisions the owner shares with you appear here."}
                     </EmptyDescription>
                   </EmptyHeader>
@@ -549,6 +585,17 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               }
             />
           </TabsContent>
+
+          {owner ? (
+            <TabsContent value="memories" className="min-w-0">
+              <ProjectMemories
+                projectId={projectId}
+                repository={project.repository}
+                submit={submit}
+                onSessionRequired={requireSignIn}
+              />
+            </TabsContent>
+          ) : null}
 
           {owner ? (
             <TabsContent value="reports" className="min-w-0">
@@ -567,165 +614,50 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                 <AlertDescription className="text-destructive">{teamError}</AlertDescription>
               </Alert>
             ) : null}
-            <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-              <Card className="h-full min-w-0">
-                <CardHeader>
-                  <CardTitle className="break-words">
-                    <h2>{team ? team.name : "Team"}</h2>
-                  </CardTitle>
-                  <CardDescription>
-                    {team ? <IdText id={team.project_id} /> : "People who work on this project together."}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {team ? (
-                    team.members.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">No team members.</p>
-                    ) : (
-                      <ul className="flex flex-col gap-2 text-sm">
-                        {team.members.map((member) => (
-                          <li key={member.person_id} className="flex min-w-0 items-center gap-2.5">
-                            <Avatar className="size-6 rounded-md">
-                              <AvatarFallback className="rounded-md text-xs">
-                                {member.email.slice(0, 1).toUpperCase()}
-                              </AvatarFallback>
-                            </Avatar>
-                            <span className="break-all">{member.email}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    )
-                  ) : !teamError ? (
-                    <Empty className="border border-dashed p-6">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <UsersIcon />
-                        </EmptyMedia>
-                        <EmptyTitle>No team yet</EmptyTitle>
-                        <EmptyDescription>
-                          {owner
-                            ? "No team yet. Create one with the form on this tab."
-                            : "This project has no team."}
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
-                  ) : null}
-                </CardContent>
-              </Card>
-
-              {owner ? (
-                <Card className="h-full min-w-0">
-                  <CardHeader>
-                    <CardTitle>
-                      <h2>Members</h2>
-                    </CardTitle>
-                    <CardDescription>
-                      Invite lets a person read the decisions you share. Add and Remove change who is
-                      in the team.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="flex min-w-0 flex-col gap-4">
-                    <FieldGroup>
-                      <Field>
-                        <FieldLabel htmlFor="team-member-email">Member email</FieldLabel>
-                        <Input
-                          id="team-member-email"
-                          type="email"
-                          value={email}
-                          onChange={(event) => setEmail(event.target.value)}
-                          autoComplete="off"
-                        />
-                      </Field>
-                    </FieldGroup>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        disabled={pending}
-                        onClick={() =>
-                          void run(
-                            () =>
-                              cairn(`projects/${encodeURIComponent(projectId)}/members`, {
-                                method: "POST",
-                                body: JSON.stringify({ email }),
-                              }),
-                            "Member invited.",
-                          )
-                        }
-                      >
-                        Invite member
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={pending}
-                        onClick={() =>
-                          void run(
-                            () =>
-                              cairn(`projects/${encodeURIComponent(projectId)}/team/members`, {
-                                method: "POST",
-                                body: JSON.stringify({ email }),
-                              }),
-                            "Team member added.",
-                          )
-                        }
-                      >
-                        Add member
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={pending}
-                        onClick={() =>
-                          void run(
-                            () =>
-                              cairn(`projects/${encodeURIComponent(projectId)}/team/members/remove`, {
-                                method: "POST",
-                                body: JSON.stringify({ email }),
-                              }),
-                            "Team member removed.",
-                          )
-                        }
-                      >
-                        Remove member
-                      </Button>
-                    </div>
-                    {team ? null : (
-                      <form
-                        className="flex flex-col gap-3 border-t pt-4"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void run(
-                            () =>
-                              cairn(`projects/${encodeURIComponent(projectId)}/team`, {
-                                method: "POST",
-                                body: JSON.stringify({ name: teamName }),
-                              }),
-                            "Team created.",
-                          );
-                        }}
-                      >
-                        <FieldGroup>
-                          <Field>
-                            <FieldLabel htmlFor="team-name">Team name</FieldLabel>
-                            <Input
-                              id="team-name"
-                              value={teamName}
-                              onChange={(event) => setTeamName(event.target.value)}
-                              required
-                            />
-                          </Field>
-                        </FieldGroup>
-                        <div>
-                          <Button type="submit" disabled={pending}>
-                            Create team
-                          </Button>
-                        </div>
-                      </form>
-                    )}
-                  </CardContent>
-                </Card>
-              ) : null}
-            </div>
+            <p className="max-w-prose text-sm text-muted-foreground">
+              Members join automatically when they work in a checkout that contains this
+              project&apos;s <code className="font-mono text-xs text-foreground">.cairn/project.json</code>{" "}
+              (created by <code className="font-mono text-xs text-foreground">cairn init</code>).
+              {owner ? " Share a decision with a member from the Decisions tab." : ""}
+            </p>
+            <Card className="min-w-0 max-w-xl">
+              <CardHeader>
+                <CardTitle className="break-words">
+                  <h2>Members</h2>
+                </CardTitle>
+                <CardDescription>
+                  {team ? `${team.members.length} ${team.members.length === 1 ? "member" : "members"}` : "People who work on this project."}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {team && team.members.length > 0 ? (
+                  <ul className="flex flex-col gap-2 text-sm">
+                    {team.members.map((member) => (
+                      <li key={member.person_id} className="flex min-w-0 items-center gap-2.5">
+                        <Avatar className="size-6 rounded-md">
+                          <AvatarFallback className="rounded-md text-xs">
+                            {member.email.slice(0, 1).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                        <span className="break-all">{member.email}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : !teamError ? (
+                  <Empty className="border border-dashed p-6">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <UsersIcon />
+                      </EmptyMedia>
+                      <EmptyTitle>No members yet</EmptyTitle>
+                      <EmptyDescription>
+                        Members appear here after they work in a checkout of this project.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                ) : null}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {owner ? (
@@ -734,7 +666,6 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                 projectId={projectId}
                 sharePolicy={project.share_policy}
                 branches={branches}
-                decisions={memories}
                 pending={pending}
                 run={run}
                 onSessionRequired={requireSignIn}
@@ -789,6 +720,47 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           ) : null}
         </SheetContent>
       </Sheet>
+
+      <FormDialog
+        open={verifying !== null}
+        onOpenChange={(open) => !open && setVerifying(null)}
+        title="Verify against commit"
+        description={
+          <>
+            Record the commit where you checked that this decision still holds.
+            <span className="mt-2 line-clamp-3 block rounded-md bg-muted px-2.5 py-2 text-foreground [overflow-wrap:anywhere]">
+              {verifying?.content}
+            </span>
+          </>
+        }
+        submitLabel="Verify decision"
+        onSubmit={async (data) => {
+          if (!verifying) {
+            return;
+          }
+          const commit = String(data.get("commit")).trim();
+          if (!commit) {
+            throw new Error("Enter the commit you checked the decision against.");
+          }
+          await submit(
+            () =>
+              cairn("projects/verify", {
+                method: "POST",
+                body: JSON.stringify({
+                  project_id: projectId,
+                  memory_id: verifying.memory_id,
+                  commit,
+                }),
+              }),
+            "Decision verified.",
+          );
+        }}
+      >
+        <Field>
+          <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
+          <Input id="verify-commit" name="commit" className="font-mono" autoComplete="off" required />
+        </Field>
+      </FormDialog>
 
       <AlertDialog
         open={confirm !== null}

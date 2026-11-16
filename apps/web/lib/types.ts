@@ -24,13 +24,15 @@ export type Account = {
   is_admin?: boolean;
 };
 
+export type AccountRow = Required<Account> & { created_at: string };
+
 export type PersonalMemory = {
   memory_id: string;
   content: string;
   kind?: string;
   created_at?: string;
   scope: string;
-  context?: { branch?: string | null };
+  context?: { branch?: string | null; repository?: string | null };
   lifecycle?: { sensitivity?: string };
 };
 

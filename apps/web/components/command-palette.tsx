@@ -7,6 +7,9 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   LogOutIcon,
+  MonitorIcon,
+  MoonIcon,
+  SunIcon,
   UsersIcon,
 } from "lucide-react";
 import {
@@ -21,8 +24,12 @@ import {
 } from "@/components/ui/command";
 import { useAccount } from "@/hooks/use-account";
 import { useLogout } from "@/hooks/use-logout";
+import { useTheme } from "@/hooks/use-theme";
 import { cairn } from "@/lib/cairn";
+import { THEMES } from "@/lib/theme";
 import type { ListedProject } from "@/lib/types";
+
+const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
 /** Jump to a page or project with Cmd+K (Ctrl+K elsewhere). Projects load on first open. */
 export function CommandPalette({
@@ -35,6 +42,7 @@ export function CommandPalette({
   const router = useRouter();
   const account = useAccount();
   const logout = useLogout();
+  const [, setTheme] = useTheme();
   const [projects, setProjects] = useState<ListedProject[]>([]);
   const loaded = useRef(false);
 
@@ -114,6 +122,25 @@ export function CommandPalette({
             ))}
           </CommandGroup>
         ) : null}
+        <CommandSeparator />
+        <CommandGroup heading="Theme">
+          {THEMES.map((item) => {
+            const Icon = THEME_ICONS[item.value];
+            return (
+              <CommandItem
+                key={item.value}
+                value={`theme ${item.label}`}
+                onSelect={() => {
+                  setTheme(item.value);
+                  onOpenChange(false);
+                }}
+              >
+                <Icon />
+                {item.label}
+              </CommandItem>
+            );
+          })}
+        </CommandGroup>
         <CommandSeparator />
         <CommandGroup heading="Account">
           <CommandItem
