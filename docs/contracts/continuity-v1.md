@@ -180,7 +180,7 @@ summary memory:
   same 512-byte limit as `register_project`; an oversized value registers nothing
   and does not fail the capture.
 
-Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/lib.rs`,
+Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/sessions.rs`,
 `crates/storage/src/lib.rs`); the pending column is
 `migrations/0012_session_summary_pending.sql`.
 
@@ -202,7 +202,7 @@ not changed, so a higher score still ranks first. Both adapters apply it; Postgr
 puts it in the SQL `ORDER BY` (after the rank, before the memory ID), so the 512-row cap
 keeps decisions before other tied rows. `why-changed` keeps its own order (decision
 reason, then relationships, then score). Implemented in `prefer_decision` and
-`prefer_newer_contradiction` (`crates/core/src/lib.rs`) and `search_window`
+`prefer_newer_contradiction` (`crates/core/src/recall.rs`) and `search_window`
 (`crates/storage/src/lib.rs`).
 
 ## Why a change exists
@@ -264,12 +264,12 @@ stability, branch scope precision, and stale/contradiction signal coverage.
 
 ## Evidence
 
-- `crates/core/src/lib.rs` implements scope derivation and filtered retrieval.
+- `crates/core/src/sessions.rs` and `crates/core/src/recall.rs` implement scope derivation and filtered retrieval.
 - `crates/server/src/lib.rs` exposes REST filters.
 - `crates/client/src/tools.rs` carries the MCP and CLI filters to REST.
-- `crates/core/src/lib.rs` extracts session handoff fields and provides resume
+- `crates/core/src/sessions.rs` and `crates/core/src/recall.rs` extract session handoff fields and provide resume
   and unresolved retrieval.
-- `crates/core/src/lib.rs` provides deterministic decision reasons, bounded code
+- `crates/core/src/recall.rs` provides deterministic decision reasons, bounded code
   relationships, and stale/contradiction signals.
 - `scripts/smoke_full_flow.sh` verifies branch-local memory does not leak into
   `main` context, that omitted results remain recoverable, and that handoff

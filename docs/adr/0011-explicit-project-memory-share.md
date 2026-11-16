@@ -148,7 +148,7 @@ decision 2 no longer lists invites.
 
 ## Evidence
 
-- `crates/core/src/lib.rs`
+- `crates/core/src/sharing.rs`
 - `crates/storage/src/lib.rs`
 - `crates/server/src/lib.rs`
 - `migrations/0008_layer5_project_shares.sql`

@@ -319,7 +319,7 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
 
 ## Evidence
 
-- `crates/core/src/lib.rs` implements password hashing, session hashing,
+- `crates/core/src/accounts.rs` implements password hashing, session hashing,
   expiration, persistence, and logout.
 - `crates/server/src/lib.rs` exposes bootstrap, register, login, logout,
   current-account, audit, account-authorized device registration, and
@@ -331,7 +331,7 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
 - `migrations/0002_layer3_audit.sql` defines metadata-only operational audit history.
 - `crates/storage/tests/postgres.rs` records the provisioned-database flow.
 - Existing tests that cover parts of this contract, listed by name and not run
-  for this documentation change: in `crates/core/src/lib.rs`,
+  for this documentation change: in `crates/core/src/accounts.rs`,
   `account_auth_hashes_credentials_and_persists_revocable_sessions`; in
   `crates/server/src/lib.rs`,
   `self_hosted_account_auth_bootstraps_logs_in_and_revokes_sessions`,
@@ -341,7 +341,7 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
   `scripts/smoke_postgres.sh` registers a second account and asserts an
   `account_bootstrap` audit event.
 - Device tokens as agent credentials (2026-11-14): `authenticate_account`,
-  `authenticate_session`, and `WEB_ONLY_ERROR` in `crates/core/src/lib.rs` and
+  `authenticate_session`, and `WEB_ONLY_ERROR` in `crates/core/src/accounts.rs` and
   `crates/storage/src/lib.rs`; the 403 mapping, `bootstrap_required` health
   field, and device routes in `crates/server/src/lib.rs`. Tests:
   `device_token_is_an_agent_credential_scoped_to_its_account` (core),
@@ -360,7 +360,7 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
   bootstrap, the password length bounds, or register's duplicate and
   pre-bootstrap errors.
 - Account administration (2026-11-16): `accounts`, `reset_account_password` and
-  `change_password` in `crates/core/src/lib.rs` and `crates/storage/src/lib.rs`; the routes
+  `change_password` in `crates/core/src/accounts.rs` and `crates/storage/src/lib.rs`; the routes
   in `crates/server/src/lib.rs`. Tests: `only_the_admin_session_lists_accounts`,
   `the_admin_resets_a_password_and_every_web_session_of_that_user_ends` and
   `changing_the_password_needs_the_current_one_and_keeps_only_this_session` (core),

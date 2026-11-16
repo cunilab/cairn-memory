@@ -90,7 +90,7 @@ flowchart TD
 
 The last dashed arrow means: if a source observation of a summary is forgotten, the next sweep or explicit end rebuilds the summary from what remains. A summary the person forgot or corrected is never rebuilt. A forget also leaves a deletion instruction in the person's sync stream; section 8 explains why no shipped client needs to read it.
 
-Where in the code: `crates/core/src/lib.rs` (`finish_idle_sessions`, `sweep_idle_sessions`, `Lifecycle::observation`, `correct_for_account`, `hide_id`, `summary_is_stale`, `build_session_digest`), `crates/storage/src/lib.rs` (`IDLE_SESSION_SECONDS`, `finish_idle_sessions`, `sweep_idle_sessions`), `crates/server/src/main.rs` (`IDLE_SWEEP_INTERVAL`), `migrations/0012_session_summary_pending.sql`. Rules: [lifecycle](./contracts/lifecycle-v1.md), [continuity](./contracts/continuity-v1.md).
+Where in the code: `crates/core/src/sessions.rs` (`finish_idle_sessions`, `sweep_idle_sessions`, `summary_is_stale`, `build_session_digest`), `crates/core/src/lifecycle.rs` (`Lifecycle::observation`, `hide_id`), `crates/core/src/memories.rs` (`correct_for_account`), `crates/storage/src/lib.rs` (`IDLE_SESSION_SECONDS`, `finish_idle_sessions`, `sweep_idle_sessions`), `crates/server/src/main.rs` (`IDLE_SWEEP_INTERVAL`), `migrations/0012_session_summary_pending.sql`. Rules: [lifecycle](./contracts/lifecycle-v1.md), [continuity](./contracts/continuity-v1.md).
 
 ### 2.1 What each Claude Code hook sends
 
@@ -139,7 +139,7 @@ Source actors:
 
 The summary lists repeated lines once, notes how many it left out, and pulls lines containing words such as "next step", "todo", or "blocked" into its next-steps and unresolved-work lists.
 
-Where in the code: `scripts/cairn_hook.py` (`build_request`, `git_context`, `HOST_ROLES`, `TOOL_CONTENT_CHARS`), `scripts/cairn_outbox.py` (`normalize`), `crates/core/src/lib.rs` (`build_session_digest`, `derive_session_memory`). Rules: [hook](./contracts/hook-v1.md#claude-code-hook-input).
+Where in the code: `scripts/cairn_hook.py` (`build_request`, `git_context`, `HOST_ROLES`, `TOOL_CONTENT_CHARS`), `scripts/cairn_outbox.py` (`normalize`), `crates/core/src/sessions.rs` (`build_session_digest`, `derive_session_memory`). Rules: [hook](./contracts/hook-v1.md#claude-code-hook-input).
 
 ### 2.2 One prompt, from keystroke to later recall
 
@@ -222,7 +222,7 @@ stateDiagram-v2
 
 A session with no retained observations gets no summary: an explicit end returns an error, the file store's sweep skips it, and PostgreSQL logs the failure and tries again after another idle period.
 
-Where in the code: `crates/core/src/lib.rs` (`finish_idle_sessions`, `session_needs_summary`, `finish_session_staged`, `carry_summary_state`), `crates/storage/src/lib.rs` (`finish_idle_session`, `finish_session_summary`, `pending_since`).
+Where in the code: `crates/core/src/sessions.rs` (`finish_idle_sessions`, `session_needs_summary`, `finish_session_staged`, `carry_summary_state`), `crates/storage/src/lib.rs` (`finish_idle_session`, `finish_session_summary`, `pending_since`).
 
 ### 2.4 A queued event's life
 
@@ -311,7 +311,7 @@ Housekeeping after the write (project registration, idle close) never turns an a
 | Search result cap | None | 512 matches |
 | `observe` with a web session | Accepted | 401 (device token only) |
 
-Where in the code: `crates/core/src/lib.rs` (`sync_push`, `capture_for_account`), `crates/storage/src/lib.rs` (`sync_push`, `auto_register_project`). Rules: [hook](./contracts/hook-v1.md), [sync](./contracts/sync-layer3.md).
+Where in the code: `crates/core/src/sync.rs` (`sync_push`), `crates/core/src/capture.rs` (`capture_for_account`), `crates/storage/src/lib.rs` (`sync_push`, `auto_register_project`). Rules: [hook](./contracts/hook-v1.md), [sync](./contracts/sync-layer3.md).
 
 ## 4. Recall path
 
@@ -343,7 +343,7 @@ Equal scores are the only place the order is adjusted: a project decision comes 
 
 Scope filter in one line: `worktree` matches repository, branch, and worktree; `branch` matches repository and branch; `project` matches repository; `global` always matches; `session` matches the same session id. With no filter, every scope is returned. A missing field never widens a match. `recall` is the same route as `context`, and `smart-search` is the same route as `search`.
 
-Where in the code: `crates/core/src/lib.rs` (`ranked_matches`, `memory_matches_filter`, `prefer_decision`, `prefer_newer_contradiction`, `build_context_pack`, `why_changed_context`), `crates/storage/src/lib.rs` (`search_window`, `why_changed_context`), `crates/client/src/tools.rs`. Rules: [continuity](./contracts/continuity-v1.md).
+Where in the code: `crates/core/src/recall.rs` (`ranked_matches`, `memory_matches_filter`, `prefer_decision`, `prefer_newer_contradiction`, `build_context_pack`, `why_changed_context`), `crates/storage/src/lib.rs` (`search_window`, `why_changed_context`), `crates/client/src/tools.rs`. Rules: [continuity](./contracts/continuity-v1.md).
 
 ## 5. Project flow
 
@@ -366,7 +366,7 @@ flowchart TD
 
 Every merge, close, verify, and promote form asks for confirmation (merge and close show what cannot be undone) and needs a reason or commit where the diagram says so. These actions are owner-only: members see shared decisions but no controls. A merged branch cannot be closed and a closed branch cannot be merged. The `projects/{id}/confirm` route, entity registration, and worktree registration have no console control, CLI command, or MCP tool.
 
-Where in the code: `crates/core/src/lib.rs` (`auto_register_project`, `promote_memory`, `verify_project_memory`, `confirm_branch_merge`, `close_branch`), `crates/storage/src/lib.rs` (same names), `crates/server/src/lib.rs` (routes), `apps/web/components/project-owner-actions.tsx` (console forms). Rules: [project](./contracts/project-layer4.md).
+Where in the code: `crates/core/src/projects.rs` (`auto_register_project`, `promote_memory`, `verify_project_memory`, `confirm_branch_merge`, `close_branch`), `crates/storage/src/lib.rs` (same names), `crates/server/src/lib.rs` (routes), `apps/web/components/project-owner-actions.tsx` (console forms). Rules: [project](./contracts/project-layer4.md).
 
 ## 6. Sharing flow
 
@@ -403,7 +403,7 @@ Not shown because it does not exist: there is no invite and no member removal (r
 
 The console lets an owner share, revoke, delete, create a team, and switch the share policy (with a confirmation that says what changes). Dismissing a share candidate has no console control, CLI command, or MCP tool; it is REST only. The policy has no CLI command or MCP tool either.
 
-Where in the code: `crates/core/src/lib.rs` (`init_project`, `join_context_project`, `share_project_memory`, `shared_project_memories`, `revoke_project_share`, `auto_share_new_project_memory`, `project_revocations`), `apps/web/components/project-detail.tsx`, `apps/web/components/project-owner-actions.tsx`. Rules: [share](./contracts/share-layer5.md).
+Where in the code: `crates/core/src/projects.rs` (`init_project`, `join_context_project`), `crates/core/src/sharing.rs` (`share_project_memory`, `shared_project_memories`, `revoke_project_share`, `auto_share_new_project_memory`, `project_revocations`), `apps/web/components/project-detail.tsx`, `apps/web/components/project-owner-actions.tsx`. Rules: [share](./contracts/share-layer5.md).
 
 ## 7. Sign-in, tokens, and permissions
 
@@ -459,7 +459,7 @@ The admin check runs before the per-email rate limit and before the email and pa
 | Remember, correct, forget, delete, export, import | Yes | Yes |
 | Projects (`init` too), promote, verify, branches, share, revoke, policy, teams | Yes | Yes |
 
-Where in the code: `crates/core/src/lib.rs` (`bootstrap_account`, `register_account_as_admin`, `authenticate_admin`, `authenticate_session`, `authenticate_account`, `WEB_ONLY_ERROR`, `ADMIN_ONLY_ERROR`, `AUTH_SESSION_SECONDS`, `confirm_branch_merge`), `crates/storage/src/lib.rs`, `crates/server/src/lib.rs` (`auth_register`, `auth_me`, `AUTH_ATTEMPT_LIMIT`), `migrations/0013_admin_role.sql`, `apps/web/app/api/cairn/[...path]/route.ts` (cookie), `apps/web/components/login-form.tsx`, `accounts.tsx`, `devices.tsx`, `apps/web/hooks/use-account.ts`, `crates/client/src/lib.rs`. Rules: [auth](./contracts/auth-layer3.md), [ADR 0008](./adr/0008-self-hosted-account-authentication.md).
+Where in the code: `crates/core/src/accounts.rs` (`bootstrap_account`, `register_account_as_admin`, `authenticate_admin`, `authenticate_session`, `authenticate_account`, `WEB_ONLY_ERROR`, `ADMIN_ONLY_ERROR`, `AUTH_SESSION_SECONDS`), `crates/core/src/projects.rs` (`confirm_branch_merge`), `crates/storage/src/lib.rs`, `crates/server/src/lib.rs` (`auth_register`, `auth_me`, `AUTH_ATTEMPT_LIMIT`), `migrations/0013_admin_role.sql`, `apps/web/app/api/cairn/[...path]/route.ts` (cookie), `apps/web/components/login-form.tsx`, `accounts.tsx`, `devices.tsx`, `apps/web/hooks/use-account.ts`, `crates/client/src/lib.rs`. Rules: [auth](./contracts/auth-layer3.md), [ADR 0008](./adr/0008-self-hosted-account-authentication.md).
 
 ## 8. Sync between devices
 
@@ -488,7 +488,7 @@ sequenceDiagram
 
 Pull and sync diagnose are REST routes that only the smoke scripts call. No shipped client reads the sync stream: the hook only pushes, and `cairn` and `cairn mcp` ask the server directly (search, context, resume) every time. A deletion instruction is therefore never delivered to anything today, and that is fine, because no client keeps a local copy of memory that could go stale. The only local data on a device is the outbox, which holds events that were never delivered, so the server has nothing to forget for them yet. A forget or delete takes effect at the server, and the next recall already leaves the item out. The pull route and its deletion instructions are the hook for a future client that keeps a local cache; such a client would have to pull to learn about deletions. Sync diagnose always reports `pending_events` and `rejected_events` as `0`; the outbox's own `status` reports its queue and rejected count.
 
-Where in the code: `crates/core/src/lib.rs` (`sync_push`, `sync_pull`), `crates/storage/src/lib.rs` (`sync_pull`, `lock_sync_cursor`, `MAX_PULL_EVENTS`), `scripts/smoke_layer3.sh`. Rules: [sync](./contracts/sync-layer3.md).
+Where in the code: `crates/core/src/sync.rs` (`sync_push`, `sync_pull`), `crates/storage/src/lib.rs` (`sync_pull`, `lock_sync_cursor`, `MAX_PULL_EVENTS`), `scripts/smoke_layer3.sh`. Rules: [sync](./contracts/sync-layer3.md).
 
 ## 9. Use cases
 

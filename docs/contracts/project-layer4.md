@@ -394,7 +394,7 @@ web-only ([auth](auth-layer3.md)).
 ## Evidence
 
 - Project init and membership by capture (2026-11-16): `init_project`, `join_context_project` in
-  `crates/core/src/lib.rs` and `crates/storage/src/lib.rs`; `crates/client/src/project.rs`.
+  `crates/core/src/projects.rs` and `crates/storage/src/lib.rs`; `crates/client/src/project.rs`.
   Tests: `a_capture_with_a_project_id_makes_the_capturer_a_member_once`,
   `an_unknown_ownerless_or_own_project_id_is_ignored_by_a_capture`,
   `a_device_sync_push_with_a_project_id_joins_and_a_bare_id_keeps_session_context`,
@@ -407,7 +407,7 @@ web-only ([auth](auth-layer3.md)).
   `postgres_init_project_creates_once_and_defaults_the_name` (storage).
 - `docs/adr/0009-explicit-project-promotion.md`
 - `docs/adr/0010-correction-keeps-linked-history.md`
-- `crates/core/src/lib.rs`
+- `crates/core/src/projects.rs`
 - `crates/client/src/tools.rs`
 - `crates/client/src/bin/cairn.rs`
 - `scripts/smoke_layer4_cli.sh`

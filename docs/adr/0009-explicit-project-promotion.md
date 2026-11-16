@@ -107,7 +107,7 @@ stake.
 
 ## Evidence
 
-- `crates/core/src/lib.rs`
+- `crates/core/src/projects.rs`
 - `crates/storage/src/lib.rs`
 - `migrations/0003_layer4_projects.sql`
 - `migrations/0004_layer4_freshness.sql`
