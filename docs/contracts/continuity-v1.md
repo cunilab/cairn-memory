@@ -17,7 +17,7 @@ user-global scope.
 | `session` | A session-local memory or legacy record without safe broader context | Same `sessionId` only |
 | `worktree` | An unmerged hypothesis tied to one repository, branch, and worktree | Repository + branch + worktree |
 | `branch` | A branch-local fact that may apply across worktrees for that branch | Repository + branch |
-| `project` | Repository-level project knowledge | Repository |
+| `project` | Repository-level personal memory, or an explicitly published decision with `published_by` | Personal: repository; publication: project ID and membership |
 | `global` | A user-level memory without repository context | Any scoped query |
 
 New session summaries derive their scope from their captured `WorkContext`:
@@ -32,6 +32,14 @@ no repository                  -> session
 Explicit memories use the same mapping, except a memory without repository
 context is treated as `global`. This keeps personal guidance available across
 projects while keeping branch/worktree hypotheses narrow.
+
+Published decisions have a separate `published_by` boundary: project tags alone
+never grant access. Normal recall combines eligible personal rows with decisions
+from `context.project_id`, ranked together and labelled `source: personal | project`.
+Global personal memory has no repository and is never shared. Resume/unresolved
+remain personal. See [the project contract](project-layer4.md) for publication,
+attachment warnings and personal branch bookkeeping; its rules supersede older
+project auto-registration wording below.
 
 ## Retrieval filters
 
@@ -180,7 +188,7 @@ summary memory:
   same 512-byte limit as `register_project`; an oversized value registers nothing
   and does not fail the capture.
 
-Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/lib.rs`,
+Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/sessions.rs`,
 `crates/storage/src/lib.rs`); the pending column is
 `migrations/0012_session_summary_pending.sql`.
 
@@ -202,7 +210,7 @@ not changed, so a higher score still ranks first. Both adapters apply it; Postgr
 puts it in the SQL `ORDER BY` (after the rank, before the memory ID), so the 512-row cap
 keeps decisions before other tied rows. `why-changed` keeps its own order (decision
 reason, then relationships, then score). Implemented in `prefer_decision` and
-`prefer_newer_contradiction` (`crates/core/src/lib.rs`) and `search_window`
+`prefer_newer_contradiction` (`crates/core/src/recall.rs`) and `search_window`
 (`crates/storage/src/lib.rs`).
 
 ## Why a change exists
@@ -264,12 +272,12 @@ stability, branch scope precision, and stale/contradiction signal coverage.
 
 ## Evidence
 
-- `crates/core/src/lib.rs` implements scope derivation and filtered retrieval.
+- `crates/core/src/sessions.rs` and `crates/core/src/recall.rs` implement scope derivation and filtered retrieval.
 - `crates/server/src/lib.rs` exposes REST filters.
 - `crates/client/src/tools.rs` carries the MCP and CLI filters to REST.
-- `crates/core/src/lib.rs` extracts session handoff fields and provides resume
+- `crates/core/src/sessions.rs` and `crates/core/src/recall.rs` extract session handoff fields and provide resume
   and unresolved retrieval.
-- `crates/core/src/lib.rs` provides deterministic decision reasons, bounded code
+- `crates/core/src/recall.rs` provides deterministic decision reasons, bounded code
   relationships, and stale/contradiction signals.
 - `scripts/smoke_full_flow.sh` verifies branch-local memory does not leak into
   `main` context, that omitted results remain recoverable, and that handoff

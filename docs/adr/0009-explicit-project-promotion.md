@@ -6,6 +6,13 @@ status: proposed
 
 # ADR 0009 — Explicit evidence-backed project promotion
 
+## Supersession — 2026-11-16
+
+[ADR 0013](0013-shared-project-decisions-and-personal-memory-scopes.md) supersedes the sharing, team-space,
+private-project auto-registration and personal-origin suppression rules below
+where they conflict. The remainder is historical rationale, not the current
+project authorization contract.
+
 ## Context
 
 Cairn already stores branch-aware personal memories with repository, branch,
@@ -107,7 +114,7 @@ stake.
 
 ## Evidence
 
-- `crates/core/src/lib.rs`
+- `crates/core/src/projects.rs`
 - `crates/storage/src/lib.rs`
 - `migrations/0003_layer4_projects.sql`
 - `migrations/0004_layer4_freshness.sql`

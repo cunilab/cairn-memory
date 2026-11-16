@@ -13,9 +13,9 @@ CREATE TABLE IF NOT EXISTS cairn_project_entities (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (person_id, entity_id),
-    UNIQUE (person_id, project_id, kind, entity_key),
-    FOREIGN KEY (person_id, project_id)
-        REFERENCES cairn_projects (person_id, project_id)
+    UNIQUE (project_id, kind, entity_key),
+    FOREIGN KEY (project_id)
+        REFERENCES cairn_projects (project_id)
 );
 
 CREATE TABLE IF NOT EXISTS cairn_project_freshness_events (
@@ -29,15 +29,15 @@ CREATE TABLE IF NOT EXISTS cairn_project_freshness_events (
     reason text,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (person_id, event_id),
-    FOREIGN KEY (person_id, project_id)
-        REFERENCES cairn_projects (person_id, project_id)
+    FOREIGN KEY (project_id)
+        REFERENCES cairn_projects (project_id)
 );
 
 CREATE INDEX IF NOT EXISTS cairn_project_entities_project_idx
-    ON cairn_project_entities (person_id, project_id, kind, updated_at DESC);
+    ON cairn_project_entities (project_id, kind, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS cairn_project_freshness_project_idx
-    ON cairn_project_freshness_events (person_id, project_id, created_at DESC);
+    ON cairn_project_freshness_events (project_id, created_at DESC);
 
 INSERT INTO cairn_schema_migrations (version)
 VALUES ('0007_layer4_registry_maintenance')

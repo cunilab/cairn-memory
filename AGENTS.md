@@ -42,15 +42,14 @@ These are the useful project-level parts of the Karpathy-inspired guidance:
   with `#[cfg(test)] mod tests;` (keeps access to private items). Integration
   and PostgreSQL tests live in `crates/<crate>/tests/`. When reading or
   changing a module, look for its `tests.rs`; when adding a module, put its
-  unit tests there. Existing inline `mod tests { … }` blocks (notably in
-  `crates/core/src/lib.rs`) are scheduled to move; do not add new inline test
-  modules.
+  unit tests there. The core crate follows this layout; do not add new inline
+  test modules.
 
 ## Critical verified lessons
 
 - Sync event IDs are person-scoped. A duplicate must first resolve to a persisted
   sync event owned by the authenticated person; never acknowledge a collision
-  from another person’s event. See `crates/core/src/lib.rs`,
+  from another person’s event. See `crates/core/src/sync.rs`,
   `crates/server/src/lib.rs`, and `scripts/smoke_layer3.sh`.
 - REST smoke readiness must allow a clean Cargo build to finish before polling
   gives up. The current startup window is 60 seconds; do not reduce it to a

@@ -454,12 +454,12 @@ unsupported context keys stay unredacted. Older spool bytes are not rewritten.
 
 ## Evidence
 
-- `crates/core/src/lib.rs` stores devices, cursors, sync events, rotation, and
+- `crates/core/src/devices.rs` and `crates/core/src/sync.rs` store devices, cursors, sync events, rotation, and
   revocation.
 - `crates/server/src/lib.rs` exposes the authenticated REST boundary.
 - `crates/storage/src/lib.rs` implements the PostgreSQL Layer 3 repository.
 - `migrations/0001_layer3_personal_memory.sql` defines the canonical tables.
-- `crates/core/src/lib.rs` and `crates/storage/src/lib.rs` expose sync diagnostics.
+- `crates/core/src/sync.rs` and `crates/storage/src/lib.rs` expose sync diagnostics.
 - `scripts/cairn_outbox.py` implements the bounded local replay spool.
 - `scripts/smoke_outbox.py` checks new queue-file bytes for `content` and the
   seven context lists, replay order, the 256 cap, duplicate event ids,

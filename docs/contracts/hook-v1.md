@@ -95,25 +95,27 @@ each; any failure leaves that part empty):
 
 | Context field | Source |
 | --- | --- |
-| `repository` | The last path part of `remote.origin.url` without a trailing `/` or `.git` (`https://host/acme/widget.git` and `git@host:acme/widget.git` both give `widget`). With no origin, the name of the `rev-parse --show-toplevel` directory. Never a host, a user, a credential, or an absolute path. This is the short-name style `project-register` and the examples use, and it is the same on every clone, device, and worktree. |
+| `repository` | SSH/HTTPS origin normalized to `host/org/repo`, host lowercase and `.git` stripped; without a network remote use `local:<top-level directory>`. Credentials are never part of the locator. |
 | `branch` | `rev-parse --abbrev-ref HEAD`; a detached HEAD sends none. |
 
 `cwd` that is missing, not a repository, or a machine without `git` leaves
 `context` empty as before. Derived values fill only what the payload lacks: an
 explicit `context.repository` is never replaced, and other keys of a partial
 `context` are kept. The context is not part of the event fingerprint, so ids
-do not change. Two repositories with the same short name under one person share
-a project; send an explicit `context.repository` to tell them apart.
+do not change. Hosts and organizations distinguish repositories with the same short name. A repository tag alone creates no project.
 
 The hook also reads the committed `.cairn/project.json`
-([project-layer4](project-layer4.md#membership-through-the-committed-project-file)) at the git
+([project-layer4](project-layer4.md#init-and-membership)) at the git
 top level of the input's `cwd` (one more `git -C <cwd> rev-parse --show-toplevel`, then a file
 read) and adds its `project_id` as `context.project_id`. That works with or without an explicit
 `context.repository`, so a hook payload can carry both. An explicit `context.project_id` is
-never replaced. A missing, unreadable or empty file, a non-string id, a `cwd` outside a
-repository, or a machine without `git` adds nothing and never fails the hook. The server makes
-the sender a member of that project (an unknown id is ignored); the id is not part of the
-event fingerprint.
+never replaced. A missing file, a `cwd` outside a repository or missing `git` adds no project.
+An existing broken, unreadable or invalid file warns on stderr and capture remains
+personal. The hook and CLI include local file warnings in the returned
+`project_attachment.warning` as well as stderr. The server joins a known project ID, or returns `project_attachment` with
+a warning for failed/unknown attachment and keeps the capture personal. It retries
+attachment on the next capture, including a duplicate replay, without creating a
+fallback project. The ID is not part of the event fingerprint.
 
 Claude Code sends no event id, so the id is the derived fingerprint: the same
 session, source, and content is one event (an identical repeated prompt in a
@@ -225,8 +227,7 @@ hook does not use the file `/observe` route.
 git top level of `cwd`; a capture that carries it makes the sender a project member.
 
 2026-11-15: when the payload has no `context.repository`, the hook derives
-`repository` and `branch` from Claude Code's `cwd` with `git`, so hook-only
-sessions register a project and branch and match repository filters.
+`repository` and `branch` from Claude Code's `cwd` with `git`, so hook-only sessions match personal repository filters. Projects require an initialized file.
 
 2026-11-15: a queued event refused with 409 is removed from the queue on
 replay and counted (`rejectedCount`, `lastRejected`) instead of staying

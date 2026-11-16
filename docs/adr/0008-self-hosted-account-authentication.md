@@ -10,6 +10,13 @@ status: draft
 - **Milestone:** Layer 3 — Personal Cross-Device Memory
 - **Related:** [Roadmap](../roadmap.md), [ADR 0003](0003-server-authoritative-postgres.md), [ADR 0007](0007-layer3-local-trusted-device-slice.md), [Layer 3 authentication contract](../contracts/auth-layer3.md)
 
+## Supersession — 2026-11-16
+
+[ADR 0013](0013-shared-project-decisions-and-personal-memory-scopes.md) supersedes
+this ADR's membership-based device merge gate: branch bookkeeping is personal,
+and devices can record their person's merges. Ownership transfer remains a web
+session operation for the owner/admin. Account/device credential separation stays.
+
 ## Context
 
 The local trusted-device slice uses opaque prototype device tokens and an

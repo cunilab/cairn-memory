@@ -60,6 +60,60 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
         }
     }
     let mut body = args.clone();
+    if matches!(
+        tool.name,
+        "memory_recall"
+            | "memory_context"
+            | "memory_reflect"
+            | "memory_smart_search"
+            | "memory_search"
+            | "memory_why_changed"
+            | "memory_resume"
+            | "memory_unresolved"
+            | "memory_session_start"
+    ) && let Ok(cwd) = std::env::current_dir()
+        && let Some(top) = crate::project::toplevel(&cwd)
+    {
+        let repository = crate::project::repository_name(&top);
+        let context = body.entry("context").or_insert_with(|| json!({}));
+        if let Some(context) = context.as_object_mut() {
+            let same_repo = context
+                .get("repository")
+                .and_then(Value::as_str)
+                .is_none_or(|r| r == repository);
+            if same_repo {
+                context
+                    .entry("repository")
+                    .or_insert_with(|| json!(repository));
+                if let Some(id) = crate::project::project_id(&cwd) {
+                    context.entry("project_id").or_insert_with(|| json!(id));
+                }
+            }
+        }
+    }
+    let mut attachment_warning = None;
+    if tool.name == "memory_observe"
+        && body
+            .get("context")
+            .and_then(|c| c.get("project_id"))
+            .and_then(Value::as_str)
+            .is_none()
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        match crate::project::read_project_id(&cwd) {
+            Ok(Some(id)) => {
+                let context = body.entry("context").or_insert_with(|| json!({}));
+                if let Some(context) = context.as_object_mut() {
+                    context.entry("project_id").or_insert_with(|| json!(id));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("cairn: warning: {error}");
+                attachment_warning = Some(error.to_string());
+            }
+        }
+    }
     let path = fill_path(tool.path, &mut body)?;
     if tool.name == "memory_lesson_save" {
         body.insert("kind".to_owned(), json!("lesson"));
@@ -71,10 +125,13 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
         }
     }
     let route = format!("/cairn-memory{path}");
-    let result = match tool.method {
+    let mut result = match tool.method {
         Method::Get => client.get(&route),
         Method::Post => client.post(&route, &Value::Object(body)),
     }?;
+    if let Some(warning) = attachment_warning {
+        result["project_attachment"] = json!({"status": "personal", "warning": warning});
+    }
     if tool.name == "memory_reflect" {
         return Ok(json!({
             "query": result["query"],
@@ -132,16 +189,6 @@ fn build_tools() -> Vec<Tool> {
         )
     };
     let project_schema = || object_schema(&[("projectId", string_schema())], &["projectId"]);
-    let share_schema = || {
-        object_schema(
-            &[
-                ("projectId", string_schema()),
-                ("memoryId", string_schema()),
-                ("email", string_schema()),
-            ],
-            &["projectId", "memoryId", "email"],
-        )
-    };
     use Method::{Get, Post};
     let spec = |name, description, method, path, schema| Tool {
         name,
@@ -319,7 +366,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_project_register",
-            "Register a repository as a personal project.",
+            "Initialize a shared project for a repository.",
             Post,
             "/projects",
             object_schema(
@@ -333,7 +380,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_promote",
-            "Promote a repository-matched memory into project scope.",
+            "Publish your own memory to all project members; use dryRun first to preview the full copy.",
             Post,
             "/promote",
             object_schema(
@@ -341,6 +388,11 @@ fn build_tools() -> Vec<Tool> {
                     ("projectId", string_schema()),
                     ("memoryId", string_schema()),
                     ("reason", string_schema()),
+                    ("previewFingerprint", string_schema()),
+                    (
+                        "dryRun",
+                        json!({"type":"boolean", "description":"Preview the full publication payload without writing."}),
+                    ),
                 ],
                 &["projectId", "memoryId", "reason"],
             ),
@@ -360,42 +412,25 @@ fn build_tools() -> Vec<Tool> {
             project_schema(),
         ),
         spec(
-            "memory_project_share",
-            "Share one promoted project memory with a project member. Owner only.",
-            Post,
-            "/projects/{projectId}/shares",
-            share_schema(),
-        ),
-        spec(
-            "memory_project_shared",
-            "List memories shared with the account for one project.",
+            "memory_project_members",
+            "List the project roster, visible to all members.",
             Get,
-            "/projects/{projectId}/shared",
+            "/projects/{projectId}/members",
             project_schema(),
         ),
         spec(
-            "memory_project_revoke",
-            "Revoke one member's share of a project memory. Owner only.",
+            "memory_project_verify",
+            "Verify a decision you authored or a project you own.",
             Post,
-            "/projects/{projectId}/shares/{memoryId}/revoke",
-            share_schema(),
-        ),
-        spec(
-            "memory_project_team_create",
-            "Create the project team space. Owner only.",
-            Post,
-            "/projects/{projectId}/team",
+            "/projects/verify",
             object_schema(
-                &[("projectId", string_schema()), ("name", string_schema())],
-                &["projectId", "name"],
+                &[
+                    ("projectId", string_schema()),
+                    ("memoryId", string_schema()),
+                    ("commit", string_schema()),
+                ],
+                &["projectId", "memoryId", "commit"],
             ),
-        ),
-        spec(
-            "memory_project_team",
-            "List the project team and its members.",
-            Get,
-            "/projects/{projectId}/team",
-            project_schema(),
         ),
         spec(
             "memory_delete",
@@ -493,12 +528,12 @@ mod tests {
 
     #[test]
     fn paths_are_filled_encoded_and_removed_from_the_body() {
-        let mut body = json!({"projectId": "p/1 x", "memoryId": "m-1", "email": "a@b.test"})
+        let mut body = json!({"projectId": "p/1 x", "branchId": "b-1", "reason": "done"})
             .as_object()
             .unwrap()
             .clone();
-        let path = fill_path("/projects/{projectId}/shares/{memoryId}/revoke", &mut body).unwrap();
-        assert_eq!(path, "/projects/p%2F1%20x/shares/m-1/revoke");
+        let path = fill_path("/projects/{projectId}/branches/{branchId}/close", &mut body).unwrap();
+        assert_eq!(path, "/projects/p%2F1%20x/branches/b-1/close");
         assert_eq!(body.len(), 1);
         assert!(fill_path("/projects/{projectId}", &mut body).is_err());
     }
@@ -507,7 +542,7 @@ mod tests {
     fn dot_only_path_segments_are_rejected() {
         for value in [".", ".."] {
             let mut body = json!({"projectId": value}).as_object().unwrap().clone();
-            let error = fill_path("/projects/{projectId}/team", &mut body).unwrap_err();
+            let error = fill_path("/projects/{projectId}/members", &mut body).unwrap_err();
             assert!(matches!(error, Error::Input(_)), "{value}");
         }
         let mut body = json!({"projectId": "a.b..c"}).as_object().unwrap().clone();

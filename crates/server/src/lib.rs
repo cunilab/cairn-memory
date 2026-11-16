@@ -2,7 +2,7 @@
 
 pub mod viewer;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -13,10 +13,8 @@ use cairn_core::{
     DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, ImportResult, LifecycleInput,
     LifecycleSummary, Memory, MemoryKind, MemoryStore, ObservationInput, Project, ProjectBranch,
     ProjectConflict, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
-    ProjectMaintenanceReport, ProjectMemoryShare, ProjectMergeResult, ProjectPerson,
-    ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord, ProjectTeam,
-    ProjectWorktree, RecallFilter, RecallResult, Session, ShareCandidateDismissal,
-    SharedProjectMemory, StoreError, SyncDiagnostics, SyncPullResult, SyncPushResult,
+    ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson, ProjectWorktree, RecallFilter,
+    RecallResult, Session, StoreError, SyncDiagnostics, SyncPullResult, SyncPushResult,
     WEB_ONLY_ERROR, WorkContext,
 };
 use cairn_storage::{PostgresError, PostgresStore};
@@ -233,9 +231,6 @@ struct ListedProject {
     #[serde(flatten)]
     project: Project,
     role: String,
-    /// Owner projects only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    share_policy: Option<ProjectSharePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -260,6 +255,12 @@ pub struct PromoteRequest {
     )]
     pub memory_id: String,
     pub reason: String,
+    #[serde(rename = "dryRun", alias = "dry_run", default)]
+    pub dry_run: bool,
+    #[serde(rename = "previewFingerprint", alias = "preview_fingerprint", default)]
+    pub preview_fingerprint: Option<String>,
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -301,6 +302,8 @@ pub struct BranchMergeRequest {
     pub memory_id: String,
     pub commit: String,
     pub reason: String,
+    #[serde(rename = "previewFingerprint", alias = "preview_fingerprint", default)]
+    pub preview_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -337,6 +340,8 @@ pub struct ProjectConfirmationRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProjectInitRequest {
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub repository: String,
     #[serde(default)]
     pub name: Option<String>,
@@ -359,33 +364,6 @@ impl ProjectInitResponse {
             created,
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProjectTeamRequest {
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProjectShareRequest {
-    #[serde(rename = "memoryId", alias = "memory_id")]
-    pub memory_id: String,
-    pub email: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProjectShareRevokeRequest {
-    pub email: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ProjectPolicyRequest {
-    pub policy: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct MemberEmailQuery {
-    email: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -540,6 +518,14 @@ pub fn app(state: AppState) -> Router {
             get(list_projects).post(register_project),
         )
         .route("/cairn-memory/projects/init", post(init_project))
+        .route(
+            "/cairn-memory/projects/{project_id}/ownership",
+            post(transfer_project),
+        )
+        .route(
+            "/cairn-memory/projects/{project_id}/personal-memories",
+            get(personal_project_memories),
+        )
         .route("/cairn-memory/promote", post(promote))
         .route("/cairn-memory/projects/verify", post(verify_project_memory))
         .route(
@@ -567,40 +553,8 @@ pub fn app(state: AppState) -> Router {
             get(list_project_people),
         )
         .route(
-            "/cairn-memory/projects/{project_id}/team",
-            get(list_project_team).post(create_project_team),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shares",
-            post(share_project_memory),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shares/{memory_id}/revoke",
-            post(revoke_project_share),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shared",
-            get(list_shared_project_memories),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/policy",
-            post(set_project_share_policy),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/share-candidates",
-            get(list_share_candidates),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/share-candidates/{memory_id}/dismiss",
-            post(dismiss_share_candidate),
-        )
-        .route(
             "/cairn-memory/projects/{project_id}/conflicts",
             get(list_project_conflicts),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/revocations",
-            get(list_project_revocations),
         )
         .route(
             "/cairn-memory/projects/{project_id}/entities",
@@ -680,6 +634,14 @@ pub fn postgres_app(store: PostgresStore) -> Router {
             get(postgres_list_projects).post(postgres_register_project),
         )
         .route("/cairn-memory/projects/init", post(postgres_init_project))
+        .route(
+            "/cairn-memory/projects/{project_id}/ownership",
+            post(postgres_transfer_project),
+        )
+        .route(
+            "/cairn-memory/projects/{project_id}/personal-memories",
+            get(postgres_personal_project_memories),
+        )
         .route("/cairn-memory/promote", post(postgres_promote))
         .route(
             "/cairn-memory/projects/verify",
@@ -710,40 +672,8 @@ pub fn postgres_app(store: PostgresStore) -> Router {
             get(postgres_list_project_people),
         )
         .route(
-            "/cairn-memory/projects/{project_id}/team",
-            get(postgres_list_project_team).post(postgres_create_project_team),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shares",
-            post(postgres_share_project_memory),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shares/{memory_id}/revoke",
-            post(postgres_revoke_project_share),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/shared",
-            get(postgres_list_shared_project_memories),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/policy",
-            post(postgres_set_project_share_policy),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/share-candidates",
-            get(postgres_list_share_candidates),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/share-candidates/{memory_id}/dismiss",
-            post(postgres_dismiss_share_candidate),
-        )
-        .route(
             "/cairn-memory/projects/{project_id}/conflicts",
             get(postgres_list_project_conflicts),
-        )
-        .route(
-            "/cairn-memory/projects/{project_id}/revocations",
-            get(postgres_list_project_revocations),
         )
         .route(
             "/cairn-memory/projects/{project_id}/entities",
@@ -946,6 +876,13 @@ async fn postgres_init_project(
     headers: HeaderMap,
     Json(request): Json<ProjectInitRequest>,
 ) -> Result<Json<ProjectInitResponse>, PostgresApiError> {
+    if let Some(id) = request.project_id.as_deref() {
+        let project = state
+            .store
+            .join_project(postgres_token(&headers)?, id)
+            .await?;
+        return Ok(Json(ProjectInitResponse::new((project, false))));
+    }
     Ok(Json(ProjectInitResponse::new(
         state
             .store
@@ -983,24 +920,18 @@ async fn postgres_list_projects(
     let token = postgres_token(&headers)?;
     let projects = state.store.projects(token).await?;
     let mut listed = Vec::with_capacity(projects.len());
+    let account = state.store.authenticate_account(token).await?;
     for project in projects {
-        let (role, share_policy) = match state
+        let people = state
             .store
-            .project_memories(token, &project.project_id)
-            .await
-        {
-            Ok(_) => (
-                "owner".to_owned(),
-                Some(state.store.share_policy(token, &project.project_id).await?),
-            ),
-            Err(error) if error.to_string().contains("does not own") => ("member".to_owned(), None),
-            Err(error) => return Err(error.into()),
-        };
-        listed.push(ListedProject {
-            project,
-            role,
-            share_policy,
-        });
+            .project_people(token, &project.project_id)
+            .await?;
+        let role = people
+            .iter()
+            .find(|p| p.person_id == account.person_id)
+            .map(|p| p.role.clone())
+            .unwrap_or_else(|| "member".to_owned());
+        listed.push(ListedProject { project, role });
     }
     Ok(Json(listed))
 }
@@ -1009,17 +940,32 @@ async fn postgres_promote(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
     Json(request): Json<PromoteRequest>,
-) -> Result<Json<Memory>, PostgresApiError> {
-    Ok(Json(
+) -> Result<Json<serde_json::Value>, PostgresApiError> {
+    let memory = if request.dry_run {
         state
             .store
-            .promote_memory(
+            .preview_promotion(
                 postgres_token(&headers)?,
                 &request.project_id,
                 &request.memory_id,
                 &request.reason,
             )
-            .await?,
+            .await?
+    } else {
+        state
+            .store
+            .promote_memory_checked(
+                postgres_token(&headers)?,
+                &request.project_id,
+                &request.memory_id,
+                &request.reason,
+                request.preview_fingerprint.as_deref(),
+            )
+            .await?
+    };
+    Ok(Json(
+        promotion_response(memory, request.dry_run, request.commit.as_deref())
+            .map_err(|e| PostgresApiError(PostgresError::Core(e)))?,
     ))
 }
 
@@ -1050,13 +996,14 @@ async fn postgres_confirm_project_branch_merge(
     Ok(Json(
         state
             .store
-            .confirm_branch_merge(
+            .confirm_branch_merge_checked(
                 postgres_token(&headers)?,
                 &project_id,
                 &branch_id,
                 &request.memory_id,
                 &request.commit,
                 &request.reason,
+                request.preview_fingerprint.as_deref(),
             )
             .await?,
     ))
@@ -1161,20 +1108,6 @@ async fn postgres_list_project_memories(
     ))
 }
 
-async fn postgres_create_project_team(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectTeamRequest>,
-) -> Result<Json<ProjectTeam>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .create_project_team(postgres_token(&headers)?, &project_id, &request.name)
-            .await?,
-    ))
-}
-
 async fn postgres_list_project_people(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
@@ -1188,117 +1121,6 @@ async fn postgres_list_project_people(
     ))
 }
 
-async fn postgres_list_project_team(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<ProjectTeam>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .project_team(postgres_token(&headers)?, &project_id)
-            .await?,
-    ))
-}
-
-async fn postgres_share_project_memory(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectShareRequest>,
-) -> Result<Json<ProjectMemoryShare>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .share_project_memory(
-                postgres_token(&headers)?,
-                &project_id,
-                &request.memory_id,
-                &request.email,
-            )
-            .await?,
-    ))
-}
-
-async fn postgres_revoke_project_share(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path((project_id, memory_id)): Path<(String, String)>,
-    Json(request): Json<ProjectShareRevokeRequest>,
-) -> Result<Json<ProjectMemoryShare>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .revoke_project_share(
-                postgres_token(&headers)?,
-                &project_id,
-                &memory_id,
-                &request.email,
-            )
-            .await?,
-    ))
-}
-
-async fn postgres_list_shared_project_memories(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<Vec<SharedProjectMemory>>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .shared_project_memories(postgres_token(&headers)?, &project_id)
-            .await?,
-    ))
-}
-
-async fn postgres_set_project_share_policy(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectPolicyRequest>,
-) -> Result<Json<ProjectSharePolicyRecord>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .set_project_share_policy(postgres_token(&headers)?, &project_id, &request.policy)
-            .await?,
-    ))
-}
-
-async fn postgres_list_share_candidates(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Query(query): Query<MemberEmailQuery>,
-) -> Result<Json<Vec<ProjectShareCandidate>>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .share_candidates(postgres_token(&headers)?, &project_id, &query.email)
-            .await?,
-    ))
-}
-
-async fn postgres_dismiss_share_candidate(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path((project_id, memory_id)): Path<(String, String)>,
-    Json(request): Json<ProjectShareRevokeRequest>,
-) -> Result<Json<ShareCandidateDismissal>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .dismiss_share_candidate(
-                postgres_token(&headers)?,
-                &project_id,
-                &memory_id,
-                &request.email,
-            )
-            .await?,
-    ))
-}
-
 async fn postgres_list_project_conflicts(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
@@ -1308,19 +1130,6 @@ async fn postgres_list_project_conflicts(
         state
             .store
             .project_conflicts(postgres_token(&headers)?, &project_id)
-            .await?,
-    ))
-}
-
-async fn postgres_list_project_revocations(
-    State(state): State<PostgresAppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<Vec<ProjectMemoryShare>>, PostgresApiError> {
-    Ok(Json(
-        state
-            .store
-            .project_revocations(postgres_token(&headers)?, &project_id)
             .await?,
     ))
 }
@@ -1441,6 +1250,7 @@ async fn postgres_capture_observation(
         .sync_push(postgres_token(&headers)?, observation_input(request))
         .await?;
     Ok(Json(CaptureResult {
+        project_attachment: pushed.project_attachment,
         accepted: pushed.accepted,
         duplicate: pushed.duplicate,
         observation: pushed.observation,
@@ -1920,6 +1730,12 @@ async fn init_project(
     Json(request): Json<ProjectInitRequest>,
 ) -> Result<Json<ProjectInitResponse>, ApiError> {
     let mut store = state.store.lock().await;
+    if let Some(id) = request.project_id.as_deref() {
+        let project = store
+            .join_project(auth_token(&headers)?, id)
+            .map_err(account_api_error)?;
+        return Ok(Json(ProjectInitResponse::new((project, false))));
+    }
     Ok(Json(ProjectInitResponse::new(
         store
             .init_project(
@@ -1957,26 +1773,19 @@ async fn list_projects(
     let store = state.store.lock().await;
     let projects = store.projects(token).map_err(account_api_error)?;
     let mut listed = Vec::with_capacity(projects.len());
+    let account = store
+        .authenticate_account(token)
+        .map_err(account_api_error)?;
     for project in projects {
-        let (role, share_policy) = match store.project_memories(token, &project.project_id) {
-            Ok(_) => (
-                "owner".to_owned(),
-                Some(
-                    store
-                        .share_policy(token, &project.project_id)
-                        .map_err(account_api_error)?,
-                ),
-            ),
-            Err(StoreError::Validation(message)) if message.contains("does not own") => {
-                ("member".to_owned(), None)
-            }
-            Err(error) => return Err(account_api_error(error)),
-        };
-        listed.push(ListedProject {
-            project,
-            role,
-            share_policy,
-        });
+        let people = store
+            .project_people(token, &project.project_id)
+            .map_err(account_api_error)?;
+        let role = people
+            .iter()
+            .find(|p| p.person_id == account.person_id)
+            .map(|p| p.role.clone())
+            .unwrap_or_else(|| "member".to_owned());
+        listed.push(ListedProject { project, role });
     }
     Ok(Json(listed))
 }
@@ -1985,17 +1794,31 @@ async fn promote(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<PromoteRequest>,
-) -> Result<Json<Memory>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let mut store = state.store.lock().await;
-    Ok(Json(
+    let memory = if request.dry_run {
         store
-            .promote_memory(
+            .preview_promotion(
                 auth_token(&headers)?,
                 &request.project_id,
                 &request.memory_id,
                 &request.reason,
             )
-            .map_err(account_api_error)?,
+            .map_err(account_api_error)?
+    } else {
+        store
+            .promote_memory_checked(
+                auth_token(&headers)?,
+                &request.project_id,
+                &request.memory_id,
+                &request.reason,
+                request.preview_fingerprint.as_deref(),
+            )
+            .map_err(account_api_error)?
+    };
+    Ok(Json(
+        promotion_response(memory, request.dry_run, request.commit.as_deref())
+            .map_err(ApiError::from)?,
     ))
 }
 
@@ -2026,13 +1849,14 @@ async fn confirm_project_branch_merge(
     let mut store = state.store.lock().await;
     Ok(Json(
         store
-            .confirm_branch_merge(
+            .confirm_branch_merge_checked(
                 auth_token(&headers)?,
                 &project_id,
                 &branch_id,
                 &request.memory_id,
                 &request.commit,
                 &request.reason,
+                request.preview_fingerprint.as_deref(),
             )
             .map_err(account_api_error)?,
     ))
@@ -2137,20 +1961,6 @@ async fn list_project_memories(
     ))
 }
 
-async fn create_project_team(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectTeamRequest>,
-) -> Result<Json<ProjectTeam>, ApiError> {
-    let mut store = state.store.lock().await;
-    Ok(Json(
-        store
-            .create_project_team(auth_token(&headers)?, &project_id, &request.name)
-            .map_err(account_api_error)?,
-    ))
-}
-
 async fn list_project_people(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2164,117 +1974,6 @@ async fn list_project_people(
     ))
 }
 
-async fn list_project_team(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<ProjectTeam>, ApiError> {
-    let store = state.store.lock().await;
-    Ok(Json(
-        store
-            .project_team(auth_token(&headers)?, &project_id)
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn share_project_memory(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectShareRequest>,
-) -> Result<Json<ProjectMemoryShare>, ApiError> {
-    let mut store = state.store.lock().await;
-    Ok(Json(
-        store
-            .share_project_memory(
-                auth_token(&headers)?,
-                &project_id,
-                &request.memory_id,
-                &request.email,
-            )
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn revoke_project_share(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((project_id, memory_id)): Path<(String, String)>,
-    Json(request): Json<ProjectShareRevokeRequest>,
-) -> Result<Json<ProjectMemoryShare>, ApiError> {
-    let mut store = state.store.lock().await;
-    Ok(Json(
-        store
-            .revoke_project_share(
-                auth_token(&headers)?,
-                &project_id,
-                &memory_id,
-                &request.email,
-            )
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn list_shared_project_memories(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<Vec<SharedProjectMemory>>, ApiError> {
-    let store = state.store.lock().await;
-    Ok(Json(
-        store
-            .shared_project_memories(auth_token(&headers)?, &project_id)
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn set_project_share_policy(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Json(request): Json<ProjectPolicyRequest>,
-) -> Result<Json<ProjectSharePolicyRecord>, ApiError> {
-    let mut store = state.store.lock().await;
-    Ok(Json(
-        store
-            .set_project_share_policy(auth_token(&headers)?, &project_id, &request.policy)
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn list_share_candidates(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-    Query(query): Query<MemberEmailQuery>,
-) -> Result<Json<Vec<ProjectShareCandidate>>, ApiError> {
-    let store = state.store.lock().await;
-    Ok(Json(
-        store
-            .share_candidates(auth_token(&headers)?, &project_id, &query.email)
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn dismiss_share_candidate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((project_id, memory_id)): Path<(String, String)>,
-    Json(request): Json<ProjectShareRevokeRequest>,
-) -> Result<Json<ShareCandidateDismissal>, ApiError> {
-    let mut store = state.store.lock().await;
-    Ok(Json(
-        store
-            .dismiss_share_candidate(
-                auth_token(&headers)?,
-                &project_id,
-                &memory_id,
-                &request.email,
-            )
-            .map_err(account_api_error)?,
-    ))
-}
-
 async fn list_project_conflicts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2284,19 +1983,6 @@ async fn list_project_conflicts(
     Ok(Json(
         store
             .project_conflicts(auth_token(&headers)?, &project_id)
-            .map_err(account_api_error)?,
-    ))
-}
-
-async fn list_project_revocations(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(project_id): Path<String>,
-) -> Result<Json<Vec<ProjectMemoryShare>>, ApiError> {
-    let store = state.store.lock().await;
-    Ok(Json(
-        store
-            .project_revocations(auth_token(&headers)?, &project_id)
             .map_err(account_api_error)?,
     ))
 }
@@ -3493,7 +3179,7 @@ mod tests {
             other_device,
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Web-only routes refuse the device token with 403.
         for (method, route) in [
@@ -3565,27 +3251,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         join_project(&router, other_session, project_id).await;
         let (status, body) = merge(device, merge_ids[1].clone()).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(status, StatusCode::OK, "{body}");
         let (status, body) = merge(session, merge_ids[1].clone()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
 
-        // The team lists the member who joined by capture; the add and remove routes are gone.
-        let (status, body) = json_request_auth(
-            router.clone(),
-            "POST",
-            &format!("/cairn-memory/projects/{project_id}/team"),
-            serde_json::json!({"name": "Core"}),
-            device,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["members"][0]["email"], "agent-other@example.test");
-        for route in ["team/members", "team/members/remove"] {
+        for route in [
+            "team",
+            "team/members",
+            "team/members/remove",
+            "shares",
+            "shared",
+            "policy",
+            "share-candidates",
+            "revocations",
+        ] {
             let (status, _) = json_request_auth(
                 router.clone(),
                 "POST",
                 &format!("/cairn-memory/projects/{project_id}/{route}"),
-                serde_json::json!({"email": "agent-other@example.test"}),
+                serde_json::json!({}),
                 session,
             )
             .await;
@@ -4092,7 +3776,7 @@ mod tests {
             serde_json::json!({
                 "query": "cache decision",
                 "limit": 10,
-                "context": {"repository": "cairn-demo", "commit": "def5678"}
+                "context": {"project_id": project_id, "repository": "cairn-demo", "commit": "def5678"}
             }),
             account_token,
         )
@@ -4132,7 +3816,7 @@ mod tests {
             serde_json::json!({
                 "query": "cache decision",
                 "limit": 10,
-                "context": {"repository": "cairn-demo", "commit": "def5678"}
+                "context": {"project_id": project_id, "repository": "cairn-demo", "commit": "def5678"}
             }),
             account_token,
         )
@@ -4621,29 +4305,16 @@ mod tests {
         assert!(body.contains("/cairn-memory/correct"));
         assert!(body.contains("Correct"));
         assert!(body.contains("Forget this"));
-        assert!(body.contains("Current decisions"));
-        assert!(body.contains("verified_commit"));
-        assert!(body.contains("lifecycle.freshness"));
-        assert!(body.contains("supersedes"));
-        assert!(body.contains("Supersedes"));
-        assert!(body.contains("Freshness history"));
-        assert!(body.contains("Share decision"));
-        assert!(body.contains("Revoke share"));
-        assert!(body.contains("Create team"));
-        assert!(body.contains("Delete memory"));
-        assert!(body.contains("/shared"));
-        let memories_fn = body
-            .split("async function loadProjectMemories")
-            .nth(1)
-            .expect("member memory loader");
-        let member_at = memories_fn.find("if (member)").expect("member branch");
-        let shared_at = memories_fn.find("/shared").expect("shared read");
-        let owner_at = memories_fn.find("/memories").expect("owner read");
-        assert!(member_at < shared_at && shared_at < owner_at);
-        assert!(!memories_fn[member_at..shared_at].contains("/memories"));
-        assert!(body.contains("\"action\""));
-        assert!(body.contains("\"commit\""));
-        assert!(body.contains("\"memory_id\""));
+        assert!(body.contains("Use the web console for project decisions"));
+        for removed in [
+            "Share decision",
+            "Revoke share",
+            "Create team",
+            "Delete memory",
+            "/shared",
+        ] {
+            assert!(!body.contains(removed), "{removed}");
+        }
         let _ = std::fs::remove_file(path);
     }
 
@@ -4754,8 +4425,7 @@ mod tests {
             report["superseded_memory_ids"]
                 .as_array()
                 .unwrap()
-                .iter()
-                .any(|id| id == promoted_id)
+                .is_empty()
         );
         assert!(
             report["active_memory_ids"]
@@ -5601,85 +5271,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_linked_import_is_owner_only_over_http() {
-        let path = temp_store_path("project-import-http");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({"email":"owner@example.test","password":password}),
-        )
-        .await;
-        let (_, other) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({"email":"other@example.test","password":password}),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap().to_owned();
-        let other_token = other["token"].as_str().unwrap().to_owned();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
-            &owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap().to_owned();
-        let (_, template) = post_as(
-            &router,
-            &other_token,
-            "/cairn-memory/remember",
-            serde_json::json!({"content":"projhttp private claim"}),
-        )
-        .await;
-        let before = std::fs::read(&path).unwrap();
-        let mut row = template.clone();
-        row["memory_id"] = "projhttp-row".into();
-        row["source_event_ids"] = serde_json::json!([]);
-        row["scope"] = "project".into();
-        row["project_id"] = project_id.clone().into();
-        let (_, mut bundle) =
-            post_as(&router, &other_token, "/cairn-memory/export", Value::Null).await;
-        bundle["memories"] = serde_json::json!([row.clone()]);
-        let (status, error) = post_as(
-            &router,
-            &other_token,
-            "/cairn-memory/import",
-            serde_json::json!({"bundle": bundle}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            error
-                .to_string()
-                .contains("account does not own the project")
-        );
-        assert!(!error.to_string().contains("projhttp"));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-
-        // The owner imports the same shape into its own project.
-        let (_, mut own) =
-            post_as(&router, &owner_token, "/cairn-memory/export", Value::Null).await;
-        own["memories"] = serde_json::json!([row]);
-        let (status, imported) = post_as(
-            &router,
-            &owner_token,
-            "/cairn-memory/import",
-            serde_json::json!({"bundle": own}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(imported["imported_memories"], 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
     async fn account_forget_requires_an_owned_id_over_http() {
         let path = temp_store_path("forget-owned-http");
         let router = app(AppState::open(&path).unwrap());
@@ -5744,127 +5335,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_maintenance_is_owner_only_over_http() {
-        let path = temp_store_path("maintenance-http");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({"email":"owner@example.test","password":password}),
-        )
-        .await;
-        let (_, other) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({"email":"other@example.test","password":password}),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap().to_owned();
-        let other_token = other["token"].as_str().unwrap().to_owned();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
-            &owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap().to_owned();
-        let url = format!("/cairn-memory/projects/{project_id}/maintenance");
-        let (status, error) = post_as(
-            &router,
-            &other_token,
-            &url,
-            serde_json::json!({"currentCommit":"abc"}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            error
-                .to_string()
-                .contains("account does not own the project")
-        );
-        assert!(error.get("active_memory_ids").is_none());
-        let (status, report) = post_as(&router, &owner_token, &url, serde_json::json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(report["project_id"], project_id);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn project_registry_is_owner_only_over_http() {
-        let path = temp_store_path("registry-http");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({"email":"owner@example.test","password":password}),
-        )
-        .await;
-        let (_, other) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({"email":"other@example.test","password":password}),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap().to_owned();
-        let other_token = other["token"].as_str().unwrap().to_owned();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({"repository":"cairn-demo","name":"Demo"}),
-            &owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap().to_owned();
-        let url = format!("/cairn-memory/projects/{project_id}/branches");
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &url,
-            serde_json::json!({"name":"feature/owner"}),
-            &owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let before = std::fs::read(&path).unwrap();
-        // An outsider who knows the project id can neither read nor write the registry.
-        let (status, error) =
-            json_request_auth(router.clone(), "GET", &url, Value::Null, &other_token).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            error
-                .to_string()
-                .contains("account does not own the project")
-        );
-        assert!(!error.to_string().contains("feature/owner"));
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &url,
-            serde_json::json!({"name":"feature/evil"}),
-            &other_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        let (status, branches) =
-            json_request_auth(router.clone(), "GET", &url, Value::Null, &owner_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(branches.as_array().unwrap().len(), 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
     async fn lifecycle_fields_and_diagnostics_work_over_http() {
         let path = temp_store_path("lifecycle");
         let router = app(AppState::open(&path).unwrap());
@@ -5906,1279 +5376,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(diagnose["temporary_observations"], 1);
         assert_eq!(diagnose["expired_items"], 1);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn explicit_project_share_is_readable_by_the_member_and_revocable() {
-        let path = temp_store_path("project-share");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({
-                "email": "share-owner@example.test",
-                "password": password
-            }),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({
-                "email": "share-member@example.test",
-                "password": password
-            }),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let member_token = member["token"].as_str().unwrap();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({
-                "repository": "cairn-demo",
-                "name": "Cairn Demo",
-                "defaultBranch": "main"
-            }),
-            owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap();
-        let (_, private_memory) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "private observation stays on the owner account"
-            }),
-            owner_token,
-        )
-        .await;
-        let private_id = private_memory["memory_id"].as_str().unwrap();
-        let (_, repository_memory) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "repository cache decision is ready for the project",
-                "context": {"repository": "cairn-demo", "commit": "abc1234"}
-            }),
-            owner_token,
-        )
-        .await;
-        let repository_id = repository_memory["memory_id"].as_str().unwrap();
-        let (_, promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": repository_id,
-                "reason": "Share the promoted repository decision"
-            }),
-            owner_token,
-        )
-        .await;
-        let promoted_id = promoted["memory_id"].as_str().unwrap();
-        let shares = format!("/cairn-memory/projects/{project_id}/shares");
-        let shared = format!("/cairn-memory/projects/{project_id}/shared");
-
-        // Sharing needs a member: a person who has not joined by capture is refused.
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "share-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        join_project(&router, member_token, project_id).await;
-
-        let (status, denied) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": private_id,
-                "email": "share-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            denied["error"]
-                .as_str()
-                .unwrap()
-                .contains("cannot be shared")
-        );
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "share-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, shared_memories) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(shared_memories.as_array().unwrap().len(), 1);
-        assert_eq!(shared_memories[0]["memory_id"], promoted_id);
-        let (status, member_projects) = json_request_auth(
-            router.clone(),
-            "GET",
-            "/cairn-memory/projects",
-            Value::Null,
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            member_projects
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|project| project["project_id"] == project_id)
-        );
-
-        let (status, member_search) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/search",
-            serde_json::json!({"query": "private observation", "limit": 5}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(member_search.as_array().unwrap().is_empty());
-        let (status, member_context) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/context",
-            serde_json::json!({"query": "private observation", "limit": 5}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(member_context["results"].as_array().unwrap().is_empty());
-
-        let (status, owner_denied) = json_request_auth(
-            router.clone(),
-            "GET",
-            &format!("/cairn-memory/projects/{project_id}/memories"),
-            Value::Null,
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            owner_denied["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, correct_denied) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/correct",
-            serde_json::json!({
-                "targetId": promoted_id,
-                "content": "A member must not rewrite the shared decision."
-            }),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            correct_denied["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, forget_denied) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/forget",
-            serde_json::json!({"id": promoted_id}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            forget_denied["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &format!("/cairn-memory/projects/{project_id}/shares/{promoted_id}/revoke"),
-            serde_json::json!({"email": "share-member@example.test"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, after_revoke) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(after_revoke.as_array().unwrap().is_empty());
-        let (status, revocations) = json_request_auth(
-            router.clone(),
-            "GET",
-            &format!("/cairn-memory/projects/{project_id}/revocations"),
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(revocations[0]["member_email"], "share-member@example.test");
-        let (status, owner_memories) = json_request_auth(
-            router.clone(),
-            "GET",
-            &format!("/cairn-memory/projects/{project_id}/memories"),
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            owner_memories
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == promoted_id)
-        );
-        let (status, exported) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            exported["memories"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == promoted_id)
-        );
-        let (status, audit) = json_request_auth(
-            router.clone(),
-            "GET",
-            "/cairn-memory/auth/audit",
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let actions: Vec<_> = audit
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|event| event["action"].as_str())
-            .collect();
-        assert!(actions.contains(&"project_memory_shared"));
-        assert!(actions.contains(&"project_memory_share_revoked"));
-        assert!(audit.as_array().unwrap().iter().all(|event| {
-            !event.to_string().contains("private observation")
-                && !event.to_string().contains(password)
-        }));
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "share-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, successor) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/correct",
-            serde_json::json!({
-                "targetId": promoted_id,
-                "content": "The successor repository decision replaces the shared one."
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let successor_id = successor["memory_id"].as_str().unwrap();
-        let (status, omitted) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            omitted
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|memory| memory["memory_id"] != promoted_id)
-        );
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": successor_id,
-                "email": "share-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, successor_read) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            successor_read
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == successor_id)
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn layer5_policy_candidates_conflicts_and_private_reads() {
-        let path = temp_store_path("project-share-policy");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({
-                "email": "policy-owner@example.test",
-                "password": password
-            }),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({
-                "email": "policy-member@example.test",
-                "password": password
-            }),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let member_token = member["token"].as_str().unwrap();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({
-                "repository": "cairn-demo",
-                "name": "Policy Demo",
-                "defaultBranch": "main"
-            }),
-            owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap();
-        let shares = format!("/cairn-memory/projects/{project_id}/shares");
-        let shared = format!("/cairn-memory/projects/{project_id}/shared");
-        let candidates = format!(
-            "/cairn-memory/projects/{project_id}/share-candidates?email=policy-member%40example.test"
-        );
-        let policy = format!("/cairn-memory/projects/{project_id}/policy");
-        let conflicts = format!("/cairn-memory/projects/{project_id}/conflicts");
-        join_project(&router, member_token, project_id).await;
-
-        let (_, manual_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "repository cache decision is ready for the project",
-                "context": {"repository": "cairn-demo", "commit": "abc1234"}
-            }),
-            owner_token,
-        )
-        .await;
-        let manual_source_id = manual_source["memory_id"].as_str().unwrap();
-        let (_, manual_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": manual_source_id,
-                "reason": "Manual policy keeps this decision unshared"
-            }),
-            owner_token,
-        )
-        .await;
-        let manual_id = manual_promoted["memory_id"].as_str().unwrap();
-        let (status, before) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(before.as_array().unwrap().is_empty());
-        let (status, listed) =
-            json_request_auth(router.clone(), "GET", &candidates, Value::Null, owner_token).await;
-        assert_eq!(status, StatusCode::OK);
-        let candidate = listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["memory_id"] == manual_id)
-            .unwrap();
-        assert!(candidate["reason"].as_str().unwrap().contains("not shared"));
-        assert!(
-            candidate["not_auto_shared_reason"]
-                .as_str()
-                .unwrap()
-                .contains("manual")
-        );
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": manual_id,
-                "email": "policy-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, accepted) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(accepted[0]["memory_id"], manual_id);
-        assert_eq!(accepted[0]["share_reason"], "manual");
-        assert!(accepted[0]["promoted_from"].is_null());
-        assert!(!accepted.to_string().contains(manual_source_id));
-
-        let (_, secret) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "api_key=super-secret-value",
-                "context": {"repository": "cairn-demo"}
-            }),
-            owner_token,
-        )
-        .await;
-        let secret_id = secret["memory_id"].as_str().unwrap();
-        let (status, secret_candidates) =
-            json_request_auth(router.clone(), "GET", &candidates, Value::Null, owner_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            secret_candidates
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["memory_id"] != secret_id)
-        );
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": secret_id,
-                "email": "policy-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &policy,
-            serde_json::json!({"policy": "auto_nonsensitive_project_memory"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (_, auto_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "nonsensitive repository decision is ready for collaborators",
-                "context": {"repository": "cairn-demo", "commit": "def5678"}
-            }),
-            owner_token,
-        )
-        .await;
-        let auto_source_id = auto_source["memory_id"].as_str().unwrap();
-        let (_, auto_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": auto_source_id,
-                "reason": "Automatic policy shares this nonsensitive decision"
-            }),
-            owner_token,
-        )
-        .await;
-        let auto_id = auto_promoted["memory_id"].as_str().unwrap();
-        let (_, sensitive_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "confidential repository note stays unshared until review",
-                "context": {"repository": "cairn-demo"}
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, sensitive_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": sensitive_source["memory_id"],
-                "reason": "Sensitive project memory stays a candidate"
-            }),
-            owner_token,
-        )
-        .await;
-        let sensitive_id = sensitive_promoted["memory_id"].as_str().unwrap();
-        let (_, private_memory) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "private observation stays on the owner account"
-            }),
-            owner_token,
-        )
-        .await;
-        let private_id = private_memory["memory_id"].as_str().unwrap();
-        let (status, after_auto) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        let shared_ids: Vec<_> = after_auto
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["memory_id"].as_str().unwrap())
-            .collect();
-        assert!(shared_ids.contains(&auto_id));
-        assert!(!shared_ids.contains(&sensitive_id));
-        assert!(!shared_ids.contains(&private_id));
-        let auto_read = after_auto
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["memory_id"] == auto_id)
-            .unwrap();
-        assert_eq!(
-            auto_read["share_reason"],
-            "auto_nonsensitive_project_memory"
-        );
-        assert!(auto_read["promoted_from"].is_null());
-        assert!(!auto_read.to_string().contains(auto_source_id));
-        let (status, member_search) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/search",
-            serde_json::json!({"query": "private observation", "limit": 5}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(member_search.as_array().unwrap().is_empty());
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &policy,
-            serde_json::json!({"policy": "manual"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, still_shared) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            still_shared
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["memory_id"] == auto_id)
-        );
-
-        let (_, dismissed_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "repository handoff note waits for an owner decision",
-                "context": {"repository": "cairn-demo"}
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, dismissed_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": dismissed_source["memory_id"],
-                "reason": "Dismiss this candidate instead of sharing it"
-            }),
-            owner_token,
-        )
-        .await;
-        let dismissed_id = dismissed_promoted["memory_id"].as_str().unwrap();
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &format!("/cairn-memory/projects/{project_id}/share-candidates/{dismissed_id}/dismiss"),
-            serde_json::json!({"email": "policy-member@example.test"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, after_dismiss) =
-            json_request_auth(router.clone(), "GET", &candidates, Value::Null, owner_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            after_dismiss
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["memory_id"] != dismissed_id)
-        );
-        let (status, after_dismiss_shared) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            after_dismiss_shared
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|item| item["memory_id"] != dismissed_id)
-        );
-
-        let (_, first_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "The project uses Redis as the default cache because reads are fast.",
-                "context": {"repository": "cairn-demo"}
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, second_source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": "The project does not use Redis as the default cache because consistency is preferred.",
-                "context": {"repository": "cairn-demo"}
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, first_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": first_source["memory_id"],
-                "reason": "Keep the first cache claim"
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, second_promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": second_source["memory_id"],
-                "reason": "Keep the contradictory cache claim"
-            }),
-            owner_token,
-        )
-        .await;
-        let first_id = first_promoted["memory_id"].as_str().unwrap();
-        let second_id = second_promoted["memory_id"].as_str().unwrap();
-        let (status, conflict_list) =
-            json_request_auth(router.clone(), "GET", &conflicts, Value::Null, owner_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(conflict_list.as_array().unwrap().iter().any(|conflict| {
-            let ids = conflict["memory_ids"].as_array().unwrap();
-            ids.iter().any(|id| id == first_id) && ids.iter().any(|id| id == second_id)
-        }));
-        let (status, owner_memories) = json_request_auth(
-            router.clone(),
-            "GET",
-            &format!("/cairn-memory/projects/{project_id}/memories"),
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            owner_memories
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == first_id)
-        );
-        assert!(
-            owner_memories
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == second_id)
-        );
-        let (status, audit) = json_request_auth(
-            router.clone(),
-            "GET",
-            "/cairn-memory/auth/audit",
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(audit.as_array().unwrap().iter().any(|event| {
-            event["action"] == "project_memory_shared" && event["metadata"]["memory_id"] == auto_id
-        }));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn layer5_team_space_permissions_and_retained_delete() {
-        let path = temp_store_path("project-team-delete");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let decision = "retained delete keeps this project decision stored";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({
-                "email": "team-owner@example.test",
-                "password": password
-            }),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({
-                "email": "team-member@example.test",
-                "password": password
-            }),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let member_token = member["token"].as_str().unwrap();
-        let (_, stranger) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({
-                "email": "team-stranger@example.test",
-                "password": password
-            }),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let stranger_token = stranger["token"].as_str().unwrap();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({
-                "repository": "cairn-demo",
-                "name": "Team Demo",
-                "defaultBranch": "main"
-            }),
-            owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap();
-        let (_, source) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({
-                "content": decision,
-                "context": {"repository": "cairn-demo", "commit": "abc1234"}
-            }),
-            owner_token,
-        )
-        .await;
-        let (_, promoted) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/promote",
-            serde_json::json!({
-                "projectId": project_id,
-                "memoryId": source["memory_id"],
-                "reason": "Share the retained decision with the team"
-            }),
-            owner_token,
-        )
-        .await;
-        let promoted_id = promoted["memory_id"].as_str().unwrap();
-        let team = format!("/cairn-memory/projects/{project_id}/team");
-        let shares = format!("/cairn-memory/projects/{project_id}/shares");
-        let shared = format!("/cairn-memory/projects/{project_id}/shared");
-        let revoke = format!("/cairn-memory/projects/{project_id}/shares/{promoted_id}/revoke");
-
-        join_project(&router, member_token, project_id).await;
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "team-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, stranger_team) =
-            json_request_auth(router.clone(), "GET", &team, Value::Null, stranger_token).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            stranger_team["error"]
-                .as_str()
-                .unwrap()
-                .contains("not a project member")
-        );
-        let (status, stranger_shared) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, stranger_token).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            stranger_shared["error"]
-                .as_str()
-                .unwrap()
-                .contains("not a project member")
-        );
-
-        let (status, member_create) = json_request_auth(
-            router.clone(),
-            "POST",
-            &team,
-            serde_json::json!({"name": "Platform"}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_create["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, created) = json_request_auth(
-            router.clone(),
-            "POST",
-            &team,
-            serde_json::json!({"name": "Platform"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(created["name"], "Platform");
-        assert_eq!(created["members"][0]["email"], "team-member@example.test");
-        let (status, listed) =
-            json_request_auth(router.clone(), "GET", &team, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(listed["members"][0]["email"], "team-member@example.test");
-        let (status, _) =
-            json_request_auth(router.clone(), "GET", &team, Value::Null, stranger_token).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        let (status, member_share) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "team-member@example.test"
-            }),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_share["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, member_revoke) = json_request_auth(
-            router.clone(),
-            "POST",
-            &revoke,
-            serde_json::json!({"email": "team-member@example.test"}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_revoke["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, member_correct) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/correct",
-            serde_json::json!({
-                "targetId": promoted_id,
-                "content": "A member must not rewrite the shared decision."
-            }),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_correct["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, member_forget) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/forget",
-            serde_json::json!({"id": promoted_id}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_forget["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-        let (status, member_delete) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/delete",
-            serde_json::json!({"id": promoted_id}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(
-            member_delete["error"]
-                .as_str()
-                .unwrap()
-                .contains("does not own")
-        );
-
-        let (_, note) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/remember",
-            serde_json::json!({"content": "owner correction source stays stored"}),
-            owner_token,
-        )
-        .await;
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/correct",
-            serde_json::json!({
-                "targetId": note["memory_id"],
-                "content": "The owner correction replaces the note."
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/forget",
-            serde_json::json!({"id": note["memory_id"]}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &revoke,
-            serde_json::json!({"email": "team-member@example.test"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &shares,
-            serde_json::json!({
-                "memoryId": promoted_id,
-                "email": "team-member@example.test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &revoke,
-            serde_json::json!({"email": "team-member@example.test"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, former_shared) =
-            json_request_auth(router.clone(), "GET", &shared, Value::Null, member_token).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(former_shared.as_array().unwrap().is_empty());
-        let (status, exported) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            exported["memories"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == promoted_id)
-        );
-
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/delete",
-            serde_json::json!({"id": promoted_id}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let (status, memories) = json_request_auth(
-            router.clone(),
-            "GET",
-            &format!("/cairn-memory/projects/{project_id}/memories"),
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            memories
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|memory| memory["memory_id"] != promoted_id)
-        );
-        let (status, found) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/search",
-            serde_json::json!({"query": "retained delete keeps", "limit": 5}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            found
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|memory| memory["memory_id"] != promoted_id)
-        );
-        let (status, after_delete) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            after_delete["memories"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|memory| memory["memory_id"] == promoted_id)
-        );
-        assert!(
-            after_delete["forgottenIds"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|id| id == promoted_id)
-        );
-        let (status, audit) = json_request_auth(
-            router.clone(),
-            "GET",
-            "/cairn-memory/auth/audit",
-            Value::Null,
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let actions: Vec<_> = audit
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|event| event["action"].as_str())
-            .collect();
-        for action in [
-            "project_member_joined",
-            "project_team_created",
-            "memory_promote",
-            "memory_forget",
-            "memory_delete_retained",
-        ] {
-            assert!(actions.contains(&action), "{action}");
-        }
-        let audit_text = audit.to_string();
-        assert!(!audit_text.contains(decision));
-        assert!(!audit_text.contains(password));
-        assert!(!audit_text.contains(owner_token));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn member_without_authorization_is_rejected_and_cannot_export_a_private_observation() {
-        let path = temp_store_path("file-auth");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({
-                "email": "owner@example.test",
-                "password": password
-            }),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({
-                "email": "member@example.test",
-                "password": password
-            }),
-            owner["token"].as_str().unwrap(),
-        )
-        .await;
-        let member_token = member["token"].as_str().unwrap();
-        let (status, captured) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/observe",
-            serde_json::json!({
-                "eventId": "owner-private-evt",
-                "sessionId": "owner-private-session",
-                "content": "owner private observation",
-                "role": "agent",
-                "source": "test"
-            }),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(captured["observation"]["event_id"], "owner-private-evt");
-
-        let (status, _) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        let (status, member_export) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-            member_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            member_export["observations"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|observation| observation["event_id"] != "owner-private-evt")
-        );
-
-        let (status, owner_export) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/export",
-            serde_json::json!({}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            owner_export["observations"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|observation| observation["content"] == "owner private observation")
-        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -7560,62 +5757,6 @@ mod tests {
                 .len(),
             1
         );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn file_project_list_reports_the_share_policy_to_owners_only() {
-        let path = temp_store_path("project-list-policy");
-        let router = app(AppState::open(&path).unwrap());
-        let password = "correct horse battery staple";
-        let (_, owner) = json_request(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/bootstrap",
-            serde_json::json!({"email": "list-owner@example.test", "password": password}),
-        )
-        .await;
-        let owner_token = owner["token"].as_str().unwrap();
-        let (_, member) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/auth/register",
-            serde_json::json!({"email": "list-member@example.test", "password": password}),
-            owner_token,
-        )
-        .await;
-        let member_token = member["token"].as_str().unwrap();
-        let (_, project) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/projects",
-            serde_json::json!({"repository": "list-demo", "name": "List Demo"}),
-            owner_token,
-        )
-        .await;
-        let project_id = project["project_id"].as_str().unwrap();
-        join_project(&router, member_token, project_id).await;
-
-        let listed = projects_as(&router, owner_token).await;
-        assert_eq!(listed[0]["role"], "owner");
-        assert_eq!(listed[0]["share_policy"], "manual");
-        let (status, _) = json_request_auth(
-            router.clone(),
-            "POST",
-            &format!("/cairn-memory/projects/{project_id}/policy"),
-            serde_json::json!({"policy": "auto_nonsensitive_project_memory"}),
-            owner_token,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let listed = projects_as(&router, owner_token).await;
-        assert_eq!(
-            listed[0]["share_policy"],
-            "auto_nonsensitive_project_memory"
-        );
-        let listed = projects_as(&router, member_token).await;
-        assert_eq!(listed[0]["role"], "member");
-        assert!(listed[0].get("share_policy").is_none(), "{listed}");
         let _ = std::fs::remove_file(path);
     }
 
@@ -8513,4 +6654,89 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
+}
+
+#[derive(Deserialize)]
+pub struct TransferProjectRequest {
+    #[serde(rename = "personId", alias = "person_id")]
+    pub person_id: String,
+}
+
+async fn transfer_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(request): Json<TransferProjectRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .store
+        .lock()
+        .await
+        .transfer_project(auth_token(&headers)?, &project_id, &request.person_id)
+        .map_err(account_api_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn postgres_transfer_project(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(request): Json<TransferProjectRequest>,
+) -> Result<StatusCode, PostgresApiError> {
+    state
+        .store
+        .transfer_project(postgres_token(&headers)?, &project_id, &request.person_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn personal_project_memories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<Memory>>, ApiError> {
+    Ok(Json(
+        state
+            .store
+            .lock()
+            .await
+            .personal_project_memories(auth_token(&headers)?, &project_id)
+            .map_err(account_api_error)?,
+    ))
+}
+async fn postgres_personal_project_memories(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Result<Json<Vec<Memory>>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .personal_project_memories(postgres_token(&headers)?, &project_id)
+            .await?,
+    ))
+}
+
+fn promotion_response(
+    mut memory: Memory,
+    dry_run: bool,
+    commit: Option<&str>,
+) -> Result<serde_json::Value, StoreError> {
+    if dry_run && let Some(commit) = commit {
+        if commit.trim().is_empty() || commit.len() > 256 {
+            return Err(StoreError::Validation(
+                "commit must contain 1 to 256 bytes".to_owned(),
+            ));
+        }
+        memory.verified_commit = Some(commit.trim().to_owned());
+        memory.lifecycle.freshness = 100;
+    }
+    let fingerprint = if dry_run {
+        Some(cairn_core::publication_fingerprint(&memory)?)
+    } else {
+        None
+    };
+    let mut value = serde_json::to_value(memory)?;
+    if let Some(fingerprint) = fingerprint {
+        value["previewFingerprint"] = serde_json::json!(fingerprint);
+    }
+    Ok(value)
 }
