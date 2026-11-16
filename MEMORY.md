@@ -65,7 +65,7 @@ replacement for the project documentation.
 
 - **Type:** decision
 - **Status:** active
-- **Summary:** `cairn init` creates the owner's project and writes `.cairn/project.json` (`project_id`, `repository`). The hook and `cairn capture` send it as `context.project_id`; a capture or sync push that names another person's project makes the capturer a member (idempotent, owner audit `project_member_joined`, no private duplicate project). Invite, team member add and member removal routes, commands and tools are gone; a team lists the project members; shares stay explicit.
+- **Summary:** `cairn init` creates the owner's project and writes `.cairn/project.json` (`project_id`, `repository`, `name` as of 0.1.4 on 2026-11-17; readers also accept older files without `name`). The hook and `cairn capture` send it as `context.project_id`; a capture or sync push that names another person's project makes the capturer a member (idempotent, owner audit `project_member_joined`, no private duplicate project). Invite, team member add and member removal routes, commands and tools are gone; a team lists the project members; shares stay explicit.
 - **Reason:** Automation-first: the repository already is the team's shared place, and invite and removal were human-only steps. Members cannot be removed, so the device-token merge gate cannot be reopened.
 - **Evidence:** `docs/adr/0011-explicit-project-memory-share.md` (2026-11-16 amendment); `docs/contracts/project-layer4.md`; `crates/core/src/lib.rs` (`join_context_project`); `cargo test --workspace`
 

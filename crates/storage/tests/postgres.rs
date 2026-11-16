@@ -3050,8 +3050,14 @@ async fn postgres_init_project_creates_once_and_defaults_the_name() {
         (created.repository.as_str(), created.name.as_str()),
         ("repo-a", "repo-a")
     );
+    assert!(
+        store
+            .init_project(&owner.token, "repo-a", Some("Renamed"))
+            .await
+            .is_err()
+    );
     let (again, is_new) = store
-        .init_project(&owner.token, "repo-a", Some("Renamed"))
+        .init_project(&owner.token, "repo-a", Some("repo-a"))
         .await
         .expect("again");
     assert!(!is_new);
@@ -3971,4 +3977,99 @@ async fn postgres_promotion_precondition_and_foreign_source_supersession() {
         .unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().any(|m| m.memory_id == original.memory_id));
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_rename_is_owner_only_audited_and_checks_name_before_join() {
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store
+        .bootstrap_account("rename-owner@example.test", pw)
+        .await
+        .unwrap();
+    let member = store
+        .register_account("rename-member@example.test", pw)
+        .await
+        .unwrap();
+    let outsider = store
+        .register_account("rename-outsider@example.test", pw)
+        .await
+        .unwrap();
+    let (project, _) = store
+        .init_project(&owner.token, "repo", Some("--help"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .join_project_named(&member.token, &project.project_id, Some("Wrong"))
+            .await
+            .is_err()
+    );
+    assert!(store.projects(&member.token).await.unwrap().is_empty());
+    // Name validation and membership must use the same transaction/connection.
+    let single_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let single = PostgresStore::from_pool(single_pool);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        single.join_project_named(&member.token, &project.project_id, Some("--help")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    for token in [&member.token, &outsider.token] {
+        assert!(
+            store
+                .rename_project(token, &project.project_id, "No")
+                .await
+                .is_err()
+        );
+    }
+    for name in [" ".to_owned(), "x".repeat(513)] {
+        assert!(
+            store
+                .rename_project(&owner.token, &project.project_id, &name)
+                .await
+                .is_err()
+        );
+    }
+    let renamed = store
+        .rename_project(&owner.token, &project.project_id, "  Useful name  ")
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "Useful name");
+    assert_eq!(renamed.project_id, project.project_id);
+    store
+        .rename_project(&owner.token, &project.project_id, "Useful name")
+        .await
+        .unwrap();
+    let audits = store.audit_events(&owner.token, 100).await.unwrap();
+    let renames: Vec<_> = audits
+        .iter()
+        .filter(|event| event.action == "project_renamed")
+        .collect();
+    assert_eq!(renames.len(), 1);
+    assert_eq!(
+        renames[0].subject_id.as_deref(),
+        Some(project.project_id.as_str())
+    );
+    assert_eq!(
+        renames[0].metadata,
+        serde_json::json!({"previous_name":"--help", "name":"Useful name"})
+    );
+    let persisted: String =
+        sqlx::query_scalar("SELECT name FROM cairn_projects WHERE project_id = $1")
+            .bind(&project.project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted, "Useful name");
+    assert_eq!(
+        store.projects(&member.token).await.unwrap()[0].name,
+        "Useful name"
+    );
 }

@@ -39,7 +39,7 @@ except ImportError:
 
 
 # Keep VERSION equal to [workspace.package] version in Cargo.toml (smoke_outbox.py checks it).
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 # urllib's default agent is blocked by Cloudflare (error 1010) in front of a deployed server.
 USER_AGENT = "cairn-hook/" + VERSION
 MAX_EVENTS = 256

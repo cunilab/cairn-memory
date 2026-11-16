@@ -115,7 +115,10 @@ personal. The hook and CLI include local file warnings in the returned
 `project_attachment.warning` as well as stderr. The server joins a known project ID, or returns `project_attachment` with
 a warning for failed/unknown attachment and keeps the capture personal. It retries
 attachment on the next capture, including a duplicate replay, without creating a
-fallback project. The ID is not part of the event fingerprint.
+fallback project. The ID is not part of the event fingerprint. Since 0.1.4, init also writes the
+project display `name` alongside `project_id` and `repository`. Hook and CLI capture
+readers accept files with or without `name`; only the ID is sent as capture
+context. Names do not change membership or fingerprints.
 
 Claude Code sends no event id, so the id is the derived fingerprint: the same
 session, source, and content is one event (an identical repeated prompt in a
@@ -222,6 +225,10 @@ that redaction. There is no PostgreSQL `/cairn-memory/observe` route, and the
 hook does not use the file `/observe` route.
 
 ## Change record
+
+2026-11-17: project files also contain `name`; old files without it remain readable.
+`cairn init` backfills legacy files, and owner-only `cairn init --rename <name>`
+repairs the server and file explicitly (see the project contract).
 
 2026-11-16: the hook adds `context.project_id` from the committed `.cairn/project.json` at the
 git top level of `cwd`; a capture that carries it makes the sender a project member.

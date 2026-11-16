@@ -349,6 +349,14 @@ class StubHookTests(unittest.TestCase):
                 self._context_for(repo / "src")["context"],
                 {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
             )
+            # v0.1.4 adds a display name; capture still uses only the stable id.
+            (repo / ".cairn" / "project.json").write_text(
+                json.dumps({"project_id": "project-abc", "repository": "example.test/acme/widget-svc", "name": "Widget Service"}), encoding="utf-8"
+            )
+            self.assertEqual(
+                self._context_for(repo / "src")["context"],
+                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+            )
             # An explicit project_id (and repository) in the input is kept.
             explicit = {
                 "session_id": "ctx-session",

@@ -46,6 +46,20 @@ Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[w
 
 Only the `Publish release` job has `contents: write`, and only the image and manifest jobs have `packages: write`.
 
+## 0.1.4 upgrade notes
+
+Upgrade the server and CLI together. This patch adds offline CLI help and rejects
+flag-like positional arguments before requests; `cairn init --help` can no longer
+create a project. Init writes the display name to `.cairn/project.json`, reads
+older files without it, and refuses name conflicts. The owner can repair an
+accidental `--help` name with `cairn init --rename "Project name"` in the affected
+checkout, then commit its updated file. This uses a new owner-only REST route and
+records an audit event; see the [project contract](contracts/project-layer4.md).
+No schema migration, new dependency or web package version change is required.
+Older CLI/hook readers tolerate the added field. A downgrade keeps the metadata
+readable but loses the rename route and restores the old CLI argument bug; use
+0.1.4 for init/rename. No project or account data is reset by this upgrade.
+
 ## How clients update
 
 - `cairn --version` prints the installed version.

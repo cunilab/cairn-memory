@@ -519,6 +519,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/cairn-memory/projects/init", post(init_project))
         .route(
+            "/cairn-memory/projects/{project_id}/rename",
+            post(rename_project),
+        )
+        .route(
             "/cairn-memory/projects/{project_id}/ownership",
             post(transfer_project),
         )
@@ -634,6 +638,10 @@ pub fn postgres_app(store: PostgresStore) -> Router {
             get(postgres_list_projects).post(postgres_register_project),
         )
         .route("/cairn-memory/projects/init", post(postgres_init_project))
+        .route(
+            "/cairn-memory/projects/{project_id}/rename",
+            post(postgres_rename_project),
+        )
         .route(
             "/cairn-memory/projects/{project_id}/ownership",
             post(postgres_transfer_project),
@@ -879,7 +887,7 @@ async fn postgres_init_project(
     if let Some(id) = request.project_id.as_deref() {
         let project = state
             .store
-            .join_project(postgres_token(&headers)?, id)
+            .join_project_named(postgres_token(&headers)?, id, request.name.as_deref())
             .await?;
         return Ok(Json(ProjectInitResponse::new((project, false))));
     }
@@ -1732,7 +1740,7 @@ async fn init_project(
     let mut store = state.store.lock().await;
     if let Some(id) = request.project_id.as_deref() {
         let project = store
-            .join_project(auth_token(&headers)?, id)
+            .join_project_named(auth_token(&headers)?, id, request.name.as_deref())
             .map_err(account_api_error)?;
         return Ok(Json(ProjectInitResponse::new((project, false))));
     }
@@ -5688,6 +5696,16 @@ mod tests {
             &owner,
         )
         .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(again["error"].as_str().unwrap().contains("--rename"));
+        let (status, again) = json_request_auth(
+            router.clone(),
+            "POST",
+            init,
+            serde_json::json!({"repository": "repo-i"}),
+            &owner,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(again["project_id"], first["project_id"]);
         assert_eq!(again["created"], false);
@@ -6660,6 +6678,41 @@ mod tests {
 pub struct TransferProjectRequest {
     #[serde(rename = "personId", alias = "person_id")]
     pub person_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenameProjectRequest {
+    pub name: String,
+}
+
+async fn rename_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(request): Json<RenameProjectRequest>,
+) -> Result<Json<Project>, ApiError> {
+    Ok(Json(
+        state
+            .store
+            .lock()
+            .await
+            .rename_project(auth_token(&headers)?, &project_id, &request.name)
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn postgres_rename_project(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(request): Json<RenameProjectRequest>,
+) -> Result<Json<Project>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .rename_project(postgres_token(&headers)?, &project_id, &request.name)
+            .await?,
+    ))
 }
 
 async fn transfer_project(

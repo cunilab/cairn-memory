@@ -128,11 +128,12 @@ const COMMANDS: &[Command] = &[
 
 const CONTEXT_KEYS: [&str; 4] = ["repository", "branch", "worktree", "commit"];
 
-fn usage() -> ! {
-    eprintln!(
+fn print_usage() {
+    println!(
         "Usage:\n\
   cairn setup <server-url>      (reads the device token from stdin)\n\
-  cairn init [name]             (create this repository's project, write .cairn/project.json)\n\
+  cairn init [name]             (create or join; write .cairn/project.json)\n\
+  cairn init --rename <name>    (owner only; update server and project file)\n\
   cairn mcp\n\
   cairn update [--check]        (install the latest release; --check only reports)\n\
   cairn --version\n\
@@ -161,17 +162,60 @@ fn usage() -> ! {
 Create the device token in the web console; it is an agent credential. Account and device\n\
 management stay in the web console."
     );
+}
+
+fn usage() -> ! {
+    print_usage();
     process::exit(2);
+}
+
+/// Help and option errors are handled before config, stdin, requests or update checks.
+fn check_arguments(args: &[String]) -> Result<bool, Error> {
+    let known = |name: &str| {
+        matches!(
+            name,
+            "init" | "setup" | "mcp" | "update" | "version" | "--version"
+        ) || COMMANDS.iter().any(|command| command.name == name)
+    };
+    if matches!(args, [flag] if flag == "--help" || flag == "-h")
+        || matches!(args, [help] if help == "help")
+        || matches!(args, [help, name] if help == "help" && known(name))
+        || matches!(args, [name, flag] if known(name) && (flag == "--help" || flag == "-h"))
+    {
+        return Ok(true);
+    }
+    for (index, value) in args.iter().enumerate() {
+        let allowed = (index == 0 && value == "--version")
+            || (index == 1 && args[0] == "update" && value == "--check")
+            || (index == 1 && args[0] == "init" && value == "--rename");
+        if value.starts_with('-') && !allowed {
+            return Err(Error::Input(format!(
+                "unexpected option {value:?}; run `cairn --help`"
+            )));
+        }
+    }
+    Ok(false)
 }
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    match check_arguments(&args) {
+        Ok(true) => {
+            print_usage();
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("cairn: {error}");
+            process::exit(1);
+        }
+    }
     update::remove_old_exe();
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
-        Some("mcp") => Config::load().and_then(mcp::run_stdio),
-        Some("version" | "--version") => {
+        Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),
+        Some("version" | "--version") if args.len() == 1 => {
             println!("cairn {}", update::VERSION);
             Ok(())
         }
@@ -222,27 +266,60 @@ fn setup(args: &[String]) -> Result<(), Error> {
 /// Creates (or finds) the caller's project for this repository and writes
 /// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
 fn init(args: &[String]) -> Result<(), Error> {
-    if args.len() > 1 {
-        usage();
+    let (rename, name) = match args {
+        [] => (false, None),
+        [name] if name != "--rename" => (false, Some(name.trim())),
+        [flag, name] if flag == "--rename" => (true, Some(name.trim())),
+        _ => usage(),
+    };
+    if name.is_some_and(str::is_empty) {
+        return Err(Error::Input("project name must not be empty".to_owned()));
     }
     let cwd = env::current_dir()
         .map_err(|error| Error::Input(format!("cannot read the current directory: {error}")))?;
     let top = project::toplevel(&cwd)
         .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
     let repository = project::repository_name(&top);
-    let mut body = json!({ "repository": repository });
-    if let Some(id) = project::read_project_id(&cwd)? {
-        body["project_id"] = json!(id);
-    }
-    if let Some(name) = args.first().filter(|name| !name.is_empty()) {
-        body["name"] = json!(name);
+    let existing = project::read(&cwd)?;
+    if !rename
+        && let (Some(requested), Some(recorded)) = (
+            name,
+            existing.as_ref().and_then(|file| file.name.as_deref()),
+        )
+        && requested != recorded
+    {
+        return Err(Error::Input(format!(
+            "project file names {recorded:?}; use `cairn init --rename <name>` as the owner to rename it"
+        )));
     }
     let client = Client::new(Config::load()?);
-    let created = client.post("/cairn-memory/projects/init", &body)?;
+    let created = if rename {
+        let file = existing.as_ref().ok_or_else(|| {
+            Error::Input("no .cairn/project.json; run `cairn init [name]` first".to_owned())
+        })?;
+        let path = tools::fill_path(
+            "/cairn-memory/projects/{projectId}/rename",
+            &mut Map::from_iter([("projectId".to_owned(), json!(file.project_id))]),
+        )?;
+        client.post(&path, &json!({"name": name}))?
+    } else {
+        let mut body = json!({ "repository": repository });
+        if let Some(file) = &existing {
+            body["project_id"] = json!(file.project_id);
+        }
+        if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref()))
+        {
+            body["name"] = json!(name);
+        }
+        client.post("/cairn-memory/projects/init", &body)?
+    };
     let project_id = created["project_id"]
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
-    let written = project::write(&top, project_id, &repository)?;
+    let name = created["name"]
+        .as_str()
+        .ok_or_else(|| Error::Input("the server sent no project name".to_owned()))?;
+    let written = project::write(&top, project_id, &repository, name)?;
     if !written {
         println!("already initialized, you are a member");
     }
@@ -391,13 +468,5 @@ fn export(client: &Client, tool: &Tool, arguments: &Map<String, Value>) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{TokenInput, token_input};
-
-    #[test]
-    fn token_input_falls_back_when_the_terminal_cannot_hide() {
-        assert_eq!(token_input(false, || unreachable!()), TokenInput::Piped);
-        assert_eq!(token_input(true, || true), TokenInput::Hidden);
-        assert_eq!(token_input(true, || false), TokenInput::Visible);
-    }
-}
+#[path = "cairn/tests.rs"]
+mod tests;

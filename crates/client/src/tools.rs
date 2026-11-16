@@ -144,7 +144,7 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
     Ok(result)
 }
 
-fn fill_path(template: &str, body: &mut Map<String, Value>) -> Result<String, Error> {
+pub fn fill_path(template: &str, body: &mut Map<String, Value>) -> Result<String, Error> {
     let mut path = String::new();
     let mut rest = template;
     while let Some(start) = rest.find('{') {

@@ -927,44 +927,9 @@ impl PostgresStore {
             return Ok(false);
         };
         let mut transaction = self.pool.begin().await?;
-        let Some(owner) = sqlx::query_scalar::<_, String>(
-            "SELECT person_id FROM cairn_projects WHERE project_id = $1 LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&mut *transaction)
-        .await?
-        else {
-            return Ok(false);
-        };
-        if owner == person_id {
-            return Ok(false);
-        }
-        let joined = sqlx::query(
-            "INSERT INTO cairn_project_members (owner_person_id, project_id, member_person_id)
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(&owner)
-        .bind(project_id)
-        .bind(person_id)
-        .execute(&mut *transaction)
-        .await?
-        .rows_affected();
-        if joined > 0 {
-            record_audit(
-                &mut transaction,
-                &owner,
-                None,
-                "project_member_joined",
-                Some(person_id),
-                serde_json::json!({
-                    "project_id": project_id,
-                    "member_person_id": person_id,
-                }),
-            )
-            .await?;
-        }
+        let joined = join_project_member(&mut transaction, person_id, project_id).await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(joined)
     }
 
     async fn auto_register_project(
@@ -1001,17 +966,28 @@ impl PostgresStore {
         token: &str,
         project_id: &str,
     ) -> Result<Project, PostgresError> {
+        self.join_project_named(token, project_id, None).await
+    }
+
+    pub async fn join_project_named(
+        &self,
+        token: &str,
+        project_id: &str,
+        name: Option<&str>,
+    ) -> Result<Project, PostgresError> {
         let account = self.authenticate_account(token).await?;
-        self.auto_register_project(
-            &account.person_id,
-            &WorkContext {
-                project_id: Some(project_id.to_owned()),
-                ..WorkContext::default()
-            },
-        )
-        .await?;
-        let row = sqlx::query("SELECT project_id, repository, name, default_branch, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at, EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at FROM cairn_projects WHERE project_id = $1").bind(project_id).fetch_one(&self.pool).await?;
-        project_from_row(&row)
+        let mut tx = self.pool.begin().await?;
+        // A concurrent rename or ownership transfer waits until the name check and join finish.
+        let row = sqlx::query("SELECT project_id, repository, name, default_branch, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at, EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at FROM cairn_projects WHERE project_id = $1 FOR SHARE")
+            .bind(project_id).fetch_optional(&mut *tx).await?
+            .ok_or_else(|| PostgresError::Validation("unknown project on this server".to_owned()))?;
+        let project = project_from_row(&row)?;
+        if name.is_some_and(|name| name.trim() != project.name) {
+            return Err(PostgresError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
+        join_project_member(&mut tx, &account.person_id, project_id).await?;
+        tx.commit().await?;
+        Ok(project)
     }
 
     pub async fn forget(&self, account_token: &str, item_id: &str) -> Result<(), PostgresError> {
@@ -1417,13 +1393,18 @@ impl PostgresStore {
         let name = name.map(str::trim).filter(|name| !name.is_empty());
         let short_name = repository.rsplit('/').next().unwrap_or(repository);
         let default_name = short_name.strip_prefix("local:").unwrap_or(short_name);
-        self.ensure_project(
-            account_token,
-            repository,
-            name.unwrap_or(default_name),
-            None,
-        )
-        .await
+        let result = self
+            .ensure_project(
+                account_token,
+                repository,
+                name.unwrap_or(default_name),
+                None,
+            )
+            .await?;
+        if name.is_some_and(|name| name != result.0.name) {
+            return Err(PostgresError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
+        Ok(result)
     }
 
     async fn ensure_project(
@@ -2495,6 +2476,49 @@ impl PostgresStore {
         Ok(decision)
     }
 
+    pub async fn rename_project(
+        &self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<Project, PostgresError> {
+        let account = self.authenticate_account(token).await?;
+        let name = name.trim();
+        validate_project_text(name, "project name")?;
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT person_id, name FROM cairn_projects WHERE project_id = $1 FOR UPDATE",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| PostgresError::Validation("unknown project".to_owned()))?;
+        if row.try_get::<String, _>("person_id")? != account.person_id {
+            return Err(PostgresError::Validation(
+                "account does not own the project".to_owned(),
+            ));
+        }
+        let previous_name: String = row.try_get("name")?;
+        if previous_name != name {
+            sqlx::query("UPDATE cairn_projects SET name = $1, updated_at = now() WHERE project_id = $2 AND person_id = $3")
+                .bind(name).bind(project_id).bind(&account.person_id).execute(&mut *tx).await?;
+            record_audit(
+                &mut tx,
+                &account.person_id,
+                None,
+                "project_renamed",
+                Some(project_id),
+                serde_json::json!({"previous_name": previous_name, "name": name}),
+            )
+            .await?;
+        }
+        let row = sqlx::query("SELECT project_id, repository, name, default_branch, EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at, EXTRACT(EPOCH FROM updated_at)::bigint::text AS updated_at FROM cairn_projects WHERE project_id = $1")
+            .bind(project_id).fetch_one(&mut *tx).await?;
+        let project = project_from_row(&row)?;
+        tx.commit().await?;
+        Ok(project)
+    }
+
     pub async fn transfer_project(
         &self,
         token: &str,
@@ -3451,6 +3475,50 @@ impl PostgresStore {
             .ok_or_else(|| PostgresError::Validation(format!("unknown device: {device_id}")))?;
         device_from_row(&row)
     }
+}
+
+async fn join_project_member(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    project_id: &str,
+) -> Result<bool, PostgresError> {
+    let Some(owner) = sqlx::query_scalar::<_, String>(
+        "SELECT person_id FROM cairn_projects WHERE project_id = $1 LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    else {
+        return Ok(false);
+    };
+    if owner == person_id {
+        return Ok(false);
+    }
+    let joined = sqlx::query(
+        "INSERT INTO cairn_project_members (owner_person_id, project_id, member_person_id)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    )
+    .bind(&owner)
+    .bind(project_id)
+    .bind(person_id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if joined > 0 {
+        record_audit(
+            transaction,
+            &owner,
+            None,
+            "project_member_joined",
+            Some(person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": person_id,
+            }),
+        )
+        .await?;
+    }
+    Ok(true)
 }
 
 async fn insert_auth_session(

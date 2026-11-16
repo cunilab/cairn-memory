@@ -105,6 +105,33 @@ async fn scenario(router: Router) {
     .await;
     let id = project["project_id"].as_str().unwrap();
     assert_eq!(project["name"], "repo");
+    let rename_path = format!("projects/{id}/rename");
+    for who in [None, Some(member_token), Some(device_token)] {
+        assert!(
+            request(
+                &router,
+                "POST",
+                &rename_path,
+                json!({"name":"Refused"}),
+                who
+            )
+            .await
+            .0 >= 400
+        );
+    }
+    let mismatch = request(
+        &router,
+        "POST",
+        "projects/init",
+        json!({"repository":"host/org/repo","project_id":id,"name":"Wrong"}),
+        Some(member_token),
+    )
+    .await;
+    assert_eq!(mismatch.0, 400);
+    assert_eq!(
+        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await,
+        json!([])
+    );
     for who in [member_token, reader_token] {
         let joined = ok(
             &router,
@@ -125,6 +152,66 @@ async fn scenario(router: Router) {
             1
         );
     }
+    for who in [member_token, reader_token, device_token] {
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                &rename_path,
+                json!({"name":"Refused"}),
+                Some(who)
+            )
+            .await
+            .0,
+            401
+        );
+    }
+    let owner_device = ok(
+        &router,
+        "POST",
+        "devices/register",
+        json!({"name":"Owner agent"}),
+        Some(token),
+    )
+    .await;
+    for who in [token, owner_device["token"].as_str().unwrap()] {
+        let renamed = ok(
+            &router,
+            "POST",
+            &rename_path,
+            json!({"name": "Useful project name"}),
+            Some(who),
+        )
+        .await;
+        assert_eq!(renamed["name"], "Useful project name");
+        assert_eq!(renamed["project_id"], id);
+    }
+    assert_eq!(
+        ok(&router, "GET", "projects", Value::Null, Some(member_token)).await[0]["name"],
+        "Useful project name"
+    );
+    let audit = ok(&router, "GET", "auth/audit", Value::Null, Some(token)).await;
+    assert_eq!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["action"] == "project_renamed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        request(
+            &router,
+            "POST",
+            "projects/init",
+            json!({"repository":"host/org/repo","project_id":id,"name":"repo"}),
+            Some(token)
+        )
+        .await
+        .0,
+        400
+    );
     let path = format!("projects/{id}");
     let content = "httpboundary complete decision payload ".repeat(40);
     let source = ok(
@@ -306,6 +393,27 @@ async fn scenario(router: Router) {
         .await[0]["person_id"],
         reader["account"]["person_id"]
     );
+    // The former owner is still the administrator; rename has no admin bypass.
+    assert_eq!(
+        request(
+            &router,
+            "POST",
+            &rename_path,
+            json!({"name":"Admin override"}),
+            Some(token)
+        )
+        .await
+        .0,
+        401
+    );
+    ok(
+        &router,
+        "POST",
+        &rename_path,
+        json!({"name":"Useful project name"}),
+        Some(reader_token),
+    )
+    .await;
     ok(
         &router,
         "POST",

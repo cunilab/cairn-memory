@@ -72,10 +72,19 @@ cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
 
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 
-To work together, run `cairn init` in the checkout and commit `.cairn/project.json`.
-It contains a project ID and a normalized `host/org/repo` locator, without a secret
-or server URL. Running init with a valid existing file joins the same project and
-says "already initialized, you are a member". Captures also join by that ID.
+To work together, run `cairn init "Project name"` in a fresh checkout and commit
+`.cairn/project.json`. It contains `project_id`, the normalized `host/org/repo`
+`repository`, and the display `name`, without a secret or server URL. Omit the name
+to default to the repository's short name. Running `cairn init` with an existing
+file joins the same project without renaming it; older files without `name` gain
+the server's name. A different supplied name or a file/server name mismatch is
+refused. The owner can explicitly repair or change both names with
+`cairn init --rename "Project name"` in that checkout, then commit the updated file.
+That also fixes a project accidentally named `--help` by an older CLI after the
+server and CLI are upgraded to 0.1.4. Captures also join by the stable ID.
+`cairn init --help`, `cairn init -h`, `cairn --help` and `cairn help init` print
+usage without connecting; unknown options and flag-like positional values are
+rejected before any request. See the [project contract](docs/contracts/project-layer4.md#init-and-membership).
 Repositories without the file create no project: captures remain private personal
 repository memory. Broken/unknown files warn while personal capture continues.
 

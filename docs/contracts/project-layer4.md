@@ -29,8 +29,10 @@ personal results carry `source: personal`. Resume/unresolved remain personal.
 `POST /cairn-memory/projects/init` takes
 `{"repository":"host/org/repo","name":"Repo","project_id":"project-…"}`.
 `name` and `project_id` are optional. With an ID it joins that existing project;
-without one it explicitly creates or returns the caller's registered project for
-that repository. The response has `project_id`, `repository`, `name`, `created`.
+if `name` is supplied it must match the server name (after trimming), checked
+before membership changes. Without an ID it explicitly creates or returns the
+caller's registered project for that repository; a supplied different name is
+refused instead of silently ignored. The response has `project_id`, `repository`, `name`, `created`.
 The CLI reads the existing file first, joins, and says
 `already initialized, you are a member`; it never creates an additional project
 for a valid existing file.
@@ -38,8 +40,26 @@ for a valid existing file.
 `cairn init [name]` writes and asks you to commit `.cairn/project.json`:
 
 ```json
-{"project_id":"project-…","repository":"host/org/repo"}
+{
+  "project_id": "project-…",
+  "repository": "host/org/repo",
+  "name": "Repo"
+}
 ```
+
+Fresh `cairn init <name>` creates that name; omission defaults to the repository's
+short name. A normal re-init joins without renaming. A different positional name
+from the file is refused locally, before a request. A file/server name mismatch
+is refused by the server. CLI and hook readers accept older files without `name`;
+init fills it from the server after a successful join. Capture uses only the ID;
+the display name is not an identity or an authorization field.
+
+`cairn init --help`, `-h`, `cairn --help`, and `cairn help init` print usage and
+exit 0 before configuration, stdin, network calls or update checks. Every known
+subcommand supports `--help` and `-h` as its sole argument. Other arguments
+starting with `-` are rejected before requests; the only action options are
+`update --check` and `init --rename <name>`. There is no `--` escape for flag-like
+positional values.
 
 The file contains no credential or server address. SSH and HTTPS remotes normalize
 to `host/org/repo`, host lowercase, without `.git`. A repository without a network
@@ -108,6 +128,29 @@ admin's web session may transfer to an existing member, with an audit event.
 The old owner stays a member; author attribution and personal branch records stay
 as they were. Owner-only project entities and verification history pass to the
 new owner; private audit history does not. A device token is refused. No account/project deletion workflow exists.
+
+## Project rename
+
+`POST projects/{id}/rename` takes `{"name":"New name"}` and returns the updated
+project. Only the current owner may call it, with their web session or device
+token. Members, non-members and an administrator who is not the owner are refused
+with `401` (the existing ownership-error mapping), as are unauthenticated
+requests. Invalid names are `400`. Names are trimmed and must contain 1–512 bytes. An unchanged name is a
+no-op. A change updates `updated_at` and records `project_renamed` with the project
+ID, `previous_name` and `name` in the owner's private audit, atomically in both
+stores. PostgreSQL locks the project row so an ownership transfer cannot race
+the authorization check. ID, repository, membership and decisions are preserved.
+
+The CLI command is `cairn init --rename "New name"`, run inside the initialized
+checkout with the owner's device configuration. It targets the committed project
+ID and writes the server-confirmed name back to the pretty JSON file. It works
+with an old file that lacks `name`, or one whose name differs from the server
+(e.g. a project accidentally named `--help` before 0.1.4). Commit and distribute
+the updated file. Ordinary members with stale files should pull that commit;
+init does not silently rename or overwrite a conflicting name. A REST-only rename
+requires updating committed files too. If the server rename succeeds but the local
+write fails, the error is reported and the old file is retained; retry the same
+command (the server's unchanged-name path adds no duplicate audit).
 
 ## Personal branch bookkeeping
 

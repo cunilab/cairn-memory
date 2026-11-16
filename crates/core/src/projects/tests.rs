@@ -411,7 +411,12 @@ fn init_project_creates_once_defaults_the_name_and_is_per_owner() -> Result<(), 
         (created.repository.as_str(), created.name.as_str()),
         ("repo-a", "repo-a")
     );
-    let (again, is_new) = store.init_project(&owner.token, "repo-a", Some("Renamed"))?;
+    assert!(
+        store
+            .init_project(&owner.token, "repo-a", Some("Renamed"))
+            .is_err()
+    );
+    let (again, is_new) = store.init_project(&owner.token, "repo-a", Some("repo-a"))?;
     assert!(!is_new);
     assert_eq!(again.project_id, created.project_id);
     assert_eq!(again.name, "repo-a");
@@ -1092,5 +1097,84 @@ fn remote_rename_keeps_tagged_personal_memories_promotable_by_project_id() -> Re
     )?;
     assert!(hits.iter().any(|r| r.source == "project"));
     fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn rename_is_owner_only_audited_and_persisted_with_rollback_on_write_failure()
+-> Result<(), StoreError> {
+    let dir = temp_store_dir("rename-project");
+    let path = dir.join("store.json");
+    let mut store = MemoryStore::open(&path)?;
+    let owner =
+        store.bootstrap_account("rename-owner@example.test", "correct horse battery staple")?;
+    let member =
+        store.register_account("rename-member@example.test", "correct horse battery staple")?;
+    let outsider = store.register_account(
+        "rename-outsider@example.test",
+        "correct horse battery staple",
+    )?;
+    let (project, _) = store.init_project(&owner.token, "repo", Some("--help"))?;
+    assert!(
+        store
+            .join_project_named(&member.token, &project.project_id, Some("Wrong"))
+            .is_err()
+    );
+    assert!(
+        store.projects(&member.token)?.is_empty(),
+        "a name mismatch must not join"
+    );
+    store.join_project(&member.token, &project.project_id)?;
+    for token in [&member.token, &outsider.token] {
+        assert!(
+            store
+                .rename_project(token, &project.project_id, "No")
+                .is_err()
+        );
+    }
+    for name in [" ".to_owned(), "x".repeat(513)] {
+        assert!(
+            store
+                .rename_project(&owner.token, &project.project_id, &name)
+                .is_err()
+        );
+    }
+    let renamed = store.rename_project(&owner.token, &project.project_id, "  Useful name  ")?;
+    assert_eq!(renamed.name, "Useful name");
+    assert_eq!(renamed.project_id, project.project_id);
+    let audits = store.audit_events(&owner.token, 100)?;
+    let audit = audits
+        .iter()
+        .find(|event| event.action == "project_renamed")
+        .unwrap();
+    assert_eq!(
+        audit.subject_id.as_deref(),
+        Some(project.project_id.as_str())
+    );
+    assert_eq!(
+        audit.metadata,
+        serde_json::json!({"previous_name":"--help", "name":"Useful name"})
+    );
+    store.rename_project(&owner.token, &project.project_id, "Useful name")?;
+    assert_eq!(
+        store.audit_events(&owner.token, 100)?.len(),
+        audits.len(),
+        "same name is a no-op"
+    );
+    assert_eq!(
+        MemoryStore::open(&path)?.projects(&member.token)?[0].name,
+        "Useful name"
+    );
+    // Force persist's rename to fail after the new name and audit were staged.
+    fs::remove_file(&path)?;
+    fs::create_dir(&path)?;
+    assert!(
+        store
+            .rename_project(&owner.token, &project.project_id, "Failed")
+            .is_err()
+    );
+    assert_eq!(store.projects(&owner.token)?[0].name, "Useful name");
+    assert_eq!(store.audit_events(&owner.token, 100)?.len(), audits.len());
+    fs::remove_dir_all(dir)?;
     Ok(())
 }

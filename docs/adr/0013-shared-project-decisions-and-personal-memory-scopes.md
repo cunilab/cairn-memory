@@ -98,6 +98,27 @@ and visibility-escalation parts of ADR 0002. ADR 0010's linked-history rule rema
     Personal export is not a project backup: it does not restore project identity,
     membership, publication or governance. Import always creates personal memory.
 
+## 2026-11-17 amendment — committed display name and explicit rename
+
+The committed project file also carries the server-confirmed `name`. Older files
+without it remain valid, and init backfills them on a successful join. Normal init
+never renames: a different explicit name or a file/server mismatch is an error.
+This prevents accidental renames and exposes inconsistent checkout metadata.
+Help and unknown flags are resolved locally before any request, because the old
+CLI could create a project literally named `--help`.
+
+Only the current owner can rename, using a web session or device token. The
+smallest repair surface is `POST projects/{id}/rename` plus
+`cairn init --rename <name>` in the initialized checkout; it updates the file as
+well as the server without changing identity, membership or decisions. This is
+an explicit owner action, with an atomic `project_renamed` audit event. A repeated
+same-name rename is a no-op, so retry after a local file-write failure is safe.
+PostgreSQL locks the project during rename and during checked init/join, including
+against concurrent ownership transfer. No MCP tool or web rename UI is added.
+See the [contract](../contracts/project-layer4.md#project-rename) for the full
+request, compatibility and recovery rules. Evidence: the client agent-flow,
+project-model HTTP, core rename/rollback and PostgreSQL rename regressions.
+
 ## Trust and limits
 
 **Possession of a project ID is sufficient to join.** Accounts are created by an

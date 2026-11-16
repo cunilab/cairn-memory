@@ -148,12 +148,16 @@ impl MemoryStore {
         let name = name.map(str::trim).filter(|name| !name.is_empty());
         let short_name = repository.rsplit('/').next().unwrap_or(repository);
         let default_name = short_name.strip_prefix("local:").unwrap_or(short_name);
-        self.ensure_project(
+        let result = self.ensure_project(
             account_token,
             repository,
             name.unwrap_or(default_name),
             None,
-        )
+        )?;
+        if name.is_some_and(|name| name != result.0.name) {
+            return Err(StoreError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
+        Ok(result)
     }
 
     fn ensure_project(
@@ -409,6 +413,15 @@ impl MemoryStore {
     }
 
     pub fn join_project(&mut self, token: &str, project_id: &str) -> Result<Project, StoreError> {
+        self.join_project_named(token, project_id, None)
+    }
+
+    pub fn join_project_named(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: Option<&str>,
+    ) -> Result<Project, StoreError> {
         let account = self.authenticate_account(token)?;
         let project = self
             .state
@@ -417,6 +430,9 @@ impl MemoryStore {
             .find(|p| p.project_id == project_id)
             .cloned()
             .ok_or_else(|| StoreError::Validation("unknown project on this server".to_owned()))?;
+        if name.is_some_and(|name| name.trim() != project.name) {
+            return Err(StoreError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
         self.auto_register_project(
             &account.person_id,
             &WorkContext {
@@ -1207,6 +1223,40 @@ impl MemoryStore {
             self.prior_project_copy(project_id, source.supersedes.as_deref(), &account.person_id);
         decision.promoted_from = None;
         Ok(decision)
+    }
+
+    /// Renaming preserves project identity, members and decisions. Only the current owner
+    /// (web session or device token) may change the name; the audit commits with the change.
+    pub fn rename_project(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<Project, StoreError> {
+        let account = self.authenticate_account(token)?;
+        self.require_project_owner(&account, project_id)?;
+        let name = name.trim();
+        validate_project_text(name, "project name")?;
+        let project = self
+            .state
+            .projects
+            .iter_mut()
+            .find(|p| p.project_id == project_id)
+            .expect("checked owner");
+        if project.name == name {
+            return Ok(project.clone());
+        }
+        let previous_name = std::mem::replace(&mut project.name, name.to_owned());
+        project.updated_at = timestamp();
+        let project = project.clone();
+        self.record_share_audit(
+            &account.person_id,
+            "project_renamed",
+            Some(project_id),
+            serde_json::json!({"previous_name": previous_name, "name": name}),
+        );
+        self.persist()?;
+        Ok(project)
     }
 
     pub fn transfer_project(
