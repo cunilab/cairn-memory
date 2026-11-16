@@ -656,6 +656,7 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
             promoted_from: Some("memory-source-1".to_owned()),
             promotion_reason: Some("because SK-synthetic-example".to_owned()),
             verified_commit: Some("abc1234".to_owned()),
+            published_by: None, changed_by: None, changed_at: None,
             created_at: "10".to_owned(),
         }],
         forgotten_ids: vec![],
@@ -685,10 +686,7 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
         .find(|memory| memory.memory_id == "memory-import-meta")
         .expect("imported memory");
     assert_eq!(imported_memory.lifecycle.sensitivity, Sensitivity::Public);
-    assert_eq!(
-        imported_memory.promoted_from.as_deref(),
-        Some("memory-source-1")
-    );
+    assert_eq!(imported_memory.promoted_from.as_deref(), None);
     assert_eq!(imported_memory.verified_commit.as_deref(), Some("abc1234"));
     assert_eq!(
         imported_memory.source_event_ids,
@@ -713,10 +711,7 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
             .iter()
             .all(|item| !item.contains(BODY))
     );
-    assert_eq!(
-        imported_memory.promotion_reason.as_deref(),
-        Some("because [REDACTED]")
-    );
+    assert_eq!(imported_memory.promotion_reason.as_deref(), None);
     let imported_session = reopened
         .sessions()
         .find(|session| session.session_id == "sess-import-meta")

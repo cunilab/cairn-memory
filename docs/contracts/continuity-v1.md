@@ -17,7 +17,7 @@ user-global scope.
 | `session` | A session-local memory or legacy record without safe broader context | Same `sessionId` only |
 | `worktree` | An unmerged hypothesis tied to one repository, branch, and worktree | Repository + branch + worktree |
 | `branch` | A branch-local fact that may apply across worktrees for that branch | Repository + branch |
-| `project` | Repository-level project knowledge | Repository |
+| `project` | Repository-level personal memory, or an explicitly published decision with `published_by` | Personal: repository; publication: project ID and membership |
 | `global` | A user-level memory without repository context | Any scoped query |
 
 New session summaries derive their scope from their captured `WorkContext`:
@@ -32,6 +32,14 @@ no repository                  -> session
 Explicit memories use the same mapping, except a memory without repository
 context is treated as `global`. This keeps personal guidance available across
 projects while keeping branch/worktree hypotheses narrow.
+
+Published decisions have a separate `published_by` boundary: project tags alone
+never grant access. Normal recall combines eligible personal rows with decisions
+from `context.project_id`, ranked together and labelled `source: personal | project`.
+Global personal memory has no repository and is never shared. Resume/unresolved
+remain personal. See [the project contract](project-layer4.md) for publication,
+attachment warnings and personal branch bookkeeping; its rules supersede older
+project auto-registration wording below.
 
 ## Retrieval filters
 

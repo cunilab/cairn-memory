@@ -188,7 +188,7 @@ export function Overview() {
         cairn<LifecycleSummary>("diagnose"),
         cairn<{ memories: PersonalMemory[]; forgottenIds?: string[] }>("export", { method: "POST" }),
         ...listed.map((project) =>
-          cairn<ProjectMemory[]>(memoryReadPath(project.project_id, project.role)),
+          cairn<ProjectMemory[]>(memoryReadPath(project.project_id)),
         ),
         ...owned.map((project) =>
           cairn<ProjectConflict[]>(`projects/${encodeURIComponent(project.project_id)}/conflicts`),

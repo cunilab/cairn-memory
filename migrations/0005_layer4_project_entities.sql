@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS cairn_project_branches (
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (person_id, branch_id),
     UNIQUE (person_id, project_id, name),
-    FOREIGN KEY (person_id, project_id)
-        REFERENCES cairn_projects (person_id, project_id)
+    FOREIGN KEY (project_id)
+        REFERENCES cairn_projects (project_id)
 );
 
 CREATE TABLE IF NOT EXISTS cairn_project_worktrees (
@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS cairn_project_worktrees (
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (person_id, worktree_id),
     UNIQUE (person_id, project_id, path),
-    FOREIGN KEY (person_id, project_id)
-        REFERENCES cairn_projects (person_id, project_id)
+    FOREIGN KEY (project_id)
+        REFERENCES cairn_projects (project_id)
 );
 
 CREATE INDEX IF NOT EXISTS cairn_project_branches_project_idx

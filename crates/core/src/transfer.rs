@@ -60,7 +60,10 @@ impl MemoryStore {
             .memories
             .iter()
             .filter(|memory| {
-                person_id.is_none_or(|person_id| self.memory_owned_by(&memory.memory_id, person_id))
+                person_id.is_none_or(|person_id| {
+                    memory.published_by.is_none()
+                        && self.memory_owned_by(&memory.memory_id, person_id)
+                })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -137,18 +140,13 @@ impl MemoryStore {
                 ));
             }
         }
-        // A project-linked row must name a project this person owns. A missing, foreign or
-        // unowned project gets one error, so it does not say which. Only memories carry a
-        // project id; the bundle holds no project records, so a cross-store restore needs the
-        // matching project registered first.
-        for memory in &bundle.memories {
-            if memory.project_id.as_deref().is_some_and(|project_id| {
-                self.project_owner_id(project_id).as_deref() != Some(person_id.as_str())
-            }) {
-                return Err(StoreError::Validation(
-                    "account does not own the project".to_owned(),
-                ));
-            }
+        for memory in &mut bundle.memories {
+            memory.published_by = None;
+            memory.changed_by = None;
+            memory.changed_at = None;
+            memory.project_id = None;
+            memory.promoted_from = None;
+            memory.promotion_reason = None;
         }
         let observation_ids = bundle
             .observations
@@ -336,6 +334,12 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
         validate_lifecycle(&observation.lifecycle)?;
     }
     for memory in &mut bundle.memories {
+        memory.published_by = None;
+        memory.changed_by = None;
+        memory.changed_at = None;
+        memory.project_id = None;
+        memory.promoted_from = None;
+        memory.promotion_reason = None;
         if memory.memory_id.trim().is_empty() || memory.session_id.trim().is_empty() {
             return Err(StoreError::Validation(
                 "export memory ids must not be empty".to_owned(),

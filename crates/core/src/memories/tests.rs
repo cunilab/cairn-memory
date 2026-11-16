@@ -131,13 +131,16 @@ fn correction_of_a_project_memory_keeps_project_id_and_hides_the_old_listing()
     let account = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
     let project =
         store.register_project(&account.token, "cairn", "Cairn", Some("main".to_owned()))?;
-    let source = store.remember(
+    let source = store.remember_for_account(
+        &account.token,
         "The cache decision passed.",
         Vec::new(),
         WorkContext {
             repository: Some("cairn".to_owned()),
             ..WorkContext::default()
         },
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
     )?;
     let promoted = store.promote_memory(
         &account.token,
@@ -145,7 +148,8 @@ fn correction_of_a_project_memory_keeps_project_id_and_hides_the_old_listing()
         &source.memory_id,
         "Confirmed by the cache regression test",
     )?;
-    let correction = store.correct(
+    let correction = store.correct_for_account(
+        &account.token,
         &promoted.memory_id,
         "The cache decision passed after review.",
         Vec::new(),
@@ -179,12 +183,7 @@ fn correction_of_a_project_memory_keeps_project_id_and_hides_the_old_listing()
             .any(|memory| memory.memory_id == promoted.memory_id)
     );
     let report = store.project_maintenance(&account.token, &project.project_id, None)?;
-    assert!(
-        report
-            .superseded_memory_ids
-            .iter()
-            .any(|id| id == &promoted.memory_id)
-    );
+    assert!(report.superseded_memory_ids.is_empty());
     assert!(
         report
             .active_memory_ids

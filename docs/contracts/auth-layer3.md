@@ -166,7 +166,7 @@ every agent route and on sync.
 
 A device token resolves to the account that owns the device. Every agent route
 below accepts it as it accepts a web session, with the same account scope: the
-device sees and changes only that account's memory, projects, and shares.
+device sees and changes that account's private memory and the decisions of projects it belongs to.
 The file-store router and the PostgreSQL router behave the same. Use of an
 active device token records its `last_seen_at`, at most once per 60 seconds; the
 file store keeps that value in memory until another write persists it. The sync
@@ -177,20 +177,18 @@ disabled account gets `401` on `sync/push`, `sync/pull`, and `sync/diagnose`. A
 | Group | Routes | Web session | Device token |
 | --- | --- | --- | --- |
 | Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `403` |
-| Merge confirmation | `projects/{id}/branches/{branch}/merge` | yes | `403` when the project has any member besides its owner (a member joins by a capture that carries the project id); allowed on a solo project |
+| Record merge | `projects/{id}/branches/{branch}/merge` | yes, caller-owned branch | yes, caller-owned branch |
 | Identity | `auth/me` | yes | yes |
 | Capture and sync | `session/start`, `session/end`, `observe`, `sync/push`, `sync/pull`, `sync/diagnose` | start, end: yes; observe: yes on the file store, `401` on PostgreSQL (device only, it is a sync push); sync: `401` (device only) | yes |
 | Recall | `search`, `smart-search`, `context`, `recall`, `resume`, `unresolved`, `why-changed`, `diagnose` | yes | yes |
 | Memory | `remember`, `correct`, `forget`, `delete`, `export`, `import` | yes | yes |
-| Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `promote`, `projects/verify`, `projects/{id}/confirm`, branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `revocations`, `maintenance`, `memories`, `shared` | yes | yes |
-| Sharing | `team` (create, list), `shares`, `shares/{memory}/revoke`, `policy`, `share-candidates` and its `dismiss` | yes | yes |
+| Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `promote`, `projects/verify`, `projects/{id}/confirm`, branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `maintenance`, `memories`, `personal-memories` | yes | yes |
+| Ownership transfer | `projects/{id}/ownership` | owner or admin, to an existing member | `403` |
 
-The merge rule reads the owner's member records at the moment of the call. A
-device that merged a solo project is refused as soon as a member has joined.
-There is no member removal, so a device cannot empty a project to reach the
-solo-merge path. In PostgreSQL the merge locks the project row first, so a join
-that commits first is seen by the check and a later join waits for the merge. The web console session stays the way to confirm a merge on a
-shared project.
+Project decisions use the author/current-owner edit rule; all project members read
+the same live decisions. Branch/worktree status is personal bookkeeping, so the
+membership-based device merge gate is removed. Teams and selective-sharing routes
+are removed; see [project-layer4](project-layer4.md).
 
 ## Agent clients: CLI and MCP
 
@@ -259,12 +257,9 @@ the rule, is not repaired, and needs the id, which is not shown to other
 accounts. The trusted unscoped forget (`MemoryStore::forget`, a library call with no
 HTTP route behind a bearer) keeps cascading every source id.
 
-Account import also requires every memory row's `project_id` to name a project the
-caller owns; otherwise the whole import is rejected with `account does not own the
-project`, whether the project is foreign, missing or unowned. The owner's project
-list, share candidates, conflicts and maintenance omit a row another account owns
-(an old row is kept, not deleted), so a foreign row cannot appear there or hide the
-owner's memory.
+Import strips publication state and restores every row as personal memory. A
+`project_id` is not publication authority. Authenticated personal export excludes
+published decisions; project state is read online. See [export](export-v1.md).
 
 A store with no accounts keeps the unscoped Layer 1 methods and their global
 event-id idempotency. Those methods stay available after accounts exist:

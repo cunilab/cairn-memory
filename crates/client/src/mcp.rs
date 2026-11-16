@@ -284,12 +284,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        for expected in [
-            "memory_observe",
-            "memory_recall",
-            "memory_promote",
-            "memory_project_share",
-        ] {
+        for expected in ["memory_observe", "memory_recall", "memory_promote"] {
             assert!(names.contains(&expected), "{expected}");
         }
         for removed in [

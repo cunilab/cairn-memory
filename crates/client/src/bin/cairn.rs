@@ -85,7 +85,7 @@ const COMMANDS: &[Command] = &[
     command(
         "promote",
         "memory_promote",
-        &["projectId", "memoryId", "reason"],
+        &["projectId", "memoryId", "reason", "previewFingerprint"],
         3,
     ),
     command(
@@ -101,25 +101,26 @@ const COMMANDS: &[Command] = &[
         1,
     ),
     command(
-        "project-share",
-        "memory_project_share",
-        &["projectId", "memoryId", "email"],
-        3,
-    ),
-    command("project-shared", "memory_project_shared", &["projectId"], 1),
-    command(
-        "project-revoke",
-        "memory_project_revoke",
-        &["projectId", "memoryId", "email"],
-        3,
+        "project-members",
+        "memory_project_members",
+        &["projectId"],
+        1,
     ),
     command(
-        "project-team-create",
-        "memory_project_team_create",
-        &["projectId", "name"],
-        2,
+        "project-verify",
+        "memory_project_verify",
+        &["projectId", "memoryId", "commit"],
+        3,
     ),
-    command("project-team", "memory_project_team", &["projectId"], 1),
+    Command {
+        defaults: &[("dryRun", "true")],
+        ..command(
+            "promote-preview",
+            "memory_promote",
+            &["projectId", "memoryId", "reason"],
+            3,
+        )
+    },
     command("delete-memory", "memory_delete", &["id"], 1),
     command("export", "memory_export", &["output"], 1),
     command("import", "memory_import", &["input"], 1),
@@ -150,14 +151,12 @@ fn usage() -> ! {
   cairn import <input>\n\
   cairn project-register <repository> <name> [default-branch]\n\
   cairn project-list\n\
-  cairn promote <project-id> <memory-id> <reason>\n\
+  cairn promote <project-id> <memory-id> <reason> [preview-fingerprint]\n\
+  cairn promote-preview <project-id> <memory-id> <reason>\n\
+  cairn project-members <project-id>\n\
+  cairn project-verify <project-id> <memory-id> <commit>\n\
   cairn project-memories <project-id>\n\
   cairn project-freshness <project-id>\n\
-  cairn project-share <project-id> <memory-id> <email>\n\
-  cairn project-shared <project-id>\n\
-  cairn project-revoke <project-id> <memory-id> <email>\n\
-  cairn project-team-create <project-id> <name>\n\
-  cairn project-team <project-id>\n\
   cairn delete-memory <memory-id>\n\
 Create the device token in the web console; it is an agent credential. Account and device\n\
 management stay in the web console."
@@ -232,6 +231,9 @@ fn init(args: &[String]) -> Result<(), Error> {
         .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
     let repository = project::repository_name(&top);
     let mut body = json!({ "repository": repository });
+    if let Some(id) = project::read_project_id(&cwd)? {
+        body["project_id"] = json!(id);
+    }
     if let Some(name) = args.first().filter(|name| !name.is_empty()) {
         body["name"] = json!(name);
     }
@@ -241,6 +243,9 @@ fn init(args: &[String]) -> Result<(), Error> {
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
     let written = project::write(&top, project_id, &repository)?;
+    if !written {
+        println!("already initialized, you are a member");
+    }
     let path = top.join(".cairn/project.json");
     println!(
         "Cairn project {project_id} ({repository}) {}: {}",
@@ -330,7 +335,13 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
         }
     }
     for (key, value) in command.defaults {
-        arguments.entry(*key).or_insert_with(|| json!(value));
+        arguments.entry(*key).or_insert_with(|| {
+            if *key == "dryRun" {
+                json!(*value == "true")
+            } else {
+                json!(value)
+            }
+        });
     }
     if command.context {
         let context: Map<String, Value> = CONTEXT_KEYS
@@ -343,13 +354,6 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
         if !context.is_empty() {
             arguments.insert("context".to_owned(), Value::Object(context));
         }
-    }
-    if command.name == "capture"
-        && let Some(project_id) = env::current_dir()
-            .ok()
-            .and_then(|cwd| project::project_id(&cwd))
-    {
-        arguments.insert("context".to_owned(), json!({ "project_id": project_id }));
     }
     if command.name == "import" {
         let input = arguments

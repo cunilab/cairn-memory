@@ -117,9 +117,12 @@ row stays as stored.
 
 Corrections create a new durable `correction` memory with `supersedes` pointing
 to the old memory or observation. The old item stays stored and linked. Normal
-recall skips it while another memory for the same person has `supersedes` set
-to its id and that newer memory is not forgotten and not expired. The same
-rule hides the promoted project copies of a corrected personal memory. Forget
+recall skips it while a newer memory for the same person has `supersedes` set
+to its id and that newer memory is not forgotten and not expired. For published
+decisions, the successor must instead be published in the same project; an
+authorized owner may correct another author’s decision. A private source
+correction never hides or changes a published project copy. Project corrections
+are visible to every member and supersede only project decisions. Forget
 still tombstones. Forgetting or deleting a promoted project copy tombstones only
 that copy, never the personal memory or its source events it was promoted from,
 and forgetting the personal memory does not tombstone the copy
@@ -128,5 +131,5 @@ systems score confidence and keep or replace a corrected record is
 [CM-RESEARCH-001](../research/memory-confidence-and-correction.md). The accepted
 decision is [CM-ADR-0010](../adr/0010-correction-keeps-linked-history.md).
 
-Older version-1 store records without lifecycle fields load with safe defaults,
-so adding this classification does not invalidate existing local stores.
+The shared project model is pre-release and requires fresh development stores;
+no compatibility or migration of older project data is provided.

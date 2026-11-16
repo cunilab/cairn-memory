@@ -303,15 +303,15 @@ class StubHookTests(unittest.TestCase):
             repo = make_repo(tmp, "checkout-dir", "https://user:pw-secret@example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
             body = self._context_for(repo / "src")
-            self.assertEqual(body["context"], {"repository": "widget-svc", "branch": "feature/x"})
+            self.assertEqual(body["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
             self.assertNotIn(tmp, json.dumps(body))
             self.assertNotIn("pw-secret", json.dumps(body))
             # No remote: fall back to the top-level directory name.
             bare = make_repo(tmp, "local-only")
-            self.assertEqual(self._context_for(bare)["context"]["repository"], "local-only")
+            self.assertEqual(self._context_for(bare)["context"]["repository"], "local:local-only")
             # scp-style remote
             scp = make_repo(tmp, "other", "git@example.test:acme/scp-repo.git")
-            self.assertEqual(self._context_for(scp)["context"]["repository"], "scp-repo")
+            self.assertEqual(self._context_for(scp)["context"]["repository"], "example.test/acme/scp-repo")
 
     def test_derived_context_keeps_event_id_and_explicit_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,22 +332,22 @@ class StubHookTests(unittest.TestCase):
             self.assertEqual(run_hook(self.url, partial).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "widget-svc", "branch": "feature/x", "commands": ["make"]},
+                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "commands": ["make"]},
             )
 
     def test_project_file_at_the_git_top_level_sends_the_project_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "widget-svc", "branch": "feature/x"})
+            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
             (repo / ".cairn").mkdir()
             (repo / ".cairn" / "project.json").write_text(
-                json.dumps({"project_id": "project-abc", "repository": "widget-svc"}), encoding="utf-8"
+                json.dumps({"project_id": "project-abc", "repository": "example.test/acme/widget-svc"}), encoding="utf-8"
             )
             # Read from a subdirectory: the file lives at the git top level.
             self.assertEqual(
                 self._context_for(repo / "src")["context"],
-                {"repository": "widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
             )
             # An explicit project_id (and repository) in the input is kept.
             explicit = {
@@ -389,7 +389,7 @@ class StubHookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "widget-svc"})
+            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc"})
 
     def test_spaced_token_rejects_before_post(self):
         bad = "sk-not-a-header token"
@@ -578,6 +578,7 @@ class FileServerHookTests(unittest.TestCase):
         cls.log = tempfile.NamedTemporaryFile(prefix="cairn-hook7a-log-", delete=False)
         cls.port = free_port()
         cls.url = "http://127.0.0.1:%d" % cls.port
+        subprocess.run(["cargo", "build", "-q", "-p", "cairn-server"], cwd=ROOT, check=True)
         cls.server = subprocess.Popen(
             [
                 "cargo",
@@ -693,7 +694,7 @@ class FileServerHookTests(unittest.TestCase):
         self.assertNotIn("hook-secret-value", device.stdout)
         self.assert_hidden(device, self.account_token, self.device_token, "hook-secret-value")
 
-        # A hook-only capture with just a cwd registers the project and branch.
+        # A checkout without a file stays personal; explicit initialization enables attachment.
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "co", "https://example.test/acme/hook7a-repo.git")
             auto = run_hook(
@@ -706,7 +707,22 @@ class FileServerHookTests(unittest.TestCase):
                 },
                 CAIRN_DEVICE_TOKEN=self.device_token,
             )
-        self.assertEqual(auto.returncode, 0, auto.stderr)
+            self.assertEqual(auto.returncode, 0, auto.stderr)
+            self.assertEqual(json.loads(auto.stdout)["project_attachment"]["status"], "personal")
+            self.assertEqual(http_json(self.url, "/cairn-memory/projects", None, self.account_token)[1], [])
+            status, initialized = http_json(self.url, "/cairn-memory/projects/init", {"repository":"example.test/acme/hook7a-repo"}, self.account_token)
+            self.assertEqual(status, 200)
+            (repo / ".cairn").mkdir()
+            (repo / ".cairn" / "project.json").write_text(json.dumps({"project_id":initialized["project_id"],"repository":"example.test/acme/hook7a-repo"}),encoding="utf-8")
+            attached = run_hook(self.url,{"sessionId":"hook7a-attached","eventId":"hook7a-attached-event","content":"initialized capture","cwd":str(repo)},CAIRN_DEVICE_TOKEN=self.device_token)
+            self.assertEqual(attached.returncode,0,attached.stderr)
+            self.assertEqual(json.loads(attached.stdout)["project_attachment"]["status"],"attached")
+            (repo / ".cairn" / "project.json").write_text("broken",encoding="utf-8")
+            broken=run_hook(self.url,{"sessionId":"hook7a-broken","eventId":"hook7a-broken-event","content":"personal despite broken file","cwd":str(repo)},CAIRN_DEVICE_TOKEN=self.device_token)
+            self.assertEqual(broken.returncode,0,broken.stderr)
+            self.assertIn("warning",broken.stderr.lower())
+            self.assertEqual(json.loads(broken.stdout)["project_attachment"]["status"],"personal")
+            self.assertIn("project.json", json.loads(broken.stdout)["project_attachment"]["warning"])
 
         # The web session revokes the device; the hook is then rejected.
         status, _ = http_json(
@@ -739,7 +755,7 @@ class FileServerHookTests(unittest.TestCase):
             for item in state.get("observations", [])
         }
         ids = set(found)
-        project = [item for item in state["projects"] if item["repository"] == "hook7a-repo"]
+        project = [item for item in state["projects"] if item["repository"] == "example.test/acme/hook7a-repo"]
         self.assertEqual(len(project), 1)
         self.assertEqual([item["name"] for item in state["project_branches"]], ["feature/x"])
         self.assertIn("hook7a-device", ids)

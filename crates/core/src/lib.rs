@@ -37,8 +37,9 @@ pub use lifecycle::{
 pub use memories::{Memory, build_explicit_memory_record};
 pub use privacy::{redact_memory_metadata, redact_sensitive_content, redact_work_context};
 pub use projects::{
-    Project, ProjectBranch, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
-    ProjectMaintenanceReport, ProjectMergeResult, ProjectWorktree,
+    Project, ProjectAttachment, ProjectBranch, ProjectEntity, ProjectEntityInput,
+    ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMergeResult, ProjectWorktree,
+    build_project_decision, publication_fingerprint,
 };
 pub use recall::{
     CodeRelationship, ContextPack, RecallFilter, RecallResult, build_context_pack,
@@ -46,11 +47,7 @@ pub use recall::{
     why_changed_priority,
 };
 pub use sessions::{Session, carry_summary_state, derive_session_memory, session_memory_id};
-pub use sharing::{
-    ProjectConflict, ProjectMemoryShare, ProjectPerson, ProjectShareCandidate, ProjectSharePolicy,
-    ProjectSharePolicyRecord, ProjectTeam, ProjectTeamMember, SHARE_REASON_AUTO,
-    SHARE_REASON_MANUAL, ShareCandidateDismissal, SharedProjectMemory, competing_project_memories,
-};
+pub use sharing::{ProjectConflict, ProjectPerson, competing_project_memories};
 pub use store::MemoryStore;
 pub use sync::{SyncDeletion, SyncDiagnostics, SyncEvent, SyncPullResult, SyncPushResult};
 pub use transfer::{

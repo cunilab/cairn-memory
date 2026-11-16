@@ -9,9 +9,6 @@ use crate::projects::{
     Project, ProjectBranch, ProjectEntity, ProjectFreshnessEvent, ProjectWorktree,
 };
 use crate::sessions::Session;
-use crate::sharing::{
-    DismissedShareCandidate, ProjectPolicyRecord, ProjectShareRecord, ProjectTeamRecord,
-};
 use crate::sync::{SyncDeletionRecord, SyncEvent};
 use crate::types::StoreError;
 use serde::{Deserialize, Serialize};
@@ -63,14 +60,6 @@ pub(crate) struct StoreState {
     #[serde(default)]
     pub(crate) project_members: Vec<ProjectMemberRecord>,
     #[serde(default)]
-    pub(crate) project_shares: Vec<ProjectShareRecord>,
-    #[serde(default)]
-    pub(crate) project_policies: Vec<ProjectPolicyRecord>,
-    #[serde(default)]
-    pub(crate) dismissed_share_candidates: Vec<DismissedShareCandidate>,
-    #[serde(default)]
-    pub(crate) project_teams: Vec<ProjectTeamRecord>,
-    #[serde(default)]
     pub(crate) audit_events: Vec<StoredAuditEvent>,
 }
 
@@ -97,10 +86,6 @@ impl Default for StoreState {
             observation_owners: Vec::new(),
             sync_deletions: Vec::new(),
             project_members: Vec::new(),
-            project_shares: Vec::new(),
-            project_policies: Vec::new(),
-            dismissed_share_candidates: Vec::new(),
-            project_teams: Vec::new(),
             audit_events: Vec::new(),
         }
     }

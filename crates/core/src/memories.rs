@@ -37,6 +37,13 @@ pub struct Memory {
     pub promotion_reason: Option<String>,
     #[serde(default)]
     pub verified_commit: Option<String>,
+    /// Set only by the publication transition; project tags alone never publish a row.
+    #[serde(default)]
+    pub published_by: Option<String>,
+    #[serde(default)]
+    pub changed_by: Option<String>,
+    #[serde(default)]
+    pub changed_at: Option<String>,
     pub created_at: String,
 }
 
@@ -256,6 +263,9 @@ impl MemoryStore {
             promoted_from: None,
             promotion_reason: None,
             verified_commit: None,
+            published_by: None,
+            changed_by: None,
+            changed_at: None,
             created_at: timestamp(),
         };
         self.state.memories.push(memory.clone());
@@ -274,9 +284,34 @@ impl MemoryStore {
         let account = self.authenticate_account(account_token)?;
         self.reject_member_mutation(&account, target_id)?;
         // The row and its owner records land in one rename; a failed rename leaves none.
-        let memory = self.stage_correction(target_id, content, concepts, context, lifecycle)?;
-        self.record_memory_owner(&account.person_id, &memory.memory_id);
-        self.record_generated_source_owners(&account.person_id, &memory);
+        let publication = self
+            .state
+            .memories
+            .iter()
+            .find(|m| m.memory_id == target_id)
+            .filter(|m| m.published_by.is_some())
+            .cloned();
+        let mut memory = self.stage_correction(target_id, content, concepts, context, lifecycle)?;
+        if let Some(target) = publication {
+            if memory.lifecycle.sensitivity == crate::Sensitivity::Secret {
+                self.unstage_memory(&memory);
+                return Err(StoreError::Validation(
+                    "secret memories cannot be published".to_owned(),
+                ));
+            }
+            memory.scope = MemoryScope::Project;
+            memory.context = target.context;
+            memory.project_id = target.project_id;
+            memory.published_by = target.published_by;
+            memory.changed_by = Some(account.person_id.clone());
+            memory.changed_at = Some(timestamp());
+            memory.source_event_ids.clear();
+            *self.state.memories.last_mut().expect("staged correction") = memory.clone();
+        }
+        // A project correction keeps its author's storage identity after ownership transfer.
+        let owner_id = memory.published_by.as_deref().unwrap_or(&account.person_id);
+        self.record_memory_owner(owner_id, &memory.memory_id);
+        self.record_generated_source_owners(owner_id, &memory);
         if let Err(error) = self.persist() {
             self.unstage_memory(&memory);
             return Err(error);
@@ -338,6 +373,9 @@ pub fn build_explicit_memory_record(
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,
+        published_by: None,
+        changed_by: None,
+        changed_at: None,
         created_at: timestamp(),
     })
 }

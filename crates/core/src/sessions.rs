@@ -503,6 +503,9 @@ pub fn derive_session_memory(
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,
+        published_by: None,
+        changed_by: None,
+        changed_at: None,
         created_at: timestamp(),
     };
     redact_memory_metadata(&mut memory);

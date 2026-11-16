@@ -19,7 +19,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -64,6 +70,7 @@ export function Accounts() {
   const [rows, setRows] = useState<AccountRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [transferring, setTransferring] = useState<AccountRow | null>(null);
   const [resetting, setResetting] = useState<AccountRow | null>(null);
   const admin = account?.is_admin === true;
 
@@ -72,6 +79,7 @@ export function Accounts() {
     setError(null);
     setCreating(false);
     setResetting(null);
+    setTransferring(null);
   });
 
   const load = useCallback(async () => {
@@ -156,6 +164,9 @@ export function Accounts() {
                 <DropdownMenuItem onClick={() => setResetting(row.original)}>
                   Reset password
                 </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setTransferring(row.original)}>
+                  Transfer project ownership
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -239,7 +250,10 @@ export function Accounts() {
           const email = String(data.get("email")).trim();
           const password = String(data.get("password"));
           checkNewPassword(password, String(data.get("confirm")));
-          await cairn("auth/register", { method: "POST", body: JSON.stringify({ email, password }) });
+          await cairn("auth/register", {
+            method: "POST",
+            body: JSON.stringify({ email, password }),
+          });
           toast.success(`Account created for ${email}.`);
           await load();
         }}
@@ -257,8 +271,9 @@ export function Accounts() {
         title="Reset password"
         description={
           <>
-            Set a new password for <span className="font-medium break-all text-foreground">{resetting?.email}</span>.
-            This signs them out everywhere, so they must sign in again with the new password.
+            Set a new password for{" "}
+            <span className="font-medium break-all text-foreground">{resetting?.email}</span>. This
+            revokes their web sessions, so they must sign in again with the new password.
           </>
         }
         submitLabel="Reset password"
@@ -272,10 +287,33 @@ export function Accounts() {
             method: "POST",
             body: JSON.stringify({ password }),
           });
-          toast.success(`Password reset for ${resetting.email}. They are signed out everywhere.`);
+          toast.success(
+            `Password reset for ${resetting.email}. They are signed out of web sessions.`,
+          );
         }}
       >
         <PasswordFields label="New password" prefix="reset" />
+      </FormDialog>
+      <FormDialog
+        open={transferring !== null}
+        onOpenChange={(open) => !open && setTransferring(null)}
+        title="Transfer project ownership"
+        description={`Make ${transferring?.email ?? "this account"} the owner of a project they already belong to. This records an audit event.`}
+        submitLabel="Transfer ownership"
+        onSubmit={async (data) => {
+          if (!transferring) return;
+          const projectId = String(data.get("projectId")).trim();
+          await cairn(`projects/${encodeURIComponent(projectId)}/ownership`, {
+            method: "POST",
+            body: JSON.stringify({ personId: transferring.person_id }),
+          });
+          toast.success("Project ownership transferred.");
+        }}
+      >
+        <Field>
+          <FieldLabel htmlFor="transfer-project-id">Project ID</FieldLabel>
+          <Input id="transfer-project-id" name="projectId" required autoComplete="off" />
+        </Field>
       </FormDialog>
     </ConsoleShell>
   );

@@ -14,7 +14,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { cairn } from "@/lib/cairn";
@@ -22,7 +28,7 @@ import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
 import type { PersonalMemory } from "@/lib/types";
 
-/** The owner's personal memories for this project's repository, with Promote to decision. */
+/** The caller's personal repository memories, with preview before promotion. */
 export function ProjectMemories({
   projectId,
   repository,
@@ -38,25 +44,22 @@ export function ProjectMemories({
   const [memories, setMemories] = useState<PersonalMemory[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<PersonalMemory | null>(null);
+  const [reason, setReason] = useState("");
+  const [preview, setPreview] = useState<{
+    memoryId: string;
+    reason: string;
+    payload: Record<string, unknown>;
+    fingerprint: string;
+  } | null>(null);
+  const previewCurrent =
+    preview?.memoryId === promoting?.memory_id && preview?.reason === reason.trim();
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
-  // shortcut: export returns every memory of the account, fine while personal stores are small.
   useEffect(() => {
     let cancelled = false;
-    cairn<{ memories: PersonalMemory[]; forgottenIds?: string[] }>("export", { method: "POST" })
-      .then((bundle) => {
-        if (cancelled) {
-          return;
-        }
-        const forgotten = new Set(bundle.forgottenIds ?? []);
-        setMemories(
-          bundle.memories.filter(
-            (memory) =>
-              memory.context?.repository === repository &&
-              !memory.project_id &&
-              memory.lifecycle?.sensitivity !== "secret" &&
-              !forgotten.has(memory.memory_id),
-          ),
-        );
+    cairn<PersonalMemory[]>(`projects/${encodeURIComponent(projectId)}/personal-memories`)
+      .then((rows) => {
+        if (!cancelled) setMemories(rows);
       })
       .catch((cause: unknown) => {
         if (cancelled) {
@@ -71,7 +74,7 @@ export function ProjectMemories({
     return () => {
       cancelled = true;
     };
-  }, [repository, onSessionRequired]);
+  }, [projectId, onSessionRequired]);
 
   const columns = useMemo<ColumnDef<PersonalMemory>[]>(
     () => [
@@ -137,7 +140,14 @@ export function ProjectMemories({
                 <MoreHorizontalIcon />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
-                <DropdownMenuItem onClick={() => setPromoting(row.original)}>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setReason("");
+                    setPreview(null);
+                    setPreviewError(null);
+                    setPromoting(row.original);
+                  }}
+                >
                   Promote to decision
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -153,9 +163,8 @@ export function ProjectMemories({
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <p className="max-w-prose text-sm text-muted-foreground">
-        Everything Cairn records for you in this repository: captured prompts, tool results,
-        session summaries and saved notes. Only you can see them. Promote one to turn it into a
-        project decision.
+        Your live session summaries, lessons and saved notes for this repository. Only you can see
+        them. Promote one to turn it into a project decision.
       </p>
       {error ? (
         <Alert variant="destructive">
@@ -175,7 +184,9 @@ export function ProjectMemories({
               <EmptyMedia variant="icon">
                 <BrainIcon />
               </EmptyMedia>
-              <EmptyTitle>{memories === null && !error ? "Loading memories…" : "No memories yet"}</EmptyTitle>
+              <EmptyTitle>
+                {memories === null && !error ? "Loading memories…" : "No memories yet"}
+              </EmptyTitle>
               <EmptyDescription>
                 Memories appear here as your agent works in {repository}.
               </EmptyDescription>
@@ -190,8 +201,8 @@ export function ProjectMemories({
         description={
           <>
             Copy this memory into the project as a decision. Your personal memory stays as it is.
-            <span className="mt-2 line-clamp-3 block rounded-md bg-muted px-2.5 py-2 text-foreground [overflow-wrap:anywhere]">
-              {promoting?.content}
+            <span className="mt-2 block max-h-60 overflow-y-auto whitespace-pre-wrap rounded-md bg-muted px-2.5 py-2 text-foreground [overflow-wrap:anywhere]">
+              {promoting?.content.slice(0, 200)}
             </span>
           </>
         }
@@ -204,6 +215,8 @@ export function ProjectMemories({
           if (!reason) {
             throw new Error("Give a reason so the decision explains itself later.");
           }
+          if (!previewCurrent)
+            throw new Error("Preview the full payload before publishing it to every member.");
           await submit(
             () =>
               cairn("promote", {
@@ -212,6 +225,7 @@ export function ProjectMemories({
                   project_id: projectId,
                   memory_id: promoting.memory_id,
                   reason,
+                  previewFingerprint: preview?.fingerprint,
                 }),
               }),
             "Memory promoted to a project decision.",
@@ -220,8 +234,76 @@ export function ProjectMemories({
       >
         <Field>
           <FieldLabel htmlFor="promote-reason">Reason</FieldLabel>
-          <Input id="promote-reason" name="reason" autoComplete="off" required />
+          <Input
+            id="promote-reason"
+            name="reason"
+            autoComplete="off"
+            value={reason}
+            onChange={(event) => {
+              setReason(event.target.value);
+              setPreview(null);
+            }}
+            required
+          />
         </Field>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!reason.trim()}
+          onClick={async () => {
+            setPreviewError(null);
+            if (!promoting) return;
+            const memoryId = promoting.memory_id;
+            const previewReason = reason.trim();
+            try {
+              const response = await cairn<Record<string, unknown>>("promote", {
+                method: "POST",
+                body: JSON.stringify({ projectId, memoryId, reason: previewReason, dryRun: true }),
+              });
+              const {
+                previewFingerprint,
+                memory_id: _id,
+                session_id: _session,
+                created_at: _created,
+                changed_at: _changed,
+                ...payload
+              } = response;
+              void _id;
+              void _session;
+              void _created;
+              void _changed;
+              setPreview({
+                memoryId,
+                reason: previewReason,
+                payload,
+                fingerprint: String(previewFingerprint),
+              });
+            } catch (cause) {
+              if (cause instanceof SessionRequiredError) {
+                onSessionRequired();
+                return;
+              }
+              setPreviewError(cause instanceof Error ? cause.message : "Preview failed");
+            }
+          }}
+        >
+          Preview full payload
+        </Button>
+        {previewError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {previewError}
+          </p>
+        ) : null}
+        {previewCurrent && preview ? (
+          <div>
+            <p className="text-sm">
+              Every member will receive this payload, including the full content and metadata.
+            </p>
+            <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-all">
+              {JSON.stringify(preview.payload, null, 2)}
+            </pre>
+          </div>
+        ) : null}
       </FormDialog>
     </div>
   );

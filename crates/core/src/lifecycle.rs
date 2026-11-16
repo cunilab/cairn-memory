@@ -232,10 +232,21 @@ impl MemoryStore {
         self.reject_member_mutation(&account, id)?;
         let person_id = account.person_id.clone();
         // Only an id this person owns. An unowned legacy id reads like an unknown one.
-        if self.item_owner(id).as_deref() != Some(person_id.as_str()) {
+        let published = self
+            .state
+            .memories
+            .iter()
+            .any(|m| m.memory_id == id && m.published_by.is_some());
+        if !published && self.item_owner(id).as_deref() != Some(person_id.as_str()) {
             return Err(StoreError::Validation(format!(
                 "unknown memory or event: {id}"
             )));
+        }
+        if published
+            && let Some(memory) = self.state.memories.iter_mut().find(|m| m.memory_id == id)
+        {
+            memory.changed_by = Some(person_id.clone());
+            memory.changed_at = Some(crate::types::timestamp());
         }
         let sources = self.hide_id(id, Some(&person_id))?;
         self.note_sync_deletions(Some(&person_id), id, &sources);

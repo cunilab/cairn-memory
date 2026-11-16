@@ -752,7 +752,8 @@ fn failed_sync_adoption_keeps_the_observation_and_retries() -> Result<(), StoreE
 }
 
 #[test]
-fn file_sync_push_registers_project_and_closes_idle_sessions() -> Result<(), StoreError> {
+fn file_sync_push_attaches_initialized_project_and_closes_idle_sessions() -> Result<(), StoreError>
+{
     let path = temp_store_path("sync-housekeeping");
     let mut store = MemoryStore::open(&path)?;
     let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
@@ -761,6 +762,8 @@ fn file_sync_push_registers_project_and_closes_idle_sessions() -> Result<(), Sto
     store.start_session_for_account(&device.token, "idle-push", WorkContext::default())?;
     let mut first = observation_for("idle-push", "evt-idle-push", "pushidle");
     first.context = repo_context("push-repo", Some("feat/push"));
+    let initialized = store.register_project(&a.token, "push-repo", "Push", None)?;
+    first.context.project_id = Some(initialized.project_id);
     store.sync_push(&device.token, first)?;
     let projects = store.projects(&a.token)?;
     assert_eq!(projects.len(), 1, "push registers the project");

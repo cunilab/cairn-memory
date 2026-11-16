@@ -258,16 +258,6 @@ impl MemoryStore {
             .ok_or_else(|| StoreError::Validation("account authentication failed".to_owned()))
     }
 
-    pub(crate) fn project_has_other_members(
-        &self,
-        project_id: &str,
-        owner_person_id: &str,
-    ) -> bool {
-        self.state.project_members.iter().any(|member| {
-            member.project_id == project_id && member.member_person_id != owner_person_id
-        })
-    }
-
     fn session_account(&self, token: &str) -> Result<Account, StoreError> {
         let token_hash = hash_token(token);
         let session = self
@@ -424,15 +414,6 @@ impl MemoryStore {
                 created_at: event.created_at.clone(),
             })
             .collect())
-    }
-
-    pub(crate) fn account_by_email(&self, email: &str) -> Result<Account, StoreError> {
-        self.state
-            .accounts
-            .iter()
-            .find(|record| record.account.email == email)
-            .map(|record| record.account.clone())
-            .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))
     }
 
     fn issue_auth_session(&mut self, account: Account) -> Result<AuthSessionResult, StoreError> {

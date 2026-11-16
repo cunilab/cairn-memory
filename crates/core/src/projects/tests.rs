@@ -1,288 +1,16 @@
-use crate::accounts::WEB_ONLY_ERROR;
 use crate::lifecycle::{LifecycleInput, MemoryKind};
 use crate::ownership::MemoryOwnerRecord;
-use crate::projects::{Project, ProjectEntityInput};
+use crate::projects::Project;
 use crate::store::MemoryStore;
 use crate::test_support::{
-    assert_unknown_id, capture_in, context, failed_write_rolls_back_then_retry_persists,
-    join_project, owned_project, project_row, remember_with_context, repo_context, temp_store_dir,
-    temp_store_path,
+    capture_in, context, failed_write_rolls_back_then_retry_persists, join_project, owned_project,
+    project_row, remember_with_context, repo_context, temp_store_dir, temp_store_path,
 };
 use crate::types::{StoreError, WorkContext};
 use std::fs;
 
-// `project_maintenance` is owner-only. Members read what is explicitly shared with them.
-#[test]
-fn project_maintenance_is_owner_only_and_needs_an_owned_project() -> Result<(), StoreError> {
-    let path = temp_store_path("maintenance-owner");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let member = store.register_account("member@example.test", "correct horse battery staple")?;
-    let outsider =
-        store.register_account("outsider@example.test", "correct horse battery staple")?;
-    let (project_id, mine) = owned_project(&mut store, &owner.token, "maintain owner decision")?;
-    join_project(&mut store, &member.token, &project_id)?;
-    store.share_project_memory(
-        &owner.token,
-        &project_id,
-        &mine.memory_id,
-        "member@example.test",
-    )?;
-    store.create_project_team(&owner.token, &project_id, "Core")?;
-    let before = fs::read(&path)?;
-
-    // Owner: unchanged report.
-    let report = store.project_maintenance(&owner.token, &project_id, Some("other-commit"))?;
-    assert_eq!(report.active_memory_ids, vec![mine.memory_id.clone()]);
-    assert_eq!(report.stale_memory_ids, vec![mine.memory_id.clone()]);
-
-    // A current member and an outsider who know the id are refused, and
-    // the error carries no memory id or commit.
-    for token in [&member.token, &outsider.token] {
-        let error = store
-            .project_maintenance(token, &project_id, Some("other-commit"))
-            .expect_err("only the owner reads maintenance");
-        assert!(
-            matches!(&error, StoreError::Validation(text) if text == "account does not own the project")
-        );
-    }
-    assert_eq!(fs::read(&path)?, before, "a read never writes");
-    let error = store
-        .project_maintenance(&owner.token, "project-missing", None)
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unknown project: project-missing")
-    );
-    assert!(
-        store
-            .project_maintenance("not-a-token", &project_id, None)
-            .unwrap_err()
-            .to_string()
-            .contains("account authentication failed")
-    );
-
-    // A project with no owner record is not maintainable by any account until the
-    // existing registration claims it; there is no other claim.
-    store
-        .state
-        .project_owners
-        .retain(|record| record.project_id != project_id);
-    for token in [&owner.token, &outsider.token] {
-        let error = store
-            .project_maintenance(token, &project_id, None)
-            .expect_err("an ownerless project is denied");
-        assert!(
-            matches!(&error, StoreError::Validation(text) if text == "account does not own the project")
-        );
-    }
-    store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
-    assert!(
-        store
-            .project_maintenance(&owner.token, &project_id, None)
-            .is_ok()
-    );
-    assert!(
-        store
-            .project_maintenance(&outsider.token, &project_id, None)
-            .is_err()
-    );
-    fs::remove_file(path)?;
-    Ok(())
-}
-
-// The Layer 4 registry (branches, worktrees, entities, freshness, merge, close) is
-// owner-only, and a merge cannot copy another account's memory.
-#[test]
-fn project_registry_is_owner_only_for_reads_and_writes() -> Result<(), StoreError> {
-    const DENIED: &str = "account does not own the project";
-    let path = temp_store_path("registry-owner");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let member = store.register_account("member@example.test", "correct horse battery staple")?;
-    let outsider =
-        store.register_account("outsider@example.test", "correct horse battery staple")?;
-    let (project_id, shared) = owned_project(&mut store, &owner.token, "registry owner decision")?;
-    join_project(&mut store, &member.token, &project_id)?;
-    store.share_project_memory(
-        &owner.token,
-        &project_id,
-        &shared.memory_id,
-        "member@example.test",
-    )?;
-    store.create_project_team(&owner.token, &project_id, "Core")?;
-    let branch = store.register_branch(&owner.token, &project_id, "feat/auth", None, None, None)?;
-    let source = remember_with_context(&mut store, &owner.token, "registry merge source")?;
-    let entity = || ProjectEntityInput {
-        kind: "file".to_owned(),
-        key: "src/secret.rs".to_owned(),
-        content: None,
-        source_memory_id: None,
-        commit: None,
-    };
-    store.register_project_entity(&owner.token, &project_id, entity())?;
-    let before = fs::read(&path)?;
-
-    type Op = fn(&mut MemoryStore, &str, &str, &str, &str) -> Result<(), StoreError>;
-    let ops: [(&str, Op); 9] = [
-        ("register_branch", |s, t, p, _, _| {
-            s.register_branch(t, p, "feat/evil", None, None, None)
-                .map(drop)
-        }),
-        ("branches", |s, t, p, _, _| s.branches(t, p).map(drop)),
-        ("register_worktree", |s, t, p, _, _| {
-            s.register_worktree(t, p, None, "/wt/evil", None).map(drop)
-        }),
-        ("worktrees", |s, t, p, _, _| s.worktrees(t, p).map(drop)),
-        ("project_entities", |s, t, p, _, _| {
-            s.project_entities(t, p).map(drop)
-        }),
-        ("register_project_entity", |s, t, p, _, _| {
-            let input = ProjectEntityInput {
-                kind: "file".to_owned(),
-                key: "evil.rs".to_owned(),
-                content: None,
-                source_memory_id: None,
-                commit: None,
-            };
-            s.register_project_entity(t, p, input).map(drop)
-        }),
-        ("freshness_history", |s, t, p, _, _| {
-            s.freshness_history(t, p).map(drop)
-        }),
-        ("close_branch", |s, t, p, b, _| {
-            s.close_branch(t, p, b, "closing").map(drop)
-        }),
-        ("confirm_branch_merge", |s, t, p, b, m| {
-            s.confirm_branch_merge(t, p, b, m, "abc123", "merge")
-                .map(drop)
-        }),
-    ];
-    // A current member and an outsider who know every id are refused on
-    // every operation, with one error that carries no registry content, and nothing is written.
-    for (name, op) in &ops {
-        for token in [&member.token, &outsider.token] {
-            let error = op(
-                &mut store,
-                token,
-                &project_id,
-                &branch.branch_id,
-                &source.memory_id,
-            )
-            .expect_err(name);
-            assert!(
-                matches!(&error, StoreError::Validation(text) if text == DENIED),
-                "{name}: {error}"
-            );
-        }
-        let error = op(&mut store, "not-a-token", &project_id, "b", "m").unwrap_err();
-        assert!(
-            error.to_string().contains("account authentication failed"),
-            "{name}"
-        );
-        let error = op(&mut store, &owner.token, "project-missing", "b", "m").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unknown project: project-missing"),
-            "{name}"
-        );
-    }
-    assert_eq!(fs::read(&path)?, before, "denials and errors write nothing");
-    assert_eq!(
-        MemoryStore::open(&path)?
-            .branches(&owner.token, &project_id)?
-            .len(),
-        1
-    );
-
-    // The owner reads and writes normally.
-    assert_eq!(store.branches(&owner.token, &project_id)?.len(), 1);
-    store.register_worktree(
-        &owner.token,
-        &project_id,
-        Some(branch.branch_id.clone()),
-        "/wt/ok",
-        None,
-    )?;
-    assert_eq!(store.worktrees(&owner.token, &project_id)?.len(), 1);
-    assert!(
-        !store
-            .project_entities(&owner.token, &project_id)?
-            .is_empty()
-    );
-    assert!(
-        !store
-            .freshness_history(&owner.token, &project_id)?
-            .is_empty()
-    );
-    let merged = store.confirm_branch_merge(
-        &owner.token,
-        &project_id,
-        &branch.branch_id,
-        &source.memory_id,
-        "abc123",
-        "merge",
-    )?;
-    assert_eq!(merged.branch.status, "merged");
-    let other = store.register_branch(&owner.token, &project_id, "feat/old", None, None, None)?;
-    assert_eq!(
-        store
-            .close_branch(&owner.token, &project_id, &other.branch_id, "done")?
-            .status,
-        "closed"
-    );
-
-    // A merge cannot copy another account's memory into the caller's own project.
-    let own = store
-        .register_project(&outsider.token, "cairn-demo", "Mine", None)?
-        .project_id;
-    let own_branch = store.register_branch(&outsider.token, &own, "feat/auth", None, None, None)?;
-    let victim = remember_with_context(&mut store, &owner.token, "registrymerge private text")?;
-    let error = store
-        .confirm_branch_merge(
-            &outsider.token,
-            &own,
-            &own_branch.branch_id,
-            &victim.memory_id,
-            "abc123",
-            "merge",
-        )
-        .expect_err("another account's memory is not a merge source");
-    assert_unknown_id(&error, &victim.memory_id);
-    assert!(store.project_memories(&outsider.token, &own)?.is_empty());
-    assert_eq!(store.branches(&outsider.token, &own)?[0].status, "active");
-    // A branch id from another project does not resolve in the caller's project.
-    assert!(
-        store
-            .register_worktree(
-                &outsider.token,
-                &own,
-                Some(branch.branch_id.clone()),
-                "/wt/x",
-                None
-            )
-            .is_err()
-    );
-
-    // A project with no owner record is not registry-accessible until registration claims it.
-    store
-        .state
-        .project_owners
-        .retain(|record| record.project_id != project_id);
-    assert!(store.branches(&owner.token, &project_id).is_err());
-    assert!(
-        store
-            .register_branch(&outsider.token, &project_id, "feat/z", None, None, None)
-            .is_err()
-    );
-    store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
-    assert!(store.branches(&owner.token, &project_id).is_ok());
-    assert!(store.branches(&outsider.token, &project_id).is_err());
-    fs::remove_file(path)?;
-    Ok(())
-}
+// Every member reads live decisions and maintenance; branches/worktrees belong to each person.
+// A merge may publish only the caller’s own source.
 
 // CM-AUDIT-015 B1: a merge confirmation must not use a stored foreign row as the promotion.
 #[test]
@@ -397,7 +125,7 @@ fn stored_foreign_project_rows_do_not_alias_a_branch_merge() -> Result<(), Store
         "mc2",
         "merge",
     )?;
-    assert_eq!(local_merge.memory.memory_id, "memory-local-merge");
+    assert_ne!(local_merge.memory.memory_id, "memory-local-merge");
     let local_again = store.confirm_branch_merge(
         &owner.token,
         &project_id,
@@ -406,7 +134,7 @@ fn stored_foreign_project_rows_do_not_alias_a_branch_merge() -> Result<(), Store
         "mc2",
         "merge",
     )?;
-    assert_eq!(local_again.memory.memory_id, "memory-local-merge");
+    assert_eq!(local_again.memory.memory_id, local_merge.memory.memory_id);
     fs::remove_file(path)?;
     Ok(())
 }
@@ -513,7 +241,7 @@ fn merged_branch_aliased_to_a_foreign_row_is_not_returned() -> Result<(), StoreE
 }
 
 #[test]
-fn failed_project_and_team_writes_roll_back_and_retry_persists() -> Result<(), StoreError> {
+fn failed_project_and_membership_writes_roll_back_and_retry_persists() -> Result<(), StoreError> {
     let dir = temp_store_dir("project-rollback");
     let path = dir.join("store.json");
     let mut store = MemoryStore::open(&path)?;
@@ -523,7 +251,6 @@ fn failed_project_and_team_writes_roll_back_and_retry_persists() -> Result<(), S
         .account
         .person_id;
     let token = owner.token;
-    let member = "member@example.test";
 
     failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
         s.register_project(&token, "cairn-demo", "Demo", None)
@@ -531,7 +258,7 @@ fn failed_project_and_team_writes_roll_back_and_retry_persists() -> Result<(), S
     })?;
     let project_id = store.state.projects[0].project_id.clone();
     let source = remember_with_context(&mut store, &token, "rollback source")?;
-    let promoted = store.promote_memory(&token, &project_id, &source.memory_id, "why")?;
+    store.promote_memory(&token, &project_id, &source.memory_id, "why")?;
 
     let joining = WorkContext {
         project_id: Some(project_id.clone()),
@@ -540,55 +267,7 @@ fn failed_project_and_team_writes_roll_back_and_retry_persists() -> Result<(), S
     failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
         s.join_context_project(&member_id, &joining).map(|_| ())
     })?;
-    failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-        s.share_project_memory(&token, &project_id, &promoted.memory_id, member)
-            .map(|_| ())
-    })?;
-    failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-        s.revoke_project_share(&token, &project_id, &promoted.memory_id, member)
-            .map(|_| ())
-    })?;
-    failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-        s.create_project_team(&token, &project_id, "Core")
-            .map(|_| ())
-    })?;
     let _ = fs::remove_dir_all(&dir);
-    Ok(())
-}
-
-#[test]
-fn a_project_with_a_member_needs_the_web_session_to_merge() -> Result<(), StoreError> {
-    let path = temp_store_path("device-merge-gate");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let member = store.register_account("member@example.test", "correct horse battery staple")?;
-    let device = store.register_device("device-own", &owner.account.person_id, None, "Laptop")?;
-    let (project_id, _) = owned_project(&mut store, &device.token, "device remove decision")?;
-    let branch =
-        store.register_branch(&device.token, &project_id, "feat/auth", None, None, None)?;
-    let source = remember_with_context(&mut store, &device.token, "gate merge source")?;
-    join_project(&mut store, &member.token, &project_id)?;
-
-    let blocked = store
-        .confirm_branch_merge(
-            &device.token,
-            &project_id,
-            &branch.branch_id,
-            &source.memory_id,
-            "c1",
-            "gate",
-        )
-        .expect_err("a project with members still needs the web console");
-    assert!(blocked.to_string().contains(WEB_ONLY_ERROR));
-    store.confirm_branch_merge(
-        &owner.token,
-        &project_id,
-        &branch.branch_id,
-        &source.memory_id,
-        "c1",
-        "gate",
-    )?;
-    fs::remove_file(path)?;
     Ok(())
 }
 
@@ -614,52 +293,23 @@ fn repromoting_a_forgotten_copy_creates_a_live_copy() -> Result<(), StoreError> 
 }
 
 #[test]
-fn capture_registers_project_and_branch_once() -> Result<(), StoreError> {
-    let path = temp_store_path("auto-register");
+fn captures_attach_only_initialized_projects_and_register_personal_branches_once()
+-> Result<(), StoreError> {
+    let path = temp_store_path("initialized-branch");
     let mut store = MemoryStore::open(&path)?;
-    let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
-    capture_in(
-        &mut store,
-        &a.token,
-        "e1",
-        repo_context("  auto-repo ", Some("feat/x")),
-    )?;
-    capture_in(
-        &mut store,
-        &a.token,
-        "e2",
-        repo_context("auto-repo", Some("feat/x")),
-    )?;
-    capture_in(
-        &mut store,
-        &a.token,
-        "e3",
-        repo_context("auto-repo", Some("HEAD")),
-    )?;
-    capture_in(&mut store, &a.token, "e4", repo_context("auto-repo", None))?;
-    capture_in(
-        &mut store,
-        &a.token,
-        "e5",
-        repo_context("auto-repo", Some("  ")),
-    )?;
-    capture_in(&mut store, &a.token, "e6", WorkContext::default())?;
-    let projects = store.projects(&a.token)?;
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].repository, "auto-repo");
-    let project_id = projects[0].project_id.clone();
-    assert_eq!(
-        store.project_owner_id(&project_id).as_deref(),
-        Some(a.account.person_id.as_str())
-    );
-    let branches = store.branches(&a.token, &project_id)?;
-    assert_eq!(branches.len(), 1);
-    assert_eq!(branches[0].name, "feat/x");
-    assert_eq!(branches[0].status, "active");
-    // The explicit registration returns the same project.
-    let explicit = store.register_project(&a.token, "auto-repo", "Auto", None)?;
-    assert_eq!(explicit.project_id, project_id);
-    fs::remove_file(path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "repo", "Repo", None)?;
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        repository: Some("repo".to_owned()),
+        branch: Some("feat/x".to_owned()),
+        ..WorkContext::default()
+    };
+    capture_in(&mut store, &owner.token, "one", context.clone())?;
+    capture_in(&mut store, &owner.token, "two", context)?;
+    assert_eq!(store.projects(&owner.token)?.len(), 1);
+    assert_eq!(store.branches(&owner.token, &project.project_id)?.len(), 1);
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -677,7 +327,10 @@ fn capture_uses_a_shared_project_and_never_claims_an_ownerless_one() -> Result<(
         &mut store,
         &member.token,
         "m1",
-        repo_context("shared-repo", Some("feat/m")),
+        WorkContext {
+            project_id: Some(shared.project_id.clone()),
+            ..repo_context("shared-repo", Some("feat/m"))
+        },
     )?;
     assert_eq!(
         store.projects(&member.token)?.len(),
@@ -685,16 +338,17 @@ fn capture_uses_a_shared_project_and_never_claims_an_ownerless_one() -> Result<(
         "no second project for the member"
     );
     assert_eq!(store.state.projects.len(), 1);
-    assert!(
-        store.state.project_branches.is_empty(),
-        "branch writes stay owner-only"
-    );
+    assert_eq!(store.branches(&member.token, &shared.project_id)?.len(), 1);
+    assert!(store.branches(&owner.token, &shared.project_id)?.is_empty());
 
     capture_in(
         &mut store,
         &owner.token,
         "o1",
-        repo_context("shared-repo", Some("feat/o")),
+        WorkContext {
+            project_id: Some(shared.project_id.clone()),
+            ..repo_context("shared-repo", Some("feat/o"))
+        },
     )?;
     assert_eq!(store.branches(&owner.token, &shared.project_id)?.len(), 1);
 
@@ -716,10 +370,7 @@ fn capture_uses_a_shared_project_and_never_claims_an_ownerless_one() -> Result<(
     )?;
     assert_eq!(store.project_owner_id("project-ownerless"), None);
     let mine = store.projects(&outsider.token)?;
-    assert!(mine.iter().any(|p| p.repository == "legacy-repo"
-        && p.project_id != "project-ownerless"
-        && store.project_owner_id(&p.project_id).as_deref()
-            == Some(outsider.account.person_id.as_str())));
+    assert!(mine.is_empty());
     assert!(
         store
             .state
@@ -774,6 +425,672 @@ fn init_project_creates_once_defaults_the_name_and_is_per_owner() -> Result<(), 
             .init_project(&owner.token, &"r".repeat(513), None)
             .is_err()
     );
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+use crate::*;
+
+#[test]
+fn all_members_read_and_promote_own_decisions_but_only_author_and_owner_edit()
+-> Result<(), StoreError> {
+    let path = temp_store_path("shared-decisions");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    let author = store.register_account("author@example.test", "correct horse battery staple")?;
+    let reader = store.register_account("reader@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    join_project(&mut store, &author.token, &project.project_id)?;
+    join_project(&mut store, &reader.token, &project.project_id)?;
+    let source = store.remember_for_account(
+        &author.token,
+        "modelneedle use WAL because durability",
+        vec![],
+        context(),
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
+    )?;
+    let decision = store.promote_memory(
+        &author.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+    )?;
+    for token in [&owner.token, &author.token, &reader.token] {
+        assert_eq!(store.project_memories(token, &project.project_id)?.len(), 1);
+    }
+    assert!(
+        store
+            .verify_project_memory(
+                &reader.token,
+                &project.project_id,
+                &decision.memory_id,
+                "abc"
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .correct_for_account(
+                &reader.token,
+                &decision.memory_id,
+                "wrong",
+                vec![],
+                WorkContext::default(),
+                LifecycleInput::default()
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .delete_for_account(&reader.token, &decision.memory_id)
+            .is_err()
+    );
+    store.verify_project_memory(
+        &owner.token,
+        &project.project_id,
+        &decision.memory_id,
+        "abc",
+    )?;
+    store.correct_for_account(
+        &author.token,
+        &source.memory_id,
+        "private correction",
+        vec![],
+        WorkContext::default(),
+        LifecycleInput::default(),
+    )?;
+    assert_eq!(
+        store
+            .project_memories(&reader.token, &project.project_id)?
+            .len(),
+        1
+    );
+    let mut ctx = context();
+    ctx.project_id = Some(project.project_id.clone());
+    let filter = RecallFilter {
+        session_id: None,
+        context: Some(ctx),
+    };
+    let results = store.search_for_account(&reader.token, "modelneedle", 20, &filter)?;
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].memory_id, decision.memory_id);
+    assert_eq!(serde_json::to_value(&results[0])?["source"], "project");
+    let corrected = store.correct_for_account(
+        &owner.token,
+        &decision.memory_id,
+        "modelneedle use WAL safely",
+        vec![],
+        WorkContext::default(),
+        LifecycleInput::default(),
+    )?;
+    let rows = store.project_memories(&reader.token, &project.project_id)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].memory_id, corrected.memory_id);
+    store.transfer_project(&owner.token, &project.project_id, &reader.account.person_id)?;
+    let mut bundle = store.export_for_account(&owner.token)?;
+    bundle.forgotten_ids.push(corrected.memory_id.clone());
+    let _ = store.import_for_account(&owner.token, bundle);
+    assert!(
+        store
+            .project_memories(&reader.token, &project.project_id)?
+            .iter()
+            .any(|m| m.memory_id == corrected.memory_id),
+        "a former owner cannot hide another author's decision through import"
+    );
+    store.delete_for_account(&author.token, &corrected.memory_id)?;
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn captures_without_project_file_never_create_projects() -> Result<(), StoreError> {
+    let path = temp_store_path("no-auto-project");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    store.capture_for_account(
+        &owner.token,
+        crate::test_support::observation("capture", "private repo capture"),
+    )?;
+    assert!(store.projects(&owner.token)?.is_empty());
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn recall_ranks_global_repo_and_project_together_without_private_cross_person_rows()
+-> Result<(), StoreError> {
+    let path = temp_store_path("mixed-recall");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let member = store.register_account("m@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "repo", "Repo", None)?;
+    store.join_project(&member.token, &project.project_id)?;
+    let ctx = WorkContext {
+        repository: Some("repo".into()),
+        ..WorkContext::default()
+    };
+    let source = store.remember_for_account(
+        &owner.token,
+        "mixneedle mixneedle mixneedle project",
+        vec![],
+        ctx.clone(),
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
+    )?;
+    let decision = store.promote_memory(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+    )?;
+    let global = store.remember_for_account(
+        &member.token,
+        "mixneedle global preference",
+        vec![],
+        WorkContext::default(),
+        LifecycleInput::default(),
+        MemoryKind::Lesson,
+    )?;
+    let own = store.remember_for_account(
+        &member.token,
+        "mixneedle repo note",
+        vec![],
+        WorkContext {
+            branch: Some("feature".into()),
+            worktree: Some("/private/worktree".into()),
+            ..ctx.clone()
+        },
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
+    )?;
+    let unrelated = store.remember_for_account(
+        &member.token,
+        "mixneedle other repo",
+        vec![],
+        WorkContext {
+            repository: Some("elsewhere".into()),
+            ..WorkContext::default()
+        },
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
+    )?;
+    let filter = RecallFilter {
+        session_id: None,
+        context: Some(WorkContext {
+            project_id: Some(project.project_id.clone()),
+            ..ctx.clone()
+        }),
+    };
+    let hits = store.search_for_account(&member.token, "mixneedle", 10, &filter)?;
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0].memory_id, decision.memory_id);
+    assert_eq!(hits[0].source, "project");
+    assert!(
+        hits.iter()
+            .any(|r| r.memory_id == global.memory_id && r.source == "personal")
+    );
+    assert!(
+        hits.iter()
+            .any(|r| r.memory_id == own.memory_id && r.source == "personal")
+    );
+    assert!(
+        !hits
+            .iter()
+            .any(|r| r.memory_id == source.memory_id || r.memory_id == unrelated.memory_id)
+    );
+    let same_name_wrong_id = RecallFilter {
+        session_id: None,
+        context: Some(WorkContext {
+            project_id: Some("wrong-project".into()),
+            ..ctx
+        }),
+    };
+    assert!(
+        !store
+            .search_for_account(&member.token, "mixneedle", 10, &same_name_wrong_id)?
+            .iter()
+            .any(|r| r.source == "project")
+    );
+    assert_eq!(
+        store
+            .context_for_account(&member.token, "mixneedle", 10, &filter)?
+            .results
+            .len(),
+        3
+    );
+    assert_eq!(
+        store
+            .why_changed_for_account(&member.token, "mixneedle", 10, &filter)?
+            .results
+            .len(),
+        3
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn promotion_preview_is_full_read_only_and_secret_sources_are_refused() -> Result<(), StoreError> {
+    let path = temp_store_path("preview-secret");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    let source = remember_with_context(&mut store, &owner.token, &"full payload ".repeat(200))?;
+    let before = std::fs::read(&path)?;
+    let preview = store.preview_promotion(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "release",
+    )?;
+    assert_eq!(preview.content, source.content);
+    assert_eq!(preview.context.files, source.context.files);
+    assert_eq!(preview.context.symbols, source.context.symbols);
+    assert!(preview.context.branch.is_none());
+    assert_eq!(preview.promoted_from, None);
+    assert!(preview.source_event_ids.is_empty());
+    assert_eq!(std::fs::read(&path)?, before);
+    assert!(
+        store
+            .project_memories(&owner.token, &project.project_id)?
+            .is_empty()
+    );
+    let secret = store.remember_for_account(
+        &owner.token,
+        "secret material",
+        vec![],
+        context(),
+        LifecycleInput {
+            sensitivity: Some(Sensitivity::Secret),
+            ..LifecycleInput::default()
+        },
+        MemoryKind::Explicit,
+    )?;
+    assert!(
+        store
+            .preview_promotion(
+                &owner.token,
+                &project.project_id,
+                &secret.memory_id,
+                "release"
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .promote_memory(
+                &owner.token,
+                &project.project_id,
+                &secret.memory_id,
+                "release"
+            )
+            .is_err()
+    );
+    let global = store.remember_for_account(
+        &owner.token,
+        "personal preference",
+        vec![],
+        WorkContext::default(),
+        LifecycleInput::default(),
+        MemoryKind::Lesson,
+    )?;
+    assert!(
+        store
+            .preview_promotion(
+                &owner.token,
+                &project.project_id,
+                &global.memory_id,
+                "release"
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .promote_memory(
+                &owner.token,
+                &project.project_id,
+                &global.memory_id,
+                "release"
+            )
+            .is_err()
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn owner_and_admin_transfer_only_to_members_and_keep_authorship_and_private_branches()
+-> Result<(), StoreError> {
+    let path = temp_store_path("owner-transfer");
+    let mut store = MemoryStore::open(&path)?;
+    let admin = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+    let owner = store.register_account("o@example.test", "correct horse battery staple")?;
+    let member = store.register_account("m@example.test", "correct horse battery staple")?;
+    let outsider = store.register_account("x@example.test", "correct horse battery staple")?;
+    let (project, decision) = owned_project(&mut store, &owner.token, "transfer decision")?;
+    store.join_project(&member.token, &project)?;
+    let branch = store.register_branch(&owner.token, &project, "feature", None, None, None)?;
+    assert!(
+        store
+            .transfer_project(&outsider.token, &project, &member.account.person_id)
+            .is_err()
+    );
+    assert!(
+        store
+            .transfer_project(&owner.token, &project, &outsider.account.person_id)
+            .is_err()
+    );
+    store.verify_project_memory(
+        &owner.token,
+        &project,
+        &decision.memory_id,
+        "transfer-check",
+    )?;
+    store.transfer_project(&owner.token, &project, &member.account.person_id)?;
+    let entities = store.project_entities(&member.token, &project)?;
+    assert!(!entities.is_empty());
+    let entity = &entities[0];
+    let repeated = store.register_project_entity(
+        &member.token,
+        &project,
+        ProjectEntityInput {
+            kind: entity.kind.clone(),
+            key: entity.key.clone(),
+            content: None,
+            source_memory_id: None,
+            commit: None,
+        },
+    )?;
+    assert_eq!(repeated.entity_id, entity.entity_id);
+    assert!(!store.freshness_history(&member.token, &project)?.is_empty());
+    assert_eq!(
+        store.project_people(&owner.token, &project)?[0].person_id,
+        member.account.person_id
+    );
+    assert_eq!(
+        store.project_memories(&member.token, &project)?[0].published_by,
+        Some(owner.account.person_id.clone())
+    );
+    assert_eq!(
+        store.branches(&owner.token, &project)?[0].branch_id,
+        branch.branch_id
+    );
+    assert!(store.branches(&member.token, &project)?.is_empty());
+    store.verify_project_memory(&member.token, &project, &decision.memory_id, "new")?;
+    store.transfer_project(&admin.token, &project, &owner.account.person_id)?;
+    assert_eq!(
+        store.project_people(&owner.token, &project)?[0].person_id,
+        owner.account.person_id
+    );
+    assert_eq!(
+        store
+            .audit_events(&admin.token, 20)?
+            .iter()
+            .filter(|a| a.action == "project_owner_transferred")
+            .count(),
+        1
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn member_branches_are_personal_and_devices_may_record_merges() -> Result<(), StoreError> {
+    let path = temp_store_path("personal-merge");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let member = store.register_account("m@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    store.join_project(&member.token, &project.project_id)?;
+    let first = store.register_branch(
+        &owner.token,
+        &project.project_id,
+        "feat/auth",
+        None,
+        None,
+        None,
+    )?;
+    let second = store.register_branch(
+        &member.token,
+        &project.project_id,
+        "feat/auth",
+        None,
+        None,
+        None,
+    )?;
+    assert_ne!(first.branch_id, second.branch_id);
+    assert!(
+        store
+            .close_branch(&owner.token, &project.project_id, &second.branch_id, "no")
+            .is_err()
+    );
+    let source = remember_with_context(&mut store, &member.token, "member branch evidence")?;
+    let device = store.register_device("member-device", &member.account.person_id, None, "Hook")?;
+    let merged = store.confirm_branch_merge(
+        &device.token,
+        &project.project_id,
+        &second.branch_id,
+        &source.memory_id,
+        "merge123",
+        "record merge",
+    )?;
+    assert_eq!(merged.branch.status, "merged");
+    assert!(merged.memory.published_by.is_some());
+    assert_eq!(
+        store.branches(&owner.token, &project.project_id)?[0].status,
+        "active"
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn failed_project_attachment_warns_but_retains_personal_capture_and_retries()
+-> Result<(), StoreError> {
+    let path = temp_store_path("attachment-warning");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let mut input =
+        crate::test_support::observation("attachment-event", "personal retained capture");
+    input.context.project_id = Some("project-missing".into());
+    let captured = store.capture_for_account(&owner.token, input.clone())?;
+    let status = captured.project_attachment.expect("attachment status");
+    assert_eq!(status.status, "personal");
+    assert!(status.warning.is_some());
+    assert!(store.projects(&owner.token)?.is_empty());
+    assert_eq!(store.observations().count(), 1);
+    let mut initialized = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    store.state.project_owners[0].project_id = "project-missing".into();
+    store.state.projects[0].project_id = "project-missing".into();
+    initialized.project_id = "project-missing".into();
+    store.persist()?;
+    let retry = store.capture_for_account(&owner.token, input)?;
+    assert!(retry.duplicate);
+    assert_eq!(
+        retry.project_attachment.expect("retried status").status,
+        "attached"
+    );
+    assert_eq!(
+        store.projects(&owner.token)?[0].project_id,
+        initialized.project_id
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn personal_promotion_cannot_supersede_another_authors_decision() -> Result<(), StoreError> {
+    let path = temp_store_path("promotion-edit-rights");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let member = store.register_account("m@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    store.join_project(&member.token, &project.project_id)?;
+    let source = remember_with_context(&mut store, &owner.token, "original author's source")?;
+    let original = store.promote_memory(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+    )?;
+    let mut forged = crate::test_support::linked_memory("forged-supersession", &source.memory_id);
+    forged.context = context();
+    forged.scope = MemoryScope::Project;
+    crate::test_support::import_memories(&mut store, &member.token, vec![forged.clone()])?;
+    let other = store.promote_memory(
+        &member.token,
+        &project.project_id,
+        &forged.memory_id,
+        "new independent decision",
+    )?;
+    assert!(other.supersedes.is_none());
+    assert_eq!(
+        store
+            .project_memories(&owner.token, &project.project_id)?
+            .len(),
+        2
+    );
+    let correction = store.correct_for_account(
+        &owner.token,
+        &source.memory_id,
+        "author corrected source",
+        vec![],
+        WorkContext::default(),
+        LifecycleInput::default(),
+    )?;
+    assert_eq!(
+        store
+            .project_memories(&member.token, &project.project_id)?
+            .len(),
+        2
+    );
+    let replacement = store.promote_memory(
+        &owner.token,
+        &project.project_id,
+        &correction.memory_id,
+        "explicitly republish",
+    )?;
+    assert_eq!(
+        replacement.supersedes.as_deref(),
+        Some(original.memory_id.as_str())
+    );
+    let live = store.project_memories(&member.token, &project.project_id)?;
+    assert_eq!(live.len(), 2);
+    assert!(live.iter().all(|m| m.memory_id != original.memory_id));
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn promotion_precondition_refuses_a_summary_that_changed_after_preview() -> Result<(), StoreError> {
+    let path = temp_store_path("changed-preview");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    store.start_session_for_account(&owner.token, "preview-session", context())?;
+    store.capture_for_account(
+        &owner.token,
+        crate::test_support::observation_for("preview-session", "first", "first payload"),
+    )?;
+    let source = store.end_session_for_account(&owner.token, "preview-session")?;
+    let preview = store.preview_promotion(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+    )?;
+    let fingerprint = publication_fingerprint(&preview)?;
+    store.start_session_for_account(&owner.token, "preview-session", context())?;
+    store.capture_for_account(
+        &owner.token,
+        crate::test_support::observation_for("preview-session", "second", "changed payload"),
+    )?;
+    store.end_session_for_account(&owner.token, "preview-session")?;
+    assert!(matches!(
+        store.promote_memory_checked(
+            &owner.token,
+            &project.project_id,
+            &source.memory_id,
+            "publish",
+            Some(&fingerprint)
+        ),
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(
+        store
+            .project_memories(&owner.token, &project.project_id)?
+            .is_empty()
+    );
+    let updated = store.preview_promotion(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+    )?;
+    let accepted = store.promote_memory_checked(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "publish",
+        Some(&publication_fingerprint(&updated)?),
+    )?;
+    assert_eq!(accepted.content, updated.content);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn remote_rename_keeps_tagged_personal_memories_promotable_by_project_id() -> Result<(), StoreError>
+{
+    let path = temp_store_path("remote-rename");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("rename@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "host/org/old", "Repo", None)?;
+    let source = store.remember_for_account(
+        &owner.token,
+        "renameneedle keep the project identity",
+        vec![],
+        WorkContext {
+            repository: Some("host/org/renamed".into()),
+            project_id: Some(project.project_id.clone()),
+            ..WorkContext::default()
+        },
+        LifecycleInput::default(),
+        MemoryKind::Explicit,
+    )?;
+    assert_eq!(
+        store
+            .personal_project_memories(&owner.token, &project.project_id)?
+            .len(),
+        1
+    );
+    store.preview_promotion(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "rename",
+    )?;
+    store.promote_memory(
+        &owner.token,
+        &project.project_id,
+        &source.memory_id,
+        "rename",
+    )?;
+    let hits = store.search_for_account(
+        &owner.token,
+        "renameneedle",
+        10,
+        &RecallFilter {
+            context: Some(WorkContext {
+                repository: Some("host/org/renamed".into()),
+                project_id: Some(project.project_id.clone()),
+                ..WorkContext::default()
+            }),
+            ..RecallFilter::default()
+        },
+    )?;
+    assert!(hits.iter().any(|r| r.source == "project"));
     fs::remove_file(path)?;
     Ok(())
 }

@@ -29,25 +29,81 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// The repository name the hook derives for the same checkout: the last path part of
-/// `origin` (no host, user or credentials), else the top-level directory name.
+/// Stable remote identity, with a marked directory fallback for repositories without a remote.
 pub fn repository_name(top: &Path) -> String {
-    let origin = git(top, &["config", "--get", "remote.origin.url"]).unwrap_or_default();
-    let origin = origin.trim_end_matches('/');
-    let origin = origin.strip_suffix(".git").unwrap_or(origin);
-    let name = origin.replace(':', "/");
-    match name.rsplit('/').next().filter(|name| !name.is_empty()) {
-        Some(name) => name.to_owned(),
-        None => top
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+    git(top, &["config", "--get", "remote.origin.url"])
+        .and_then(|origin| normalize_remote(&origin))
+        .unwrap_or_else(|| {
+            format!(
+                "local:{}",
+                top.file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default()
+            )
+        })
+}
+
+fn normalize_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let (host, path) = if let Some((scheme, rest)) = remote.split_once("://") {
+        if !matches!(scheme, "ssh" | "https" | "http" | "git") {
+            return None;
+        }
+        rest.split_once('/')?
+    } else {
+        remote.split_once(':')?
+    };
+    let host = host
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    let path = path.trim_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
     }
+    Some(format!("{host}/{path}"))
+}
+
+/// A malformed or unreadable existing file is an actionable warning, never a request to initialize.
+pub fn read_project_id(dir: &Path) -> Result<Option<String>, Error> {
+    let Some(top) = toplevel(dir) else {
+        return Ok(None);
+    };
+    let path = top.join(FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(Error::Input(
+                "cannot read .cairn/project.json; capture remains personal".to_owned(),
+            ));
+        }
+    };
+    let value: Value = serde_json::from_str(&raw).map_err(|_| {
+        Error::Input("invalid .cairn/project.json; capture remains personal".to_owned())
+    })?;
+    let id = value["project_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            Error::Input(
+                "invalid project id in .cairn/project.json; capture remains personal".to_owned(),
+            )
+        })?;
+    Ok(Some(id.to_owned()))
 }
 
 /// The project id in `<git toplevel of dir>/.cairn/project.json`, if there is a readable one.
 pub fn project_id(dir: &Path) -> Option<String> {
-    existing_id(&toplevel(dir)?)
+    match read_project_id(dir) {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("cairn: warning: {error}");
+            None
+        }
+    }
 }
 
 fn existing_id(top: &Path) -> Option<String> {
@@ -111,16 +167,30 @@ mod tests {
     #[test]
     fn repository_name_follows_the_hook_convention() {
         for (origin, expected) in [
-            ("https://example.test/acme/cairn-memory.git", "cairn-memory"),
-            ("git@example.test:acme/cairn-memory.git/", "cairn-memory"),
-            ("git@example.test:solo.git", "solo"),
+            (
+                "https://example.test/acme/cairn-memory.git",
+                "example.test/acme/cairn-memory",
+            ),
+            (
+                "git@example.test:acme/cairn-memory.git/",
+                "example.test/acme/cairn-memory",
+            ),
+            ("git@example.test:solo.git", "example.test/solo"),
+            (
+                "ssh://git@EXAMPLE.test:22/acme/repo.git",
+                "example.test/acme/repo",
+            ),
+            (
+                "https://fixture:credential@EXAMPLE.test/acme/repo.git",
+                "example.test/acme/repo",
+            ),
         ] {
             let top = checkout("origin", Some(origin));
             assert_eq!(repository_name(&top), expected, "{origin}");
             let _ = fs::remove_dir_all(&top);
         }
         let top = checkout("no-origin", None);
-        let expected = top.file_name().unwrap().to_string_lossy().into_owned();
+        let expected = format!("local:{}", top.file_name().unwrap().to_string_lossy());
         assert_eq!(repository_name(&top), expected);
         let _ = fs::remove_dir_all(&top);
     }

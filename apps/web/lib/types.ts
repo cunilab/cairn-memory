@@ -6,7 +6,6 @@ export type ListedProject = {
   created_at: string;
   updated_at: string;
   role: string;
-  share_policy?: string | null;
 };
 
 export type ProjectBranch = {
@@ -49,7 +48,9 @@ export type ProjectMemory = {
     freshness?: number;
     sensitivity?: string;
   };
-  share_reason?: string | null;
+  published_by?: string | null;
+  changed_by?: string | null;
+  changed_at?: string | null;
   created_at?: string;
 };
 
@@ -78,20 +79,6 @@ export type ProjectFreshnessEvent = {
   action: string;
   reason?: string | null;
   created_at: string;
-};
-
-export type ProjectRevocation = {
-  memory_id: string;
-  member_person_id: string;
-  member_email?: string | null;
-  created_at: string;
-  revoked_at?: string | null;
-};
-
-export type ShareCandidate = {
-  memory_id: string;
-  reason: string;
-  not_auto_shared_reason: string;
 };
 
 export type Device = {

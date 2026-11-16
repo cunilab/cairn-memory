@@ -73,17 +73,16 @@ fn project_forget_and_delete_never_touch_personal_memory() -> Result<(), StoreEr
     let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
     let project_id = project.project_id;
     join_project(&mut store, &member.token, &project_id)?;
-    store.create_project_team(&owner.token, &project_id, "Core")?;
-    let filter = RecallFilter::default();
+    let filter = RecallFilter {
+        session_id: None,
+        context: Some(WorkContext {
+            project_id: Some(project_id.clone()),
+            ..context()
+        }),
+    };
     let promote_shared = |store: &mut MemoryStore, content: &str| {
         let source = remember_with_context(store, &owner.token, content)?;
         let copy = store.promote_memory(&owner.token, &project_id, &source.memory_id, "why")?;
-        store.share_project_memory(
-            &owner.token,
-            &project_id,
-            &copy.memory_id,
-            "member@example.test",
-        )?;
         Ok::<_, StoreError>((source, copy))
     };
 
@@ -99,8 +98,8 @@ fn project_forget_and_delete_never_touch_personal_memory() -> Result<(), StoreEr
         let origin = hits.iter().find(|hit| hit.memory_id == copy.memory_id);
         assert_eq!(
             origin.and_then(|hit| hit.promoted_from.as_deref()),
-            Some(source.memory_id.as_str()),
-            "the owner sees the origin"
+            None,
+            "the shared payload never exposes private provenance"
         );
         if delete {
             store.delete_for_account(&owner.token, &copy.memory_id)?;
@@ -123,17 +122,17 @@ fn project_forget_and_delete_never_touch_personal_memory() -> Result<(), StoreEr
         );
         assert!(
             store
-                .shared_project_memories(&member.token, &project_id)?
+                .project_memories(&member.token, &project_id)?
                 .is_empty()
         );
     }
 
     // Forgetting the personal memory leaves the shared copy; the origin is never exposed.
     let (source, copy) = promote_shared(&mut store, "keepcopy personal fact")?;
-    let shared = store.shared_project_memories(&member.token, &project_id)?;
+    let shared = store.project_memories(&member.token, &project_id)?;
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory.promoted_from, None);
-    assert!(shared[0].memory.source_event_ids.is_empty());
+    assert_eq!(shared[0].promoted_from, None);
+    assert!(shared[0].source_event_ids.is_empty());
     store.forget_for_account(&owner.token, &source.memory_id)?;
     let hits = store.search_for_account(&owner.token, "keepcopy", 10, &filter)?;
     assert_eq!(ids_of(&hits), vec![copy.memory_id.as_str()]);
@@ -141,65 +140,16 @@ fn project_forget_and_delete_never_touch_personal_memory() -> Result<(), StoreEr
     let listed = store.project_memories(&owner.token, &project_id)?;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].promoted_from, None);
-    let shared = store.shared_project_memories(&member.token, &project_id)?;
+    let shared = store.project_memories(&member.token, &project_id)?;
     assert_eq!(shared.len(), 1);
-    assert_eq!(shared[0].memory.memory_id, copy.memory_id);
-    assert_eq!(shared[0].memory.promoted_from, None);
+    assert_eq!(shared[0].memory_id, copy.memory_id);
+    assert_eq!(shared[0].promoted_from, None);
     fs::remove_file(path)?;
     Ok(())
 }
 
 // A correction of a personal memory hides that memory's promoted copies; promoting the
 // correction links the new copy to the old copy, never to the personal id.
-#[test]
-fn personal_correction_supersedes_the_promoted_copy() -> Result<(), StoreError> {
-    let path = temp_store_path("correction-copy");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-    let member = store.register_account("member@example.test", "correct horse battery staple")?;
-    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
-    let project_id = project.project_id;
-    join_project(&mut store, &member.token, &project_id)?;
-    let source = remember_with_context(&mut store, &owner.token, "stalecopy old fact")?;
-    let copy = store.promote_memory(&owner.token, &project_id, &source.memory_id, "why")?;
-    store.share_project_memory(
-        &owner.token,
-        &project_id,
-        &copy.memory_id,
-        "member@example.test",
-    )?;
-    let correction = store.correct_for_account(
-        &owner.token,
-        &source.memory_id,
-        "stalecopy new fact",
-        Vec::new(),
-        context(),
-        LifecycleInput::default(),
-    )?;
-    let filter = RecallFilter::default();
-    assert!(
-        store
-            .project_memories(&owner.token, &project_id)?
-            .is_empty()
-    );
-    assert!(
-        store
-            .shared_project_memories(&member.token, &project_id)?
-            .is_empty()
-    );
-    let hits = store.search_for_account(&owner.token, "stalecopy", 10, &filter)?;
-    assert_eq!(ids_of(&hits), vec![correction.memory_id.as_str()]);
-    let report = store.project_maintenance(&owner.token, &project_id, None)?;
-    assert_eq!(report.superseded_memory_ids, vec![copy.memory_id.clone()]);
-
-    let next = store.promote_memory(&owner.token, &project_id, &correction.memory_id, "why")?;
-    assert_eq!(next.supersedes.as_deref(), Some(copy.memory_id.as_str()));
-    let listed = store.project_memories(&owner.token, &project_id)?;
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].memory_id, next.memory_id);
-    fs::remove_file(path)?;
-    Ok(())
-}
 
 #[test]
 fn forget_cascades_only_sources_the_caller_owns() -> Result<(), StoreError> {
