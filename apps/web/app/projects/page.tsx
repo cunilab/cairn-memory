@@ -1,31 +1,30 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { ColumnDef } from "@tanstack/react-table";
+import { FolderGitIcon } from "lucide-react";
+import { IdText, RoleBadge } from "@/components/badges";
 import { ConsoleShell } from "@/components/console-shell";
+import { DataTable } from "@/components/data-table";
+import { PageHeader } from "@/components/page-header";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
+import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
 import type { ListedProject } from "@/lib/types";
-
-function roleLabel(role: string): string {
-  if (role === "owner") {
-    return "Owner";
-  }
-  if (role === "member") {
-    return "Member";
-  }
-  return role;
-}
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -71,21 +70,62 @@ export default function ProjectsPage() {
     };
   }, [router]);
 
-  async function logout() {
-    try {
-      await cairn("auth/logout", { method: "POST" });
-    } catch (cause) {
-      if (cause instanceof SessionRequiredError) {
-        setSessionRequired(true);
-        router.replace("/");
-        return;
-      }
-      const message = cause instanceof Error ? cause.message : "Logout failed";
-      setError(`Could not log out. ${message}`);
-      return;
-    }
-    router.replace("/");
-  }
+  const columns = useMemo<ColumnDef<ListedProject>[]>(
+    () => [
+      {
+        accessorKey: "name",
+        header: "Project",
+        cell: ({ row }) => (
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <Link
+              href={`/projects/${row.original.project_id}`}
+              className="w-fit rounded-sm font-medium break-words underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {row.original.name}
+            </Link>
+            <span className="font-mono text-xs break-all text-muted-foreground">
+              {row.original.repository}
+            </span>
+          </div>
+        ),
+      },
+      {
+        accessorKey: "role",
+        header: "Role",
+        cell: ({ row }) => <RoleBadge role={row.original.role} />,
+      },
+      {
+        accessorKey: "default_branch",
+        header: "Branch",
+        cell: ({ row }) =>
+          row.original.default_branch ? (
+            <span className="font-mono text-xs">{row.original.default_branch}</span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        meta: { className: "hidden md:table-cell" },
+      },
+      {
+        accessorKey: "project_id",
+        header: "ID",
+        cell: ({ row }) => <IdText id={row.original.project_id} />,
+        enableSorting: false,
+        meta: { className: "hidden lg:table-cell" },
+      },
+      {
+        accessorKey: "updated_at",
+        header: "Updated",
+        sortingFn: (a, b) => Number(a.original.updated_at) - Number(b.original.updated_at),
+        cell: ({ row }) => (
+          <span className="text-xs whitespace-nowrap text-muted-foreground">
+            {formatTime(row.original.updated_at)}
+          </span>
+        ),
+        meta: { className: "hidden md:table-cell" },
+      },
+    ],
+    [],
+  );
 
   if (sessionRequired) {
     return (
@@ -96,56 +136,50 @@ export default function ProjectsPage() {
   }
 
   return (
-    <ConsoleShell
-      title="Projects"
-      action={
-        <Button type="button" variant="outline" onClick={() => void logout()}>
-          Log out
-        </Button>
-      }
-    >
-      <div className="flex flex-col gap-4">
-        {error ? (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        ) : null}
-        {loading ? (
-          <p role="status" className="text-sm text-muted-foreground">
-            Loading projects…
-          </p>
-        ) : null}
-        {!loading && projects.length === 0 && !error ? (
-          <div className="flex w-full min-w-0 flex-col items-center justify-center gap-2 rounded-xl border border-dashed p-6 text-center">
-            <p className="text-sm font-medium">No projects</p>
-            <p className="max-w-sm text-sm text-balance text-muted-foreground">
-              No projects for this account.
-            </p>
-          </div>
-        ) : null}
-        <ul className="flex flex-col gap-3">
-          {projects.map((project) => (
-            <li key={project.project_id}>
-              <Link
-                href={`/projects/${project.project_id}`}
-                className="block rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-              >
-                <Card className="h-full hover:bg-muted/40">
-                  <CardHeader>
-                    <CardTitle className="break-words">{project.name}</CardTitle>
-                    <CardDescription className="break-words">
-                      {project.repository} · {roleLabel(project.role)}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="break-all text-sm text-muted-foreground">
-                    {project.project_id}
-                  </CardContent>
-                </Card>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      </div>
+    <ConsoleShell crumbs={[{ label: "Projects" }]}>
+      <PageHeader
+        title="Projects"
+        description="Repositories Cairn keeps decisions for, on this account or shared with it."
+      />
+      {error ? (
+        <Alert variant="destructive">
+          <AlertDescription className="text-destructive">{error}</AlertDescription>
+        </Alert>
+      ) : null}
+      {loading ? (
+        <div role="status" className="flex flex-col gap-2">
+          <span className="sr-only">Loading projects…</span>
+          <Skeleton className="h-8 w-64" />
+          <Skeleton className="h-48 w-full" />
+        </div>
+      ) : null}
+      {!loading && !error ? (
+        <DataTable
+          label="projects"
+          data={projects}
+          columns={columns}
+          getRowId={(project) => project.project_id}
+          filterPlaceholder="Filter projects"
+          initialSort={[{ id: "updated_at", desc: true }]}
+          empty={
+            <Empty className="border-0 p-6">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <FolderGitIcon />
+                </EmptyMedia>
+                <EmptyTitle>No projects</EmptyTitle>
+                <EmptyDescription>
+                  No projects for this account. An agent registers one when it first works in a
+                  repository with one of your devices.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <Button nativeButton={false} render={<Link href="/devices" />}>Set up a device</Button>
+              </EmptyContent>
+            </Empty>
+          }
+        />
+      ) : null}
     </ConsoleShell>
   );
 }

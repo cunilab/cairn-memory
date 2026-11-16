@@ -1,10 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { ColumnDef } from "@tanstack/react-table";
+import { MessageSquareTextIcon, MoreHorizontalIcon, UsersIcon } from "lucide-react";
+import { toast } from "sonner";
+import { Freshness, IdText, KindBadge, RoleBadge, ScopeBadge, SensitivityBadge } from "@/components/badges";
 import { ConsoleShell } from "@/components/console-shell";
+import { DataTable } from "@/components/data-table";
+import { PageHeader } from "@/components/page-header";
 import { ProjectOwnerActions } from "@/components/project-owner-actions";
 import { ProjectReports } from "@/components/project-reports";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,20 +22,35 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { deleteDecisionImpact, revokeShareImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { memoryReadPath } from "@/lib/memory-path";
+import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
 import { isAbsentTeam } from "@/lib/team";
 import type { ListedProject, ProjectBranch, ProjectMemory, ProjectTeam } from "@/lib/types";
@@ -42,16 +64,6 @@ function field(value: string | number | null | undefined): string {
 
 type ConfirmAction = { kind: "delete" | "revoke"; memoryId: string };
 
-function roleLabel(role: string): string {
-  if (role === "owner") {
-    return "Owner";
-  }
-  if (role === "member") {
-    return "Member";
-  }
-  return role;
-}
-
 export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
   const [project, setProject] = useState<ListedProject | null>(null);
@@ -61,13 +73,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [teamError, setTeamError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [teamName, setTeamName] = useState("");
   const [pending, setPending] = useState(false);
   const [sessionRequired, setSessionRequired] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
   const [dialogAction, setDialogAction] = useState<ConfirmAction | null>(null);
+  const [detail, setDetail] = useState<ProjectMemory | null>(null);
   const confirming = useRef(false);
   const loadGeneration = useRef(0);
 
@@ -90,18 +102,17 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setTeamError(null);
     setError(null);
     setActionError(null);
-    setNotice(null);
     setEmail("");
     setTeamName("");
     setPending(false);
     setSessionRequired(false);
     setConfirm(null);
     setDialogAction(null);
+    setDetail(null);
   });
 
   function openConfirm(next: ConfirmAction) {
     setActionError(null);
-    setNotice(null);
     setDialogAction(next);
     setConfirm(next);
   }
@@ -115,7 +126,6 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setTeamError(null);
     setError(null);
     setActionError(null);
-    setNotice(null);
     router.replace("/");
   }, [router]);
 
@@ -197,13 +207,14 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     const generation = beginLoad();
     setPending(true);
     setActionError(null);
-    setNotice(null);
     try {
       await action();
       const result = await fetchProject();
       if (isCurrent(generation)) {
         applyProject(result);
-        setNotice(success ?? null);
+        if (success) {
+          toast.success(success);
+        }
         return true;
       }
     } catch (cause) {
@@ -214,7 +225,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         requireSignIn();
         return false;
       }
-      setActionError(cause instanceof Error ? cause.message : "Request failed");
+      const message = cause instanceof Error ? cause.message : "Request failed";
+      setActionError(message);
+      toast.error(message);
     } finally {
       if (isCurrent(generation)) {
         setPending(false);
@@ -272,6 +285,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       if (isCurrent(generation)) {
         applyProject(result);
         setConfirm(null);
+        toast.success(action.kind === "delete" ? "Decision deleted." : "Share revoked.");
       }
     } catch (cause) {
       if (!isCurrent(generation)) {
@@ -295,19 +309,137 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     }
   }
 
-  async function logout() {
-    try {
-      await cairn("auth/logout", { method: "POST" });
-    } catch (cause) {
-      if (cause instanceof SessionRequiredError) {
-        requireSignIn();
-        return;
-      }
-      setActionError(cause instanceof Error ? cause.message : "Logout failed");
+  function shareDecision(memoryId: string) {
+    if (email.trim() === "") {
+      toast.error("Enter a member email under “Share with” first.");
+      document.getElementById("member-email")?.focus();
       return;
     }
-    router.replace("/");
+    void run(
+      () =>
+        cairn(`projects/${encodeURIComponent(projectId)}/shares`, {
+          method: "POST",
+          body: JSON.stringify({ memory_id: memoryId, email }),
+        }),
+      "Decision shared.",
+    );
   }
+
+  const columns = useMemo<ColumnDef<ProjectMemory>[]>(() => {
+    const cols: ColumnDef<ProjectMemory>[] = [
+      {
+        id: "decision",
+        header: "Decision",
+        accessorFn: (memory) => `${memory.memory_id} ${memory.content}`,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={() => setDetail(row.original)}
+              aria-haspopup="dialog"
+              className="line-clamp-2 w-full rounded-sm text-left text-sm [overflow-wrap:anywhere] underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {row.original.content}
+            </button>
+            <IdText id={row.original.memory_id} />
+          </div>
+        ),
+      },
+      {
+        id: "scope",
+        header: "Scope",
+        accessorFn: (memory) => memory.scope ?? "",
+        cell: ({ row }) => <ScopeBadge scope={row.original.scope} />,
+        meta: { className: "hidden md:table-cell" },
+      },
+      {
+        id: "sensitivity",
+        header: "Sensitivity",
+        accessorFn: (memory) => memory.lifecycle?.sensitivity ?? "",
+        cell: ({ row }) => <SensitivityBadge sensitivity={row.original.lifecycle?.sensitivity} />,
+        meta: { className: "hidden lg:table-cell" },
+      },
+      {
+        id: "freshness",
+        header: "Freshness",
+        accessorFn: (memory) => memory.lifecycle?.freshness ?? -1,
+        cell: ({ row }) => <Freshness value={row.original.lifecycle?.freshness} />,
+        meta: { className: "hidden lg:table-cell" },
+      },
+      {
+        id: "verified",
+        header: "Verified at",
+        accessorFn: (memory) => memory.verified_commit ?? "",
+        cell: ({ row }) =>
+          row.original.verified_commit ? (
+            <span className="font-mono text-xs break-all">{row.original.verified_commit}</span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        meta: { className: "hidden xl:table-cell" },
+      },
+      {
+        id: "created",
+        header: "Created",
+        accessorFn: (memory) => Number(memory.created_at ?? 0),
+        cell: ({ row }) => (
+          <span className="text-xs whitespace-nowrap text-muted-foreground">
+            {formatTime(row.original.created_at)}
+          </span>
+        ),
+        meta: { className: "hidden md:table-cell" },
+      },
+    ];
+    if (owner) {
+      cols.push({
+        id: "actions",
+        header: () => <span className="sr-only">Actions</span>,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex justify-end">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={pending}
+                    aria-label={`Actions for ${row.original.memory_id}`}
+                  />
+                }
+              >
+                <MoreHorizontalIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={() => setDetail(row.original)}>View details</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => shareDecision(row.original.memory_id)}>
+                  Share decision
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => openConfirm({ kind: "revoke", memoryId: row.original.memory_id })}
+                >
+                  Revoke share
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => openConfirm({ kind: "delete", memoryId: row.original.memory_id })}
+                >
+                  Delete memory
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ),
+        meta: { className: "w-10" },
+      });
+    }
+    return cols;
+    // shareDecision and openConfirm close over `email` and the setters; rebuild when those change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [owner, pending, email, projectId]);
 
   if (sessionRequired) {
     return (
@@ -317,290 +449,347 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     );
   }
 
+  const title = project?.name ?? (error ? "Project unavailable" : "Project");
+
   return (
-    <ConsoleShell
-      title={project?.name ?? (error ? "Project unavailable" : "Project")}
-      action={
-        <Button type="button" variant="outline" onClick={() => void logout()}>
-          Log out
-        </Button>
-      }
-    >
-      <div className="flex min-w-0 flex-col gap-6">
-      {project ? (
-        <p className="break-all text-sm text-muted-foreground">
-          {project.repository} · {roleLabel(project.role)} · {project.project_id}
-        </p>
-      ) : null}
+    <ConsoleShell crumbs={[{ label: "Projects", href: "/projects" }, { label: title }]}>
+      <PageHeader
+        title={title}
+        description={
+          project ? (
+            <span className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className="font-mono text-xs break-all">{project.repository}</span>
+              <RoleBadge role={project.role} />
+              <IdText id={project.project_id} />
+            </span>
+          ) : undefined
+        }
+      />
       {!project && !error ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading project…
-        </p>
+        <div role="status" className="flex flex-col gap-3">
+          <span className="sr-only">Loading project…</span>
+          <Skeleton className="h-8 w-80 max-w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
-        </p>
-      ) : null}
-      {notice ? (
-        <p
-          role="status"
-          ref={(element) => element?.scrollIntoView({ block: "nearest" })}
-          className="text-sm text-muted-foreground"
-        >
-          {notice}
-        </p>
-      ) : null}
-      {actionError ? (
-        // The owner form sits far below the buttons, so bring the failure into view.
-        <p
-          role="alert"
-          ref={(element) => element?.scrollIntoView({ block: "nearest" })}
-          className="text-sm text-destructive"
-        >
-          {actionError}
-        </p>
+        <Alert variant="destructive">
+          <AlertDescription className="text-destructive">{error}</AlertDescription>
+        </Alert>
       ) : null}
 
       {project ? (
-      <>
-      <section className="flex min-w-0 flex-col gap-3">
-        <h2 className="text-base font-medium">Decisions</h2>
-        {project && memories.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {owner ? "No decisions." : "No shared decisions."}
-          </p>
-        ) : null}
-        <ul className="flex flex-col gap-3">
-          {memories.map((memory) => (
-            <li key={memory.memory_id} className="min-w-0">
-              <Card className="min-w-0">
+        <Tabs defaultValue="decisions" className="min-w-0 gap-5">
+          <TabsList variant="line" className="w-full justify-start overflow-x-auto border-b">
+            <TabsTrigger value="decisions" className="flex-none px-3">
+              Decisions
+              <Badge variant="secondary">{memories.length}</Badge>
+            </TabsTrigger>
+            {owner ? (
+              <TabsTrigger value="reports" className="flex-none px-3">
+                Reports
+              </TabsTrigger>
+            ) : null}
+            <TabsTrigger value="team" className="flex-none px-3">
+              Team &amp; sharing
+            </TabsTrigger>
+            {owner ? (
+              <TabsTrigger value="controls" className="flex-none px-3">
+                Controls
+              </TabsTrigger>
+            ) : null}
+          </TabsList>
+
+          <TabsContent value="decisions" className="flex min-w-0 flex-col gap-4">
+            <DataTable
+              label="decisions"
+              data={memories}
+              columns={columns}
+              getRowId={(memory) => memory.memory_id}
+              filterPlaceholder="Filter decisions"
+              toolbar={
+                owner ? (
+                  <Field className="sm:ml-auto sm:w-80">
+                    <FieldLabel htmlFor="member-email" className="sr-only">
+                      Share with
+                    </FieldLabel>
+                    <Input
+                      id="member-email"
+                      type="email"
+                      list="member-emails"
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                      autoComplete="off"
+                      placeholder="Share with: member email"
+                      title="The member that Share decision and Revoke share act on"
+                    />
+                    <datalist id="member-emails">
+                      {team?.members.map((member) => (
+                        <option key={member.person_id} value={member.email} />
+                      ))}
+                    </datalist>
+                  </Field>
+                ) : null
+              }
+              initialSort={[{ id: "created", desc: true }]}
+              empty={
+                <Empty className="border-0 p-6">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <MessageSquareTextIcon />
+                    </EmptyMedia>
+                    <EmptyTitle>{owner ? "No decisions" : "No shared decisions"}</EmptyTitle>
+                    <EmptyDescription>
+                      {owner
+                        ? "Promote a memory from the Controls tab to record the first decision."
+                        : "Decisions the owner shares with you appear here."}
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              }
+            />
+          </TabsContent>
+
+          {owner ? (
+            <TabsContent value="reports" className="min-w-0">
+              <ProjectReports
+                projectId={projectId}
+                memberEmails={team?.members.map((member) => member.email) ?? []}
+                decisions={memories}
+                onSessionRequired={requireSignIn}
+              />
+            </TabsContent>
+          ) : null}
+
+          <TabsContent value="team" className="flex min-w-0 flex-col gap-4">
+            {teamError ? (
+              <Alert variant="destructive">
+                <AlertDescription className="text-destructive">{teamError}</AlertDescription>
+              </Alert>
+            ) : null}
+            <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+              <Card className="h-full min-w-0">
                 <CardHeader>
-                  <CardTitle className="break-all">{memory.memory_id}</CardTitle>
+                  <CardTitle className="break-words">
+                    <h2>{team ? team.name : "Team"}</h2>
+                  </CardTitle>
+                  <CardDescription>
+                    {team ? <IdText id={team.project_id} /> : "People who work on this project together."}
+                  </CardDescription>
                 </CardHeader>
-                <CardContent className="flex min-w-0 flex-col gap-3">
-                  <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">
-                    {memory.content}
-                  </p>
-                  <dl className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
-                    <dt className="text-muted-foreground">Scope</dt>
-                    <dd className="min-w-0 break-all">{field(memory.scope)}</dd>
-                    <dt className="text-muted-foreground">Verified commit</dt>
-                    <dd className="min-w-0 break-all">{field(memory.verified_commit)}</dd>
-                    <dt className="text-muted-foreground">Freshness</dt>
-                    <dd className="min-w-0 break-all">{field(memory.lifecycle?.freshness)}</dd>
-                    <dt className="text-muted-foreground">Supersedes</dt>
-                    <dd className="min-w-0 break-all">{field(memory.supersedes)}</dd>
-                    {memory.share_reason ? (
-                      <>
-                        <dt className="text-muted-foreground">Share reason</dt>
-                        <dd className="min-w-0 break-all">{memory.share_reason}</dd>
-                      </>
-                    ) : null}
-                  </dl>
-                  {owner ? (
+                <CardContent>
+                  {team ? (
+                    team.members.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No team members.</p>
+                    ) : (
+                      <ul className="flex flex-col gap-2 text-sm">
+                        {team.members.map((member) => (
+                          <li key={member.person_id} className="flex min-w-0 items-center gap-2.5">
+                            <Avatar className="size-6 rounded-md">
+                              <AvatarFallback className="rounded-md text-xs">
+                                {member.email.slice(0, 1).toUpperCase()}
+                              </AvatarFallback>
+                            </Avatar>
+                            <span className="break-all">{member.email}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                  ) : !teamError ? (
+                    <Empty className="border border-dashed p-6">
+                      <EmptyHeader>
+                        <EmptyMedia variant="icon">
+                          <UsersIcon />
+                        </EmptyMedia>
+                        <EmptyTitle>No team yet</EmptyTitle>
+                        <EmptyDescription>
+                          {owner
+                            ? "No team yet. Create one with the form on this tab."
+                            : "This project has no team."}
+                        </EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
+                  ) : null}
+                </CardContent>
+              </Card>
+
+              {owner ? (
+                <Card className="h-full min-w-0">
+                  <CardHeader>
+                    <CardTitle>
+                      <h2>Members</h2>
+                    </CardTitle>
+                    <CardDescription>
+                      Invite lets a person read the decisions you share. Add and Remove change who is
+                      in the team.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex min-w-0 flex-col gap-4">
+                    <FieldGroup>
+                      <Field>
+                        <FieldLabel htmlFor="team-member-email">Member email</FieldLabel>
+                        <Input
+                          id="team-member-email"
+                          type="email"
+                          value={email}
+                          onChange={(event) => setEmail(event.target.value)}
+                          autoComplete="off"
+                        />
+                      </Field>
+                    </FieldGroup>
                     <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        disabled={pending}
+                        onClick={() =>
+                          void run(
+                            () =>
+                              cairn(`projects/${encodeURIComponent(projectId)}/members`, {
+                                method: "POST",
+                                body: JSON.stringify({ email }),
+                              }),
+                            "Member invited.",
+                          )
+                        }
+                      >
+                        Invite member
+                      </Button>
                       <Button
                         type="button"
                         variant="outline"
                         disabled={pending}
                         onClick={() =>
-                          void run(() =>
-                            cairn(`projects/${encodeURIComponent(projectId)}/shares`, {
-                              method: "POST",
-                              body: JSON.stringify({
-                                memory_id: memory.memory_id,
-                                email,
+                          void run(
+                            () =>
+                              cairn(`projects/${encodeURIComponent(projectId)}/team/members`, {
+                                method: "POST",
+                                body: JSON.stringify({ email }),
                               }),
-                            }),
-                            "Decision shared.",
+                            "Team member added.",
                           )
                         }
                       >
-                        Share decision
+                        Add member
                       </Button>
                       <Button
                         type="button"
                         variant="outline"
                         disabled={pending}
-                        onClick={() => {
-                          openConfirm({ kind: "revoke", memoryId: memory.memory_id });
-                        }}
+                        onClick={() =>
+                          void run(
+                            () =>
+                              cairn(`projects/${encodeURIComponent(projectId)}/team/members/remove`, {
+                                method: "POST",
+                                body: JSON.stringify({ email }),
+                              }),
+                            "Team member removed.",
+                          )
+                        }
                       >
-                        Revoke share
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        disabled={pending}
-                        onClick={() => {
-                          openConfirm({ kind: "delete", memoryId: memory.memory_id });
-                        }}
-                      >
-                        Delete memory
+                        Remove member
                       </Button>
                     </div>
+                    {team ? null : (
+                      <form
+                        className="flex flex-col gap-3 border-t pt-4"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void run(
+                            () =>
+                              cairn(`projects/${encodeURIComponent(projectId)}/team`, {
+                                method: "POST",
+                                body: JSON.stringify({ name: teamName }),
+                              }),
+                            "Team created.",
+                          );
+                        }}
+                      >
+                        <FieldGroup>
+                          <Field>
+                            <FieldLabel htmlFor="team-name">Team name</FieldLabel>
+                            <Input
+                              id="team-name"
+                              value={teamName}
+                              onChange={(event) => setTeamName(event.target.value)}
+                              required
+                            />
+                          </Field>
+                        </FieldGroup>
+                        <div>
+                          <Button type="submit" disabled={pending}>
+                            Create team
+                          </Button>
+                        </div>
+                      </form>
+                    )}
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
+          </TabsContent>
+
+          {owner ? (
+            <TabsContent value="controls" className="min-w-0">
+              <ProjectOwnerActions
+                projectId={projectId}
+                sharePolicy={project.share_policy}
+                branches={branches}
+                decisions={memories}
+                pending={pending}
+                run={run}
+                onSessionRequired={requireSignIn}
+              />
+            </TabsContent>
+          ) : null}
+        </Tabs>
+      ) : null}
+
+      <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
+        <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+          {detail ? (
+            <>
+              <SheetHeader>
+                <SheetTitle>Decision</SheetTitle>
+                <SheetDescription className="break-all">{detail.memory_id}</SheetDescription>
+              </SheetHeader>
+              <div className="flex min-w-0 flex-col gap-5 px-4 pb-6">
+                <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{detail.content}</p>
+                <dl className="grid min-w-0 grid-cols-[max-content_minmax(0,1fr)] items-center gap-x-4 gap-y-2.5 text-sm">
+                  <dt className="text-muted-foreground">Kind</dt>
+                  <dd>
+                    <KindBadge kind={detail.kind} />
+                  </dd>
+                  <dt className="text-muted-foreground">Scope</dt>
+                  <dd>
+                    <ScopeBadge scope={detail.scope} />
+                  </dd>
+                  <dt className="text-muted-foreground">Sensitivity</dt>
+                  <dd>
+                    <SensitivityBadge sensitivity={detail.lifecycle?.sensitivity} />
+                  </dd>
+                  <dt className="text-muted-foreground">Freshness</dt>
+                  <dd>
+                    <Freshness value={detail.lifecycle?.freshness} />
+                  </dd>
+                  <dt className="text-muted-foreground">Verified commit</dt>
+                  <dd className="min-w-0 font-mono text-xs break-all">{field(detail.verified_commit)}</dd>
+                  <dt className="text-muted-foreground">Supersedes</dt>
+                  <dd className="min-w-0 font-mono text-xs break-all">{field(detail.supersedes)}</dd>
+                  {detail.share_reason ? (
+                    <>
+                      <dt className="text-muted-foreground">Share reason</dt>
+                      <dd className="min-w-0 break-words">{detail.share_reason}</dd>
+                    </>
                   ) : null}
-                </CardContent>
-              </Card>
-            </li>
-          ))}
-        </ul>
-      </section>
+                  <dt className="text-muted-foreground">Created</dt>
+                  <dd>{formatTime(detail.created_at)}</dd>
+                </dl>
+              </div>
+            </>
+          ) : null}
+        </SheetContent>
+      </Sheet>
 
-      <section className="flex min-w-0 flex-col gap-3">
-        <h2 className="text-base font-medium">Team</h2>
-        {teamError ? (
-          <p role="alert" className="text-sm text-destructive">
-            {teamError}
-          </p>
-        ) : null}
-        {team ? (
-          <Card className="min-w-0">
-            <CardHeader>
-              <CardTitle className="break-words">{team.name}</CardTitle>
-              <CardDescription className="break-all">{team.project_id}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {team.members.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No team members.</p>
-              ) : (
-                <ul className="text-sm">
-                  {team.members.map((member) => (
-                    <li key={member.person_id} className="break-all">
-                      {member.email}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        ) : null}
-        {!team && !teamError ? (
-          <p className="text-sm text-muted-foreground">
-            {owner
-              ? "No team yet. Create one with the form below."
-              : "This project has no team."}
-          </p>
-        ) : null}
-      </section>
-
-      {owner ? (
-        <ProjectReports
-          projectId={projectId}
-          memberEmails={team?.members.map((member) => member.email) ?? []}
-          decisions={memories}
-          onSessionRequired={requireSignIn}
-        />
-      ) : null}
-
-      {owner ? (
-        <ProjectOwnerActions
-          projectId={projectId}
-          sharePolicy={project.share_policy}
-          branches={branches}
-          decisions={memories}
-          pending={pending}
-          run={run}
-          onSessionRequired={requireSignIn}
-        />
-      ) : null}
-
-      {owner ? (
-        <section className="flex flex-col gap-4">
-          <h2 className="text-base font-medium">Owner actions</h2>
-          <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="member-email">Member email</FieldLabel>
-            <Input
-              id="member-email"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              autoComplete="off"
-            />
-          </Field>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/members`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                  "Member invited.",
-                )
-              }
-            >
-              Invite member
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team/members`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                  "Team member added.",
-                )
-              }
-            >
-              Add member
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() =>
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team/members/remove`, {
-                    method: "POST",
-                    body: JSON.stringify({ email }),
-                  }),
-                )
-              }
-            >
-              Remove member
-            </Button>
-          </div>
-          {team ? null : (
-            <form
-              className="flex flex-col gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void run(() =>
-                  cairn(`projects/${encodeURIComponent(projectId)}/team`, {
-                    method: "POST",
-                    body: JSON.stringify({ name: teamName }),
-                  }),
-                  "Team created.",
-                );
-              }}
-            >
-              <Field>
-                <FieldLabel htmlFor="team-name">Team name</FieldLabel>
-                <Input
-                  id="team-name"
-                  value={teamName}
-                  onChange={(event) => setTeamName(event.target.value)}
-                  required
-                />
-              </Field>
-              <Button type="submit" disabled={pending}>
-                Create team
-              </Button>
-            </form>
-          )}
-          </FieldGroup>
-        </section>
-      ) : null}
-      </>
-      ) : null}
       <AlertDialog
         open={confirm !== null}
         onOpenChange={(open) => {
@@ -624,10 +813,22 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                   : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {confirm?.kind === "revoke" ? (
+            <Field>
+              <FieldLabel htmlFor="revoke-member-email">Member email</FieldLabel>
+              <Input
+                id="revoke-member-email"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="off"
+              />
+            </Field>
+          ) : null}
           {actionError ? (
-            <p role="alert" className="text-sm text-destructive">
-              {actionError}
-            </p>
+            <Alert variant="destructive">
+              <AlertDescription className="text-destructive">{actionError}</AlertDescription>
+            </Alert>
           ) : null}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
@@ -638,16 +839,20 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               }
               onClick={() => void confirmAction()}
             >
-              {pending
-                ? "Working…"
-                : dialogAction?.kind === "revoke"
-                  ? "Revoke share"
-                  : "Delete memory"}
+              {pending ? (
+                <>
+                  <Spinner aria-hidden />
+                  Working…
+                </>
+              ) : dialogAction?.kind === "revoke" ? (
+                "Revoke share"
+              ) : (
+                "Delete memory"
+              )}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      </div>
     </ConsoleShell>
   );
 }

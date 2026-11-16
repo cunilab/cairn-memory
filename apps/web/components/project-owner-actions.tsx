@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -11,9 +12,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { closeBranchImpact, mergeBranchImpact, sharePolicyImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
@@ -24,9 +28,6 @@ const POLICIES = [
   { value: "auto_nonsensitive_project_memory", label: "Automatic" },
 ];
 
-const SELECT_CLASS =
-  "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50 md:text-sm dark:bg-input/30 dark:*:bg-popover";
-
 type Confirm = { title: string; description: string; label: string; go: () => void };
 
 function pick<T>(items: T[], key: (item: T) => string, id: string): T | undefined {
@@ -36,6 +37,76 @@ function pick<T>(items: T[], key: (item: T) => string, id: string): T | undefine
 function preview(memory: PersonalMemory): string {
   const text = memory.content.replace(/\s+/g, " ");
   return `${memory.memory_id} · ${text.length > 60 ? `${text.slice(0, 60)}…` : text}`;
+}
+
+type Option = { value: string; label: string };
+
+/** A labelled select that shows `empty` and stays disabled when there is nothing to choose. */
+function Choice({
+  id,
+  value,
+  options,
+  empty,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  options: Option[];
+  empty: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Select
+      items={options}
+      value={options.length === 0 ? null : value}
+      onValueChange={(next) => next && onChange(next)}
+      disabled={options.length === 0}
+    >
+      <SelectTrigger id={id} className="w-full min-w-0">
+        <SelectValue placeholder={empty} />
+      </SelectTrigger>
+      <SelectContent className="max-w-[min(34rem,calc(100vw-2rem))]">
+        {options.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function ActionCard({
+  title,
+  description,
+  footer,
+  children,
+}: {
+  title: string;
+  description: string;
+  footer?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <Card className="h-full min-w-0">
+      <CardHeader>
+        <CardTitle>
+          <h3>{title}</h3>
+        </CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      {children ? <CardContent className="flex min-w-0 flex-col gap-4">{children}</CardContent> : null}
+      {footer ? <CardFooter className="mt-auto">{footer}</CardFooter> : null}
+    </Card>
+  );
+}
+
+function BranchStatus({ status }: { status: string }) {
+  return (
+    <Badge variant={status === "merged" ? "success" : status === "closed" ? "secondary" : "outline"}>
+      {status.charAt(0).toUpperCase() + status.slice(1)}
+    </Badge>
+  );
 }
 
 /** Owner-only writes on a project. `run` reloads the project and reports errors above the form. */
@@ -115,353 +186,360 @@ export function ProjectOwnerActions({
   );
   const mergeMemory = pick(mergeMemories, (m) => m.memory_id, mergeMemoryId);
   const closeBranch = pick(openBranches, (b) => b.branch_id, closeBranchId);
+  const branchOptions = openBranches.map((branch) => ({ value: branch.branch_id, label: branch.name }));
 
   return (
-    <section className="flex min-w-0 flex-col gap-6">
-      <h2 className="text-base font-medium">Project controls</h2>
+    <div className="flex min-w-0 flex-col gap-4">
       {memoriesError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {memoriesError}
-        </p>
+        <Alert variant="destructive">
+          <AlertDescription className="text-destructive">{memoriesError}</AlertDescription>
+        </Alert>
       ) : null}
 
-      <div className="flex max-w-xl min-w-0 flex-col gap-3">
-        <h3 className="text-sm font-medium">Share policy</h3>
-        <p className="text-sm text-muted-foreground">
-          Current:{" "}
-          {POLICIES.find((policy) => policy.value === sharePolicy)?.label ??
-            "not reported by the server"}
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {POLICIES.filter((policy) => policy.value !== sharePolicy).map((policy) => (
-            <Button
-              key={policy.value}
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() =>
-                setConfirm({
-                  title: `Switch to ${policy.label.toLowerCase()} sharing?`,
-                  description: sharePolicyImpact(policy.value),
-                  label: `Switch to ${policy.label.toLowerCase()}`,
-                  go: () =>
-                    void run(
-                      () =>
-                        cairn(`${base}/policy`, {
-                          method: "POST",
-                          body: JSON.stringify({ policy: policy.value }),
-                        }),
-                      `Share policy set to ${policy.label.toLowerCase()}.`,
-                    ),
-                })
-              }
-            >
-              Use {policy.label.toLowerCase()} sharing
-            </Button>
-          ))}
-        </div>
-      </div>
-
-      <form
-        className="flex max-w-xl min-w-0 flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!promote) {
-            return;
-          }
-          void run(
-            () =>
-              cairn("promote", {
-                method: "POST",
-                body: JSON.stringify({
-                  project_id: projectId,
-                  memory_id: promote.memory_id,
-                  reason: promoteReason,
-                }),
-              }),
-            "Memory promoted to a project decision.",
-          ).then((ok) => ok && setPromoteReason(""));
-        }}
-      >
-        <h3 className="text-sm font-medium">Promote a memory</h3>
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="promote-memory">Personal memory</FieldLabel>
-            <select
-              id="promote-memory"
-              className={SELECT_CLASS}
-              value={promote?.memory_id ?? ""}
-              onChange={(event) => setPromoteId(event.target.value)}
-              disabled={memories.length === 0}
-            >
-              {memories.length === 0 ? <option value="">No personal memories</option> : null}
-              {memories.map((memory) => (
-                <option key={memory.memory_id} value={memory.memory_id}>
-                  {preview(memory)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="promote-reason">Reason</FieldLabel>
-            <Input
-              id="promote-reason"
-              value={promoteReason}
-              onChange={(event) => setPromoteReason(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-        </FieldGroup>
-        <div>
-          <Button type="submit" disabled={pending || !promote || promoteReason.trim() === ""}>
-            Promote memory
-          </Button>
-        </div>
-      </form>
-
-      <form
-        className="flex max-w-xl min-w-0 flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!verify) {
-            return;
-          }
-          void run(
-            () =>
-              cairn("projects/verify", {
-                method: "POST",
-                body: JSON.stringify({
-                  project_id: projectId,
-                  memory_id: verify.memory_id,
-                  commit: verifyCommit.trim(),
-                }),
-              }),
-            "Decision verified.",
-          ).then((ok) => ok && setVerifyCommit(""));
-        }}
-      >
-        <h3 className="text-sm font-medium">Verify a decision</h3>
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="verify-memory">Decision</FieldLabel>
-            <select
-              id="verify-memory"
-              className={SELECT_CLASS}
-              value={verify?.memory_id ?? ""}
-              onChange={(event) => setVerifyId(event.target.value)}
-              disabled={decisions.length === 0}
-            >
-              {decisions.length === 0 ? <option value="">No decisions</option> : null}
-              {decisions.map((memory) => (
-                <option key={memory.memory_id} value={memory.memory_id}>
-                  {memory.memory_id}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
-            <Input
-              id="verify-commit"
-              value={verifyCommit}
-              onChange={(event) => setVerifyCommit(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-        </FieldGroup>
-        <div>
-          <Button type="submit" disabled={pending || !verify || verifyCommit.trim() === ""}>
-            Verify decision
-          </Button>
-        </div>
-      </form>
-
-      <div className="flex max-w-xl min-w-0 flex-col gap-3">
-        <h3 className="text-sm font-medium">Branches</h3>
-        {branches.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No branches registered.</p>
-        ) : (
-          <ul className="text-sm">
-            {branches.map((branch) => (
-              <li key={branch.branch_id} className="break-all">
-                {branch.name} · {branch.status}
-                {branch.merge_commit ? ` · merged at ${branch.merge_commit}` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <form
-        className="flex max-w-xl min-w-0 flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!mergeBranch || !mergeMemory) {
-            return;
-          }
-          const [branch, memory] = [mergeBranch, mergeMemory];
-          setConfirm({
-            title: "Merge this branch?",
-            description: mergeBranchImpact(branch.name),
-            label: "Merge branch",
-            go: () =>
-              void run(
-                () =>
-                  cairn(`${base}/branches/${encodeURIComponent(branch.branch_id)}/merge`, {
-                    method: "POST",
-                    body: JSON.stringify({
-                      memory_id: memory.memory_id,
-                      commit: mergeCommit.trim(),
-                      reason: mergeReason.trim(),
-                    }),
-                  }),
-                `Branch ${branch.name} merged.`,
-              ).then((ok) => {
-                if (ok) {
-                  setMergeCommit("");
-                  setMergeReason("");
+      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+        <ActionCard
+          title="Share policy"
+          description="Decides whether new decisions reach members on their own."
+        >
+          <p className="flex items-center gap-2 text-sm">
+            Current
+            <Badge variant="brand">
+              {POLICIES.find((policy) => policy.value === sharePolicy)?.label ??
+                "not reported by the server"}
+            </Badge>
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {POLICIES.filter((policy) => policy.value !== sharePolicy).map((policy) => (
+              <Button
+                key={policy.value}
+                type="button"
+                variant="outline"
+                disabled={pending}
+                onClick={() =>
+                  setConfirm({
+                    title: `Switch to ${policy.label.toLowerCase()} sharing?`,
+                    description: sharePolicyImpact(policy.value),
+                    label: `Switch to ${policy.label.toLowerCase()}`,
+                    go: () =>
+                      void run(
+                        () =>
+                          cairn(`${base}/policy`, {
+                            method: "POST",
+                            body: JSON.stringify({ policy: policy.value }),
+                          }),
+                        `Share policy set to ${policy.label.toLowerCase()}.`,
+                      ),
+                  })
                 }
-              }),
-          });
-        }}
-      >
-        <h3 className="text-sm font-medium">Merge a branch</h3>
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="merge-branch">Branch</FieldLabel>
-            <select
-              id="merge-branch"
-              className={SELECT_CLASS}
-              value={mergeBranch?.branch_id ?? ""}
-              onChange={(event) => setMergeBranchId(event.target.value)}
-              disabled={openBranches.length === 0}
-            >
-              {openBranches.length === 0 ? <option value="">No open branches</option> : null}
-              {openBranches.map((branch) => (
-                <option key={branch.branch_id} value={branch.branch_id}>
-                  {branch.name}
-                </option>
+              >
+                Use {policy.label.toLowerCase()} sharing
+              </Button>
+            ))}
+          </div>
+        </ActionCard>
+
+        <ActionCard
+          title="Branches"
+          description="Branches registered for this project and where each one stands."
+        >
+          {branches.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No branches registered.</p>
+          ) : (
+            <ul className="divide-y rounded-lg border text-sm">
+              {branches.map((branch) => (
+                <li key={branch.branch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                  <span className="min-w-0 flex-1 font-mono text-xs break-all">{branch.name}</span>
+                  {branch.merge_commit ? (
+                    <span className="font-mono text-xs break-all text-muted-foreground">
+                      merged at {branch.merge_commit}
+                    </span>
+                  ) : null}
+                  <BranchStatus status={branch.status} />
+                </li>
               ))}
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="merge-memory">Branch memory to merge</FieldLabel>
-            <select
-              id="merge-memory"
-              className={SELECT_CLASS}
-              value={mergeMemory?.memory_id ?? ""}
-              onChange={(event) => setMergeMemoryId(event.target.value)}
-              disabled={mergeMemories.length === 0}
-            >
-              {mergeMemories.length === 0 ? (
-                <option value="">No memories captured on this branch</option>
-              ) : null}
-              {mergeMemories.map((memory) => (
-                <option key={memory.memory_id} value={memory.memory_id}>
-                  {preview(memory)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="merge-commit">Merge commit</FieldLabel>
-            <Input
-              id="merge-commit"
-              value={mergeCommit}
-              onChange={(event) => setMergeCommit(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="merge-reason">Reason</FieldLabel>
-            <Input
-              id="merge-reason"
-              value={mergeReason}
-              onChange={(event) => setMergeReason(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-        </FieldGroup>
-        <div>
-          <Button
-            type="submit"
-            disabled={
-              pending || !mergeBranch || !mergeMemory || mergeCommit.trim() === "" || mergeReason.trim() === ""
+            </ul>
+          )}
+        </ActionCard>
+
+        <form
+          className="min-w-0"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!promote) {
+              return;
+            }
+            void run(
+              () =>
+                cairn("promote", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    project_id: projectId,
+                    memory_id: promote.memory_id,
+                    reason: promoteReason,
+                  }),
+                }),
+              "Memory promoted to a project decision.",
+            ).then((ok) => ok && setPromoteReason(""));
+          }}
+        >
+          <ActionCard
+            title="Promote a memory"
+            description="Copy one of your personal memories into this project as a decision."
+            footer={
+              <Button type="submit" disabled={pending || !promote || promoteReason.trim() === ""}>
+                Promote memory
+              </Button>
             }
           >
-            Merge branch
-          </Button>
-        </div>
-      </form>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="promote-memory">Personal memory</FieldLabel>
+                <Choice
+                  id="promote-memory"
+                  value={promote?.memory_id ?? ""}
+                  options={memories.map((memory) => ({
+                    value: memory.memory_id,
+                    label: preview(memory),
+                  }))}
+                  empty="No personal memories"
+                  onChange={setPromoteId}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="promote-reason">Reason</FieldLabel>
+                <Input
+                  id="promote-reason"
+                  value={promoteReason}
+                  onChange={(event) => setPromoteReason(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </Field>
+            </FieldGroup>
+          </ActionCard>
+        </form>
 
-      <form
-        className="flex max-w-xl min-w-0 flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!closeBranch) {
-            return;
-          }
-          const branch = closeBranch;
-          setConfirm({
-            title: "Close this branch?",
-            description: closeBranchImpact(branch.name),
-            label: "Close branch",
-            go: () =>
-              void run(
-                () =>
-                  cairn(`${base}/branches/${encodeURIComponent(branch.branch_id)}/close`, {
-                    method: "POST",
-                    body: JSON.stringify({ reason: closeReason.trim() }),
+        <form
+          className="min-w-0"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!verify) {
+              return;
+            }
+            void run(
+              () =>
+                cairn("projects/verify", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    project_id: projectId,
+                    memory_id: verify.memory_id,
+                    commit: verifyCommit.trim(),
                   }),
-                `Branch ${branch.name} closed.`,
-              ).then((ok) => ok && setCloseReason("")),
-          });
-        }}
-      >
-        <h3 className="text-sm font-medium">Close a branch</h3>
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="close-branch">Branch</FieldLabel>
-            <select
-              id="close-branch"
-              className={SELECT_CLASS}
-              value={closeBranch?.branch_id ?? ""}
-              onChange={(event) => setCloseBranchId(event.target.value)}
-              disabled={openBranches.length === 0}
-            >
-              {openBranches.length === 0 ? <option value="">No open branches</option> : null}
-              {openBranches.map((branch) => (
-                <option key={branch.branch_id} value={branch.branch_id}>
-                  {branch.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="close-reason">Reason</FieldLabel>
-            <Input
-              id="close-reason"
-              value={closeReason}
-              onChange={(event) => setCloseReason(event.target.value)}
-              autoComplete="off"
-              required
-            />
-          </Field>
-        </FieldGroup>
-        <div>
-          <Button
-            type="submit"
-            variant="destructive"
-            disabled={pending || !closeBranch || closeReason.trim() === ""}
+                }),
+              "Decision verified.",
+            ).then((ok) => ok && setVerifyCommit(""));
+          }}
+        >
+          <ActionCard
+            title="Verify a decision"
+            description="Tie a decision to the commit where you checked that it still holds."
+            footer={
+              <Button type="submit" disabled={pending || !verify || verifyCommit.trim() === ""}>
+                Verify decision
+              </Button>
+            }
           >
-            Close branch
-          </Button>
-        </div>
-      </form>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="verify-memory">Decision</FieldLabel>
+                <Choice
+                  id="verify-memory"
+                  value={verify?.memory_id ?? ""}
+                  options={decisions.map((memory) => ({
+                    value: memory.memory_id,
+                    label: memory.memory_id,
+                  }))}
+                  empty="No decisions"
+                  onChange={setVerifyId}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
+                <Input
+                  id="verify-commit"
+                  className="font-mono"
+                  value={verifyCommit}
+                  onChange={(event) => setVerifyCommit(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </Field>
+            </FieldGroup>
+          </ActionCard>
+        </form>
+
+        <form
+          className="min-w-0"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!mergeBranch || !mergeMemory) {
+              return;
+            }
+            const [branch, memory] = [mergeBranch, mergeMemory];
+            setConfirm({
+              title: "Merge this branch?",
+              description: mergeBranchImpact(branch.name),
+              label: "Merge branch",
+              go: () =>
+                void run(
+                  () =>
+                    cairn(`${base}/branches/${encodeURIComponent(branch.branch_id)}/merge`, {
+                      method: "POST",
+                      body: JSON.stringify({
+                        memory_id: memory.memory_id,
+                        commit: mergeCommit.trim(),
+                        reason: mergeReason.trim(),
+                      }),
+                    }),
+                  `Branch ${branch.name} merged.`,
+                ).then((ok) => {
+                  if (ok) {
+                    setMergeCommit("");
+                    setMergeReason("");
+                  }
+                }),
+            });
+          }}
+        >
+          <ActionCard
+            title="Merge a branch"
+            description="Turn one branch memory into a project decision and mark the branch merged."
+            footer={
+              <Button
+                type="submit"
+                disabled={
+                  pending ||
+                  !mergeBranch ||
+                  !mergeMemory ||
+                  mergeCommit.trim() === "" ||
+                  mergeReason.trim() === ""
+                }
+              >
+                Merge branch
+              </Button>
+            }
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="merge-branch">Branch</FieldLabel>
+                <Choice
+                  id="merge-branch"
+                  value={mergeBranch?.branch_id ?? ""}
+                  options={branchOptions}
+                  empty="No open branches"
+                  onChange={setMergeBranchId}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="merge-memory">Branch memory to merge</FieldLabel>
+                <Choice
+                  id="merge-memory"
+                  value={mergeMemory?.memory_id ?? ""}
+                  options={mergeMemories.map((memory) => ({
+                    value: memory.memory_id,
+                    label: preview(memory),
+                  }))}
+                  empty="No memories captured on this branch"
+                  onChange={setMergeMemoryId}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="merge-commit">Merge commit</FieldLabel>
+                <Input
+                  id="merge-commit"
+                  className="font-mono"
+                  value={mergeCommit}
+                  onChange={(event) => setMergeCommit(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="merge-reason">Reason</FieldLabel>
+                <Input
+                  id="merge-reason"
+                  value={mergeReason}
+                  onChange={(event) => setMergeReason(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </Field>
+            </FieldGroup>
+          </ActionCard>
+        </form>
+
+        <form
+          className="min-w-0"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!closeBranch) {
+              return;
+            }
+            const branch = closeBranch;
+            setConfirm({
+              title: "Close this branch?",
+              description: closeBranchImpact(branch.name),
+              label: "Close branch",
+              go: () =>
+                void run(
+                  () =>
+                    cairn(`${base}/branches/${encodeURIComponent(branch.branch_id)}/close`, {
+                      method: "POST",
+                      body: JSON.stringify({ reason: closeReason.trim() }),
+                    }),
+                  `Branch ${branch.name} closed.`,
+                ).then((ok) => ok && setCloseReason("")),
+            });
+          }}
+        >
+          <ActionCard
+            title="Close a branch"
+            description="Retire a branch without merging it. A closed branch cannot be merged later."
+            footer={
+              <Button
+                type="submit"
+                variant="destructive"
+                disabled={pending || !closeBranch || closeReason.trim() === ""}
+              >
+                Close branch
+              </Button>
+            }
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="close-branch">Branch</FieldLabel>
+                <Choice
+                  id="close-branch"
+                  value={closeBranch?.branch_id ?? ""}
+                  options={branchOptions}
+                  empty="No open branches"
+                  onChange={setCloseBranchId}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="close-reason">Reason</FieldLabel>
+                <Input
+                  id="close-reason"
+                  value={closeReason}
+                  onChange={(event) => setCloseReason(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </Field>
+            </FieldGroup>
+          </ActionCard>
+        </form>
+      </div>
 
       <AlertDialog
         open={confirm !== null}
@@ -492,6 +570,6 @@ export function ProjectOwnerActions({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </section>
+    </div>
   );
 }

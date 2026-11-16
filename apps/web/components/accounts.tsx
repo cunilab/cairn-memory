@@ -2,10 +2,18 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ShieldAlertIcon } from "lucide-react";
+import { toast } from "sonner";
 import { ConsoleShell } from "@/components/console-shell";
+import { PageHeader } from "@/components/page-header";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
@@ -20,7 +28,6 @@ export function Accounts() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   useResetOnHide(() => {
@@ -28,13 +35,11 @@ export function Accounts() {
     setPassword("");
     setConfirm("");
     setError(null);
-    setNotice(null);
     setPending(false);
   });
 
   async function createAccount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setNotice(null);
     if (password.length < MIN_PASSWORD) {
       setError(`Use a password of at least ${MIN_PASSWORD} characters.`);
       return;
@@ -50,7 +55,7 @@ export function Accounts() {
         method: "POST",
         body: JSON.stringify({ email: email.trim(), password }),
       });
-      setNotice(`Account created for ${email.trim()}.`);
+      toast.success(`Account created for ${email.trim()}.`);
       setEmail("");
       setPassword("");
       setConfirm("");
@@ -65,39 +70,27 @@ export function Accounts() {
     }
   }
 
-  async function logout() {
-    try {
-      await cairn("auth/logout", { method: "POST" });
-    } catch (cause) {
-      if (!(cause instanceof SessionRequiredError)) {
-        setError(cause instanceof Error ? `Could not log out. ${cause.message}` : "Logout failed");
-        return;
-      }
-    }
-    router.replace("/");
-  }
-
   return (
-    <ConsoleShell
-      title="Accounts"
-      action={
-        <Button type="button" variant="outline" onClick={() => void logout()}>
-          Log out
-        </Button>
-      }
-    >
-      <div className="flex min-w-0 flex-col gap-6">
-        {account === undefined ? (
-          <p role="status" className="text-sm text-muted-foreground">
-            Loading…
-          </p>
-        ) : account?.is_admin ? (
-          <>
-            <p className="max-w-prose text-sm text-muted-foreground">
-              Create an account for a teammate. They sign in with this email and password. Your
-              own session is not changed.
-            </p>
-            <form className="flex max-w-sm flex-col gap-3" onSubmit={(event) => void createAccount(event)}>
+    <ConsoleShell crumbs={[{ label: "Admin" }, { label: "Accounts" }]}>
+      <PageHeader
+        title="Accounts"
+        description="Create an account for a teammate. They sign in with this email and password. Your own session is not changed."
+      />
+      {account === undefined ? (
+        <div role="status" className="max-w-md">
+          <span className="sr-only">Loading…</span>
+          <Skeleton className="h-80 w-full" />
+        </div>
+      ) : account?.is_admin ? (
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>
+              <h2>New account</h2>
+            </CardTitle>
+            <CardDescription>Use a password of at least {MIN_PASSWORD} characters.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="flex flex-col gap-4" onSubmit={(event) => void createAccount(event)}>
               <FieldGroup>
                 <Field>
                   <FieldLabel htmlFor="account-email">Email</FieldLabel>
@@ -131,31 +124,34 @@ export function Accounts() {
                     autoComplete="new-password"
                     required
                   />
+                  <FieldDescription>Type it again so a typo does not lock them out.</FieldDescription>
                 </Field>
               </FieldGroup>
               {error ? (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
-              ) : null}
-              {notice ? (
-                <p role="status" className="text-sm text-muted-foreground">
-                  {notice}
-                </p>
+                <Alert variant="destructive">
+                  <AlertDescription className="text-destructive">{error}</AlertDescription>
+                </Alert>
               ) : null}
               <div>
                 <Button type="submit" disabled={pending}>
+                  {pending ? <Spinner aria-hidden /> : null}
                   {pending ? "Creating account…" : "Create account"}
                 </Button>
               </div>
             </form>
-          </>
-        ) : (
-          <p role="alert" className="text-sm text-destructive">
-            Only an admin can create accounts.
-          </p>
-        )}
-      </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <ShieldAlertIcon />
+            </EmptyMedia>
+            <EmptyTitle>Admins only</EmptyTitle>
+            <EmptyDescription role="alert">Only an admin can create accounts.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
     </ConsoleShell>
   );
 }
