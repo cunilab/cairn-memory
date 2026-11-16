@@ -86,12 +86,16 @@ account scope. Their behavior is owned by the contract named here:
 | Tool | Owner |
 | --- | --- |
 | `memory_project_list`, `memory_project_register`, `memory_promote`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
-| `memory_project_invite`, `memory_project_share`, `memory_project_shared`, `memory_project_revoke`, `memory_project_team_create`, `memory_project_team`, `memory_project_team_add`, `memory_delete` | [CM-CONTRACT-010](share-layer5.md) |
+| `memory_project_share`, `memory_project_shared`, `memory_project_revoke`, `memory_project_team_create`, `memory_project_team`, `memory_delete` | [CM-CONTRACT-010](share-layer5.md) |
 
 Removed with the local-store mode: `memory_sessions` (it listed the file store's unscoped
 sessions), `memory_account_bootstrap` and `memory_account_register` (account creation is a
 web action), and `memory_project_team_remove` (member removal is web-only; a device token is
-`403`, so the tool would only invite retries). `memory_diagnose` returns the lifecycle
+`403`, so the tool would only invite retries). Since 2026-11-16 there is no invite, team
+member add or member removal at all, so `memory_project_invite` and
+`memory_project_team_add` are gone too; a teammate joins a project by capturing in a checkout
+whose `.cairn/project.json` names it ([project-layer4](project-layer4.md)). `cairn init`, which
+writes that file, is a CLI command only. `memory_diagnose` returns the lifecycle
 summary of `GET /diagnose`, not the earlier local storage counts. `memory_project_list` is
 new: an agent needs a project id before it can promote or share. Argument names are the
 camelCase names of the REST bodies; path ids (`projectId`, `memoryId`) are percent-encoded

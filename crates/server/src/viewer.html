@@ -705,21 +705,8 @@
         email.autocomplete = "off";
         email.value = state.shareEmail || "";
         email.addEventListener("input", () => { state.shareEmail = email.value; });
-        const invite = document.createElement("button");
-        invite.className = "button";
-        invite.type = "submit";
-        invite.textContent = "Invite member";
-        shareForm.append(email, invite);
-        shareForm.addEventListener("submit", (event) => {
-          event.preventDefault();
-          const value = readShareEmail();
-          if (!value) return;
-          postProjectShare(
-            `/cairn-memory/projects/${data.project.project_id}/members`,
-            { email: value },
-            data.project,
-          );
-        });
+        shareForm.append(email);
+        shareForm.addEventListener("submit", (event) => event.preventDefault());
         inner.append(eyebrow, title, content, shareForm, teamSection, facts, evidence, decisions, handoffSection, staleSection, conflictSection, revocationSection, history);
       }
       detail.appendChild(inner);
@@ -764,36 +751,7 @@
             data.project,
           );
         });
-        const actions = document.createElement("div");
-        actions.className = "detail-actions";
-        const add = document.createElement("button");
-        add.className = "button";
-        add.type = "button";
-        add.textContent = "Add member";
-        add.addEventListener("click", () => {
-          const email = readShareEmail();
-          if (!email) return;
-          postProjectShare(
-            `/cairn-memory/projects/${data.project.project_id}/team/members`,
-            { email },
-            data.project,
-          );
-        });
-        const remove = document.createElement("button");
-        remove.className = "button danger";
-        remove.type = "button";
-        remove.textContent = "Remove member";
-        remove.addEventListener("click", () => {
-          const email = readShareEmail();
-          if (!email) return;
-          postProjectShare(
-            `/cairn-memory/projects/${data.project.project_id}/team/members/remove`,
-            { email },
-            data.project,
-          );
-        });
-        actions.append(add, remove);
-        section.append(form, actions);
+        section.append(form);
       }
       return section;
     }

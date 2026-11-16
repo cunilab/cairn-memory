@@ -221,6 +221,10 @@ impl From<serde_json::Error> for StoreError {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkContext {
+    /// The committed `.cairn/project.json` project id. A capture that names an existing
+    /// project the person does not own makes the person a member of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub repository: Option<String>,
     pub branch: Option<String>,
     pub worktree: Option<String>,
@@ -481,8 +485,6 @@ struct StoreState {
     #[serde(default)]
     project_teams: Vec<ProjectTeamRecord>,
     #[serde(default)]
-    project_team_members: Vec<ProjectTeamMemberRecord>,
-    #[serde(default)]
     audit_events: Vec<StoredAuditEvent>,
 }
 
@@ -529,7 +531,6 @@ impl Default for StoreState {
             project_policies: Vec::new(),
             dismissed_share_candidates: Vec::new(),
             project_teams: Vec::new(),
-            project_team_members: Vec::new(),
             audit_events: Vec::new(),
         }
     }
@@ -733,14 +734,6 @@ pub struct ProjectMergeResult {
     pub memory: Memory,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectMembership {
-    pub project_id: String,
-    pub person_id: String,
-    pub email: String,
-    pub created_at: String,
-}
-
 pub const SHARE_REASON_MANUAL: &str = "manual";
 pub const SHARE_REASON_AUTO: &str = "auto_nonsensitive_project_memory";
 
@@ -809,6 +802,16 @@ pub struct ProjectMemoryShare {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<String>,
+}
+
+/// One person of a project: its owner, or a member who joined by capture.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectPerson {
+    pub person_id: String,
+    pub email: String,
+    /// `owner` or `member`.
+    pub role: String,
+    pub joined_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -893,13 +896,6 @@ struct ProjectTeamRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ProjectTeamMemberRecord {
-    project_id: String,
-    member_person_id: String,
-    created_at: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredAuditEvent {
     person_id: String,
     audit_id: String,
@@ -929,15 +925,6 @@ pub struct MemoryStore {
     persisted: StoreState,
 }
 
-fn membership_view(record: &ProjectMemberRecord, email: &str) -> ProjectMembership {
-    ProjectMembership {
-        project_id: record.project_id.clone(),
-        person_id: record.member_person_id.clone(),
-        email: email.to_owned(),
-        created_at: record.created_at.clone(),
-    }
-}
-
 fn share_view(record: &ProjectShareRecord) -> ProjectMemoryShare {
     ProjectMemoryShare {
         project_id: record.project_id.clone(),
@@ -946,14 +933,6 @@ fn share_view(record: &ProjectShareRecord) -> ProjectMemoryShare {
         member_email: None,
         created_at: record.created_at.clone(),
         revoked_at: record.revoked_at.clone(),
-    }
-}
-
-fn team_member_view(record: &ProjectTeamMemberRecord, email: &str) -> ProjectTeamMember {
-    ProjectTeamMember {
-        person_id: record.member_person_id.clone(),
-        email: email.to_owned(),
-        created_at: record.created_at.clone(),
     }
 }
 
@@ -1276,8 +1255,6 @@ impl MemoryStore {
     fn project_has_other_members(&self, project_id: &str, owner_person_id: &str) -> bool {
         self.state.project_members.iter().any(|member| {
             member.project_id == project_id && member.member_person_id != owner_person_id
-        }) || self.state.project_team_members.iter().any(|member| {
-            member.project_id == project_id && member.member_person_id != owner_person_id
         })
     }
 
@@ -1331,6 +1308,90 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Admin web session only: every account, oldest first.
+    pub fn accounts(&self, token: &str) -> Result<Vec<Account>, StoreError> {
+        self.authenticate_admin(token)?;
+        Ok(self
+            .state
+            .accounts
+            .iter()
+            .map(|record| record.account.clone())
+            .collect())
+    }
+
+    /// Admin web session only. Sets another account's password and revokes every web
+    /// session of that account; device tokens stay valid. Audited under the target.
+    pub fn reset_account_password(
+        &mut self,
+        token: &str,
+        person_id: &str,
+        new_password: &str,
+    ) -> Result<(), StoreError> {
+        let admin = self.authenticate_admin(token)?;
+        validate_password(new_password)?;
+        let password_hash = hash_password(new_password)?;
+        let record = self
+            .state
+            .accounts
+            .iter_mut()
+            .find(|record| record.account.person_id == person_id)
+            .ok_or_else(|| StoreError::Validation(format!("unknown account: {person_id}")))?;
+        record.password_hash = password_hash;
+        self.revoke_sessions_except(person_id, None);
+        self.record_share_audit(
+            person_id,
+            "account_password_reset",
+            Some(person_id),
+            serde_json::json!({ "actor_person_id": admin.person_id }),
+        );
+        self.persist()
+    }
+
+    /// Web session only. Needs the current password, then revokes the account's other
+    /// web sessions and keeps this one.
+    pub fn change_password(
+        &mut self,
+        token: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<(), StoreError> {
+        let account = self.authenticate_session(token)?;
+        let record = self
+            .state
+            .accounts
+            .iter_mut()
+            .find(|record| record.account.person_id == account.person_id)
+            .ok_or_else(|| StoreError::Validation("account authentication failed".to_owned()))?;
+        if !verify_password(current_password, &record.password_hash) {
+            return Err(StoreError::Validation(
+                "invalid account credentials".to_owned(),
+            ));
+        }
+        validate_password(new_password)?;
+        record.password_hash = hash_password(new_password)?;
+        self.revoke_sessions_except(&account.person_id, Some(&hash_token(token)));
+        self.record_share_audit(
+            &account.person_id,
+            "account_password_change",
+            Some(&account.person_id),
+            serde_json::json!({}),
+        );
+        self.persist()
+    }
+
+    /// Stages the revocation of the person's open web sessions, except the one `keep`.
+    fn revoke_sessions_except(&mut self, person_id: &str, keep: Option<&str>) {
+        let revoked_at = timestamp();
+        for session in &mut self.state.auth_sessions {
+            if session.person_id == person_id
+                && session.revoked_at.is_none()
+                && keep != Some(session.token_hash.as_str())
+            {
+                session.revoked_at = Some(revoked_at.clone());
+            }
+        }
+    }
+
     pub fn register_project(
         &mut self,
         account_token: &str,
@@ -1338,6 +1399,31 @@ impl MemoryStore {
         name: &str,
         default_branch: Option<String>,
     ) -> Result<Project, StoreError> {
+        self.ensure_project(account_token, repository, name, default_branch)
+            .map(|(project, _)| project)
+    }
+
+    /// `cairn init`: the caller's project for the repository, created when there is none.
+    /// `name` defaults to the repository; the flag is true when the project is new.
+    pub fn init_project(
+        &mut self,
+        account_token: &str,
+        repository: &str,
+        name: Option<&str>,
+    ) -> Result<(Project, bool), StoreError> {
+        let repository = repository.trim();
+        validate_project_text(repository, "repository")?;
+        let name = name.map(str::trim).filter(|name| !name.is_empty());
+        self.ensure_project(account_token, repository, name.unwrap_or(repository), None)
+    }
+
+    fn ensure_project(
+        &mut self,
+        account_token: &str,
+        repository: &str,
+        name: &str,
+        default_branch: Option<String>,
+    ) -> Result<(Project, bool), StoreError> {
         let account = self.authenticate_account(account_token)?;
         let repository = repository.trim();
         let name = name.trim();
@@ -1362,11 +1448,11 @@ impl MemoryStore {
                 self.claim_project_owner(&account.person_id, &project.project_id);
                 self.persist()?;
             }
-            return Ok(project);
+            return Ok((project, false));
         }
         let project = self.stage_project(&account.person_id, repository, name, default_branch);
         self.persist()?;
-        Ok(project)
+        Ok((project, true))
     }
 
     /// Adds a project owned by `person_id`. The caller persists.
@@ -1462,6 +1548,63 @@ impl MemoryStore {
         branch
     }
 
+    /// Membership through the committed project file: a capture whose `project_id` names an
+    /// existing project that another person owns makes the person a member, idempotently.
+    /// True when the person is such a member. An unknown, ownerless or own project id is
+    /// ignored (false), so the capture falls back to repository registration. The caller
+    /// has already acknowledged the capture, so it logs a failure.
+    fn join_context_project(
+        &mut self,
+        person_id: &str,
+        context: &WorkContext,
+    ) -> Result<bool, StoreError> {
+        let Some(project_id) = context
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+        else {
+            return Ok(false);
+        };
+        let Some(owner) = self.project_owner_id(project_id) else {
+            return Ok(false);
+        };
+        if owner == person_id
+            || !self
+                .state
+                .projects
+                .iter()
+                .any(|project| project.project_id == project_id)
+        {
+            return Ok(false);
+        }
+        if self
+            .state
+            .project_members
+            .iter()
+            .any(|record| record.project_id == project_id && record.member_person_id == person_id)
+        {
+            return Ok(true);
+        }
+        self.state.project_members.push(ProjectMemberRecord {
+            project_id: project_id.to_owned(),
+            owner_person_id: owner.clone(),
+            member_person_id: person_id.to_owned(),
+            created_at: timestamp(),
+        });
+        self.record_share_audit(
+            &owner,
+            "project_member_joined",
+            Some(person_id),
+            serde_json::json!({
+                "project_id": project_id,
+                "member_person_id": person_id,
+            }),
+        );
+        self.persist()?;
+        Ok(true)
+    }
+
     /// Automatic registration on account capture. The person's own project for the
     /// repository comes first, then one they are a member of; a project with no owner
     /// record is never claimed. Only when there is none, a project owned by this person is
@@ -1472,6 +1615,10 @@ impl MemoryStore {
         person_id: &str,
         context: &WorkContext,
     ) -> Result<(), StoreError> {
+        // A member reads the owner's project, so no private project is created for it.
+        if self.join_context_project(person_id, context)? {
+            return Ok(());
+        }
         let Some(repository) = context
             .repository
             .as_deref()
@@ -2324,46 +2471,6 @@ impl MemoryStore {
             .collect())
     }
 
-    pub fn invite_project_member(
-        &mut self,
-        account_token: &str,
-        project_id: &str,
-        email: &str,
-    ) -> Result<ProjectMembership, StoreError> {
-        let account = self.authenticate_account(account_token)?;
-        self.require_project_owner(&account, project_id)?;
-        let email = normalize_email(email)?;
-        if email == account.email {
-            return Err(StoreError::Validation(
-                "project owner cannot invite themselves".to_owned(),
-            ));
-        }
-        let member = self.account_by_email(&email)?;
-        if let Some(existing) = self.state.project_members.iter().find(|record| {
-            record.project_id == project_id && record.member_person_id == member.person_id
-        }) {
-            return Ok(membership_view(existing, &member.email));
-        }
-        let record = ProjectMemberRecord {
-            project_id: project_id.to_owned(),
-            owner_person_id: account.person_id.clone(),
-            member_person_id: member.person_id.clone(),
-            created_at: timestamp(),
-        };
-        self.record_share_audit(
-            &account.person_id,
-            "project_member_invited",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        );
-        self.state.project_members.push(record.clone());
-        self.persist()?;
-        Ok(membership_view(&record, &member.email))
-    }
-
     pub fn share_project_memory(
         &mut self,
         account_token: &str,
@@ -2542,91 +2649,58 @@ impl MemoryStore {
         self.team_view(&record)
     }
 
-    pub fn add_project_team_member(
-        &mut self,
+    /// The project's owner first, then its members by join time. Owner and members may read it.
+    pub fn project_people(
+        &self,
         account_token: &str,
         project_id: &str,
-        email: &str,
-    ) -> Result<ProjectTeamMember, StoreError> {
+    ) -> Result<Vec<ProjectPerson>, StoreError> {
         let account = self.authenticate_account(account_token)?;
-        self.require_project_owner(&account, project_id)?;
-        self.require_project_team(project_id)?;
-        let member = self.member_account(project_id, email)?;
-        if let Some(existing) = self
-            .state
-            .project_team_members
-            .iter()
-            .find(|record| {
-                record.project_id == project_id && record.member_person_id == member.person_id
-            })
-            .cloned()
-        {
-            return Ok(team_member_view(&existing, &member.email));
-        }
-        let record = ProjectTeamMemberRecord {
-            project_id: project_id.to_owned(),
-            member_person_id: member.person_id.clone(),
-            created_at: timestamp(),
+        self.require_project_reader(&account, project_id)?;
+        let email_of = |person_id: &str| {
+            self.state
+                .accounts
+                .iter()
+                .find(|record| record.account.person_id == person_id)
+                .map(|record| record.account.email.clone())
+                .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))
         };
-        self.record_share_audit(
-            &account.person_id,
-            "project_team_member_added",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        );
-        self.state.project_team_members.push(record.clone());
-        self.persist()?;
-        Ok(team_member_view(&record, &member.email))
-    }
-
-    pub fn remove_project_team_member(
-        &mut self,
-        account_token: &str,
-        project_id: &str,
-        email: &str,
-    ) -> Result<ProjectTeamMember, StoreError> {
-        // Removing a member reopens the solo-project merge path, so it stays web-only.
-        let account = self.authenticate_session(account_token)?;
-        self.require_project_owner(&account, project_id)?;
-        let member = self.account_by_email(&normalize_email(email)?)?;
-        let existing = self
+        let project = self
             .state
-            .project_team_members
+            .projects
             .iter()
-            .find(|record| {
-                record.project_id == project_id && record.member_person_id == member.person_id
-            })
-            .cloned()
-            .ok_or_else(|| StoreError::Validation("account is not a team member".to_owned()))?;
-        let removed_at = timestamp();
-        for share in &mut self.state.project_shares {
-            if share.project_id == project_id
-                && share.member_person_id == member.person_id
-                && share.revoked_at.is_none()
-            {
-                share.revoked_at = Some(removed_at.clone());
-            }
+            .find(|project| project.project_id == project_id)
+            .ok_or_else(|| StoreError::Validation(format!("unknown project: {project_id}")))?;
+        let owner_id = self
+            .project_owner_id(project_id)
+            .ok_or_else(|| StoreError::Validation("account does not own the project".to_owned()))?;
+        let mut people = vec![ProjectPerson {
+            email: email_of(&owner_id)?,
+            person_id: owner_id,
+            role: "owner".to_owned(),
+            joined_at: project.created_at.clone(),
+        }];
+        let mut members = Vec::new();
+        for record in self
+            .state
+            .project_members
+            .iter()
+            .filter(|record| record.project_id == project_id)
+        {
+            members.push(ProjectPerson {
+                person_id: record.member_person_id.clone(),
+                email: email_of(&record.member_person_id)?,
+                role: "member".to_owned(),
+                joined_at: record.created_at.clone(),
+            });
         }
-        self.state.project_members.retain(|record| {
-            record.project_id != project_id || record.member_person_id != member.person_id
+        members.sort_by(|left, right| {
+            left.joined_at
+                .cmp(&right.joined_at)
+                .then(left.person_id.cmp(&right.person_id))
         });
-        self.state.project_team_members.retain(|record| {
-            record.project_id != project_id || record.member_person_id != member.person_id
-        });
-        self.record_share_audit(
-            &account.person_id,
-            "project_team_member_removed",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        );
-        self.persist()?;
-        Ok(team_member_view(&existing, &member.email))
+        people.extend(members);
+        Ok(people)
     }
 
     pub fn project_team(
@@ -2975,25 +3049,12 @@ impl MemoryStore {
         ))
     }
 
-    fn require_project_team(&self, project_id: &str) -> Result<(), StoreError> {
-        if self
-            .state
-            .project_teams
-            .iter()
-            .any(|team| team.project_id == project_id)
-        {
-            return Ok(());
-        }
-        Err(StoreError::Validation(
-            "project has no team space".to_owned(),
-        ))
-    }
-
+    /// The team's members are the project's members (people who joined by capture).
     fn team_view(&self, team: &ProjectTeamRecord) -> Result<ProjectTeam, StoreError> {
         let mut members = Vec::new();
         for record in self
             .state
-            .project_team_members
+            .project_members
             .iter()
             .filter(|record| record.project_id == team.project_id)
         {
@@ -3004,7 +3065,11 @@ impl MemoryStore {
                 .find(|account| account.account.person_id == record.member_person_id)
                 .map(|account| account.account.email.clone())
                 .ok_or_else(|| StoreError::Validation("unknown account email".to_owned()))?;
-            members.push(team_member_view(record, &email));
+            members.push(ProjectTeamMember {
+                person_id: record.member_person_id.clone(),
+                email,
+                created_at: record.created_at.clone(),
+            });
         }
         members.sort_by(|left, right| {
             left.created_at
@@ -3798,7 +3863,12 @@ impl MemoryStore {
             });
         }
 
-        let context = if input.context == WorkContext::default() {
+        // A bare project id (the CLI sends only that) still inherits the session's context.
+        let bare = WorkContext {
+            project_id: None,
+            ..input.context.clone()
+        } == WorkContext::default();
+        let mut context = if bare {
             self.state
                 .sessions
                 .iter()
@@ -3811,6 +3881,7 @@ impl MemoryStore {
         } else {
             input.context.clone()
         };
+        context.project_id = input.context.project_id.clone().or(context.project_id);
         let mut normalized_input = input;
         normalized_input.context = context;
         let observation = normalize_observation(&normalized_input)?;
@@ -5609,6 +5680,7 @@ fn redact_string_list(values: &[String]) -> Vec<String> {
 /// worktree, and commit stay, including a supported secret in those fields.
 pub fn redact_work_context(context: &WorkContext) -> WorkContext {
     WorkContext {
+        project_id: context.project_id.clone(),
         repository: context.repository.clone(),
         branch: context.branch.clone(),
         worktree: context.worktree.clone(),
@@ -6682,6 +6754,7 @@ mod tests {
 
     fn context() -> WorkContext {
         WorkContext {
+            project_id: None,
             repository: Some("cairn-demo".to_owned()),
             branch: Some("feat/auth".to_owned()),
             worktree: Some("wt-auth".to_owned()),
@@ -7250,7 +7323,7 @@ mod tests {
         let member =
             store.register_account("member@example.test", "correct horse battery staple")?;
         let (project_id, _) = owned_project(&mut store, &owner.token, "pimport owner decision")?;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         let before = fs::read(&path)?;
         let owners_before = store.state.memory_owners.len();
 
@@ -7329,7 +7402,7 @@ mod tests {
             &owner.token,
             "payments retry queue uses redis storage",
         )?;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         store.share_project_memory(
             &owner.token,
             &project_id,
@@ -7421,7 +7494,7 @@ mod tests {
         let member =
             store.register_account("member@example.test", "correct horse battery staple")?;
         let (project_id, _) = owned_project(&mut store, &owner.token, "promo first decision")?;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         let source = remember_with_context(&mut store, &owner.token, "promo second source")?;
         let legacy_source = remember_with_context(&mut store, &owner.token, "promo legacy source")?;
 
@@ -7572,7 +7645,7 @@ mod tests {
             store.register_account("member@example.test", "correct horse battery staple")?;
         let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
         let project_id = project.project_id;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         store.create_project_team(&owner.token, &project_id, "Core")?;
         let filter = RecallFilter::default();
         let promote_shared = |store: &mut MemoryStore, content: &str| {
@@ -7661,7 +7734,7 @@ mod tests {
             store.register_account("member@example.test", "correct horse battery staple")?;
         let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
         let project_id = project.project_id;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         let source = remember_with_context(&mut store, &owner.token, "stalecopy old fact")?;
         let copy = store.promote_memory(&owner.token, &project_id, &source.memory_id, "why")?;
         store.share_project_memory(
@@ -7888,7 +7961,7 @@ mod tests {
         let member =
             store.register_account("member@example.test", "correct horse battery staple")?;
         let (project_id, mine) = owned_project(&mut store, &owner.token, "revocation email")?;
-        store.invite_project_member(&owner.token, &project_id, "member@example.test")?;
+        join_project(&mut store, &member.token, &project_id)?;
         store.share_project_memory(
             &owner.token,
             &project_id,
@@ -7923,19 +7996,18 @@ mod tests {
             store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
         let member =
             store.register_account("member@example.test", "correct horse battery staple")?;
-        let removed =
-            store.register_account("removed@example.test", "correct horse battery staple")?;
         let outsider =
             store.register_account("outsider@example.test", "correct horse battery staple")?;
         let (project_id, mine) =
             owned_project(&mut store, &owner.token, "maintain owner decision")?;
-        for email in ["member@example.test", "removed@example.test"] {
-            store.invite_project_member(&owner.token, &project_id, email)?;
-            store.share_project_memory(&owner.token, &project_id, &mine.memory_id, email)?;
-        }
+        join_project(&mut store, &member.token, &project_id)?;
+        store.share_project_memory(
+            &owner.token,
+            &project_id,
+            &mine.memory_id,
+            "member@example.test",
+        )?;
         store.create_project_team(&owner.token, &project_id, "Core")?;
-        store.add_project_team_member(&owner.token, &project_id, "removed@example.test")?;
-        store.remove_project_team_member(&owner.token, &project_id, "removed@example.test")?;
         let before = fs::read(&path)?;
 
         // Owner: unchanged report.
@@ -7943,9 +8015,9 @@ mod tests {
         assert_eq!(report.active_memory_ids, vec![mine.memory_id.clone()]);
         assert_eq!(report.stale_memory_ids, vec![mine.memory_id.clone()]);
 
-        // A current member, a removed member and an outsider who know the id are refused, and
+        // A current member and an outsider who know the id are refused, and
         // the error carries no memory id or commit.
-        for token in [&member.token, &removed.token, &outsider.token] {
+        for token in [&member.token, &outsider.token] {
             let error = store
                 .project_maintenance(token, &project_id, Some("other-commit"))
                 .expect_err("only the owner reads maintenance");
@@ -8010,19 +8082,18 @@ mod tests {
             store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
         let member =
             store.register_account("member@example.test", "correct horse battery staple")?;
-        let removed =
-            store.register_account("removed@example.test", "correct horse battery staple")?;
         let outsider =
             store.register_account("outsider@example.test", "correct horse battery staple")?;
         let (project_id, shared) =
             owned_project(&mut store, &owner.token, "registry owner decision")?;
-        for email in ["member@example.test", "removed@example.test"] {
-            store.invite_project_member(&owner.token, &project_id, email)?;
-            store.share_project_memory(&owner.token, &project_id, &shared.memory_id, email)?;
-        }
+        join_project(&mut store, &member.token, &project_id)?;
+        store.share_project_memory(
+            &owner.token,
+            &project_id,
+            &shared.memory_id,
+            "member@example.test",
+        )?;
         store.create_project_team(&owner.token, &project_id, "Core")?;
-        store.add_project_team_member(&owner.token, &project_id, "removed@example.test")?;
-        store.remove_project_team_member(&owner.token, &project_id, "removed@example.test")?;
         let branch =
             store.register_branch(&owner.token, &project_id, "feat/auth", None, None, None)?;
         let source = remember_with_context(&mut store, &owner.token, "registry merge source")?;
@@ -8071,10 +8142,10 @@ mod tests {
                     .map(drop)
             }),
         ];
-        // A current member, a removed member and an outsider who know every id are refused on
+        // A current member and an outsider who know every id are refused on
         // every operation, with one error that carries no registry content, and nothing is written.
         for (name, op) in &ops {
-            for token in [&member.token, &removed.token, &outsider.token] {
+            for token in [&member.token, &outsider.token] {
                 let error = op(
                     &mut store,
                     token,
@@ -8771,7 +8842,7 @@ mod tests {
             "c1",
             "solo",
         )?;
-        store.invite_project_member(&owner.token, &project_id, "other@example.test")?;
+        join_project(&mut store, &other.token, &project_id)?;
         let shared_branch =
             store.register_branch(&owner.token, &project_id, "feat/shared", None, None, None)?;
         let mut shared_context = context();
@@ -8858,6 +8929,27 @@ mod tests {
             context: WorkContext::default(),
             ..observation_for(session_id, event_id, content)
         }
+    }
+
+    /// Makes the account a project member the way the committed project file does: one
+    /// capture that carries the project id.
+    fn join_project(
+        store: &mut MemoryStore,
+        token: &str,
+        project_id: &str,
+    ) -> Result<(), StoreError> {
+        let event_id = format!("join-{project_id}-{}", &hash_token(token)[..8]);
+        store.capture_for_account(
+            token,
+            ObservationInput {
+                context: WorkContext {
+                    project_id: Some(project_id.to_owned()),
+                    ..WorkContext::default()
+                },
+                ..observation_for("join", &event_id, "joined by project file")
+            },
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -10864,6 +10956,7 @@ mod tests {
 
     fn metadata_secret_context() -> WorkContext {
         WorkContext {
+            project_id: None,
             repository: Some("cairn-demo".to_owned()),
             branch: Some("sk-looking-name".to_owned()),
             worktree: Some("wt-auth".to_owned()),
@@ -11597,7 +11690,10 @@ mod tests {
         let mut store = MemoryStore::open(&path)?;
         let owner =
             store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-        store.register_account("member@example.test", "correct horse battery staple")?;
+        let member_id = store
+            .register_account("member@example.test", "correct horse battery staple")?
+            .account
+            .person_id;
         let token = owner.token;
         let member = "member@example.test";
 
@@ -11609,9 +11705,12 @@ mod tests {
         let source = remember_with_context(&mut store, &token, "rollback source")?;
         let promoted = store.promote_memory(&token, &project_id, &source.memory_id, "why")?;
 
+        let joining = WorkContext {
+            project_id: Some(project_id.clone()),
+            ..WorkContext::default()
+        };
         failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-            s.invite_project_member(&token, &project_id, member)
-                .map(|_| ())
+            s.join_context_project(&member_id, &joining).map(|_| ())
         })?;
         failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
             s.share_project_memory(&token, &project_id, &promoted.memory_id, member)
@@ -11623,14 +11722,6 @@ mod tests {
         })?;
         failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
             s.create_project_team(&token, &project_id, "Core")
-                .map(|_| ())
-        })?;
-        failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-            s.add_project_team_member(&token, &project_id, member)
-                .map(|_| ())
-        })?;
-        failed_write_rolls_back_then_retry_persists(&mut store, &path, |s| {
-            s.remove_project_team_member(&token, &project_id, member)
                 .map(|_| ())
         })?;
         let _ = fs::remove_dir_all(&dir);
@@ -13084,26 +13175,21 @@ mod tests {
     }
 
     #[test]
-    fn device_token_cannot_remove_members_so_the_merge_gate_holds() -> Result<(), StoreError> {
-        let path = temp_store_path("device-remove-member");
+    fn a_project_with_a_member_needs_the_web_session_to_merge() -> Result<(), StoreError> {
+        let path = temp_store_path("device-merge-gate");
         let mut store = MemoryStore::open(&path)?;
         let owner =
             store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
-        store.register_account("member@example.test", "correct horse battery staple")?;
+        let member =
+            store.register_account("member@example.test", "correct horse battery staple")?;
         let device =
             store.register_device("device-own", &owner.account.person_id, None, "Laptop")?;
         let (project_id, _) = owned_project(&mut store, &device.token, "device remove decision")?;
-        store.create_project_team(&device.token, &project_id, "Core")?;
-        store.invite_project_member(&device.token, &project_id, "member@example.test")?;
-        store.add_project_team_member(&device.token, &project_id, "member@example.test")?;
         let branch =
             store.register_branch(&device.token, &project_id, "feat/auth", None, None, None)?;
         let source = remember_with_context(&mut store, &device.token, "gate merge source")?;
+        join_project(&mut store, &member.token, &project_id)?;
 
-        let refused = store
-            .remove_project_team_member(&device.token, &project_id, "member@example.test")
-            .expect_err("removing a member is web-only");
-        assert!(refused.to_string().contains(WEB_ONLY_ERROR));
         let blocked = store
             .confirm_branch_merge(
                 &device.token,
@@ -13115,10 +13201,8 @@ mod tests {
             )
             .expect_err("a project with members still needs the web console");
         assert!(blocked.to_string().contains(WEB_ONLY_ERROR));
-
-        store.remove_project_team_member(&owner.token, &project_id, "member@example.test")?;
         store.confirm_branch_merge(
-            &device.token,
+            &owner.token,
             &project_id,
             &branch.branch_id,
             &source.memory_id,
@@ -13511,7 +13595,7 @@ mod tests {
         let member = store.register_account("m@example.test", "correct horse battery staple")?;
         let outsider = store.register_account("x@example.test", "correct horse battery staple")?;
         let shared = store.register_project(&owner.token, "shared-repo", "Shared", None)?;
-        store.invite_project_member(&owner.token, &shared.project_id, "m@example.test")?;
+        join_project(&mut store, &member.token, &shared.project_id)?;
 
         capture_in(
             &mut store,
@@ -13746,6 +13830,7 @@ mod tests {
 
     fn context_from_fixture(value: &Value) -> WorkContext {
         WorkContext {
+            project_id: None,
             repository: value["repository"].as_str().map(ToOwned::to_owned),
             branch: value["branch"].as_str().map(ToOwned::to_owned),
             worktree: value["worktree"].as_str().map(ToOwned::to_owned),
@@ -14014,6 +14099,355 @@ mod tests {
         let again =
             store.start_session_for_account(&a.token, "push-start", WorkContext::default())?;
         assert_eq!(again.context.branch.as_deref(), Some("feat/auth"));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    fn with_project_id(mut context: WorkContext, project_id: &str) -> WorkContext {
+        context.project_id = Some(project_id.to_owned());
+        context
+    }
+
+    #[test]
+    fn a_capture_with_a_project_id_makes_the_capturer_a_member_once() -> Result<(), StoreError> {
+        let path = temp_store_path("join-by-project-file");
+        let mut store = MemoryStore::open(&path)?;
+        let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+        let member = store.register_account("m@example.test", "correct horse battery staple")?;
+        let shared = store.register_project(&owner.token, "cairn-demo", "Shared", None)?;
+        store.create_project_team(&owner.token, &shared.project_id, "Core")?;
+
+        // The member's repository name differs, so only the project id can link it.
+        let context = with_project_id(
+            repo_context("other-name", Some("feat/m")),
+            &shared.project_id,
+        );
+        capture_in(&mut store, &member.token, "j1", context.clone())?;
+        capture_in(&mut store, &member.token, "j2", context)?;
+
+        assert_eq!(
+            store.state.projects.len(),
+            1,
+            "no duplicate private project"
+        );
+        assert!(store.state.project_branches.is_empty());
+        let projects = store.projects(&member.token)?;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].project_id, shared.project_id);
+        let team = store.project_team(&owner.token, &shared.project_id)?;
+        assert_eq!(
+            team.members.len(),
+            1,
+            "joining twice records one membership"
+        );
+        assert_eq!(team.members[0].email, "m@example.test");
+        let stored = store
+            .observations()
+            .find(|observation| observation.event_id == "j1")
+            .expect("the observation is stored");
+        assert_eq!(
+            stored.context.project_id.as_deref(),
+            Some(shared.project_id.as_str())
+        );
+        let audit = store.audit_events(&owner.token, 10)?;
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|event| event.action == "project_member_joined")
+                .count(),
+            1
+        );
+
+        // The new member can be shared with, and reads the shared decision.
+        let source = remember_with_context(&mut store, &owner.token, "member shared source")?;
+        let promoted =
+            store.promote_memory(&owner.token, &shared.project_id, &source.memory_id, "why")?;
+        store.share_project_memory(
+            &owner.token,
+            &shared.project_id,
+            &promoted.memory_id,
+            "m@example.test",
+        )?;
+        assert_eq!(
+            store
+                .shared_project_memories(&member.token, &shared.project_id)?
+                .len(),
+            1
+        );
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_ownerless_or_own_project_id_is_ignored_by_a_capture() -> Result<(), StoreError> {
+        let path = temp_store_path("join-ignored");
+        let mut store = MemoryStore::open(&path)?;
+        let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+        let other = store.register_account("x@example.test", "correct horse battery staple")?;
+        let own = store.register_project(&owner.token, "own-repo", "Own", None)?;
+
+        // Unknown id: the capture succeeds and registers the repository as before.
+        capture_in(
+            &mut store,
+            &other.token,
+            "u1",
+            with_project_id(repo_context("fallback-repo", Some("main")), "project-nope"),
+        )?;
+        let mine = store.projects(&other.token)?;
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].repository, "fallback-repo");
+
+        // A project with no owner record is never joined.
+        store.state.projects.push(Project {
+            project_id: "project-ownerless".to_owned(),
+            repository: "legacy-repo".to_owned(),
+            name: "Legacy".to_owned(),
+            default_branch: None,
+            created_at: "1".to_owned(),
+            updated_at: "1".to_owned(),
+        });
+        capture_in(
+            &mut store,
+            &other.token,
+            "u2",
+            with_project_id(repo_context("legacy-repo", None), "project-ownerless"),
+        )?;
+        assert!(store.state.project_members.is_empty());
+
+        // The owner's own project id adds no membership and still registers the branch.
+        capture_in(
+            &mut store,
+            &owner.token,
+            "u3",
+            with_project_id(repo_context("own-repo", Some("feat/o")), &own.project_id),
+        )?;
+        assert!(store.state.project_members.is_empty());
+        assert_eq!(store.branches(&owner.token, &own.project_id)?.len(), 1);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_device_sync_push_with_a_project_id_joins_and_a_bare_id_keeps_session_context()
+    -> Result<(), StoreError> {
+        let path = temp_store_path("join-by-push");
+        let mut store = MemoryStore::open(&path)?;
+        let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+        let member = store.register_account("m@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-m", &member.account.person_id, None, "Hook")?;
+        let shared = store.register_project(&owner.token, "shared-repo", "Shared", None)?;
+
+        store.start_session_for_account(&member.token, "bare", context())?;
+        let mut input = observation_for("bare", "bare-1", "barefact");
+        input.context = WorkContext {
+            project_id: Some(shared.project_id.clone()),
+            ..WorkContext::default()
+        };
+        let pushed = store.sync_push(&device.token, input)?;
+        assert_eq!(store.projects(&member.token)?.len(), 1);
+        assert_eq!(store.state.projects.len(), 1);
+        assert_eq!(
+            pushed.observation.context.project_id.as_deref(),
+            Some(shared.project_id.as_str())
+        );
+        assert_eq!(
+            pushed.observation.context.repository.as_deref(),
+            Some("cairn-demo")
+        );
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn init_project_creates_once_defaults_the_name_and_is_per_owner() -> Result<(), StoreError> {
+        let path = temp_store_path("init-project");
+        let mut store = MemoryStore::open(&path)?;
+        let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+        let other = store.register_account("x@example.test", "correct horse battery staple")?;
+        let (created, is_new) = store.init_project(&owner.token, " repo-a ", None)?;
+        assert!(is_new);
+        assert_eq!(
+            (created.repository.as_str(), created.name.as_str()),
+            ("repo-a", "repo-a")
+        );
+        let (again, is_new) = store.init_project(&owner.token, "repo-a", Some("Renamed"))?;
+        assert!(!is_new);
+        assert_eq!(again.project_id, created.project_id);
+        assert_eq!(again.name, "repo-a");
+        let (theirs, is_new) = store.init_project(&other.token, "repo-a", Some("Named"))?;
+        assert!(is_new);
+        assert_ne!(theirs.project_id, created.project_id);
+        assert_eq!(theirs.name, "Named");
+        assert!(store.init_project(&owner.token, "  ", None).is_err());
+        assert!(
+            store
+                .init_project(&owner.token, &"r".repeat(513), None)
+                .is_err()
+        );
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_admin_session_lists_accounts() -> Result<(), StoreError> {
+        let path = temp_store_path("list-accounts");
+        let mut store = MemoryStore::open(&path)?;
+        let admin = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let user = store.register_account("u@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-a", &admin.account.person_id, None, "Laptop")?;
+
+        let listed = store.accounts(&admin.token)?;
+        assert_eq!(
+            listed.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(),
+            ["a@example.test", "u@example.test"]
+        );
+        assert!(listed[0].is_admin && !listed[1].is_admin);
+        let refused = store.accounts(&user.token).expect_err("not admin");
+        assert!(refused.to_string().contains(ADMIN_ONLY_ERROR));
+        let refused = store.accounts(&device.token).expect_err("device token");
+        assert!(refused.to_string().contains(WEB_ONLY_ERROR));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_admin_resets_a_password_and_every_web_session_of_that_user_ends()
+    -> Result<(), StoreError> {
+        let path = temp_store_path("reset-password");
+        let mut store = MemoryStore::open(&path)?;
+        let admin = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let user = store.register_account("u@example.test", "correct horse battery staple")?;
+        let second = store.login("u@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-u", &user.account.person_id, None, "Laptop")?;
+        let fresh = "a brand new passphrase";
+
+        for (token, expected) in [
+            (&user.token, ADMIN_ONLY_ERROR),
+            (&device.token, WEB_ONLY_ERROR),
+        ] {
+            let refused = store
+                .reset_account_password(token, &user.account.person_id, fresh)
+                .expect_err("admin web session only");
+            assert!(refused.to_string().contains(expected));
+        }
+        assert!(
+            store
+                .reset_account_password(&admin.token, &user.account.person_id, "short")
+                .is_err()
+        );
+        assert!(
+            store
+                .reset_account_password(&admin.token, "person-missing", fresh)
+                .is_err()
+        );
+        store.authenticate_session(&user.token)?;
+
+        store.reset_account_password(&admin.token, &user.account.person_id, fresh)?;
+        for token in [&user.token, &second.token] {
+            assert!(store.authenticate_session(token).is_err());
+        }
+        assert!(
+            store.authenticate_account(&device.token).is_ok(),
+            "devices stay valid"
+        );
+        assert!(
+            store
+                .login("u@example.test", "correct horse battery staple")
+                .is_err()
+        );
+        let relogin = store.login("u@example.test", fresh)?;
+        store.authenticate_session(&admin.token)?;
+        assert!(
+            store
+                .audit_events(&relogin.token, 10)?
+                .iter()
+                .any(|event| event.action == "account_password_reset")
+        );
+        let on_disk = fs::read_to_string(&path)?;
+        assert!(!on_disk.contains(fresh));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn changing_the_password_needs_the_current_one_and_keeps_only_this_session()
+    -> Result<(), StoreError> {
+        let path = temp_store_path("change-password");
+        let mut store = MemoryStore::open(&path)?;
+        let user = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
+        let other = store.login("a@example.test", "correct horse battery staple")?;
+        let device = store.register_device("dev-a", &user.account.person_id, None, "Laptop")?;
+        let fresh = "a brand new passphrase";
+
+        let wrong = store
+            .change_password(&user.token, "not the password", fresh)
+            .expect_err("wrong current password");
+        assert!(wrong.to_string().contains("invalid account credentials"));
+        assert!(
+            store
+                .change_password(&user.token, "correct horse battery staple", "short")
+                .is_err()
+        );
+        let refused = store
+            .change_password(&device.token, "correct horse battery staple", fresh)
+            .expect_err("device token");
+        assert!(refused.to_string().contains(WEB_ONLY_ERROR));
+        store.authenticate_session(&other.token)?;
+
+        store.change_password(&user.token, "correct horse battery staple", fresh)?;
+        store.authenticate_session(&user.token)?;
+        assert!(store.authenticate_session(&other.token).is_err());
+        assert!(store.authenticate_account(&device.token).is_ok());
+        assert!(
+            store
+                .login("a@example.test", "correct horse battery staple")
+                .is_err()
+        );
+        store.login("a@example.test", fresh)?;
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_people_lists_the_owner_then_members_for_owner_and_members_only()
+    -> Result<(), StoreError> {
+        let path = temp_store_path("project-people");
+        let mut store = MemoryStore::open(&path)?;
+        let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
+        let member = store.register_account("m@example.test", "correct horse battery staple")?;
+        let outsider = store.register_account("x@example.test", "correct horse battery staple")?;
+        let (project, _) = store.init_project(&owner.token, "repo-p", None)?;
+
+        // No team space is needed, and a fresh project has only its owner.
+        let alone = store.project_people(&owner.token, &project.project_id)?;
+        assert_eq!(alone.len(), 1);
+        assert_eq!(
+            (alone[0].role.as_str(), alone[0].email.as_str()),
+            ("owner", "o@example.test")
+        );
+        assert_eq!(alone[0].person_id, owner.account.person_id);
+        assert_eq!(alone[0].joined_at, project.created_at);
+
+        join_project(&mut store, &member.token, &project.project_id)?;
+        for token in [&owner.token, &member.token] {
+            let people = store.project_people(token, &project.project_id)?;
+            assert_eq!(
+                people
+                    .iter()
+                    .map(|p| (p.role.as_str(), p.email.as_str()))
+                    .collect::<Vec<_>>(),
+                [("owner", "o@example.test"), ("member", "m@example.test")]
+            );
+        }
+        let refused = store
+            .project_people(&outsider.token, &project.project_id)
+            .expect_err("outsider");
+        assert!(refused.to_string().contains("not a project member"));
+        assert!(
+            store
+                .project_people(&owner.token, "project-missing")
+                .is_err()
+        );
         fs::remove_file(path)?;
         Ok(())
     }

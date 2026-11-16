@@ -80,7 +80,7 @@ stake.
    and ordering contradicting recall (newer first, nothing auto-resolved). The
    rules are in [CM-CONTRACT-006](../contracts/continuity-v1.md) and
    [CM-CONTRACT-009](../contracts/project-layer4.md).
-2. A human acts for: accounts and sign-in, devices, invites, share and revoke,
+2. A human acts for: accounts and sign-in, devices, share and revoke,
    share-policy changes, delete and forget, branch close, and merge
    confirmation on a project that has members.
 3. Automatic registration never claims a project with no owner record, uses a
@@ -90,7 +90,7 @@ stake.
    2026-11-14 through the credential kind chosen in
    [ADR 0008](0008-self-hosted-account-authentication.md): a device token is
    refused (`403`) on a project with any member besides its owner, and the web
-   session is the human surface. The other decision 2 actions (invites, share
+   session is the human surface. The other decision 2 actions (share
    and revoke, share policy, delete and forget, branch close) accept a device
    token for the owner's account; accounts, sign-in and devices are web-session
    only. That follows the owner's choice in ADR 0008; this ADR's wording for

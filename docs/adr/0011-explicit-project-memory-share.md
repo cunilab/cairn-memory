@@ -18,8 +18,9 @@ revoked, and the grant has to stay inspectable.
 
 1. Share only a project memory the owner has already promoted. Sharing a
    personal observation or a non-project memory fails.
-2. The owner invites another account by email. Any active account session of
-   that member can read the shared memory. The member cannot read the owner's
+2. The owner invites another account by email (replaced by the 2026-11-16
+   amendment: a teammate joins through the committed project file). Any active
+   account session of that member can read the shared memory. The member cannot read the owner's
    private observations, personal memories, or unshared project memories.
 3. Only the owner can share, revoke, correct, or forget that memory. The
    member can read.
@@ -96,6 +97,42 @@ memory content or tokens.
 
 Offline purge, encryption, federation, and CRDTs stay unimplemented.
 
+## Amendment 2026-11-16: membership through a committed project file; no invites, no removal
+
+Reason: the invite, the team member add and the member removal were human steps in
+an automation-first product ([ADR 0009](0009-explicit-project-promotion.md)). The repository
+already is the place a team shares, so it carries the membership too.
+
+1. `cairn init` (REST `POST /projects/init`) creates the caller's project for a
+   repository, or returns the existing one, and writes
+   `<git toplevel>/.cairn/project.json` with `project_id` and `repository`. The file holds
+   no secret and no server URL, and people commit it.
+2. The hook and `cairn capture` send that id as `context.project_id`. A capture or sync
+   push that names an existing project another person owns makes the capturer a member,
+   idempotently, and writes the owner audit event `project_member_joined`. The observation
+   keeps `context.project_id`, and no private project is created for the member. An unknown,
+   ownerless or own project id is ignored; the capture never fails because of it.
+3. Removed: the invite route, the team member add and remove routes, their CLI commands
+   and MCP tools, and the `project_member_invited`, `project_team_member_added` and
+   `project_team_member_removed` events. A team lists the project's members; PostgreSQL
+   has no separate team member table; `GET /projects/{id}/members` lists the owner and members for both without a team space. Shares stay explicit and revocable by the owner, and
+   only members can be shared with.
+4. The merge gate is unchanged: a project with any member besides its owner needs the web
+   session for merge confirmation. Members cannot be removed, so a device token cannot
+   reopen the solo-project path.
+
+Trade-offs accepted: the project id is not a secret, so any account on the server that
+captures with it becomes a member (accounts are created only by the admin, there is no
+open sign-up). A member reads only what the owner explicitly shares, cannot correct,
+forget or delete anything of the owner's, and cannot reach the owner's other memories.
+Because a member cannot be removed, the owner's tools are to revoke shares and, for a
+wrong person, a new project. Pre-release: no migration of existing invites; a PostgreSQL
+database made earlier keeps its unused `cairn_project_team_members` table, and file stores
+ignore the stale team member list.
+
+Supersedes decision 2 above and the member add and remove of the team amendment; ADR 0009
+decision 2 no longer lists invites.
+
 ## Consequences
 
 - The first Layer 5 slice is one owner, one invited member, and one explicit
@@ -103,8 +140,8 @@ Offline purge, encryption, federation, and CRDTs stay unimplemented.
   Offline purge, encryption, federation, and CRDTs remain later work. Roles
   beyond owner and member are not part of this model. Automatic sharing is
   only the explicit nonsensitive project-memory policy above.
-- Repeating an invite, or an active share of the same memory to the same
-  member, is idempotent. Unknown emails and self-invites fail closed.
+- Repeating a join, or an active share of the same memory to the same
+  member, is idempotent. Sharing with an unknown email or a non-member fails closed.
 - Member correction and forget use the existing validation path. Where the
   server already maps a message containing "does not own" to 401, that status
   stays in place.
@@ -117,4 +154,6 @@ Offline purge, encryption, federation, and CRDTs stay unimplemented.
 - `migrations/0008_layer5_project_shares.sql`
 - `migrations/0009_layer5_share_policy.sql`
 - `migrations/0010_layer5_team_space.sql`
+- `crates/client/src/project.rs`
 - `docs/contracts/share-layer5.md`
+- `docs/contracts/project-layer4.md`

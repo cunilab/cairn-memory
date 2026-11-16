@@ -105,6 +105,16 @@ explicit `context.repository` is never replaced, and other keys of a partial
 do not change. Two repositories with the same short name under one person share
 a project; send an explicit `context.repository` to tell them apart.
 
+The hook also reads the committed `.cairn/project.json`
+([project-layer4](project-layer4.md#membership-through-the-committed-project-file)) at the git
+top level of the input's `cwd` (one more `git -C <cwd> rev-parse --show-toplevel`, then a file
+read) and adds its `project_id` as `context.project_id`. That works with or without an explicit
+`context.repository`, so a hook payload can carry both. An explicit `context.project_id` is
+never replaced. A missing, unreadable or empty file, a non-string id, a `cwd` outside a
+repository, or a machine without `git` adds nothing and never fails the hook. The server makes
+the sender a member of that project (an unknown id is ignored); the id is not part of the
+event fingerprint.
+
 Claude Code sends no event id, so the id is the derived fingerprint: the same
 session, source, and content is one event (an identical repeated prompt in a
 session is stored once). When the input has a `tool_use_id`, it is part of the
@@ -210,6 +220,9 @@ that redaction. There is no PostgreSQL `/cairn-memory/observe` route, and the
 hook does not use the file `/observe` route.
 
 ## Change record
+
+2026-11-16: the hook adds `context.project_id` from the committed `.cairn/project.json` at the
+git top level of `cwd`; a capture that carries it makes the sender a project member.
 
 2026-11-15: when the payload has no `context.repository`, the hook derives
 `repository` and `branch` from Claude Code's `cwd` with `git`, so hook-only

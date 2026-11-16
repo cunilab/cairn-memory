@@ -72,6 +72,8 @@ cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
 
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 
+To work on a project together, the project owner runs `cairn init` once inside the git checkout. It creates the owner's project for that repository and writes `.cairn/project.json` (`project_id` and `repository`, no secret). Commit that file: a teammate whose hook or `cairn capture` runs in the checkout joins the project automatically, and the owner then shares decisions with them explicitly. There are no invites and no member removal ([project contract](docs/contracts/project-layer4.md)).
+
 The first REST compatibility server is:
 
 ```bash
@@ -112,7 +114,7 @@ cd apps/web
 CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
 ```
 
-`CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and a member's shared read.
+`CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and a member's shared read (the member joins by a capture that carries the project id).
 
 For automatic hook capture, send one JSON object to the portable adapter:
 

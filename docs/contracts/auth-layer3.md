@@ -64,6 +64,49 @@ attempts. The CLI
 and MCP do not create accounts: account creation is a web action. The sharing flow that
 uses a second account is in [share-layer5](share-layer5.md).
 
+## Account administration and passwords
+
+Three web-session routes manage accounts after bootstrap. A device bearer is `403`
+(`web console session required; device tokens cannot do this`) on all of them, and no
+bearer or an unknown, expired or revoked one is `401`.
+
+`GET /cairn-memory/auth/accounts` needs the admin's web session (a non-admin session is
+`403`, `admin web session required; only the admin account can do this`). It returns
+every account, oldest first, without a password or hash:
+
+```json
+[
+  {
+    "person_id": "person-…",
+    "email": "owner@example.test",
+    "status": "active",
+    "is_admin": true,
+    "created_at": "1789000000"
+  }
+]
+```
+
+`created_at` is unix seconds as a string, like every other `created_at` in the API.
+
+`POST /cairn-memory/auth/accounts/{person_id}/password` needs the admin's web session and
+the body `{"password": "<new password>"}`. The new password follows the same rules as
+register (12 to 1024 bytes). It answers `204`, replaces that account's password and revokes
+**every** web session of that account, so it must sign in again; its device tokens stay
+valid. An unknown `person_id` or a short password is `400`. The admin resetting its own
+password ends its own sessions too. It writes the audit event `account_password_reset`
+under the target account (metadata: `actor_person_id`).
+
+`POST /cairn-memory/auth/password` takes any web session and the body
+`{"current_password": "…", "new_password": "…"}`. A wrong current password is `401`
+(`invalid account credentials`) and a new password that breaks the rules is `400`. Success
+is `204`: the password changes and every **other** web session of the account is revoked;
+the calling session and the account's device tokens stay valid. The route shares the login
+rate limit (10 attempts per 60 seconds per normalized email, counted before the password is
+checked, so a caller without a valid session cannot use up an account's attempts; the 11th is
+`429`). It writes `account_password_change`. Passwords are never stored in plaintext or in
+audit metadata. There is no password recovery for a locked-out admin: the admin resets the
+other accounts, and nothing resets the admin's password without its own session.
+
 Both adapters store the flag with the account (`Account.is_admin`; PostgreSQL
 `cairn_accounts.is_admin`, at most one true row by a unique partial index,
 `migrations/0013_admin_role.sql`). Development databases created before the column
@@ -133,22 +176,20 @@ disabled account gets `401` on `sync/push`, `sync/pull`, and `sync/diagnose`. A
 
 | Group | Routes | Web session | Device token |
 | --- | --- | --- | --- |
-| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register` needs the admin session) | `403` |
-| Merge confirmation | `projects/{id}/branches/{branch}/merge` | yes | `403` when the project has any member besides its owner (invited or team); allowed on a solo project |
+| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `403` |
+| Merge confirmation | `projects/{id}/branches/{branch}/merge` | yes | `403` when the project has any member besides its owner (a member joins by a capture that carries the project id); allowed on a solo project |
 | Identity | `auth/me` | yes | yes |
 | Capture and sync | `session/start`, `session/end`, `observe`, `sync/push`, `sync/pull`, `sync/diagnose` | start, end: yes; observe: yes on the file store, `401` on PostgreSQL (device only, it is a sync push); sync: `401` (device only) | yes |
 | Recall | `search`, `smart-search`, `context`, `recall`, `resume`, `unresolved`, `why-changed`, `diagnose` | yes | yes |
 | Memory | `remember`, `correct`, `forget`, `delete`, `export`, `import` | yes | yes |
-| Projects | `projects` (list and register), `promote`, `projects/verify`, `projects/{id}/confirm`, branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `revocations`, `maintenance`, `memories`, `shared` | yes | yes |
-| Sharing | `members` (invite), `team` and `team/members` (create, add, list), `shares`, `shares/{memory}/revoke`, `policy`, `share-candidates` and its `dismiss` | yes | yes |
-| Member removal | `team/members/remove` | yes | `403` |
+| Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `promote`, `projects/verify`, `projects/{id}/confirm`, branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `revocations`, `maintenance`, `memories`, `shared` | yes | yes |
+| Sharing | `team` (create, list), `shares`, `shares/{memory}/revoke`, `policy`, `share-candidates` and its `dismiss` | yes | yes |
 
-The merge rule reads the owner's member and team-member records at the moment of
-the call. A device that merged a solo project is refused as soon as a member is
-added. Removing a member is web-only, so a device cannot empty a project to
-reach the solo-merge path. In PostgreSQL the merge locks the project row first, so
-a member invite that commits first is seen by the check and a later invite waits
-for the merge. The web console session stays the way to confirm a merge on a
+The merge rule reads the owner's member records at the moment of the call. A
+device that merged a solo project is refused as soon as a member has joined.
+There is no member removal, so a device cannot empty a project to reach the
+solo-merge path. In PostgreSQL the merge locks the project row first, so a join
+that commits first is seen by the check and a later join waits for the merge. The web console session stays the way to confirm a merge on a
 shared project.
 
 ## Agent clients: CLI and MCP
@@ -160,7 +201,7 @@ token, created in the web console, in `$XDG_CONFIG_HOME/cairn/config.json` (mode
 as the bearer and nothing else; there is no account-token argument and no local-store mode.
 The URL must be `https`, or `http` for a loopback host only. The client never follows a
 redirect and never prints the token. A web-only route answers `403`, and the client shows
-the server's message. Account creation, device management, and member removal have no
+the server's message. Account creation, password management and device management have no
 CLI command or MCP tool. The tool table is in [mcp-layer1](mcp-layer1.md).
 
 ## Limitations
@@ -262,16 +303,16 @@ The push, duplicate, and summary-copy rules are in the
 `sync/push` with its device token. With `CAIRN_OUTBOX` unset it does not
 enqueue. The opt-in device queue is the [hook contract](./hook-v1.md), which
 owns the client rule.
-Bootstrap, register, and login are each limited to 10 attempts per 60-second
-window, per operation and per normalized (trimmed, ASCII-lowercased) email. The
+Bootstrap, register, login and password change are each limited to 10 attempts per
+60-second window, per operation and per normalized (trimmed, ASCII-lowercased) email. The
 counter lives in server memory and resets on restart, counts every attempt
 including successful ones, and is not per IP; the 11th attempt in a window
 returns `429`. `me`, `logout`, `audit`, and the device endpoints are not
 limited. PostgreSQL records metadata-only audit events, among others, for
-account bootstrap, register, login, and logout, device registration, resume,
-rotation, and revocation, and sync push and duplicate operations, besides
-project and share events. The file store records only project, share, team, promotion, and
-forget or delete events, and no account or device events. Passwords,
+account bootstrap, register, login, logout, password reset and password change, device
+registration, resume, rotation, and revocation, and sync push and duplicate operations, besides
+project and share events. The file store records only project, share, team, promotion, password reset or change,
+and forget or delete events, and no other account or device events. Passwords,
 tokens, and memory content are never written to the audit table. Password
 recovery, MFA, and OIDC remain separate adapters because they require an
 email/identity provider decision beyond the self-hosted Layer 3 boundary.
@@ -318,6 +359,15 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
   builds an expired session. No test found covers the HTTP `400` for a second
   bootstrap, the password length bounds, or register's duplicate and
   pre-bootstrap errors.
+- Account administration (2026-11-16): `accounts`, `reset_account_password` and
+  `change_password` in `crates/core/src/lib.rs` and `crates/storage/src/lib.rs`; the routes
+  in `crates/server/src/lib.rs`. Tests: `only_the_admin_session_lists_accounts`,
+  `the_admin_resets_a_password_and_every_web_session_of_that_user_ends` and
+  `changing_the_password_needs_the_current_one_and_keeps_only_this_session` (core),
+  `file_admin_lists_accounts_and_resets_a_password` and
+  `file_password_change_needs_the_current_password_and_is_rate_limited` (server), and the
+  ignored `postgres_admin_lists_accounts_and_passwords_reset_and_change_revoke_sessions`
+  (storage).
 - Network CLI and MCP (2026-11-14): `crates/client/tests/agent_flow.rs` runs the real
   `cairn` binary and `cairn mcp` on a device token against the file-store router, and,
   ignored, against the PostgreSQL router, including `403` on web-only routes and `401`

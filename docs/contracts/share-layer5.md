@@ -6,9 +6,9 @@ status: draft
 
 # Layer 5 Explicit Project Memory Share
 
-This contract owns the first cross-person slice: an owner invites one existing
-account and explicitly shares one promoted project memory. The rationale is
-[ADR 0011](../adr/0011-explicit-project-memory-share.md). Project registration
+This contract owns the first cross-person slice: a teammate joins an owner's project through
+the committed project file and the owner explicitly shares one promoted project memory. The
+rationale is [ADR 0011](../adr/0011-explicit-project-memory-share.md). Project registration
 and promotion stay in [CM-CONTRACT-009](project-layer4.md).
 
 A second self-hosted account is created after bootstrap with the same
@@ -21,32 +21,41 @@ POST /cairn-memory/auth/register
 
 Bootstrap remains the first account only. Register fails before bootstrap,
 rejects a duplicate email, and returns the new account's session. The share target
-must already exist.
+must already exist and must be a member of the project.
 
 Every owner route below accepts the owner's web session token or a device token
 that belongs to the owner's account; a device token is not a member credential.
 See the [permission table](auth-layer3.md#device-tokens-are-agent-credentials).
-Removing a team member is the exception: it needs the web session, and a device
-token gets `403` (`web console session required; device tokens cannot do this`),
-because removing members would reopen the solo-project merge path for agents.
 
-## Invite
+## Membership
+
+There is no invite and no member removal. A teammate becomes a member when a capture or sync
+push of theirs carries the owner's project id, which the hook and `cairn capture` read from the
+committed `.cairn/project.json` (`cairn init` writes it); the rules are in
+[project-layer4](project-layer4.md#membership-through-the-committed-project-file). Joining is
+idempotent and writes the owner audit event `project_member_joined`. The routes
+`POST /cairn-memory/projects/{projectId}/members`, `POST .../team/members` and
+`POST .../team/members/remove` do not exist (`404`; a `POST` to `.../members` is `405`
+because that path is now read-only). Because members cannot be removed, the
+owner's control over what a member sees is to revoke shares.
 
 ```http
-POST /cairn-memory/projects/{projectId}/members
-Authorization: Bearer <owner-account-token>
+GET /cairn-memory/projects/{projectId}/members
 ```
+
+The owner and any member (web session or device token) read the project's people, owner
+first, then members by join time. It needs no team space, so it works for a project made by
+`cairn init`. A person who is not a member gets `account is not a project member` (`400`),
+an unknown project `unknown project: <id>` (`400`). Both stores answer the same:
 
 ```json
-{
-  "email": "member@example.test"
-}
+[
+  { "person_id": "person-…", "email": "owner@example.test", "role": "owner", "joined_at": "1789000000" },
+  { "person_id": "person-…", "email": "member@example.test", "role": "member", "joined_at": "1789000300" }
+]
 ```
 
-Only the project owner can invite. The email must belong to an existing
-account, the owner cannot invite themselves, and an unknown email fails.
-Repeating the same invite returns the existing membership. The response uses
-`project_id`, `person_id`, `email`, and `created_at`.
+`joined_at` is unix seconds as a string (the project's `created_at` for the owner).
 
 ## Share
 
@@ -64,7 +73,7 @@ Authorization: Bearer <owner-account-token>
 
 The memory must belong to that project, have project scope, and not be
 forgotten, expired, or a personal observation. The member must already be
-invited. Repeating an active share of the same memory to the same member is
+a project member (joined by a capture, see Membership). Repeating an active share of the same memory to the same member is
 idempotent. The response uses `project_id`, `memory_id`,
 `member_person_id`, `created_at`, and `revoked_at` when revoked.
 
@@ -78,7 +87,7 @@ GET /cairn-memory/projects/{projectId}/shared
 Authorization: Bearer <member-account-token>
 ```
 
-Any active session of the invited member can list the active shared memories
+Any active session of a project member can list the active shared memories
 for that project. Forgotten, expired, and revoked memories are omitted. A
 shared memory that a live successor supersedes is omitted; the grant stays on
 the original id until the owner shares the successor.
@@ -195,34 +204,9 @@ The owner and a project member can list the team and its members. A person
 who is not a project member cannot. Each member object has `person_id`,
 `email`, and `created_at`.
 
-```http
-POST /cairn-memory/projects/{projectId}/team/members
-```
-
-```json
-{
-  "email": "member@example.test"
-}
-```
-
-Only the owner can add a member, and that account must already be a project
-member. Repeating the add returns the existing team member.
-
-```http
-POST /cairn-memory/projects/{projectId}/team/members/remove
-```
-
-```json
-{
-  "email": "member@example.test"
-}
-```
-
-Only the owner's web session can remove a team member; a device token gets `403`.
-Removal deletes that person's
-project membership and revokes active shares for that project. A later shared
-read by the former member is empty. A person who was never a member still
-receives the non-member error. The memory stays stored for the owner.
+The team's members are the project's members (without the owner), so the list fills as
+teammates join; there are no team member add or remove routes. The team is the project's name for
+its shared space and must be created before it can be listed; the `members` route above needs no team.
 
 ## Delete
 
@@ -265,10 +249,9 @@ path; a message containing "does not own" is 401.
 
 ## Audit
 
-Owner audit history records `project_member_invited`,
+Owner audit history records `project_member_joined`,
 `project_memory_shared`, `project_memory_share_revoked`,
-`project_team_created`, `project_team_member_added`,
-`project_team_member_removed`, `memory_promote`, `memory_forget`, and
+`project_team_created`, `memory_promote`, `memory_forget`, and
 `memory_delete_retained`. Metadata may contain the project id, member person
 id, and memory id. It does not contain memory content, tokens, or passwords.
 
@@ -277,39 +260,36 @@ id, and memory id. It does not contain memory content, tokens, or passwords.
 The `cairn` binary and `cairn mcp` call the share routes above with the device token from
 `cairn setup` (see [mcp-layer1](mcp-layer1.md)). The commands take no account token and no
 store path. A second account is created in the web console, which also issues that
-account's device token. An unknown email or a non-owner action is an error. Each command
+account's device token; the teammate joins the project by capturing in the committed
+checkout ([project-layer4](project-layer4.md#membership-through-the-committed-project-file)).
+An unknown email, a person who has not joined, or a non-owner action is an error. Each command
 prints the server JSON and exits 1 with the server's message on an error:
 
-- `cairn project-invite <project-id> <email>`
 - `cairn project-share <project-id> <memory-id> <email>`
 - `cairn project-shared <project-id>`
 - `cairn project-revoke <project-id> <memory-id> <email>`
 - `cairn project-team-create <project-id> <name>`
 - `cairn project-team <project-id>`
-- `cairn project-team-add <project-id> <email>`
 - `cairn delete-memory <memory-id>`
 
 `delete-memory` prints nothing on success (the route returns `204`).
 
 MCP tools take the camelCase fields below.
 
-- `memory_project_invite` (`projectId`, `email`)
 - `memory_project_share` (`projectId`, `memoryId`, `email`)
 - `memory_project_shared` (`projectId`)
 - `memory_project_revoke` (`projectId`, `memoryId`, `email`)
 - `memory_project_team_create` (`projectId`, `name`)
 - `memory_project_team` (`projectId`)
-- `memory_project_team_add` (`projectId`, `email`)
 - `memory_delete` (`id`)
 
-Removing a team member is web-only: a device token is `403`, so the CLI and MCP have no
-command or tool for it.
+There is no invite, no team member add and no member removal, on the CLI, MCP or REST.
 
 ## Viewer
 
-The `/viewer` Projects page keeps the account token used for project inspection. It reads `role` from `GET /cairn-memory/projects`. An owner page loads `GET /cairn-memory/projects/{projectId}/memories` and shows one member email field, **Invite member**, **Share decision**, **Revoke share**, and **Delete memory** on each current decision. It also shows the team name and members, a team name field with **Create team**, and **Add member** and **Remove member** using that same email field. Those buttons call the invite, share, revoke, team, and delete routes and show an API error in the existing toast.
+The `/viewer` Projects page keeps the account token used for project inspection. It reads `role` from `GET /cairn-memory/projects`. An owner page loads `GET /cairn-memory/projects/{projectId}/memories` and shows one member email field, **Share decision**, **Revoke share**, and **Delete memory** on each current decision. It also shows the team name and members and a team name field with **Create team**. Those buttons call the share, revoke, team, and delete routes and show an API error in the existing toast.
 
-A member page loads `GET /cairn-memory/projects/{projectId}/shared` directly and does not request the owner memories URL. It lists the team name and members and renders shared memories with scope, verified commit, freshness, and supersedes. It does not show create, add, remove, delete, invite, share, or revoke.
+A member page loads `GET /cairn-memory/projects/{projectId}/shared` directly and does not request the owner memories URL. It lists the team name and members and renders shared memories with scope, verified commit, freshness, and supersedes. It does not show create, delete, share, or revoke.
 
 The inspection page also shows **Current decisions**, **Handoffs**, **Stale memories**, **Conflicts**, and **Revocations**. A failed conflicts or revocations request shows the error in the toast and keeps the decisions already loaded. `api()` applies `Content-Type: application/json` after the other request options.
 

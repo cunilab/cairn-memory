@@ -402,12 +402,44 @@ try:
         },
         account_token,
     )
-    _, invited = call(
+    # Membership comes from the committed project file: the member's capture carries the
+    # project id. There is no invite route.
+    expect_error(
         f"/cairn-memory/projects/{project['project_id']}/members",
         {"email": "postgres-member@example.test"},
         account_token,
+        405,
     )
-    assert invited["person_id"] == member["account"]["person_id"]
+    _, member_device = call(
+        "/cairn-memory/devices/register", {"name": "postgres member agent"}, member_token
+    )
+    for event_id in ("member-join-1", "member-join-2"):
+        call(
+            "/cairn-memory/observe",
+            {
+                "eventId": event_id,
+                "sessionId": "member-join",
+                "content": "joined by project file",
+                "role": "agent",
+                "source": "smoke",
+                "context": {
+                    "repository": "cairn",
+                    "project_id": project["project_id"],
+                },
+            },
+            member_device["token"],
+        )
+    _, member_listed = call("/cairn-memory/projects", token=member_token)
+    assert [item["project_id"] for item in member_listed] == [project["project_id"]]
+    for reader in (account_token, member_token):
+        _, people = call(
+            f"/cairn-memory/projects/{project['project_id']}/members", token=reader
+        )
+        assert [(p["role"], p["email"]) for p in people][1:] == [
+            ("member", "postgres-member@example.test")
+        ]
+        assert people[0]["role"] == "owner"
+        assert all(set(p) == {"person_id", "email", "role", "joined_at"} for p in people)
     try:
         call(
             f"/cairn-memory/projects/{project['project_id']}/shares",
@@ -591,7 +623,6 @@ try:
     stranger_token = stranger["token"]
     project_id = project["project_id"]
     team = f"/cairn-memory/projects/{project_id}/team"
-    team_members = f"/cairn-memory/projects/{project_id}/team/members"
     shared_path = f"/cairn-memory/projects/{project_id}/shared"
     expect_error(team, None, stranger_token, 400)
     expect_error(shared_path, None, stranger_token, 400)
@@ -629,12 +660,6 @@ try:
     )
     _, created_team = call(team, {"name": "Platform"}, account_token)
     assert created_team["name"] == "Platform"
-    _, added_member = call(
-        team_members,
-        {"email": "postgres-member@example.test"},
-        account_token,
-    )
-    assert added_member["email"] == "postgres-member@example.test"
     _, listed_team = call(team, token=member_token)
     assert listed_team["members"][0]["email"] == "postgres-member@example.test"
     expect_error(team, None, stranger_token, 400)
@@ -644,13 +669,13 @@ try:
         account_token,
     )
     call("/cairn-memory/forget", {"id": forgotten_note["memory_id"]}, account_token)
-    call(
-        f"/cairn-memory/projects/{project_id}/team/members/remove",
-        {"email": "postgres-member@example.test"},
-        account_token,
-    )
-    _, former_shared = call(shared_path, token=member_token)
-    assert former_shared == []
+    for removed_route in ("team/members", "team/members/remove"):
+        expect_error(
+            f"/cairn-memory/projects/{project_id}/{removed_route}",
+            {"email": "postgres-member@example.test"},
+            account_token,
+            404,
+        )
     _, before_delete = call("/cairn-memory/export", {}, account_token)
     assert any(
         memory["memory_id"] == auto_promoted["memory_id"]
@@ -682,8 +707,7 @@ try:
     _, team_audit = call("/cairn-memory/auth/audit", token=account_token)
     team_actions = {event["action"] for event in team_audit}
     assert "project_team_created" in team_actions
-    assert "project_team_member_added" in team_actions
-    assert "project_team_member_removed" in team_actions
+    assert "project_member_joined" in team_actions
     assert "memory_delete_retained" in team_actions
     assert "memory_forget" in team_actions
     audit_text = json.dumps(team_audit)

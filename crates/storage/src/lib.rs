@@ -9,8 +9,8 @@ use cairn_core::{
     Device, DeviceRegistration, DeviceStatus, ExportBundle, ImportResult, Lifecycle,
     LifecycleInput, LifecycleSummary, Memory, MemoryKind, MemoryScope, Observation,
     ObservationInput, Project, ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput,
-    ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMembership, ProjectMemoryShare,
-    ProjectMergeResult, ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord,
+    ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMemoryShare, ProjectMergeResult,
+    ProjectPerson, ProjectShareCandidate, ProjectSharePolicy, ProjectSharePolicyRecord,
     ProjectTeam, ProjectTeamMember, ProjectWorktree, RecallFilter, RecallResult, SHARE_REASON_AUTO,
     SHARE_REASON_MANUAL, Session, ShareCandidateDismissal, SharedProjectMemory, SyncDeletion,
     SyncDiagnostics, SyncEvent, SyncPullResult, SyncPushResult, WorkContext, build_context_pack,
@@ -346,6 +346,111 @@ impl PostgresStore {
     ) -> Result<AuthSessionResult, PostgresError> {
         self.authenticate_admin(token).await?;
         self.register_account(email, password).await
+    }
+
+    /// Admin web session only: every account, oldest first.
+    pub async fn accounts(&self, token: &str) -> Result<Vec<Account>, PostgresError> {
+        self.authenticate_admin(token).await?;
+        let rows = sqlx::query(
+            "SELECT person_id, email, status, is_admin,
+                    EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at
+             FROM cairn_accounts ORDER BY cairn_accounts.created_at, person_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(account_from_row).collect()
+    }
+
+    /// Admin web session only. Sets another account's password and revokes every web
+    /// session of that account; device tokens stay valid. Audited under the target.
+    pub async fn reset_account_password(
+        &self,
+        token: &str,
+        person_id: &str,
+        new_password: &str,
+    ) -> Result<(), PostgresError> {
+        let admin = self.authenticate_admin(token).await?;
+        validate_password(new_password)?;
+        let password_hash = cairn_core::hash_password(new_password)?;
+        let mut transaction = self.pool.begin().await?;
+        let updated =
+            sqlx::query("UPDATE cairn_accounts SET password_hash = $2 WHERE person_id = $1")
+                .bind(person_id)
+                .bind(password_hash)
+                .execute(&mut *transaction)
+                .await?;
+        if updated.rows_affected() == 0 {
+            return Err(PostgresError::Validation(format!(
+                "unknown account: {person_id}"
+            )));
+        }
+        sqlx::query(
+            "UPDATE cairn_auth_sessions SET revoked_at = now()
+             WHERE person_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(person_id)
+        .execute(&mut *transaction)
+        .await?;
+        record_audit(
+            &mut transaction,
+            person_id,
+            None,
+            "account_password_reset",
+            Some(person_id),
+            serde_json::json!({ "actor_person_id": admin.person_id }),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Web session only. Needs the current password, then revokes the account's other
+    /// web sessions and keeps this one.
+    pub async fn change_password(
+        &self,
+        token: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<(), PostgresError> {
+        let account = self.authenticate_session(token).await?;
+        let current_hash = sqlx::query_scalar::<_, String>(
+            "SELECT password_hash FROM cairn_accounts WHERE person_id = $1",
+        )
+        .bind(&account.person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !cairn_core::verify_password(current_password, &current_hash) {
+            return Err(PostgresError::Validation(
+                "invalid account credentials".to_owned(),
+            ));
+        }
+        validate_password(new_password)?;
+        let password_hash = cairn_core::hash_password(new_password)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE cairn_accounts SET password_hash = $2 WHERE person_id = $1")
+            .bind(&account.person_id)
+            .bind(password_hash)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "UPDATE cairn_auth_sessions SET revoked_at = now()
+             WHERE person_id = $1 AND token_hash <> $2 AND revoked_at IS NULL",
+        )
+        .bind(&account.person_id)
+        .bind(cairn_core::hash_token(token))
+        .execute(&mut *transaction)
+        .await?;
+        record_audit(
+            &mut transaction,
+            &account.person_id,
+            None,
+            "account_password_change",
+            Some(&account.person_id),
+            serde_json::json!({}),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn login(
@@ -815,6 +920,64 @@ impl PostgresStore {
         }
     }
 
+    /// Membership through the committed project file: a capture whose `project_id` names an
+    /// existing project that another person owns makes the person a member, idempotently.
+    /// True when the person is such a member. An unknown or own project id is ignored
+    /// (false), so the capture falls back to repository registration.
+    async fn join_context_project(
+        &self,
+        person_id: &str,
+        context: &WorkContext,
+    ) -> Result<bool, PostgresError> {
+        let Some(project_id) = context
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+        else {
+            return Ok(false);
+        };
+        let mut transaction = self.pool.begin().await?;
+        let Some(owner) = sqlx::query_scalar::<_, String>(
+            "SELECT person_id FROM cairn_projects WHERE project_id = $1 LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        else {
+            return Ok(false);
+        };
+        if owner == person_id {
+            return Ok(false);
+        }
+        let joined = sqlx::query(
+            "INSERT INTO cairn_project_members (owner_person_id, project_id, member_person_id)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(&owner)
+        .bind(project_id)
+        .bind(person_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if joined > 0 {
+            record_audit(
+                &mut transaction,
+                &owner,
+                None,
+                "project_member_joined",
+                Some(person_id),
+                serde_json::json!({
+                    "project_id": project_id,
+                    "member_person_id": person_id,
+                }),
+            )
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     /// Automatic registration on capture. The person's own project for the repository comes
     /// first, then one they are a member of; only when there is none, a project owned by this
     /// person is created. A branch is registered on a project the person owns (branch writes
@@ -824,6 +987,10 @@ impl PostgresStore {
         person_id: &str,
         context: &WorkContext,
     ) -> Result<(), PostgresError> {
+        // A member reads the owner's project, so no private project is created for it.
+        if self.join_context_project(person_id, context).await? {
+            return Ok(());
+        }
         let Some(repository) = context
             .repository
             .as_deref()
@@ -1308,6 +1475,33 @@ impl PostgresStore {
         name: &str,
         default_branch: Option<String>,
     ) -> Result<Project, PostgresError> {
+        self.ensure_project(account_token, repository, name, default_branch)
+            .await
+            .map(|(project, _)| project)
+    }
+
+    /// `cairn init`: the caller's project for the repository, created when there is none.
+    /// `name` defaults to the repository; the flag is true when the project is new.
+    pub async fn init_project(
+        &self,
+        account_token: &str,
+        repository: &str,
+        name: Option<&str>,
+    ) -> Result<(Project, bool), PostgresError> {
+        let repository = repository.trim();
+        validate_project_text(repository, "repository")?;
+        let name = name.map(str::trim).filter(|name| !name.is_empty());
+        self.ensure_project(account_token, repository, name.unwrap_or(repository), None)
+            .await
+    }
+
+    async fn ensure_project(
+        &self,
+        account_token: &str,
+        repository: &str,
+        name: &str,
+        default_branch: Option<String>,
+    ) -> Result<(Project, bool), PostgresError> {
         let account = self.authenticate_account(account_token).await?;
         let repository = repository.trim();
         let name = name.trim();
@@ -1327,7 +1521,7 @@ impl PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
         if let Some(row) = existing {
-            return project_from_row(&row);
+            return Ok((project_from_row(&row)?, false));
         }
         let project_id = format!(
             "project-{}",
@@ -1347,7 +1541,7 @@ impl PostgresStore {
         .bind(default_branch)
         .fetch_one(&self.pool)
         .await?;
-        project_from_row(&row)
+        Ok((project_from_row(&row)?, true))
     }
 
     pub async fn projects(&self, account_token: &str) -> Result<Vec<Project>, PostgresError> {
@@ -1758,13 +1952,10 @@ impl PostgresStore {
         .ok_or_else(|| PostgresError::Validation(format!("unknown project: {project_id}")))?;
         let project = project_from_row(&project)?;
         // The row lock conflicts with the key-share lock a concurrent member insert takes through
-        // its foreign key, so the member check below cannot race an invite.
+        // its foreign key, so the member check below cannot race a join.
         if via_device
             && sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (SELECT 1 FROM cairn_project_members
-                                WHERE owner_person_id = $1 AND project_id = $2
-                                  AND member_person_id <> $1)
-                     OR EXISTS (SELECT 1 FROM cairn_project_team_members
                                 WHERE owner_person_id = $1 AND project_id = $2
                                   AND member_person_id <> $1)",
             )
@@ -2129,70 +2320,6 @@ impl PostgresStore {
         Ok(memories)
     }
 
-    pub async fn invite_project_member(
-        &self,
-        account_token: &str,
-        project_id: &str,
-        email: &str,
-    ) -> Result<ProjectMembership, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
-        self.require_project_owner(&account.person_id, project_id)
-            .await?;
-        let email = normalize_email(email)?;
-        if email == account.email {
-            return Err(PostgresError::Validation(
-                "project owner cannot invite themselves".to_owned(),
-            ));
-        }
-        let member = self.account_by_email(&email).await?;
-        if let Some(row) = sqlx::query(
-            "SELECT m.project_id, m.member_person_id, a.email,
-                    EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
-             FROM cairn_project_members m
-             JOIN cairn_accounts a ON a.person_id = m.member_person_id
-             WHERE m.owner_person_id = $1 AND m.project_id = $2 AND m.member_person_id = $3",
-        )
-        .bind(&account.person_id)
-        .bind(project_id)
-        .bind(&member.person_id)
-        .fetch_optional(&self.pool)
-        .await?
-        {
-            return membership_from_row(&row);
-        }
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "INSERT INTO cairn_project_members (owner_person_id, project_id, member_person_id)
-             VALUES ($1, $2, $3)
-             RETURNING project_id, member_person_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at",
-        )
-        .bind(&account.person_id)
-        .bind(project_id)
-        .bind(&member.person_id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        record_audit(
-            &mut transaction,
-            &account.person_id,
-            None,
-            "project_member_invited",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(ProjectMembership {
-            project_id: row.try_get("project_id")?,
-            person_id: row.try_get("member_person_id")?,
-            email: member.email,
-            created_at: row.try_get("created_at")?,
-        })
-    }
-
     pub async fn share_project_memory(
         &self,
         account_token: &str,
@@ -2454,129 +2581,44 @@ impl PostgresStore {
         self.project_team_view(project_id).await
     }
 
-    pub async fn add_project_team_member(
+    /// The project's owner first, then its members by join time. Owner and members may read it.
+    pub async fn project_people(
         &self,
         account_token: &str,
         project_id: &str,
-        email: &str,
-    ) -> Result<ProjectTeamMember, PostgresError> {
+    ) -> Result<Vec<ProjectPerson>, PostgresError> {
         let account = self.authenticate_account(account_token).await?;
-        self.require_project_owner(&account.person_id, project_id)
+        self.require_project_reader(&account.person_id, project_id)
             .await?;
-        let team_exists = self.project_team_row(project_id).await?.is_some();
-        if !team_exists {
-            return Err(PostgresError::Validation(
-                "project has no team space".to_owned(),
-            ));
-        }
-        let member = self.account_by_email(&normalize_email(email)?).await?;
-        let member_exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                SELECT 1 FROM cairn_project_members
-                WHERE owner_person_id = $1 AND project_id = $2 AND member_person_id = $3
-             )",
-        )
-        .bind(&account.person_id)
-        .bind(project_id)
-        .bind(&member.person_id)
-        .fetch_one(&self.pool)
-        .await?;
-        if !member_exists {
-            return Err(PostgresError::Validation(
-                "account is not a project member".to_owned(),
-            ));
-        }
-        if let Some(row) = self.team_member_row(project_id, &member.person_id).await? {
-            return team_member_from_row(&row);
-        }
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "INSERT INTO cairn_project_team_members
-                (owner_person_id, project_id, member_person_id)
-             VALUES ($1, $2, $3)
-             RETURNING member_person_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint::text AS created_at",
-        )
-        .bind(&account.person_id)
-        .bind(project_id)
-        .bind(&member.person_id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        record_audit(
-            &mut transaction,
-            &account.person_id,
-            None,
-            "project_team_member_added",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(ProjectTeamMember {
-            person_id: row.try_get("member_person_id")?,
-            email: member.email,
-            created_at: row.try_get("created_at")?,
-        })
-    }
-
-    pub async fn remove_project_team_member(
-        &self,
-        account_token: &str,
-        project_id: &str,
-        email: &str,
-    ) -> Result<ProjectTeamMember, PostgresError> {
-        // Removing a member reopens the solo-project merge path, so it stays web-only.
-        let account = self.authenticate_session(account_token).await?;
-        self.require_project_owner(&account.person_id, project_id)
-            .await?;
-        let member = self.account_by_email(&normalize_email(email)?).await?;
-        let row = self
-            .team_member_row(project_id, &member.person_id)
-            .await?
-            .ok_or_else(|| PostgresError::Validation("account is not a team member".to_owned()))?;
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE cairn_project_shares
-             SET revoked_at = now()
-             WHERE project_id = $1 AND member_person_id = $2 AND revoked_at IS NULL",
+        let rows = sqlx::query(
+            "SELECT person_id, email, role, joined_at FROM (
+                 SELECT p.person_id, a.email, 'owner' AS role, 0 AS ord,
+                        p.created_at AS at,
+                        EXTRACT(EPOCH FROM p.created_at)::bigint::text AS joined_at
+                 FROM cairn_projects p JOIN cairn_accounts a ON a.person_id = p.person_id
+                 WHERE p.project_id = $1
+                 UNION ALL
+                 SELECT m.member_person_id, a.email, 'member', 1,
+                        m.created_at,
+                        EXTRACT(EPOCH FROM m.created_at)::bigint::text
+                 FROM cairn_project_members m
+                 JOIN cairn_accounts a ON a.person_id = m.member_person_id
+                 WHERE m.project_id = $1
+             ) people ORDER BY ord, at, person_id",
         )
         .bind(project_id)
-        .bind(&member.person_id)
-        .execute(&mut *transaction)
+        .fetch_all(&self.pool)
         .await?;
-        sqlx::query(
-            "DELETE FROM cairn_project_members
-             WHERE project_id = $1 AND member_person_id = $2",
-        )
-        .bind(project_id)
-        .bind(&member.person_id)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "DELETE FROM cairn_project_team_members
-             WHERE project_id = $1 AND member_person_id = $2",
-        )
-        .bind(project_id)
-        .bind(&member.person_id)
-        .execute(&mut *transaction)
-        .await?;
-        record_audit(
-            &mut transaction,
-            &account.person_id,
-            None,
-            "project_team_member_removed",
-            Some(&member.person_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "member_person_id": member.person_id,
-            }),
-        )
-        .await?;
-        transaction.commit().await?;
-        team_member_from_row(&row)
+        rows.iter()
+            .map(|row| {
+                Ok(ProjectPerson {
+                    person_id: row.try_get("person_id")?,
+                    email: row.try_get("email")?,
+                    role: row.try_get("role")?,
+                    joined_at: row.try_get("joined_at")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn project_team(
@@ -2903,24 +2945,6 @@ impl PostgresStore {
         .await?)
     }
 
-    async fn team_member_row(
-        &self,
-        project_id: &str,
-        member_person_id: &str,
-    ) -> Result<Option<PgRow>, PostgresError> {
-        Ok(sqlx::query(
-            "SELECT m.member_person_id, a.email,
-                    EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
-             FROM cairn_project_team_members m
-             JOIN cairn_accounts a ON a.person_id = m.member_person_id
-             WHERE m.project_id = $1 AND m.member_person_id = $2",
-        )
-        .bind(project_id)
-        .bind(member_person_id)
-        .fetch_optional(&self.pool)
-        .await?)
-    }
-
     async fn project_team_view(&self, project_id: &str) -> Result<ProjectTeam, PostgresError> {
         let team = self
             .project_team_row(project_id)
@@ -2929,7 +2953,7 @@ impl PostgresStore {
         let rows = sqlx::query(
             "SELECT m.member_person_id, a.email,
                     EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
-             FROM cairn_project_team_members m
+             FROM cairn_project_members m
              JOIN cairn_accounts a ON a.person_id = m.member_person_id
              WHERE m.project_id = $1
              ORDER BY m.created_at, m.member_person_id",
@@ -3888,6 +3912,8 @@ impl PostgresStore {
         let device = self.authenticate_device(device_token).await?;
         let mut input = input;
         let mut transaction = self.pool.begin().await?;
+        // A bare project id (the CLI sends only that) still inherits the session's context.
+        let sent_project = input.context.project_id.take();
         if input.context == WorkContext::default() {
             // Copy only this person's stored session. A missing row stays empty
             // and is inserted below so the observation foreign key holds.
@@ -3904,6 +3930,7 @@ impl PostgresStore {
                 input.context = row.try_get::<Json<WorkContext>, _>("context")?.0;
             }
         }
+        input.context.project_id = sent_project.or(input.context.project_id.take());
         let observation = normalize_observation(&input)?;
         let lifecycle = serde_json::to_value(&observation.lifecycle)?;
         let context = serde_json::to_value(&observation.context)?;
@@ -4762,15 +4789,6 @@ fn import_conflict(kind: &str, id: &str) -> PostgresError {
 
 fn team_member_from_row(row: &PgRow) -> Result<ProjectTeamMember, PostgresError> {
     Ok(ProjectTeamMember {
-        person_id: row.try_get("member_person_id")?,
-        email: row.try_get("email")?,
-        created_at: row.try_get("created_at")?,
-    })
-}
-
-fn membership_from_row(row: &PgRow) -> Result<ProjectMembership, PostgresError> {
-    Ok(ProjectMembership {
-        project_id: row.try_get("project_id")?,
         person_id: row.try_get("member_person_id")?,
         email: row.try_get("email")?,
         created_at: row.try_get("created_at")?,

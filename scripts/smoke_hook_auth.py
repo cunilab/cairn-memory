@@ -335,6 +335,47 @@ class StubHookTests(unittest.TestCase):
                 {"repository": "widget-svc", "branch": "feature/x", "commands": ["make"]},
             )
 
+    def test_project_file_at_the_git_top_level_sends_the_project_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
+            (repo / "src").mkdir()
+            self.assertEqual(self._context_for(repo)["context"], {"repository": "widget-svc", "branch": "feature/x"})
+            (repo / ".cairn").mkdir()
+            (repo / ".cairn" / "project.json").write_text(
+                json.dumps({"project_id": "project-abc", "repository": "widget-svc"}), encoding="utf-8"
+            )
+            # Read from a subdirectory: the file lives at the git top level.
+            self.assertEqual(
+                self._context_for(repo / "src")["context"],
+                {"repository": "widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+            )
+            # An explicit project_id (and repository) in the input is kept.
+            explicit = {
+                "session_id": "ctx-session",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "p",
+                "cwd": str(repo),
+                "context": {"repository": "mine", "project_id": "project-mine"},
+            }
+            self.server.captured = []
+            self.assertEqual(run_hook(self.url, explicit).returncode, 0)
+            self.assertEqual(
+                json.loads(self.server.captured[0]["body"])["context"],
+                {"repository": "mine", "project_id": "project-mine"},
+            )
+            # An explicit repository still picks up the file's id.
+            partial = dict(explicit, context={"repository": "mine"})
+            self.server.captured = []
+            self.assertEqual(run_hook(self.url, partial).returncode, 0)
+            self.assertEqual(
+                json.loads(self.server.captured[0]["body"])["context"],
+                {"repository": "mine", "project_id": "project-abc"},
+            )
+            # Unreadable or empty files send no id and never fail the hook.
+            for body in ("not json", "{}", '{"project_id": ""}', '{"project_id": 7}', "[]"):
+                (repo / ".cairn" / "project.json").write_text(body, encoding="utf-8")
+                self.assertNotIn("project_id", self._context_for(repo)["context"], body)
+
     def test_no_context_when_cwd_is_not_a_repo_or_git_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._context_for(tmp)["context"], {})

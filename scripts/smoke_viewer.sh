@@ -38,7 +38,7 @@ PAGE_HTML="$page" python3 - <<'PY'
 import os
 
 page = os.environ["PAGE_HTML"]
-for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Invite member", "Share decision", "Revoke share", "Create team", "Add member", "Remove member", "Delete memory", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
+for marker in ("Cairn / memory field", "/cairn-memory/export", "Forget this", "Share decision", "Revoke share", "Create team", "Delete memory", "/shared", "Current decisions", "Handoffs", "Stale memories", "Conflicts", "Revocations", "Content-Type"):
     assert marker in page, marker
 loader = page.split("async function loadProjectMemories", 1)[1]
 member_at = loader.index("if (member)")

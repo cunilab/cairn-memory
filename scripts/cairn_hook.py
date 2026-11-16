@@ -138,6 +138,23 @@ def git_context(cwd):
     return derived
 
 
+def project_file_id(cwd):
+    # The committed .cairn/project.json at the git top level names the Cairn project; a
+    # capture that carries its id makes the capturer a member. Missing or unreadable: none.
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return None
+    try:
+        with open(os.path.join(top, ".cairn", "project.json"), encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    project_id = value.get("project_id") if isinstance(value, dict) else None
+    return project_id.strip() if isinstance(project_id, str) and project_id.strip() else None
+
+
 def build_request(source):
     nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
     session_id = first(source, "sessionId", "session_id") or first(nested, "sessionId", "session_id") or os.environ.get("CAIRN_SESSION_ID")
@@ -165,8 +182,13 @@ def build_request(source):
         fingerprint = json.dumps(parts, sort_keys=True).encode()
         event_id = "hook-" + hashlib.sha256(fingerprint).hexdigest()[:24]
     context = first(source, "context") or first(nested, "context") or {}
+    cwd = first(source, "cwd") or first(nested, "cwd")
     if isinstance(context, dict) and not context.get("repository"):
-        context = {**git_context(first(source, "cwd") or first(nested, "cwd")), **context}
+        context = {**git_context(cwd), **context}
+    if isinstance(context, dict) and not context.get("project_id"):
+        project_id = project_file_id(cwd)
+        if project_id:
+            context = {**context, "project_id": project_id}
     lifecycle = first(source, "lifecycle") or first(nested, "lifecycle") or {}
     request = {
         "eventId": event_id,

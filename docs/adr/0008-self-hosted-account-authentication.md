@@ -85,7 +85,7 @@ the personal-memory path is complete.
   identified or changed.
 - Account import accepts a memory row with a `project_id` only for a project the
   caller owns. A foreign, missing or unowned project rejects the whole import with
-  `account does not own the project` and writes nothing, so an outsider or invited
+  `account does not own the project` and writes nothing, so an outsider or
   member cannot add a row to another person's project. Import does not create or map
   a project or strip the link; a cross-store restore needs the matching project
   registered first. The owner-facing project views (list, share candidates,
@@ -104,7 +104,7 @@ the personal-memory path is complete.
   keeps its cascade. PostgreSQL scopes forget by person already and is not
   reviewed here.
 - File-store `project_maintenance` is owner-only: after authentication the caller
-  must own a project that has an owner record, so a member, a removed member, an
+  must own a project that has an owner record, so a member, an
   outsider and an ownerless project are refused with `account does not own the
   project`. Members use explicit sharing, not a member-scoped maintenance report.
   An ownerless project is claimed by the first account that registers the same
@@ -114,7 +114,7 @@ the personal-memory path is complete.
 - File-store project registry operations are owner-only too: branch and worktree
   registration and listing, entity registration and listing, freshness history,
   branch merge confirmation and branch close use the same strict owned-project
-  check after authentication, so a member, a removed member, an outsider and an
+  check after authentication, so a member, an outsider and an
   ownerless project are refused with `account does not own the project`. Merge
   confirmation also rejects a source memory another account owns, like
   promotion, and its existing-promotion lookup, like promotion's, considers only
@@ -171,8 +171,7 @@ bearer, which could not be told apart from a person.
 4. A device token is refused with `403` and `web console session required;
    device tokens cannot do this` for account bootstrap, register, sign-in,
    sign-out, audit, device create, list, rotate and revoke, and for branch merge
-   confirmation on a project that has any member besides its owner, invited or
-   team. A solo-project merge is allowed. A revoked device token is `401` on
+   confirmation on a project that has any member besides its owner. A solo-project merge is allowed. A revoked device token is `401` on
    every route.
 5. The first account is created from the web console on an empty server;
    `GET /cairn-memory/health` reports `bootstrap_required` so the console can

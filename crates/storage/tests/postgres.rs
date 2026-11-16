@@ -574,27 +574,20 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         )
         .await
         .expect("promote repository memory");
+    // Sharing needs a member: before the member joins, the share fails.
     assert!(
         store
-            .invite_project_member(&account.token, &project.project_id, "owner@example.test",)
+            .share_project_memory(
+                &account.token,
+                &project.project_id,
+                &shared_promoted.memory_id,
+                "member@example.test",
+            )
             .await
             .is_err()
     );
-    assert!(
-        store
-            .invite_project_member(&account.token, &project.project_id, "missing@example.test",)
-            .await
-            .is_err()
-    );
-    let invited = store
-        .invite_project_member(&account.token, &project.project_id, "member@example.test")
-        .await
-        .expect("invite member");
-    let repeated_invite = store
-        .invite_project_member(&account.token, &project.project_id, "member@example.test")
-        .await
-        .expect("repeat invite");
-    assert_eq!(repeated_invite.person_id, invited.person_id);
+    join_project(&store, &member, &project.project_id).await;
+    join_project(&store, &member, &project.project_id).await;
     assert!(
         store
             .share_project_memory(
@@ -2094,10 +2087,7 @@ async fn postgres_project_actions_never_delete_personal_memory() {
         .await
         .expect("project")
         .project_id;
-    store
-        .invite_project_member(&owner.token, &project, "never-member@example.test")
-        .await
-        .expect("invite");
+    join_project(&store, &member, &project).await;
     store
         .create_project_team(&owner.token, &project, "Core")
         .await
@@ -2312,6 +2302,28 @@ async fn push_in(
     let mut input = pushed(event, session, ctx);
     input.content = format!("autofact {event}");
     store.sync_push(device, input).await.expect("push");
+}
+
+/// Makes the account a project member the way the committed project file does: one device
+/// push that carries the project id.
+async fn join_project(
+    store: &PostgresStore,
+    account: &cairn_core::AuthSessionResult,
+    project_id: &str,
+) {
+    let device = device_for(store, account, &format!("join-{project_id}")).await;
+    let context = WorkContext {
+        project_id: Some(project_id.to_owned()),
+        ..WorkContext::default()
+    };
+    push_in(
+        store,
+        &device,
+        "join",
+        &format!("join-{project_id}"),
+        context,
+    )
+    .await;
 }
 
 async fn age(pool: &PgPool, person_id: &str, session_id: &str) {
@@ -2555,10 +2567,7 @@ async fn postgres_capture_registers_project_and_branch_without_a_second_project_
         .register_project(&owner.token, "shared-pg", "Shared", None)
         .await
         .expect("shared");
-    store
-        .invite_project_member(&owner.token, &shared.project_id, "reg-m@example.test")
-        .await
-        .expect("invite");
+    join_project(&store, &member, &shared.project_id).await;
     let member_dev = device_for(&store, &member, "reg-member").await;
     push_in(
         &store,
@@ -3020,10 +3029,7 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
         .confirm_branch_merge(&device, &project, &merges[0].0, &merges[0].1, "c1", "solo")
         .await
         .expect("solo merge with a device token");
-    store
-        .invite_project_member(&device, &project, "dev-other@example.test")
-        .await
-        .expect("device invites a member");
+    join_project(&store, &other, &project).await;
     let refused = store
         .confirm_branch_merge(
             &device,
@@ -3063,7 +3069,8 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_invite() {
+async fn postgres_merge_needs_the_web_session_once_a_member_joins_and_waits_for_a_concurrent_join()
+{
     let (pool, store) = pool_and_store().await;
     let password = "correct horse battery staple";
     let owner = store
@@ -3103,25 +3110,15 @@ async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_in
             .expect("memory");
         branches.push((branch.branch_id, memory.memory_id));
     }
-    store
-        .invite_project_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect("device invites");
+    // A member who joined by capture closes the device merge path.
+    join_project(&store, &other, &project).await;
     store
         .create_project_team(&device, &project, "Core")
         .await
         .expect("device creates the team");
-    store
-        .add_project_team_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect("device adds a team member");
-
-    // A device token cannot empty the project to reopen the solo-merge path.
-    let removal = store
-        .remove_project_team_member(&device, &project, "gate-other@example.test")
-        .await
-        .expect_err("removing a member is web-only");
-    assert!(removal.to_string().contains(cairn_core::WEB_ONLY_ERROR));
+    let team = store.project_team(&device, &project).await.expect("team");
+    assert_eq!(team.members.len(), 1);
+    assert_eq!(team.members[0].email, "gate-other@example.test");
     let merge = store
         .confirm_branch_merge(
             &device,
@@ -3132,15 +3129,11 @@ async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_in
             "gate",
         )
         .await
-        .expect_err("members still need the web console");
+        .expect_err("members need the web console");
     assert!(merge.to_string().contains(cairn_core::WEB_ONLY_ERROR));
     store
-        .remove_project_team_member(&owner.token, &project, "gate-other@example.test")
-        .await
-        .expect("the web session removes the member");
-    store
         .confirm_branch_merge(
-            &device,
+            &owner.token,
             &project,
             &branches[0].0,
             &branches[0].1,
@@ -3148,9 +3141,28 @@ async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_in
             "gate",
         )
         .await
-        .expect("a solo project merges with the device again");
+        .expect("the web session merges a shared project");
+    // Joining again, from another device and event, adds no second membership.
+    let second_device = device_for(&store, &other, "gate-second").await;
+    let again = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    push_in(&store, &second_device, "join-again", "join-again-1", again).await;
+    let (members,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cairn_project_members WHERE project_id = $1")
+            .bind(&project)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(members, 1);
+    sqlx::query("DELETE FROM cairn_project_members WHERE project_id = $1")
+        .bind(&project)
+        .execute(&pool)
+        .await
+        .expect("reset the membership for the race below");
 
-    // An invite that is still uncommitted holds a key-share lock on the project row. The
+    // A join that is still uncommitted holds a key-share lock on the project row. The
     // device merge must wait for it, then see the member and refuse.
     let mut held = pool.begin().await.expect("begin");
     sqlx::query(
@@ -3162,7 +3174,7 @@ async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_in
     .bind(&other.account.person_id)
     .execute(&mut *held)
     .await
-    .expect("uncommitted invite");
+    .expect("uncommitted join");
     let merger = tokio::spawn({
         let (store, device, project) = (store.clone(), device.clone(), project.clone());
         let (branch_id, memory_id) = branches[1].clone();
@@ -3175,7 +3187,7 @@ async fn postgres_member_removal_is_web_only_and_merge_waits_for_a_concurrent_in
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(
         !merger.is_finished(),
-        "the merge must wait for the in-flight invite"
+        "the merge must wait for the in-flight join"
     );
     held.commit().await.expect("commit");
     let raced = merger
@@ -3602,14 +3614,7 @@ async fn postgres_share_policy_is_readable_by_the_owner_only() {
         .register_project(&owner.token, "policy-read", "Policy Read", None)
         .await
         .expect("project");
-    store
-        .invite_project_member(
-            &owner.token,
-            &project.project_id,
-            "policy-read-member@example.test",
-        )
-        .await
-        .expect("invite");
+    join_project(&store, &member, &project.project_id).await;
     let policy = |token: String| {
         let store = store.clone();
         let project_id = project.project_id.clone();
@@ -3633,4 +3638,365 @@ async fn postgres_share_policy_is_readable_by_the_owner_only() {
     );
     let denied = policy(member.token.clone()).await.expect_err("member");
     assert!(denied.to_string().contains("does not own"), "{denied}");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_a_project_id_joins_once_and_unknown_or_own_ids_are_ignored() {
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store
+        .bootstrap_account("join-owner@example.test", pw)
+        .await
+        .expect("owner");
+    let member = store
+        .register_account("join-member@example.test", pw)
+        .await
+        .expect("member");
+    let shared = store
+        .register_project(&owner.token, "join-shared", "Shared", None)
+        .await
+        .expect("project");
+    store
+        .create_project_team(&owner.token, &shared.project_id, "Core")
+        .await
+        .expect("team");
+    let owner_dev = device_for(&store, &owner, "join-owner-dev").await;
+    let member_dev = device_for(&store, &member, "join-member-dev").await;
+    let with_id = |project_id: &str, repository: &str, branch: &str| WorkContext {
+        project_id: Some(project_id.to_owned()),
+        repository: Some(repository.to_owned()),
+        branch: Some(branch.to_owned()),
+        ..WorkContext::default()
+    };
+
+    // The member's repository name differs; only the project id links it.
+    push_in(
+        &store,
+        &member_dev,
+        "s",
+        "j1",
+        with_id(&shared.project_id, "other-name", "feat/m"),
+    )
+    .await;
+    push_in(
+        &store,
+        &member_dev,
+        "s",
+        "j2",
+        with_id(&shared.project_id, "other-name", "feat/m"),
+    )
+    .await;
+    let mine = store.projects(&member.token).await.expect("projects");
+    assert_eq!(mine.len(), 1, "no duplicate private project");
+    assert_eq!(mine[0].project_id, shared.project_id);
+    let (private,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cairn_projects WHERE person_id = $1")
+            .bind(&member.account.person_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(private, 0);
+    let team = store
+        .project_team(&owner.token, &shared.project_id)
+        .await
+        .expect("team");
+    assert_eq!(
+        team.members.len(),
+        1,
+        "joining twice records one membership"
+    );
+    assert_eq!(team.members[0].email, "join-member@example.test");
+    for token in [&owner.token, &member.token] {
+        let people = store
+            .project_people(token, &shared.project_id)
+            .await
+            .expect("people");
+        assert_eq!(
+            people
+                .iter()
+                .map(|p| (p.role.as_str(), p.email.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("owner", "join-owner@example.test"),
+                ("member", "join-member@example.test")
+            ]
+        );
+    }
+    let stranger = store
+        .register_account("join-stranger@example.test", pw)
+        .await
+        .expect("stranger");
+    let refused = store
+        .project_people(&stranger.token, &shared.project_id)
+        .await
+        .expect_err("outsider");
+    assert!(refused.to_string().contains("not a project member"));
+    let audit = store.audit_events(&owner.token, 100).await.expect("audit");
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.action == "project_member_joined")
+            .count(),
+        1
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT context->>'project_id' FROM cairn_observations WHERE event_id = 'j1' AND person_id = $1",
+    )
+    .bind(&member.account.person_id)
+    .fetch_one(&pool)
+    .await
+    .expect("stored context");
+    assert_eq!(stored, shared.project_id);
+
+    // An unknown id is ignored: the push succeeds and the repository registers as before.
+    push_in(
+        &store,
+        &member_dev,
+        "s2",
+        "u1",
+        with_id("project-nope", "fallback", "main"),
+    )
+    .await;
+    let repos: Vec<String> = store
+        .projects(&member.token)
+        .await
+        .expect("projects")
+        .into_iter()
+        .map(|project| project.repository)
+        .collect();
+    assert!(repos.contains(&"fallback".to_owned()), "{repos:?}");
+
+    // The owner's own id adds no membership.
+    push_in(
+        &store,
+        &owner_dev,
+        "s3",
+        "o1",
+        with_id(&shared.project_id, "join-shared", "feat/o"),
+    )
+    .await;
+    let (members,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cairn_project_members WHERE project_id = $1")
+            .bind(&shared.project_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(members, 1);
+
+    // A bare project id still inherits the stored session context.
+    store
+        .start_session(
+            &member.token,
+            "bare",
+            WorkContext {
+                repository: Some("bare-repo".to_owned()),
+                branch: Some("feat/bare".to_owned()),
+                ..WorkContext::default()
+            },
+        )
+        .await
+        .expect("start");
+    let bare = WorkContext {
+        project_id: Some(shared.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let pushed = store
+        .sync_push(&member_dev, pushed("bare-1", "bare", bare))
+        .await
+        .expect("bare push");
+    assert_eq!(
+        pushed.observation.context.repository.as_deref(),
+        Some("bare-repo")
+    );
+    assert_eq!(
+        pushed.observation.context.project_id.as_deref(),
+        Some(shared.project_id.as_str())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_init_project_creates_once_and_defaults_the_name() {
+    let (_pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let owner = store
+        .bootstrap_account("init-owner@example.test", pw)
+        .await
+        .expect("owner");
+    let other = store
+        .register_account("init-other@example.test", pw)
+        .await
+        .expect("other");
+    let (created, is_new) = store
+        .init_project(&owner.token, " repo-a ", None)
+        .await
+        .expect("init");
+    assert!(is_new);
+    assert_eq!(
+        (created.repository.as_str(), created.name.as_str()),
+        ("repo-a", "repo-a")
+    );
+    let (again, is_new) = store
+        .init_project(&owner.token, "repo-a", Some("Renamed"))
+        .await
+        .expect("again");
+    assert!(!is_new);
+    assert_eq!(again.project_id, created.project_id);
+    let (theirs, is_new) = store
+        .init_project(&other.token, "repo-a", Some("Named"))
+        .await
+        .expect("other init");
+    assert!(is_new);
+    assert_ne!(theirs.project_id, created.project_id);
+    assert_eq!(theirs.name, "Named");
+    assert!(store.init_project(&owner.token, "  ", None).await.is_err());
+    assert!(
+        store
+            .init_project(&owner.token, &"r".repeat(513), None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_admin_lists_accounts_and_passwords_reset_and_change_revoke_sessions() {
+    let (pool, store) = pool_and_store().await;
+    let pw = "correct horse battery staple";
+    let fresh = "a brand new passphrase";
+    let admin = store
+        .bootstrap_account("pw-admin@example.test", pw)
+        .await
+        .expect("admin");
+    let user = store
+        .register_account("pw-user@example.test", pw)
+        .await
+        .expect("user");
+    let second = store
+        .login("pw-user@example.test", pw)
+        .await
+        .expect("second session");
+    let device = device_for(&store, &user, "pw-device").await;
+
+    // Listing is admin web session only.
+    let listed = store.accounts(&admin.token).await.expect("list");
+    assert_eq!(
+        listed.iter().map(|a| a.email.as_str()).collect::<Vec<_>>(),
+        ["pw-admin@example.test", "pw-user@example.test"]
+    );
+    assert!(listed[0].is_admin && !listed[1].is_admin);
+    for (token, expected) in [
+        (&user.token, cairn_core::ADMIN_ONLY_ERROR),
+        (&device, cairn_core::WEB_ONLY_ERROR),
+    ] {
+        let refused = store.accounts(token).await.expect_err("refused");
+        assert!(refused.to_string().contains(expected), "{refused}");
+        let refused = store
+            .reset_account_password(token, &user.account.person_id, fresh)
+            .await
+            .expect_err("refused");
+        assert!(refused.to_string().contains(expected), "{refused}");
+    }
+    assert!(
+        store
+            .reset_account_password(&admin.token, &user.account.person_id, "short")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .reset_account_password(&admin.token, "person-missing", fresh)
+            .await
+            .is_err()
+    );
+    store
+        .authenticate_session(&user.token)
+        .await
+        .expect("untouched");
+
+    // The reset ends every web session of that user, keeps devices, and is audited.
+    store
+        .reset_account_password(&admin.token, &user.account.person_id, fresh)
+        .await
+        .expect("reset");
+    for token in [&user.token, &second.token] {
+        assert!(store.authenticate_session(token).await.is_err());
+    }
+    store
+        .authenticate_account(&device)
+        .await
+        .expect("device stays valid");
+    store
+        .authenticate_session(&admin.token)
+        .await
+        .expect("admin session stays");
+    assert!(store.login("pw-user@example.test", pw).await.is_err());
+    let relogin = store
+        .login("pw-user@example.test", fresh)
+        .await
+        .expect("new password");
+    let audit = store
+        .audit_events(&relogin.token, 100)
+        .await
+        .expect("audit");
+    assert!(
+        audit
+            .iter()
+            .any(|event| event.action == "account_password_reset")
+    );
+    let (leaked,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM cairn_audit_events WHERE metadata::text LIKE $1")
+            .bind(format!("%{fresh}%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(leaked, 0);
+
+    // A change needs the current password and keeps only the current session.
+    let other = store
+        .login("pw-user@example.test", fresh)
+        .await
+        .expect("other session");
+    let wrong = store
+        .change_password(&relogin.token, "not the password", pw)
+        .await
+        .expect_err("wrong current password");
+    assert!(wrong.is_unauthorized(), "{wrong}");
+    assert!(
+        store
+            .change_password(&relogin.token, fresh, "short")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .change_password(&device, fresh, pw)
+            .await
+            .expect_err("device")
+            .to_string()
+            .contains(cairn_core::WEB_ONLY_ERROR)
+    );
+    store
+        .authenticate_session(&other.token)
+        .await
+        .expect("still valid");
+    store
+        .change_password(&relogin.token, fresh, pw)
+        .await
+        .expect("change");
+    store
+        .authenticate_session(&relogin.token)
+        .await
+        .expect("current kept");
+    assert!(store.authenticate_session(&other.token).await.is_err());
+    store
+        .authenticate_account(&device)
+        .await
+        .expect("device stays valid");
+    assert!(store.login("pw-user@example.test", fresh).await.is_err());
+    store
+        .login("pw-user@example.test", pw)
+        .await
+        .expect("changed password");
 }

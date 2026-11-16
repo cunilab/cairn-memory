@@ -23,6 +23,66 @@ Authorization: Bearer <account-token>
 }
 ```
 
+`cairn init` is the one-call form for a repository checkout:
+
+```http
+POST /cairn-memory/projects/init
+Authorization: Bearer <account-token>
+```
+
+```json
+{ "repository": "cairn-memory", "name": "Cairn Memory" }
+```
+
+`name` is optional and defaults to the repository (at most 512 bytes, like
+the repository). The call creates a project owned by the caller for that repository, or returns
+the caller's existing one, and answers exactly:
+
+```json
+{ "project_id": "project-…", "repository": "cairn-memory", "name": "Cairn Memory", "created": true }
+```
+
+`created` is `false` when the caller already owned the project (the stored name is kept). A web
+session or a device token may call it; both stores behave the same. A member of someone else's
+project for the same repository still gets (or creates) their own project, so run it only to
+start a new project; a teammate joins by capturing in the committed checkout (below).
+
+## Membership through the committed project file
+
+`cairn init` writes `<git toplevel>/.cairn/project.json` from that response:
+
+```json
+{
+  "project_id": "project-…",
+  "repository": "cairn-memory"
+}
+```
+
+It holds no secret and no server URL. Committing it is how a team shares the project: there are
+no invites and no member removal ([ADR 0011](../adr/0011-explicit-project-memory-share.md#amendment-2026-11-16-membership-through-a-committed-project-file-no-invites-no-removal)).
+The repository name is the hook's git-derived one (the last path part of `origin`, else the
+top-level directory name). `cairn init` refuses to overwrite a file that names a different project
+id (exit 1, the file is unchanged) and tells the user to commit the file.
+
+The hook ([hook-v1](hook-v1.md)) and `cairn capture` read that file from the git top level of the
+working directory and send its id as `context.project_id`. When a capture or sync push (file store
+`capture_for_account` and `sync_push`, PostgreSQL device `sync/push`) carries a `project_id` of an
+existing project that another person owns, the capturer becomes a member of it, idempotently, and
+the owner's audit history records `project_member_joined`. The stored observation keeps
+`context.project_id`. A member's capture then never creates a private project for that repository
+(automatic registration below is skipped), even when the member's repository name differs. An unknown
+id, a project with no owner record, and the capturer's own project are ignored: the capture still
+succeeds and falls back to the repository rules below. A context that carries only `project_id`
+still inherits the started session's other context fields.
+
+Anyone with an account on the server who captures with a project id joins that project. A member
+reads only what the owner explicitly shares ([share-layer5](share-layer5.md)), so the id is not a
+secret in the sense of memory access, but a member cannot be removed; the owner's control is to
+revoke shares. Everyone can see who is in a project with `GET /cairn-memory/projects/{projectId}/members`
+([share-layer5](share-layer5.md#membership)).
+
+## Capture registers the project
+
 A capture does the same without a call. When an account-owned observation (file
 store `capture_for_account`, PostgreSQL device `sync/push`) carries
 `context.repository`, the trimmed repository selects a project: one the person
@@ -44,7 +104,7 @@ In the file store the project registry operations are owner-only, for reads and
 writes: branch and worktree registration and listing, evidence entity
 registration and listing, freshness history, branch merge confirmation and branch
 close. After authentication the caller must own a project that has an owner
-record. A current member, a removed member and a registered outsider who know the
+record. A current member and a registered outsider who know the
 project id get `account does not own the project`, with no registry content in the
 error, and nothing is written. An unknown project is `unknown project: <id>`. A
 project with no owner record is not usable until the existing project registration
@@ -130,11 +190,11 @@ project with no other members may be confirmed by an agent. Since 2026-11-14
 the signal is the credential ([ADR 0008](../adr/0008-self-hosted-account-authentication.md)):
 a device token (an agent) is refused with `403` and `web console session
 required; device tokens cannot do this` when the project has any member besides
-its owner, invited or team, in both the file-store and PostgreSQL routers. A
+its owner, in both the file-store and PostgreSQL routers. A
 device token may confirm a merge on a solo project, and the web session may
-confirm on any owned project. Removing a member is web-only too, so a device token
-cannot remove members to make a project solo. In PostgreSQL the merge locks the
-project row, so it cannot race a concurrent invite. The member check runs after the owned-project
+confirm on any owned project. Members cannot be removed, so a device token
+cannot make a project solo again. In PostgreSQL the merge locks the
+project row, so it cannot race a concurrent join. The member check runs after the owned-project
 check, so an unknown or foreign project keeps its existing error. The other
 project routes in this contract accept a device token for the owner's account
 ([permission table](auth-layer3.md#device-tokens-are-agent-credentials)).
@@ -266,7 +326,7 @@ Authorization: Bearer <account-token>
 change stored memories.
 
 Maintenance is owner-only in the file store. After authentication it requires the
-caller to be the project owner: a current member, a removed member and a registered
+caller to be the project owner: a current member and a registered
 outsider who know the project id get `account does not own the project`, and the
 error carries no memory id or commit. An unknown project is `unknown project:
 <id>`. A project with no owner record (data from before accounts) is not
@@ -313,6 +373,7 @@ The `cairn` binary and `cairn mcp` call the project routes above with the device
 commands take no account token and no store path. Each command prints the server JSON and
 exits 1 with the server's message on an error:
 
+- `cairn init [name]` (writes `.cairn/project.json`; it has no MCP tool because it writes a file)
 - `cairn project-register <repository> <name> [default-branch]`
 - `cairn project-list`
 - `cairn promote <project-id> <memory-id> <reason>`
@@ -332,6 +393,18 @@ web-only ([auth](auth-layer3.md)).
 
 ## Evidence
 
+- Project init and membership by capture (2026-11-16): `init_project`, `join_context_project` in
+  `crates/core/src/lib.rs` and `crates/storage/src/lib.rs`; `crates/client/src/project.rs`.
+  Tests: `a_capture_with_a_project_id_makes_the_capturer_a_member_once`,
+  `an_unknown_ownerless_or_own_project_id_is_ignored_by_a_capture`,
+  `a_device_sync_push_with_a_project_id_joins_and_a_bare_id_keeps_session_context`,
+  `init_project_creates_once_defaults_the_name_and_is_per_owner`,
+  `project_people_lists_the_owner_then_members_for_owner_and_members_only` (core),
+  `file_project_init_is_idempotent_and_a_capture_joins_by_project_id` (server),
+  `agent_flow_on_the_file_store_server` (client), `test_project_file_at_the_git_top_level_sends_the_project_id`
+  in `scripts/smoke_hook_auth.py`, and the ignored
+  `postgres_a_project_id_joins_once_and_unknown_or_own_ids_are_ignored` and
+  `postgres_init_project_creates_once_and_defaults_the_name` (storage).
 - `docs/adr/0009-explicit-project-promotion.md`
 - `docs/adr/0010-correction-keeps-linked-history.md`
 - `crates/core/src/lib.rs`

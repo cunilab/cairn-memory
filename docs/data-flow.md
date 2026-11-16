@@ -370,7 +370,7 @@ Where in the code: `crates/core/src/lib.rs` (`auto_register_project`, `promote_m
 
 ## 6. Sharing flow
 
-Sharing is by invitation. The owner invites an existing account (created by the admin, section 7), then shares one decision at a time, or turns on a policy that shares non-sensitive decisions automatically when they are promoted. The project page shows the current policy, Manual or Automatic, and offers a button to switch to the other. A member reads only what was shared with them.
+Membership comes from the repository, not from an invite. The owner runs `cairn init` in the checkout and commits `.cairn/project.json`; a teammate with an account (created by the admin, section 7) joins the project when the hook or `cairn capture` runs in that checkout and sends the project id. The owner then shares one decision at a time, or turns on a policy that shares non-sensitive decisions automatically when they are promoted. The project page shows the current policy, Manual or Automatic, and offers a button to switch to the other. A member reads only what was shared with them.
 
 ```mermaid
 sequenceDiagram
@@ -378,8 +378,9 @@ sequenceDiagram
     participant Srv as cairn-server
     participant Mem as Member
 
-    Own->>Srv: invite member email (account must already exist)
-    Srv-->>Own: membership recorded
+    Own->>Srv: cairn init (create the project, write .cairn/project.json, commit it)
+    Mem->>Srv: first capture in the checkout carries context.project_id
+    Note over Srv: the capturer becomes a member, idempotently
     alt manual policy, the default
         Own->>Srv: share one decision with the member
         Srv-->>Own: share recorded
@@ -392,19 +393,17 @@ sequenceDiagram
     Own->>Srv: revoke share for one member
     Mem->>Srv: GET projects/id/shared
     Srv-->>Mem: that decision is gone
-    Own->>Srv: remove member (web session only)
-    Note over Srv: membership deleted, all active shares revoked
     Own->>Srv: GET revocations and conflicts
     Srv-->>Own: revoked shares with member email, conflicting decisions
     Mem->>Srv: GET revocations and conflicts
     Srv-->>Mem: own revoked shares, conflicts among shared decisions
 ```
 
-Not shown because it does not exist: a share never copies the memory into the member's own memories, and it does not reach the member's devices through sync. The member's search and context do not return the owner's unshared memories. Turning the policy back to manual does not revoke shares already made. Decisions that a live correction replaced, forgotten, expired, and revoked ones are all hidden from the member.
+Not shown because it does not exist: there is no invite and no member removal (revoking shares is the owner's control), and a share never copies the memory into the member's own memories, and it does not reach the member's devices through sync. The member's search and context do not return the owner's unshared memories. Turning the policy back to manual does not revoke shares already made. Decisions that a live correction replaced, forgotten, expired, and revoked ones are all hidden from the member.
 
-The console lets an owner invite, share, revoke, delete, create a team, add or remove a member, and switch the share policy (with a confirmation that says what changes). Dismissing a share candidate has no console control, CLI command, or MCP tool; it is REST only. The policy has no CLI command or MCP tool either.
+The console lets an owner share, revoke, delete, create a team, and switch the share policy (with a confirmation that says what changes). Dismissing a share candidate has no console control, CLI command, or MCP tool; it is REST only. The policy has no CLI command or MCP tool either.
 
-Where in the code: `crates/core/src/lib.rs` (`invite_project_member`, `share_project_memory`, `shared_project_memories`, `revoke_project_share`, `remove_project_team_member`, `auto_share_new_project_memory`, `project_revocations`), `apps/web/components/project-detail.tsx`, `apps/web/components/project-owner-actions.tsx`. Rules: [share](./contracts/share-layer5.md).
+Where in the code: `crates/core/src/lib.rs` (`init_project`, `join_context_project`, `share_project_memory`, `shared_project_memories`, `revoke_project_share`, `auto_share_new_project_memory`, `project_revocations`), `apps/web/components/project-detail.tsx`, `apps/web/components/project-owner-actions.tsx`. Rules: [share](./contracts/share-layer5.md).
 
 ## 7. Sign-in, tokens, and permissions
 
@@ -427,10 +426,10 @@ flowchart TD
     G --> H["Agent calls REST with the device token"]
     C --> R["Devices page: rotate or revoke a device"]
     R --> S["The old token gets 401 on every agent route<br/>rotate shows a new token once"]
-    H -.->|"device management, account creation<br/>or member removal"| X["403 web console session required"]
+    H -.->|"device management, account creation<br/>or password changes"| X["403 web console session required"]
 ```
 
-Hooks do not read `config.json`; they need `CAIRN_DEVICE_TOKEN` (and optionally `CAIRN_URL`) in their environment. Sign-in sessions last 30 days, on the server and in the console's cookie. Bootstrap, register, and login are limited to 10 tries per minute per email.
+Hooks do not read `config.json`; they need `CAIRN_DEVICE_TOKEN` (and optionally `CAIRN_URL`) in their environment. Sign-in sessions last 30 days, on the server and in the console's cookie. Bootstrap, register, login, and password change are limited to 10 tries per minute per email. The admin lists accounts and resets another account's password (`GET auth/accounts`, `POST auth/accounts/{id}/password`, which ends that account's web sessions); any signed-in account changes its own (`POST auth/password`, which ends its other sessions).
 
 `GET auth/me` returns the signed-in account with `is_admin` for a web session or a device token; the console uses it to show or hide the Accounts link. There is exactly one admin and no way to change that role through the API. Creating an account (`POST auth/register`) answers:
 
@@ -449,7 +448,8 @@ The admin check runs before the per-email rate limit and before the email and pa
 | Create another account | Admin only; any other account `403` | `403` |
 | Sign out, read audit history | Yes | `403` |
 | Create, list, rotate, revoke devices | Yes | `403` |
-| Remove a team member | Yes | `403` |
+| List accounts, reset another account's password | Admin only | `403` |
+| Change your own password | Yes | `403` |
 | Merge a branch on a project that has other members | Yes (owner) | `403` |
 | Merge a branch on a solo project | Yes (owner) | Yes |
 | Who am I (`auth/me`) | Yes | Yes |
@@ -457,7 +457,7 @@ The admin check runs before the per-email rate limit and before the email and pa
 | Capture through `sync/push`, pull, sync diagnose | `401` | Yes |
 | Recall, search, resume, why-changed, diagnose | Yes | Yes |
 | Remember, correct, forget, delete, export, import | Yes | Yes |
-| Projects, promote, verify, branches, invite, share, revoke, policy, teams | Yes | Yes |
+| Projects (`init` too), promote, verify, branches, share, revoke, policy, teams | Yes | Yes |
 
 Where in the code: `crates/core/src/lib.rs` (`bootstrap_account`, `register_account_as_admin`, `authenticate_admin`, `authenticate_session`, `authenticate_account`, `WEB_ONLY_ERROR`, `ADMIN_ONLY_ERROR`, `AUTH_SESSION_SECONDS`, `confirm_branch_merge`), `crates/storage/src/lib.rs`, `crates/server/src/lib.rs` (`auth_register`, `auth_me`, `AUTH_ATTEMPT_LIMIT`), `migrations/0013_admin_role.sql`, `apps/web/app/api/cairn/[...path]/route.ts` (cookie), `apps/web/components/login-form.tsx`, `accounts.tsx`, `devices.tsx`, `apps/web/hooks/use-account.ts`, `crates/client/src/lib.rs`. Rules: [auth](./contracts/auth-layer3.md), [ADR 0008](./adr/0008-self-hosted-account-authentication.md).
 
@@ -523,14 +523,14 @@ flowchart LR
     Mem(["Team member"])
     Own --> P1["Agent promotes a memory (cairn promote)<br/>or the owner uses the console Promote form"]
     P1 --> P2["Project decision with provenance"]
-    Own --> I1["Invite member email<br/>console or cairn project-invite"]
-    I1 --> I2["Member account must already exist"]
+    Own --> I1["cairn init in the checkout,<br/>commit .cairn/project.json"]
+    I1 --> I2["Teammate's first capture in the checkout<br/>joins the project (account must exist)"]
     P2 --> S1["Share decision<br/>console or cairn project-share"]
     I2 --> S1
     S1 --> M1["Member signs in to the console"]
     Mem --> M1
     M1 --> M2["Project page shows shared decisions"]
-    Own --> V1["Revoke a share or remove the member<br/>console"]
+    Own --> V1["Revoke a share<br/>console"]
     V1 --> V2["Member no longer sees the decision<br/>revocation listed in the report"]
 ```
 
@@ -592,7 +592,7 @@ flowchart TD
 
 ### 9f. The admin adds a teammate
 
-The teammate's account must exist before the owner can invite them to a project (section 6). Only the admin can create it.
+The teammate's account must exist before the teammate can join a project by capturing (section 6). Only the admin can create it.
 
 ```mermaid
 flowchart LR
@@ -601,7 +601,7 @@ flowchart LR
     N1 --> N2["Accounts page:<br/>email, password of 12 bytes or more, confirm"]
     N2 --> N3["Account created<br/>admin stays signed in"]
     N3 --> N4["Teammate signs in with that email<br/>and creates their own devices"]
-    N3 --> N5["A project owner can now invite<br/>that email to a project"]
+    N3 --> N5["Capturing in a checkout that commits<br/>.cairn/project.json now joins the project"]
 ```
 
 Where in the code: `apps/web/components/overview.tsx`, `project-detail.tsx`, `project-owner-actions.tsx`, `project-reports.tsx`, `devices.tsx`, `accounts.tsx`, `crates/client/src/bin/cairn.rs`.
@@ -612,9 +612,9 @@ Where in the code: `apps/web/components/overview.tsx`, `project-detail.tsx`, `pr
 | --- | --- | --- | --- |
 | `scripts/cairn_hook.py` | Turns one agent event (Claude Code hook input, section 2.1) into a `sync/push`; optional outbox on outage | The agent host, automatically | `CAIRN_DEVICE_TOKEN` (env), `CAIRN_URL` (env) |
 | `scripts/cairn_outbox.py` | Manual queue control: `enqueue`, `replay`, `status`, `purge` | An operator or script | Device token via `--token` (replay only) |
-| `cairn` CLI | One REST call per command. `setup`, `mcp`, `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `lesson`, `correct`, `export`, `import`, `project-register`, `project-list`, `promote`, `project-memories`, `project-freshness`, `project-invite`, `project-share`, `project-shared`, `project-revoke`, `project-team-create`, `project-team`, `project-team-add`, `delete-memory` | Agents, and people setting up | Device token from `cairn setup` or env |
-| `cairn mcp` | Same tool table over MCP stdio. 32 tools; the 26 that match a CLI command are in the CLI row, and six are MCP only: `memory_save`, `memory_recall`, `memory_consolidate`, `memory_smart_search`, `memory_diagnose`, `memory_reflect` | AI agents | Device token |
-| Web console | Pages: sign-in (`/` and `/login`), `/dashboard`, `/projects`, `/projects/[id]` (owner controls: share policy, promote, verify, merge, close), `/devices` (create, rotate, revoke), `/accounts` (admin only, linked from the sidebar only when `auth/me` says `is_admin`) | The owner, invited members, and the admin | Web session cookie |
+| `cairn` CLI | One REST call per command. `setup`, `mcp`, `init`, `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `lesson`, `correct`, `export`, `import`, `project-register`, `project-list`, `promote`, `project-memories`, `project-freshness`, `project-share`, `project-shared`, `project-revoke`, `project-team-create`, `project-team`, `delete-memory` | Agents, and people setting up | Device token from `cairn setup` or env |
+| `cairn mcp` | Same tool table over MCP stdio. 30 tools; the 24 that match a CLI command are in the CLI row, and six are MCP only: `memory_save`, `memory_recall`, `memory_consolidate`, `memory_smart_search`, `memory_diagnose`, `memory_reflect` | AI agents | Device token |
+| Web console | Pages: sign-in (`/` and `/login`), `/dashboard`, `/projects`, `/projects/[id]` (owner controls: share policy, promote, verify, merge, close), `/devices` (create, rotate, revoke), `/accounts` (admin only, linked from the sidebar only when `auth/me` says `is_admin`) | The owner, members, and the admin | Web session cookie |
 | REST server | `cairn-server`, routes under `/cairn-memory/*`, plus `/viewer` | Everything above | Per route: web session, device token, or both |
 | Docker dev stack | PostgreSQL 16, server, console on 127.0.0.1 ports 55432, 58080, 53000; `scripts/dev_up.sh` and `scripts/dev_down.sh` | Developers of Cairn | A generated database password in `.env.dev` |
 

@@ -155,7 +155,9 @@ command is unchanged. The client rule is the [hook contract](./hook-v1.md).
 
 An empty PostgreSQL push is a context equal to `WorkContext::default()`. When
 this person's `(person_id, session_id)` row already exists, the push copies
-that stored context before normalize. It does not copy another person's row.
+that stored context before normalize. It does not copy another person's row. A context
+that sets only `project_id` (what `cairn capture` sends) counts as empty for this copy and keeps
+its `project_id`; the file store does the same on `observe` and `sync/push`.
 When no session exists, the push inserts a session with the pushed context so the
 observation foreign key holds, and a push with a real context fills an existing
 empty row under the same rule as a start (a real context is never replaced). A partial context, including one that sets only `files`,

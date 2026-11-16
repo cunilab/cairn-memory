@@ -61,6 +61,14 @@ replacement for the project documentation.
 - **Reason:** Automation-first: an agent holding the account bearer could not be told apart from a person, so merge gating and device control had no signal.
 - **Evidence:** `docs/adr/0008-self-hosted-account-authentication.md` (2026-11-14 amendment); `docs/contracts/auth-layer3.md`; `crates/core/src/lib.rs`; `crates/storage/src/lib.rs`; `crates/server/src/lib.rs`; `cargo test --workspace`; `scripts/smoke_layer3.sh`; `scripts/smoke_web.sh`. The PostgreSQL test and `scripts/smoke_postgres.sh` were not run (database container I/O errors).
 
+### 2026-11-16 — Membership is the committed `.cairn/project.json`; no invites, no removal
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** `cairn init` creates the owner's project and writes `.cairn/project.json` (`project_id`, `repository`). The hook and `cairn capture` send it as `context.project_id`; a capture or sync push that names another person's project makes the capturer a member (idempotent, owner audit `project_member_joined`, no private duplicate project). Invite, team member add and member removal routes, commands and tools are gone; a team lists the project members; shares stay explicit.
+- **Reason:** Automation-first: the repository already is the team's shared place, and invite and removal were human-only steps. Members cannot be removed, so the device-token merge gate cannot be reopened.
+- **Evidence:** `docs/adr/0011-explicit-project-memory-share.md` (2026-11-16 amendment); `docs/contracts/project-layer4.md`; `crates/core/src/lib.rs` (`join_context_project`); `cargo test --workspace`
+
 ### 2026-11-13 — The remote Cairn server is canonical; local outbox and file backend are not
 
 - **Type:** decision
@@ -302,6 +310,14 @@ when an ADR, specification, or implementation resolves them.
 - **Summary:** In the file store `project_maintenance`, branch and worktree registration and listing, entity registration and listing, freshness history, `confirm_branch_merge` and `close_branch` call `require_owned_project` after authentication: the project must exist and have an owner record equal to the caller, otherwise `account does not own the project` (members, removed members, outsiders and ownerless projects are refused; members use explicit sharing). Merge also rejects another account's source memory, and its existing-promotion and merged-branch lookups use `project_rows` (owner-visible rows only). Not repaired: old aliased branches are denied the read, an ownerless project is claimed by the first account that registers its repository, other functions still use the lenient `require_project_owner`, and foreign vs missing project errors differ. PostgreSQL is not covered.
 - **Reason:** The project id is not a secret and an authenticate-only check let any account read or write another's registry and copy its memory. The lenient helper passes any account for an ownerless project, so strict ownership needs its own helper.
 - **Evidence:** `docs/contracts/project-layer4.md`; `docs/audits/2026-11-13-file-import-project-id.md`; `docs/audits/2026-11-13-project-registry-access.md`; `crates/core/src/lib.rs`
+
+### 2026-11-16 — Smoke scripts must not inherit CAIRN_URL and CAIRN_DEVICE_TOKEN
+
+- **Type:** lesson
+- **Status:** active
+- **Summary:** `cairn` lets `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` override its config, so a shell that has them set for a real server sends the CLI and MCP smoke scripts' writes there. `scripts/smoke_agent_lib.sh` now unsets them (and `CAIRN_OUTBOX`); run other ad hoc `cairn` checks with `env -u CAIRN_URL -u CAIRN_DEVICE_TOKEN -u CAIRN_OUTBOX`.
+- **Reason:** Smoke runs wrote test sessions and decisions to a live server before the cause was noticed.
+- **Evidence:** `scripts/smoke_agent_lib.sh`; `crates/client/src/lib.rs` (environment override)
 
 ## Entry template
 

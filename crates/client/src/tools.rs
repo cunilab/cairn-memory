@@ -1,8 +1,8 @@
 //! The agent tool surface. Each tool is one REST call; the `cairn` CLI and the MCP server
 //! share this table, so a command and its tool cannot drift apart.
 //!
-//! Web-only actions (account and device management, member removal) have no tool: a device
-//! token is refused there, so offering them would only invite retries.
+//! Web-only actions (account and device management) have no tool: a device token is refused
+//! there, so offering them would only invite retries.
 
 use crate::{Client, Error};
 use serde_json::{Map, Value, json};
@@ -132,12 +132,6 @@ fn build_tools() -> Vec<Tool> {
         )
     };
     let project_schema = || object_schema(&[("projectId", string_schema())], &["projectId"]);
-    let project_email_schema = || {
-        object_schema(
-            &[("projectId", string_schema()), ("email", string_schema())],
-            &["projectId", "email"],
-        )
-    };
     let share_schema = || {
         object_schema(
             &[
@@ -366,15 +360,8 @@ fn build_tools() -> Vec<Tool> {
             project_schema(),
         ),
         spec(
-            "memory_project_invite",
-            "Invite an existing account to a project. Owner only.",
-            Post,
-            "/projects/{projectId}/members",
-            project_email_schema(),
-        ),
-        spec(
             "memory_project_share",
-            "Share one promoted project memory with an invited member. Owner only.",
+            "Share one promoted project memory with a project member. Owner only.",
             Post,
             "/projects/{projectId}/shares",
             share_schema(),
@@ -409,13 +396,6 @@ fn build_tools() -> Vec<Tool> {
             Get,
             "/projects/{projectId}/team",
             project_schema(),
-        ),
-        spec(
-            "memory_project_team_add",
-            "Add an existing project member to the team. Owner only.",
-            Post,
-            "/projects/{projectId}/team/members",
-            project_email_schema(),
         ),
         spec(
             "memory_delete",

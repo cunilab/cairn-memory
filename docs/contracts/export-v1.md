@@ -98,7 +98,7 @@ additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
   a store with no accounts (REST: without a bearer) merge every entry. Tombstones already stored are not
   rewritten.
 - File-store account import accepts a memory row that carries a `project_id` only when that
-  project exists and the caller owns it. An outsider, an invited member, a missing
+  project exists and the caller owns it. An outsider, a member, a missing
   project and a project with no owner record all reject the whole import with
   `account does not own the project`, and nothing is written. The bundle holds no
   project record, and import does not create a project, map one, or strip the

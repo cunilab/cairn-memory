@@ -295,6 +295,8 @@ mod tests {
         for removed in [
             "memory_account_bootstrap",
             "memory_account_register",
+            "memory_project_invite",
+            "memory_project_team_add",
             "memory_project_team_remove",
             "memory_sessions",
         ] {

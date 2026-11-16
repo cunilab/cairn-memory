@@ -30,7 +30,18 @@ memory_id="$(ENDED_JSON="$ended" python3 -c 'import json, os; print(json.loads(o
 promoted="$(cairn promote "$project_id" "$memory_id" "Share the promoted repository decision")"
 promoted_id="$(PROMOTED_JSON="$promoted" python3 -c 'import json, os; print(json.loads(os.environ["PROMOTED_JSON"])["memory_id"])')"
 
-cairn project-invite "$project_id" member@example.test >/dev/null
+# Membership comes from the committed project file: the owner runs `cairn init` in the
+# checkout, and the member's first capture there joins the project. There is no invite.
+checkout="$smoke_dir/checkout"
+git init -q "$checkout"
+git -C "$checkout" remote add origin https://example.test/acme/cairn-demo.git
+(cd "$checkout" && cairn init >/dev/null)
+init_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["project_id"])' "$checkout/.cairn/project.json")"
+if [ "$init_id" != "$project_id" ]; then
+  printf '%s\n' "cairn init wrote $init_id, expected $project_id" >&2
+  exit 1
+fi
+(cd "$checkout" && as_member cairn capture join-session evt-join "joined by the project file" >/dev/null)
 cairn project-share "$project_id" "$promoted_id" member@example.test >/dev/null
 
 shared="$(as_member cairn project-shared "$project_id")"
@@ -69,7 +80,6 @@ import os
 
 assert json.loads(os.environ["TEAM_JSON"])["name"] == "Platform"
 PY
-cairn project-team-add "$project_id" member@example.test >/dev/null
 listed="$(as_member cairn project-team "$project_id")"
 LISTED_JSON="$listed" python3 - <<'PY'
 import json
@@ -83,24 +93,31 @@ if as_member cairn project-team-create "$project_id" Other >/dev/null 2>&1; then
   printf '%s\n' "member team create should fail" >&2
   exit 1
 fi
-# Removing a member is web-only: the owner's device token is refused, the web session works.
-remove_url="$base/cairn-memory/projects/$project_id/team/members/remove"
-remove_body='{"email":"member@example.test"}'
-status="$(curl -sS -o "$smoke_dir/remove.out" -w '%{http_code}' -X POST "$remove_url" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $(device_of owner)" -d "$remove_body")"
-if [ "$status" != "403" ] || ! grep -q "device tokens cannot do this" "$smoke_dir/remove.out"; then
-  printf '%s\n' "device token should be refused with 403 on team member removal" >&2
-  exit 1
-fi
-curl -fsS -X POST "$remove_url" -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $(session_of owner)" -d "$remove_body" >/dev/null
-former="$(as_member cairn project-shared "$project_id")"
-FORMER_JSON="$former" python3 - <<'PY'
+# There is no invite, member removal or team member route.
+# (`members` stays as a read-only GET, so a POST there is 405.)
+for route_status in members:405 team/members:404 team/members/remove:404; do
+  route="${route_status%%:*}"
+  want="${route_status##*:}"
+  status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$base/cairn-memory/projects/$project_id/$route" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $(session_of owner)" \
+    -d '{"email":"member@example.test"}')"
+  if [ "$status" != "$want" ]; then
+    printf '%s\n' "POST $route should be $want, got $status" >&2
+    exit 1
+  fi
+done
+# The owner and the member both read the member list; no team space is needed.
+for who in owner member; do
+  people="$(curl -fsS "$base/cairn-memory/projects/$project_id/members" -H "Authorization: Bearer $(session_of $who)")"
+  PEOPLE_JSON="$people" python3 - <<'PY'
 import json
 import os
 
-assert json.loads(os.environ["FORMER_JSON"]) == []
+people = json.loads(os.environ["PEOPLE_JSON"])
+assert [(p["role"], p["email"]) for p in people] == [("owner", "owner@example.test"), ("member", "member@example.test")]
+assert all(set(p) == {"person_id", "email", "role", "joined_at"} for p in people)
 PY
+done
 cairn delete-memory "$promoted_id" >/dev/null
 export_path="$smoke_dir/export.json"
 cairn export "$export_path"
