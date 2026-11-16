@@ -38,6 +38,13 @@ These are the useful project-level parts of the Karpathy-inspired guidance:
   narrower check proves the requested result.
 - Keep the product boundary clear: personal memory and branch continuity come
   before project promotion, collaboration, or federation.
+- Rust unit tests live in a sibling `tests.rs` next to their module, declared
+  with `#[cfg(test)] mod tests;` (keeps access to private items). Integration
+  and PostgreSQL tests live in `crates/<crate>/tests/`. When reading or
+  changing a module, look for its `tests.rs`; when adding a module, put its
+  unit tests there. Existing inline `mod tests { … }` blocks (notably in
+  `crates/core/src/lib.rs`) are scheduled to move; do not add new inline test
+  modules.
 
 ## Critical verified lessons
 
