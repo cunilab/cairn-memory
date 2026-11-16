@@ -6,6 +6,11 @@ status: draft
 
 # Product — Cairn Memory
 
+Current project collaboration is defined by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+Its all-member decisions, explicit publication, personal scopes and online retrieval
+supersede the selective-sharing, team-space and project-delivery proposals below.
+The current API contract is [project-layer4](contracts/project-layer4.md).
+
 > Cairn Memory is an AI-managed, person-owned memory layer that automatically captures, organizes, synchronizes, and retrieves useful context for people and coding agents.
 
 ## Product Statement

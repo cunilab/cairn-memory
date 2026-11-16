@@ -6,6 +6,11 @@ status: draft
 
 # Cairn Memory Autopilot and Sharing Policy
 
+Current project collaboration is defined by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+Its all-member decisions, explicit publication, personal scopes and online retrieval
+supersede the selective-sharing, team-space and project-delivery proposals below.
+The current API contract is [project-layer4](contracts/project-layer4.md).
+
 This policy defines the proposed Phase 0 behavior in plain language. It is the product boundary for automatic memory. The AI may manage relevance and lifecycle, but it does not get to redefine ownership or permissions.
 
 ## The promise

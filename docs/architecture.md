@@ -6,6 +6,11 @@ status: draft
 
 # Architecture — Cairn Memory
 
+Current project collaboration is defined by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+Its all-member decisions, explicit publication, personal scopes and online retrieval
+supersede the selective-sharing, team-space and project-delivery proposals below.
+The current API contract is [project-layer4](contracts/project-layer4.md).
+
 | Field | Value |
 | --- | --- |
 | Scope | Server-authoritative Rust backend, optional edge client, Next.js console, persistence, retrieval, and compatibility boundaries |
