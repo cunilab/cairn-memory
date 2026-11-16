@@ -139,7 +139,7 @@ export default function ProjectsPage() {
     <ConsoleShell crumbs={[{ label: "Projects" }]}>
       <PageHeader
         title="Projects"
-        description="Repositories Cairn keeps decisions for, on this account or shared with it."
+        description="Projects you belong to. Every member can read the project decisions."
       />
       {error ? (
         <Alert variant="destructive">

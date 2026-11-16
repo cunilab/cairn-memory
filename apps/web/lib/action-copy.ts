@@ -1,13 +1,5 @@
 export function deleteDecisionImpact(memoryId: string): string {
-  return `This hides ${memoryId} from the project. Cairn keeps the stored record and records a retained delete. The decision leaves this page and the member shared view. This console cannot undo it.`;
-}
-
-export function revokeShareImpact(memoryId: string, email: string): string {
-  const member = email.trim();
-  if (!member) {
-    return "Enter a member email before revoking this share. No request is sent until you confirm.";
-  }
-  return `Stop sharing ${memoryId} with ${member}. The decision stays on your account. ${member} will no longer see it in the shared project. Share this decision again to show it to this member.`;
+  return `This hides ${memoryId} from the project. Cairn keeps the stored record and records a retained delete. The decision leaves this page and every member’s project view. Your private source stays as it is. This console cannot undo it.`;
 }
 
 export function revokeDeviceImpact(name: string): string {
@@ -19,15 +11,9 @@ export function rotateDeviceImpact(name: string): string {
 }
 
 export function closeBranchImpact(name: string): string {
-  return `Close branch ${name}. A closed branch cannot be merged into the project and this console cannot reopen it. Memories captured on the branch stay on your account.`;
+  return `Close your branch ${name}. Your personal memories stay on your account, and other members’ branch records stay as they are.`;
 }
 
 export function mergeBranchImpact(name: string): string {
-  return `Merge branch ${name}. The chosen memory becomes a project decision, the branch is marked merged, and this console cannot undo it.`;
-}
-
-export function sharePolicyImpact(policy: string): string {
-  return policy === "manual"
-    ? "Set the share policy to manual. New decisions stay private until you share each one with a member."
-    : "Set the share policy to automatic. New non-sensitive project decisions are shared with project members without a per-decision step.";
+  return `Record the merge of your branch ${name}. The selected memory becomes a decision for every member; only your branch and worktree records change. Preview the full copy first.`;
 }

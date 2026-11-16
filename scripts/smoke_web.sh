@@ -61,17 +61,15 @@ web_port="$(printf '%s\n' "$ports" | sed -n '2p')"
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
 import { memoryReadPath } from "./apps/web/lib/memory-path.ts";
 
-const member = memoryReadPath("proj", "member");
-const owner = memoryReadPath("proj", "owner");
-if (member !== "projects/proj/shared") {
+const member = memoryReadPath("proj");
+const owner = memoryReadPath("proj");
+if (member !== "projects/proj/memories") {
   throw new Error(`member path ${member}`);
 }
 if (owner !== "projects/proj/memories") {
   throw new Error(`owner path ${owner}`);
 }
-if (member.includes("memories")) {
-  throw new Error("member path requests owner memories");
-}
+if (member !== owner) { throw new Error("every role must use the same decision list"); }
 JS
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
@@ -119,7 +117,7 @@ if (signInFailureMessage("authentication rate limit exceeded") !== "authenticati
 JS
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import { deleteDecisionImpact, revokeShareImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
+import { deleteDecisionImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
 
 const deleted = deleteDecisionImpact("memory-1");
 if (!deleted.includes("memory-1") || !deleted.includes("retained delete") || !deleted.includes("keeps the stored record")) {
@@ -128,24 +126,11 @@ if (!deleted.includes("memory-1") || !deleted.includes("retained delete") || !de
 if (/permanently|erase|purged|undo button/i.test(deleted)) {
   throw new Error("delete copy must not promise erasure or an undo control");
 }
-const revoked = revokeShareImpact("memory-1", "member@example.test");
-if (!revoked.includes("member@example.test") || !revoked.includes("stays on your account")) {
-  throw new Error("revoke copy must name the member and keep the decision");
-}
-if (!revoked.includes("Share this decision again to show it to this member.")) {
-  throw new Error("revoke copy must say sharing again restores access");
-}
-if (/cannot undo the revoke/i.test(revoked)) {
-  throw new Error("revoke copy must not say the console cannot undo a revoke");
-}
 const rotated = rotateDeviceImpact("laptop");
 if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
   throw new Error("rotate copy must name the device, the old token and the one-time new token");
 }
-const missingEmail = revokeShareImpact("memory-1", "  ");
-if (!missingEmail.includes("member email") || !missingEmail.includes("No request is sent")) {
-  throw new Error("revoke without an email must not describe a completed change");
-}
+
 JS
 
 # The inline theme script sets the dark class before paint: stored choice first, OS preference for System.
@@ -299,10 +284,7 @@ curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${member_device}" \
   -d "{\"eventId\":\"member-join\",\"sessionId\":\"member-join\",\"content\":\"joined by project file\",\"role\":\"agent\",\"source\":\"smoke\",\"context\":{\"repository\":\"cairn-demo\",\"project_id\":\"${project_id}\"}}" \
   "${api}/cairn-memory/observe" >/dev/null
-curl -fsS -H 'content-type: application/json' \
-  -H "authorization: Bearer ${device_token}" \
-  -d "{\"memory_id\":\"${promoted_id}\",\"email\":\"member@example.test\"}" \
-  "${api}/cairn-memory/projects/${project_id}/shares" >/dev/null
+
 
 (
   cd apps/web
@@ -558,7 +540,6 @@ owner_ok() {
     exit 1
   fi
 }
-owner_ok "share policy" "projects/${project_id}/policy" '{"policy":"manual"}'
 curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
   -d '{"session_id":"web-console-promote","context":{"repository":"cairn-demo","commit":"abc1234"}}' \
   "${api}/cairn-memory/session/start" >/dev/null
@@ -609,9 +590,7 @@ if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
   exit 1
 fi
 
-for report in diagnose "projects/${project_id}/conflicts" "projects/${project_id}/freshness" \
-  "projects/${project_id}/revocations" \
-  "projects/${project_id}/share-candidates?email=member@example.test"; do
+for report in diagnose "projects/${project_id}/conflicts" "projects/${project_id}/freshness"; do
   report_code="$(curl -sS -o "$workdir/report.body" -b "$owner_jar" -w '%{http_code}' \
     "${web}/api/cairn/${report}")"
   if [ "$report_code" != "200" ]; then
@@ -723,7 +702,7 @@ PY
 
 shared_body="$workdir/shared.body"
 shared_code="$(curl -sS -o "$shared_body" -b "$member_jar" -w '%{http_code}' \
-  "${web}/api/cairn/projects/${project_id}/shared")"
+  "${web}/api/cairn/projects/${project_id}/memories")"
 if [ "$shared_code" != "200" ]; then
   printf '%s\n' "member shared read failed: ${shared_code}" >&2
   cat "$shared_body" >&2
@@ -734,7 +713,7 @@ import json
 import os
 memories = json.load(open(os.environ["SHARED_BODY"], encoding="utf-8"))
 ids = [memory["memory_id"] for memory in memories]
-assert ids == [os.environ["PROMOTED_ID"]]
+assert os.environ["PROMOTED_ID"] in ids
 assert os.environ["PRIVATE_ID"] not in ids
 blob = json.dumps(memories)
 assert "private observation stays on the owner account" not in blob
