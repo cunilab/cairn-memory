@@ -71,16 +71,20 @@ pub fn hybrid_rank(
     let mut typed_in: HashMap<&str, Vec<&str>> = HashMap::new();
     for memory in memories {
         for link in &memory.links {
-            if link.target_id != memory.memory_id && by_id.contains_key(link.target_id.as_str()) {
-                typed_out
-                    .entry(memory.memory_id.as_str())
-                    .or_default()
-                    .push(link.target_id.as_str());
-                typed_in
-                    .entry(link.target_id.as_str())
-                    .or_default()
-                    .push(memory.memory_id.as_str());
+            let Some(target) = by_id.get(link.target_id.as_str()) else {
+                continue;
+            };
+            if !crate::link_is_readable(memory, target) {
+                continue;
             }
+            typed_out
+                .entry(memory.memory_id.as_str())
+                .or_default()
+                .push(link.target_id.as_str());
+            typed_in
+                .entry(link.target_id.as_str())
+                .or_default()
+                .push(memory.memory_id.as_str());
         }
     }
     for (id, score) in seeds {

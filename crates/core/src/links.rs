@@ -26,6 +26,32 @@ pub struct MemoryLink {
     pub target_id: String,
 }
 
+/// Why an imported link was not stored. Link creation rejects the same cases.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DroppedLinkReason {
+    SelfLink,
+    Duplicate,
+    UnknownTarget,
+    Scope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DroppedLink {
+    pub memory_id: String,
+    pub relation: LinkRelation,
+    pub target_id: String,
+    pub reason: DroppedLinkReason,
+}
+
+/// A stored directed link counts only when both ends are different memories in
+/// the same scope and project. Missing and cross-scope targets do not.
+pub fn link_is_readable(source: &Memory, target: &Memory) -> bool {
+    source.memory_id != target.memory_id
+        && source.scope == target.scope
+        && source.project_id == target.project_id
+}
+
 /// Every edge the canvas can draw, including the two stored outside `links`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +117,7 @@ pub fn graph_node_cap(requested: Option<usize>) -> Result<usize, StoreError> {
 }
 
 /// Nodes are the memories the caller can already read. An edge is kept only
-/// when both ends are in that set. Above `cap`, the fewest incident edges are
+/// when both ends are in that set and share a scope and project. Above `cap`, the fewest incident edges are
 /// dropped first, then the oldest `created_at`, then the memory id.
 pub fn build_memory_graph(memories: &[Memory], filter: &GraphFilter, cap: usize) -> MemoryGraph {
     let mut candidates: Vec<&Memory> = memories
@@ -107,14 +133,21 @@ pub fn build_memory_graph(memories: &[Memory], filter: &GraphFilter, cap: usize)
                     .is_none_or(|project_id| memory.project_id.as_ref() == Some(project_id))
         })
         .collect();
-    let ids = candidates
+    let by_id = candidates
         .iter()
-        .map(|memory| memory.memory_id.as_str())
-        .collect::<HashSet<_>>();
+        .map(|memory| (memory.memory_id.as_str(), *memory))
+        .collect::<HashMap<_, _>>();
+    let ids = by_id.keys().copied().collect::<HashSet<_>>();
     let mut edges = Vec::new();
     let mut seen = HashSet::new();
     for memory in &candidates {
         for link in &memory.links {
+            let Some(target) = by_id.get(link.target_id.as_str()) else {
+                continue;
+            };
+            if !link_is_readable(memory, target) {
+                continue;
+            }
             push_edge(
                 &mut edges,
                 &mut seen,
@@ -241,6 +274,74 @@ fn same_link_scope(left: &Memory, right: &Memory) -> Result<(), StoreError> {
         Err(StoreError::Validation(
             "link must stay in the same scope and project".to_owned(),
         ))
+    }
+}
+
+struct LinkEnd {
+    scope: crate::MemoryScope,
+    project_id: Option<String>,
+}
+
+/// Drops imported links that `link_memories` would reject. A target may be
+/// another row in this bundle or a memory the caller can already read.
+pub fn sanitize_imported_links(incoming: &mut [Memory], readable: &[Memory]) -> Vec<DroppedLink> {
+    let mut known = HashMap::<String, LinkEnd>::new();
+    for memory in readable {
+        known.insert(
+            memory.memory_id.clone(),
+            LinkEnd {
+                scope: memory.scope.clone(),
+                project_id: memory.project_id.clone(),
+            },
+        );
+    }
+    for memory in incoming.iter() {
+        known.insert(
+            memory.memory_id.clone(),
+            LinkEnd {
+                scope: memory.scope.clone(),
+                project_id: memory.project_id.clone(),
+            },
+        );
+    }
+    let mut dropped = Vec::new();
+    for memory in incoming.iter_mut() {
+        let mut kept = Vec::new();
+        let mut seen = HashSet::new();
+        for link in std::mem::take(&mut memory.links) {
+            if link.target_id == memory.memory_id {
+                dropped.push(dropped_link(memory, &link, DroppedLinkReason::SelfLink));
+                continue;
+            }
+            if !seen.insert((link.relation, link.target_id.clone())) {
+                dropped.push(dropped_link(memory, &link, DroppedLinkReason::Duplicate));
+                continue;
+            }
+            let Some(target) = known.get(&link.target_id) else {
+                dropped.push(dropped_link(
+                    memory,
+                    &link,
+                    DroppedLinkReason::UnknownTarget,
+                ));
+                continue;
+            };
+            if memory.scope != target.scope || memory.project_id != target.project_id {
+                dropped.push(dropped_link(memory, &link, DroppedLinkReason::Scope));
+                continue;
+            }
+            kept.push(link);
+        }
+        memory.links = kept;
+    }
+    dropped
+}
+
+fn dropped_link(memory: &Memory, link: &MemoryLink, reason: DroppedLinkReason) -> DroppedLink {
+    DroppedLink {
+        memory_id: memory.memory_id.clone(),
+        relation: link.relation,
+        target_id: link.target_id.clone(),
+        reason,
     }
 }
 

@@ -8,7 +8,10 @@ import { ConsoleShell } from "@/components/console-shell";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { graphEdgeKey } from "@/lib/graph-edge-key";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
@@ -17,8 +20,59 @@ import type { ListedProject, MemoryGraph, ProjectMemory } from "@/lib/types";
 const RELATIONS = ["relates", "causes", "fixes", "depends_on", "contradicts", "supersedes"] as const;
 const SCOPES = ["personal", "project", "global"] as const;
 
-const controlClass =
-  "h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30";
+function choice(value: string | null) {
+  return value && value !== "all" ? value : "";
+}
+
+function LinkTable({ graph, onOpen }: { graph: MemoryGraph; onOpen: (memoryId: string) => void }) {
+  const titles = new Map(graph.nodes.map((node) => [node.memory_id, node.title]));
+  const linked = new Set(graph.edges.flatMap((edge) => [edge.source_id, edge.target_id]));
+  const alone = graph.nodes.filter((node) => !linked.has(node.memory_id));
+  return (
+    <div className="max-h-80 overflow-auto rounded-lg border">
+      <Table id="memory-links" aria-label="Memory links">
+        <TableCaption className="sr-only">
+          Directed links. Each row names the source memory, the relation, and the target memory.
+        </TableCaption>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Source</TableHead>
+            <TableHead>Relation</TableHead>
+            <TableHead>Target</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {graph.edges.map((edge) => (
+            <TableRow key={graphEdgeKey(edge.source_id, edge.relation, edge.target_id)}>
+              <TableCell className="whitespace-normal">
+                <button type="button" className="text-left hover:underline" onClick={() => onOpen(edge.source_id)}>
+                  {titles.get(edge.source_id) ?? edge.source_id}
+                </button>
+              </TableCell>
+              <TableCell>{edge.relation.replaceAll("_", " ")}</TableCell>
+              <TableCell className="whitespace-normal">
+                <button type="button" className="text-left hover:underline" onClick={() => onOpen(edge.target_id)}>
+                  {titles.get(edge.target_id) ?? edge.target_id}
+                </button>
+              </TableCell>
+            </TableRow>
+          ))}
+          {alone.map((node) => (
+            <TableRow key={`node:${node.memory_id}`}>
+              <TableCell className="whitespace-normal">
+                <button type="button" className="text-left hover:underline" onClick={() => onOpen(node.memory_id)}>
+                  {node.title}
+                </button>
+              </TableCell>
+              <TableCell>no link</TableCell>
+              <TableCell>—</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
 
 export default function GraphPage() {
   const router = useRouter();
@@ -85,30 +139,45 @@ export default function GraphPage() {
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
         <label className="grid gap-1 text-xs font-medium text-muted-foreground">
           Scope
-          <select className={controlClass} value={scope} onChange={(event) => setScope(event.target.value)} aria-label="Scope">
-            <option value="">All</option>
-            {SCOPES.map((item) => (
-              <option key={item} value={item}>{item}</option>
-            ))}
-          </select>
+          <Select value={scope || "all"} onValueChange={(value) => setScope(choice(value))}>
+            <SelectTrigger className="w-full" aria-label="Scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              {SCOPES.map((item) => (
+                <SelectItem key={item} value={item}>{item}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-muted-foreground">
           Project
-          <select className={controlClass} value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Project">
-            <option value="">All</option>
-            {projects.map((project) => (
-              <option key={project.project_id} value={project.project_id}>{project.name}</option>
-            ))}
-          </select>
+          <Select value={projectId || "all"} onValueChange={(value) => setProjectId(choice(value))}>
+            <SelectTrigger className="w-full" aria-label="Project">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              {projects.map((project) => (
+                <SelectItem key={project.project_id} value={project.project_id}>{project.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-muted-foreground">
           Relation
-          <select className={controlClass} value={relation} onChange={(event) => setRelation(event.target.value)} aria-label="Relation">
-            <option value="">All</option>
-            {RELATIONS.map((item) => (
-              <option key={item} value={item}>{item.replaceAll("_", " ")}</option>
-            ))}
-          </select>
+          <Select value={relation || "all"} onValueChange={(value) => setRelation(choice(value))}>
+            <SelectTrigger className="w-full" aria-label="Relation">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              {RELATIONS.map((item) => (
+                <SelectItem key={item} value={item}>{item.replaceAll("_", " ")}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </label>
         <label className="grid gap-1 text-xs font-medium text-muted-foreground">
           Node cap
@@ -144,19 +213,9 @@ export default function GraphPage() {
           {loading ? "Loading the graph…" : "No memories to draw."}
         </p>
       )}
-      <details className="text-sm">
-        <summary className="cursor-pointer font-medium">Memory list</summary>
-        <ul className="mt-2 grid gap-1">
-          {graph?.nodes.map((node) => (
-            <li key={node.memory_id}>
-              <button type="button" className="text-left hover:underline" onClick={() => openMemory(node.memory_id)}>
-                {node.title}
-              </button>
-              <span className="ml-2 text-muted-foreground">{node.scope}</span>
-            </li>
-          ))}
-        </ul>
-      </details>
+      {graph && graph.nodes.length > 0 ? (
+        <LinkTable graph={graph} onOpen={openMemory} />
+      ) : null}
       <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>

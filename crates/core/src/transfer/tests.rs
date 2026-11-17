@@ -583,6 +583,7 @@ fn export_import_round_trip_is_idempotent_and_preserves_forget() -> Result<(), S
             imported_observations: 0,
             imported_memories: 0,
             imported_forgotten_ids: 0,
+            dropped_links: Vec::new(),
         }
     );
     drop(target);

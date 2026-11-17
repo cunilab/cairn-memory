@@ -2560,12 +2560,15 @@ impl PostgresStore {
                 memory.changed_by = Some(account.person_id.clone());
             }
         }
+        let readable = self.all_memories_for_person(&account.person_id).await?;
+        let dropped_links = cairn_core::sanitize_imported_links(&mut bundle.memories, &readable);
         let mut transaction = self.pool.begin().await?;
         let mut result = ImportResult {
             imported_sessions: 0,
             imported_observations: 0,
             imported_memories: 0,
             imported_forgotten_ids: 0,
+            dropped_links,
         };
         for session in &bundle.sessions {
             let existing = sqlx::query(

@@ -106,6 +106,41 @@ fn a_typed_link_hops_once_with_the_same_weight_as_evidence() {
 }
 
 #[test]
+fn a_cross_scope_link_does_not_change_rank() {
+    let note = |id: &str| {
+        let mut memory = build_explicit_memory_record(
+            "body",
+            vec![],
+            WorkContext::default(),
+            LifecycleInput::default(),
+            MemoryKind::Fact,
+        )
+        .unwrap();
+        memory.memory_id = id.to_owned();
+        memory
+    };
+    let mut personal = note("personal");
+    let mut global = note("global");
+    global.scope = crate::MemoryScope::Global;
+    global.fields.title = "quasarneedlexyz".to_owned();
+    global.content = "quasarneedlexyz".to_owned();
+    personal.links.push(crate::MemoryLink {
+        relation: crate::LinkRelation::Causes,
+        target_id: "global".to_owned(),
+    });
+    let hits = hybrid_rank(
+        &[personal, global],
+        "quasarneedlexyz",
+        &RecallFilter::default(),
+        None,
+        vec![],
+    )
+    .unwrap();
+    assert!(hits.iter().all(|(id, _)| id != "personal"));
+    assert!(hits.iter().any(|(id, _)| id == "global"));
+}
+
+#[test]
 fn shared_source_ids_do_not_cross_the_person_namespace() {
     let mut a = build_explicit_memory_record(
         "body",

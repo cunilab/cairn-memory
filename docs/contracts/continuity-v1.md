@@ -477,12 +477,15 @@ is true when any node was dropped. Edges among the kept nodes remain.
 Create and remove are `POST /cairn-memory/links` and
 `POST /cairn-memory/links/remove`. MCP tools are `memory_link`,
 `memory_unlink`, and `memory_graph`. CLI commands are `link`, `unlink`, and
-`graph`. The console page `/graph` draws this response. Import stores `links`
-with the memory. A stored target that is missing or unreadable does not enter
-recall or the graph.
+`graph`. The console page `/graph` draws this response. Import keeps a link
+only when link creation would: the target is in the same bundle or already
+readable, the scope and project match, and the source is not the target. One
+triple is stored once. Any other link is dropped and listed as `dropped_links`
+on the import result (`memory_id`, `relation`, `target_id`, `reason`). A link
+that fails those rules does not change rank and is not a graph edge.
 
-Import stores `contradicts` with the memory. A link whose target is missing,
-unreadable, or in another scope or project does not change rank.
+Import stores `contradicts` with the memory. A contradicts target that is
+missing, unreadable, or in another scope or project does not change rank.
 
 ## Contradiction ordering
 

@@ -141,7 +141,10 @@ additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entr
 Export returns the envelope itself. REST import takes `{"bundle": <envelope>}`,
 and MCP `memory_import` takes the envelope as its `bundle` argument. The import
 result keys are `imported_sessions`, `imported_observations`,
-`imported_memories`, and `imported_forgotten_ids`. A file-store account
+`imported_memories`, `imported_forgotten_ids`, and `dropped_links`.
+`dropped_links` lists typed links the import did not store because they are
+self-links, duplicates, or point at a missing, unreadable, or other-scope
+target. A file-store account
 ownership rejection returns HTTP 401. PostgreSQL has no such rejection, and its
 database errors return HTTP 500.
 

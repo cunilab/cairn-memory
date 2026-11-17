@@ -52,9 +52,9 @@ pub use lifecycle::{
     sensitivity_including_context,
 };
 pub use links::{
-    GRAPH_NODE_CAP_DEFAULT, GRAPH_NODE_CAP_MAX, GRAPH_NODE_CAP_MIN, GraphEdge, GraphFilter,
-    GraphNode, GraphRelation, LinkRelation, MemoryGraph, MemoryLink, build_memory_graph,
-    graph_node_cap,
+    DroppedLink, DroppedLinkReason, GRAPH_NODE_CAP_DEFAULT, GRAPH_NODE_CAP_MAX, GRAPH_NODE_CAP_MIN,
+    GraphEdge, GraphFilter, GraphNode, GraphRelation, LinkRelation, MemoryGraph, MemoryLink,
+    build_memory_graph, graph_node_cap, link_is_readable, sanitize_imported_links,
 };
 pub use memories::{
     Memory, MemoryFields, MemoryStatus, SaveMemoryInput, build_explicit_memory_record,

@@ -365,3 +365,122 @@ fn a_typed_link_recalls_one_hop_and_a_hidden_neighbour_does_not() {
     assert!(!ids.contains(&foreign.memory_id.as_str()));
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn graph_omits_a_cross_scope_link_between_visible_memories() {
+    let mut personal = blank("personal", "1");
+    let mut global = blank("global", "2");
+    global.scope = crate::MemoryScope::Global;
+    personal.links.push(MemoryLink {
+        relation: LinkRelation::Causes,
+        target_id: global.memory_id.clone(),
+    });
+    personal.links.push(MemoryLink {
+        relation: LinkRelation::Relates,
+        target_id: personal.memory_id.clone(),
+    });
+    let graph = build_memory_graph(&[personal, global], &GraphFilter::default(), 120);
+    assert!(graph.edges.is_empty());
+    assert_eq!(graph.nodes.len(), 2);
+}
+
+#[test]
+fn import_drops_links_link_creation_would_reject() {
+    let path = temp_store_path("import-links");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .unwrap();
+    let global = save(&mut store, &owner.token, "global", "quasarneedlexyz");
+    let anchor = save(&mut store, &owner.token, "personal", "anchorplain");
+    let foreign = save(&mut store, &other.token, "personal", "foreignplain");
+    let mut incoming = anchor.clone();
+    incoming.memory_id = "imported-cross-scope".to_owned();
+    incoming.fields.title = "plain carton".to_owned();
+    incoming.fields.summary = "plain carton".to_owned();
+    incoming.fields.statement = Some("plain carton".to_owned());
+    incoming.content = "plain carton".to_owned();
+    incoming.links = vec![
+        MemoryLink {
+            relation: LinkRelation::Causes,
+            target_id: global.memory_id.clone(),
+        },
+        MemoryLink {
+            relation: LinkRelation::Relates,
+            target_id: incoming.memory_id.clone(),
+        },
+        MemoryLink {
+            relation: LinkRelation::Fixes,
+            target_id: anchor.memory_id.clone(),
+        },
+        MemoryLink {
+            relation: LinkRelation::Fixes,
+            target_id: anchor.memory_id.clone(),
+        },
+        MemoryLink {
+            relation: LinkRelation::DependsOn,
+            target_id: "missing-target".to_owned(),
+        },
+        MemoryLink {
+            relation: LinkRelation::Causes,
+            target_id: foreign.memory_id.clone(),
+        },
+    ];
+    let mut bundle = store.export_for_account(&owner.token).unwrap();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    bundle.memories = vec![incoming];
+    let imported = store.import_for_account(&owner.token, bundle).unwrap();
+    let reasons = imported
+        .dropped_links
+        .iter()
+        .map(|link| (link.reason, link.target_id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(reasons.contains(&(DroppedLinkReason::Scope, global.memory_id.as_str())));
+    assert!(reasons.contains(&(DroppedLinkReason::SelfLink, "imported-cross-scope")));
+    assert!(reasons.contains(&(DroppedLinkReason::Duplicate, anchor.memory_id.as_str())));
+    assert!(reasons.contains(&(DroppedLinkReason::UnknownTarget, "missing-target")));
+    assert!(reasons.contains(&(DroppedLinkReason::UnknownTarget, foreign.memory_id.as_str())));
+    let stored = store
+        .memories_for_account(&owner.token)
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == "imported-cross-scope")
+        .unwrap();
+    assert_eq!(stored.links.len(), 1);
+    assert_eq!(stored.links[0].target_id, anchor.memory_id);
+    let hits = store
+        .search_for_account(
+            &owner.token,
+            "quasarneedlexyz",
+            10,
+            &RecallFilter::default(),
+        )
+        .unwrap();
+    assert!(
+        hits.iter()
+            .all(|hit| hit.memory_id != "imported-cross-scope")
+    );
+    let hopped = store
+        .search_for_account(&owner.token, "anchorplain", 10, &RecallFilter::default())
+        .unwrap();
+    assert!(
+        hopped
+            .iter()
+            .any(|hit| hit.memory_id == "imported-cross-scope")
+    );
+    let graph = store
+        .graph_for_account(&owner.token, &GraphFilter::default(), None)
+        .unwrap();
+    assert!(graph.edges.iter().all(|edge| {
+        !(edge.source_id == "imported-cross-scope" && edge.target_id == global.memory_id)
+    }));
+    assert!(graph.edges.iter().any(|edge| {
+        edge.source_id == "imported-cross-scope" && edge.target_id == anchor.memory_id
+    }));
+    fs::remove_file(path).unwrap();
+}

@@ -525,8 +525,69 @@ separate red run was not archived.
   `/tmp/cairn-stage8-graph/graph-dark-390.png`.
   Light and dark both show scope colours and relation edges. At 390px the
   filters stack and the canvas pans; a couple of labels sit against the edge.
+  The dark-canvas claim in this list does not hold: the 2026-11-17 review
+  found black labels and invisible global nodes. The fix is recorded below.
 - Pinned canvas packages, all MIT: `sigma` 4.0.6 (3.8 MB on disk),
   `graphology` 0.26.0 (2.7 MB), `graphology-layout-forceatlas2` 0.10.1 (104 KB).
   Sigma also installs `graphology-utils` (136 KB) and `graphology-types` (68 KB).
 - Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
   server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.
+
+## Stage 8 review fixes (2026-11-17)
+
+The review of `50b4866` (1 P1, 5 P2, 2 P3) is fixed here.
+
+- Dark colours are read back through a canvas, so a `lab()` theme value is not
+  replaced by the light fallback. Labels use the foreground. The canvas
+  rebuilds when the document `dark` class changes. Global nodes use that
+  foreground, so they stay visible on a dark card.
+- Import drops a link that creation would reject: a self-link, a duplicate
+  triple, or a target that is missing, unreadable, or in another scope or
+  project. `dropped_links` lists them. Recall and the graph ignore a stored
+  link that fails the same scope and project rule. File and PostgreSQL both
+  call `sanitize_imported_links`.
+- Canvas edge keys are length-prefixed, so a memory id that contains `:` does
+  not collide with another triple.
+- Labels sit above the node on a card-coloured chip. A long canvas label is
+  shortened; the link table keeps the full title.
+- The flag that swallowed the click after a drag is gone. Sigma already drops
+  the click that ends a drag.
+- The page has a keyboard-reachable table of source, relation, and target.
+- Scope, project, and relation use the shared Select. The node cap stays the
+  shared Input.
+- Disconnected pairs are packed in a centered row.
+
+Checked on 2026-11-17. Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and
+`CAIRN_OUTBOX`. No live server. PostgreSQL was disposable
+`pgvector/pgvector:pg17` container `cairn-stage8-fix-pg` on the Colima socket,
+removed after the suite. The Cargo target was `/tmp/cairn-stage8-fix-target`.
+The pinned MiniLM directory was `/tmp/cairn-stage7-fix-minilm`.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 230 passed, 0 failed, 56 ignored.
+- `scripts/ci_postgres_tests.sh`: 56 passed, 0 failed, including
+  `postgres_links_permissions_visibility_cap_and_one_hop` and both real-model
+  semantic tests.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, and
+  `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web `typecheck`, `lint`, and `build` passed, and `scripts/smoke_web.sh` passed.
+- Node test `apps/web/lib/graph-edge-key.test.ts` passed. Playwright click
+  after a drag passed, the link table opened a memory from the keyboard, and
+  the colon edge-key fixture drew a canvas.
+- Screenshots, looked at after the fixes:
+  `/tmp/cairn-stage8-fix-shots/graph-sparse-light-1440.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-50-light-1440.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-50-dark-1440.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-50-light-390.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-50-dark-390.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-500-light-1440.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-500-dark-1440.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-500-light-390.png`,
+  `/tmp/cairn-stage8-fix-shots/graph-500-dark-390.png`,
+  `/tmp/cairn-stage8-fix-shots/live-theme-switch.png`.
+  Dark labels and global nodes are visible. The six-node graph is a centered
+  row with separated labels. At 500 nodes the desktop canvas shows distinct
+  circles; a narrow viewport still stacks a long chain, and the link table
+  lists every connection. A few dense labels still share a line.

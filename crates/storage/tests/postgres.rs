@@ -5698,10 +5698,10 @@ async fn postgres_links_permissions_visibility_cap_and_one_hop() {
         .unwrap();
     assert_eq!(stored.links.len(), 1);
     sqlx::query("UPDATE cairn_memories SET links = links || $1::jsonb WHERE memory_id = $2")
-        .bind(serde_json::json!([{
-            "relation": "fixes",
-            "target_id": foreign.memory_id
-        }]))
+        .bind(serde_json::json!([
+            { "relation": "fixes", "target_id": foreign.memory_id },
+            { "relation": "causes", "target_id": global.memory_id }
+        ]))
         .bind(&seed.memory_id)
         .execute(&pool)
         .await
@@ -5717,6 +5717,21 @@ async fn postgres_links_permissions_visibility_cap_and_one_hop() {
     assert!(ids.contains(&neighbour.memory_id.as_str()));
     assert!(!ids.contains(&alone.memory_id.as_str()));
     assert!(!ids.contains(&foreign.memory_id.as_str()));
+    assert!(!ids.contains(&global.memory_id.as_str()));
+    let global_hits = store
+        .search(&owner.token, "globaltoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        global_hits
+            .iter()
+            .any(|hit| hit.memory_id == global.memory_id)
+    );
+    assert!(
+        global_hits
+            .iter()
+            .all(|hit| hit.memory_id != seed.memory_id)
+    );
     let graph = store
         .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), None)
         .await
@@ -5730,6 +5745,11 @@ async fn postgres_links_permissions_visibility_cap_and_one_hop() {
     assert!(graph.edges.iter().all(|edge| {
         edge.source_id != foreign.memory_id && edge.target_id != foreign.memory_id
     }));
+    assert!(
+        graph.edges.iter().all(|edge| {
+            !(edge.source_id == seed.memory_id && edge.target_id == global.memory_id)
+        })
+    );
     store
         .declare_contradiction(&owner.token, &seed.memory_id, &neighbour.memory_id)
         .await
@@ -5857,4 +5877,77 @@ async fn postgres_links_permissions_visibility_cap_and_one_hop() {
     assert_eq!(capped.nodes.len(), 120);
     assert_eq!(capped.node_cap, 120);
     assert!(capped.nodes.iter().any(|node| node.memory_id == hub));
+
+    let mut bundle = store.export_bundle(&owner.token).await.unwrap();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    let mut incoming = alone.clone();
+    incoming.memory_id = "imported-cross-scope".to_owned();
+    incoming.fields.title = "plain carton".to_owned();
+    incoming.fields.summary = "plain carton".to_owned();
+    incoming.fields.statement = Some("plain carton".to_owned());
+    incoming.content = "plain carton".to_owned();
+    incoming.links = vec![
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Causes,
+            target_id: global.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Relates,
+            target_id: incoming.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Fixes,
+            target_id: alone.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Fixes,
+            target_id: alone.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::DependsOn,
+            target_id: "missing-target".to_owned(),
+        },
+    ];
+    bundle.memories = vec![incoming];
+    let imported = store.import_bundle(&owner.token, bundle).await.unwrap();
+    assert_eq!(imported.imported_memories, 1);
+    assert!(imported.dropped_links.iter().any(|link| {
+        link.reason == cairn_core::DroppedLinkReason::Scope && link.target_id == global.memory_id
+    }));
+    assert!(
+        imported
+            .dropped_links
+            .iter()
+            .any(|link| link.reason == cairn_core::DroppedLinkReason::SelfLink)
+    );
+    assert!(
+        imported
+            .dropped_links
+            .iter()
+            .any(|link| link.reason == cairn_core::DroppedLinkReason::Duplicate)
+    );
+    assert!(imported.dropped_links.iter().any(|link| {
+        link.reason == cairn_core::DroppedLinkReason::UnknownTarget
+            && link.target_id == "missing-target"
+    }));
+    let stored_import = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == "imported-cross-scope")
+        .unwrap();
+    assert_eq!(stored_import.links.len(), 1);
+    assert_eq!(stored_import.links[0].target_id, alone.memory_id);
+    let leaked = store
+        .search(&owner.token, "globaltoken", 20, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        leaked
+            .iter()
+            .all(|hit| hit.memory_id != "imported-cross-scope")
+    );
 }

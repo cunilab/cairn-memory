@@ -294,7 +294,10 @@ the viewer’s cap. The cap defaults to 120, and the viewer may set it from 120
 through 500. The fewest incident edges are dropped first, then the oldest
 memory, then the id. `truncated` reports that drop. An edge is included only
 when both ends are visible. The console draws that response with Sigma.js and
-graphology. Filters are scope, relation, project, and the cap.
+graphology. Filters are scope, relation, project, and the cap. Import drops a
+link that creation would reject (self-link, duplicate triple, or a target that
+is missing, unreadable, or in another scope or project) and reports it on
+`dropped_links`. Recall and the graph ignore a stored link that fails that rule.
 
 ## Trust and limits
 

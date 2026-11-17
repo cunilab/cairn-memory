@@ -31,6 +31,9 @@ pub struct ImportResult {
     pub imported_observations: usize,
     pub imported_memories: usize,
     pub imported_forgotten_ids: usize,
+    /// Links removed because link creation would reject them.
+    #[serde(default)]
+    pub dropped_links: Vec<crate::DroppedLink>,
 }
 
 impl MemoryStore {
@@ -202,7 +205,8 @@ impl MemoryStore {
         }
         // One persist for rows, tombstones, expiry tombstones and owners: a failure restores
         // the prior state, so no row is left in memory or on disk without its owner.
-        let (candidate, result, _) = self.stage_import(bundle)?;
+        let readable = self.memories_for_account(account_token)?;
+        let (candidate, result, _) = self.stage_import(bundle, &readable)?;
         self.state = candidate;
         for event_id in observation_ids {
             self.record_observation_owner(&person_id, &event_id);
@@ -215,7 +219,7 @@ impl MemoryStore {
     }
 
     pub fn import_bundle(&mut self, bundle: ExportBundle) -> Result<ImportResult, StoreError> {
-        let (candidate, result, changed) = self.stage_import(bundle)?;
+        let (candidate, result, changed) = self.stage_import(bundle, &self.state.memories)?;
         if changed {
             self.state = candidate;
             self.persist()?;
@@ -228,14 +232,17 @@ impl MemoryStore {
     fn stage_import(
         &self,
         mut bundle: ExportBundle,
+        readable: &[crate::Memory],
     ) -> Result<(StoreState, ImportResult, bool), StoreError> {
         normalize_export_bundle(&mut bundle)?;
+        let dropped_links = crate::sanitize_imported_links(&mut bundle.memories, readable);
         let mut candidate = self.state.clone();
         let mut result = ImportResult {
             imported_sessions: 0,
             imported_observations: 0,
             imported_memories: 0,
             imported_forgotten_ids: 0,
+            dropped_links,
         };
 
         for session in bundle.sessions {
