@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { NODE_SIZE, layoutGraph } from "./graph-layout.ts";
+import { NODE_SIZE, fitBBox, layoutGraph } from "./graph-layout.ts";
 
 function chain(count: number, prefix: string) {
   const ids = Array.from({ length: count }, (_, index) => `${prefix}${index}`);
@@ -60,6 +60,10 @@ test("five hundred chain nodes stay apart and are not a thin pillar", () => {
   const box = extent(positions);
   const aspect = Math.max(box.width, box.height) / Math.max(1, Math.min(box.width, box.height));
   assert.ok(aspect < 4, `layout collapsed into a pillar (${aspect})`);
+  assert.ok(
+    Math.max(box.width, box.height) < 1_200,
+    `chain spread too far to read when fitted (${box.width}x${box.height})`,
+  );
   assert.ok(milliseconds < 400, `layout took ${milliseconds}ms`);
   const again = layoutGraph(ids, edges);
   for (const id of ids) {
@@ -92,4 +96,29 @@ test("disconnected components are packed without stacking", () => {
   const other = positions.get("a0");
   assert.ok(alone && other);
   assert.ok(Math.hypot(alone.x - other.x, alone.y - other.y) > NODE_SIZE * 4);
+});
+
+test("a sparse layout is capped so fitted nodes stay a readable size", () => {
+  const wide = fitBBox(
+    [
+      { x: 0, y: 0 },
+      { x: 32, y: 0 },
+    ],
+    { width: 1440, height: 800 },
+    48,
+  );
+  assert.ok(wide);
+  const fitted = NODE_SIZE * Math.min((1440 - 96) / (wide.x[1] - wide.x[0]), (800 - 96) / (wide.y[1] - wide.y[0]));
+  assert.ok(fitted <= 22.01, `capped radius ${fitted}`);
+  assert.equal(
+    fitBBox(
+      [
+        { x: 0, y: 0 },
+        { x: 8_000, y: 6_000 },
+      ],
+      { width: 1440, height: 800 },
+      48,
+    ),
+    null,
+  );
 });

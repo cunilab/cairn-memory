@@ -6,6 +6,10 @@ export const NODE_SIZE = 8;
 
 const SPACING = NODE_SIZE * 4;
 const COMPONENT_GAP = NODE_SIZE * 6;
+/** Fitted radius above this, in pixels, means a sparse graph would become giant disks. */
+const MAX_FITTED_RADIUS = 22;
+/** A path longer than this is folded into a block so a fitted view keeps nodes visible. */
+const PACKED_PATH = 40;
 
 // graphology-layout-forceatlas2 0.10.1 only applies size-aware repulsion on the
 // direct pass. Barnes–Hut ignores `adjustSizes`, so a long chain collapses into a stack.
@@ -67,6 +71,66 @@ function placeOnArc(index: number, count: number): { x: number; y: number } {
   const radius = SPACING / (2 * Math.sin(step / 2));
   const angle = -span / 2 + step * index;
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+}
+
+/** Fold a long path into a serpentine block. Adjacent chain nodes stay one `SPACING` apart. */
+function placePackedPath(index: number, count: number): { x: number; y: number } {
+  const columns = Math.max(2, Math.ceil(Math.sqrt(count)));
+  const row = Math.floor(index / columns);
+  const offset = index % columns;
+  const column = row % 2 === 0 ? offset : columns - 1 - offset;
+  return { x: column * SPACING, y: row * SPACING };
+}
+
+function linked(graph: Graph, from: string, to: string): boolean {
+  return graph.hasDirectedEdge(from, to) || graph.hasDirectedEdge(to, from);
+}
+
+function openPath(graph: Graph, ordered: string[]): boolean {
+  if (ordered.length <= PACKED_PATH) return false;
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (!linked(graph, ordered[index - 1], ordered[index])) return false;
+  }
+  return true;
+}
+
+/**
+ * Bounding box that keeps a fitted node at most `MAX_FITTED_RADIUS` pixels.
+ * Returns null when the natural fit is already that small or smaller.
+ */
+export function fitBBox(
+  points: Iterable<{ x: number; y: number }>,
+  viewport: { width: number; height: number },
+  padding: number,
+): { x: [number, number]; y: [number, number] } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let count = 0;
+  for (const point of points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+    count += 1;
+  }
+  if (count === 0 || viewport.width < 2 || viewport.height < 2) return null;
+  const extentW = Math.max(maxX - minX, NODE_SIZE * 2);
+  const extentH = Math.max(maxY - minY, NODE_SIZE * 2);
+  const innerW = Math.max(viewport.width - padding * 2, 1);
+  const innerH = Math.max(viewport.height - padding * 2, 1);
+  const fittedRadius = NODE_SIZE * Math.min(innerW / extentW, innerH / extentH);
+  if (fittedRadius <= MAX_FITTED_RADIUS) return null;
+  const scale = fittedRadius / MAX_FITTED_RADIUS;
+  const boxW = extentW * scale;
+  const boxH = extentH * scale;
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  return {
+    x: [centerX - boxW / 2, centerX + boxW / 2],
+    y: [centerY - boxH / 2, centerY + boxH / 2],
+  };
 }
 
 type ComponentLayout = { graph: Graph; ids: string[]; remaining: number };
@@ -177,9 +241,11 @@ export function createLayoutSession(nodeIds: string[], edges: LayoutEdge[]): Lay
       }
     }
     const ids = orderComponent(model, group);
+    const packed = openPath(model, ids);
     const local = new Graph({ type: "directed" });
     ids.forEach((id, index) => {
-      local.addNode(id, { ...placeOnArc(index, ids.length), size: NODE_SIZE });
+      const point = packed ? placePackedPath(index, ids.length) : placeOnArc(index, ids.length);
+      local.addNode(id, { ...point, size: NODE_SIZE });
     });
     const members = new Set(ids);
     model.forEachDirectedEdge((_edge, _attributes, source, target) => {
@@ -187,7 +253,11 @@ export function createLayoutSession(nodeIds: string[], edges: LayoutEdge[]): Lay
         local.addDirectedEdge(source, target);
       }
     });
-    components.push({ graph: local, ids, remaining: iterationBudget(ids.length) });
+    components.push({
+      graph: local,
+      ids,
+      remaining: packed ? 0 : iterationBudget(ids.length),
+    });
   });
   let cursor = 0;
   let elapsed = 0;

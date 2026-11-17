@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { graphEdgeKey } from "@/lib/graph-edge-key";
-import { NODE_SIZE, createLayoutSession } from "@/lib/graph-layout";
+import { NODE_SIZE, createLayoutSession, fitBBox } from "@/lib/graph-layout";
 import type { MemoryGraph } from "@/lib/types";
 
 const SCOPE_COLOR = {
@@ -137,13 +137,13 @@ export function MemoryGraphCanvas({
                 enableNodeDrag: true,
                 itemSizesReference: "positions",
                 autoRescale: true,
-                autoRescaleContent: model.order <= 24 ? "labels" : "nodes",
+                autoRescaleContent: model.order <= 80 ? "labels" : "nodes",
                 stagePadding: 48,
-                // Sizes stay in graph units at every zoom, so a fitted view cannot squash nodes together.
-                zoomToSizeRatioFunction: (ratio) => ratio,
-                labelRenderedSizeThreshold: 16,
-                labelDensity: 0.7,
-                labelGridCellSize: 120,
+                // Quadratic so zooming in enlarges nodes; ratio 1 matches graph units.
+                zoomToSizeRatioFunction: (ratio) => ratio * ratio,
+                labelRenderedSizeThreshold: 3,
+                labelDensity: 1,
+                labelGridCellSize: 200,
                 nodePickingPadding: 8,
               },
               primitives: {
@@ -170,9 +170,21 @@ export function MemoryGraphCanvas({
                 stage: { background: card },
               },
             });
-            renderer = instance;
+            const frame = () => {
+              const box = fitBBox(session.positions().values(), element.getBoundingClientRect(), 48);
+              instance.setCustomBBox(box);
+            };
+            frame();
+            const resize = new ResizeObserver(frame);
+            resize.observe(element);
+            renderer = {
+              kill: () => {
+                resize.disconnect();
+                instance.kill();
+              },
+            };
             if (cancelled) {
-              instance.kill();
+              renderer.kill();
               return;
             }
             element.dataset.layoutRun = String(Number(element.dataset.layoutRun ?? "0") + 1);
