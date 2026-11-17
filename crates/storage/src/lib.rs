@@ -3746,11 +3746,22 @@ fn not_superseded_by_live_memory_sql(same_project: bool) -> String {
     } else {
         ""
     };
-    // Only a live successor of this row can suppress it; private origin changes are independent.
+    // A live successor hides this row for the same account, the same global scope,
+    // or two published memories in the same project.
     format!(
         "NOT EXISTS (
              SELECT 1 FROM cairn_memories newer
-             WHERE (newer.person_id = m.person_id OR (m.scope = 'global' AND newer.scope = 'global'))
+             WHERE (
+                 newer.person_id = m.person_id
+                 OR (m.scope = 'global' AND newer.scope = 'global')
+                 OR (
+                     m.scope = 'project'
+                     AND newer.scope = 'project'
+                     AND m.published_by IS NOT NULL
+                     AND newer.published_by IS NOT NULL
+                     AND newer.project_id = m.project_id
+                 )
+             )
                AND newer.supersedes = m.memory_id AND newer.scope = m.scope
                AND COALESCE(newer.record->>'status', 'active') <> 'superseded' {project_clause}
                AND ((m.published_by IS NULL AND newer.published_by IS NULL) OR

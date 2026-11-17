@@ -476,7 +476,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_review_dismiss",
-            "Dismiss an open similarity review without changing either memory. Requires edit rights on either memory.",
+            "Dismiss an open similarity review without changing the memories. Requires edit rights on both memories.",
             Post,
             "/similarity-reviews/dismiss",
             object_schema(&[("reviewId", string_schema())], &["reviewId"]),

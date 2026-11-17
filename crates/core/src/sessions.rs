@@ -531,7 +531,7 @@ fn summary_is_stale(
 }
 
 /// A re-derived summary keeps verification, lifecycle (sensitivity can only rise),
-/// creation time, reinforcement and feedback.
+/// creation time, reinforcement, feedback, and its declared links.
 pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
     derived.lifecycle = Lifecycle {
         sensitivity: stricter_sensitivity(
@@ -548,6 +548,7 @@ pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
         .clone_from(&earlier.last_accessed_at);
     derived.feedback.clone_from(&earlier.feedback);
     derived.contradicts.clone_from(&earlier.contradicts);
+    derived.supersedes.clone_from(&earlier.supersedes);
     derived.helpful_count = earlier.helpful_count;
     derived.stale_count = earlier.stale_count;
 }

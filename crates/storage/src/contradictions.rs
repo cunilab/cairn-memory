@@ -111,7 +111,7 @@ async fn project_owner(
     tx: &mut Transaction<'_, Postgres>,
     project_id: &str,
 ) -> Result<Option<String>, PostgresError> {
-    sqlx::query_scalar("SELECT person_id FROM cairn_projects WHERE project_id = $1")
+    sqlx::query_scalar("SELECT person_id FROM cairn_projects WHERE project_id = $1 FOR SHARE")
         .bind(project_id)
         .fetch_optional(&mut **tx)
         .await
@@ -365,25 +365,15 @@ impl PostgresStore {
         let review = self.open_review(token, review_id).await?;
         let account = self.authenticate_account(token).await?;
         let mut tx = self.pool.begin().await?;
-        let ((left, left_person), (right, right_person)) = self
-            .edit_pair(
-                &mut tx,
-                &account,
-                &review.left_id,
-                &review.right_id,
-                false,
-                None,
-            )
-            .await?;
-        let owner = match left.project_id.as_deref() {
-            Some(project_id) => project_owner(&mut tx, project_id).await?,
-            None => None,
-        };
-        if may_edit(&account, &left, &left_person, owner.as_deref()).is_err()
-            && may_edit(&account, &right, &right_person, owner.as_deref()).is_err()
-        {
-            may_edit(&account, &left, &left_person, owner.as_deref())?;
-        }
+        self.edit_pair(
+            &mut tx,
+            &account,
+            &review.left_id,
+            &review.right_id,
+            true,
+            None,
+        )
+        .await?;
         sqlx::query(
             "UPDATE cairn_similarity_reviews
              SET status = 'dismissed', resolved_at = $2, resolved_by = $3
@@ -518,10 +508,15 @@ impl PostgresStore {
         now: u64,
     ) -> Result<usize, PostgresError> {
         let found = self.similarity_found(now).await?;
-        let added = found.len();
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
         let mut tx = self.pool.begin().await?;
+        if !super::jobs::claim_is_held(&mut tx, &claim.job_id, &claim_id).await? {
+            tx.rollback().await?;
+            return Ok(0);
+        }
+        let mut inserted_ids = Vec::new();
         for review in &found {
-            sqlx::query(
+            let inserted = sqlx::query(
                 "INSERT INTO cairn_similarity_reviews
                     (review_id, left_id, right_id, scope, project_id, cosine, band, status, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)
@@ -536,22 +531,56 @@ impl PostgresStore {
             .bind(band_name(review.band))
             .bind(i64::try_from(review.created_at).unwrap_or(i64::MAX))
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
+            if inserted == 1 {
+                inserted_ids.push(review.review_id.clone());
+            }
         }
-        tx.commit().await?;
-        let claim_id = claim.claim_id.clone().unwrap_or_default();
-        let settled = self
-            .settle_job(&claim.job_id, &claim_id, now, JobEnd::Succeeded)
-            .await?;
-        if settled {
-            self.enqueue_job(
-                JobKind::Similarity,
-                SIMILARITY_JOB_KEY,
-                now.saturating_add(SIMILARITY_INTERVAL_SECONDS),
-                false,
+        if !inserted_ids.is_empty() {
+            sqlx::query(
+                "DELETE FROM cairn_similarity_reviews AS review
+                 WHERE review.review_id = ANY($1)
+                   AND EXISTS (
+                       SELECT 1 FROM cairn_memories AS memory
+                       WHERE (memory.memory_id = review.left_id AND (
+                                jsonb_exists(memory.contradicts, review.right_id)
+                                OR memory.supersedes = review.right_id))
+                          OR (memory.memory_id = review.right_id AND (
+                                jsonb_exists(memory.contradicts, review.left_id)
+                                OR memory.supersedes = review.left_id))
+                   )",
             )
+            .bind(&inserted_ids)
+            .execute(&mut *tx)
             .await?;
         }
-        Ok(added)
+        let kept: i64 = if inserted_ids.is_empty() {
+            0
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM cairn_similarity_reviews WHERE review_id = ANY($1)",
+            )
+            .bind(&inserted_ids)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+        let settled =
+            super::jobs::settle_on(&mut tx, &claim.job_id, &claim_id, now, JobEnd::Succeeded)
+                .await?;
+        if !settled {
+            tx.rollback().await?;
+            return Ok(0);
+        }
+        super::jobs::enqueue_on(
+            &mut tx,
+            JobKind::Similarity,
+            SIMILARITY_JOB_KEY,
+            now.saturating_add(SIMILARITY_INTERVAL_SECONDS),
+            false,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(usize::try_from(kept).unwrap_or(0))
     }
 }

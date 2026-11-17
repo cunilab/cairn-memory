@@ -51,7 +51,7 @@ fn quarantine_from_row(row: &PgRow) -> Result<QuarantinedJob, PostgresError> {
     })
 }
 
-async fn enqueue_on(
+pub(crate) async fn enqueue_on(
     tx: &mut Transaction<'_, Postgres>,
     kind: JobKind,
     key: &str,
@@ -215,7 +215,7 @@ async fn claim_on(
     Ok(claimed)
 }
 
-async fn settle_on(
+pub(crate) async fn settle_on(
     tx: &mut Transaction<'_, Postgres>,
     job_id: &str,
     claim_id: &str,
@@ -362,7 +362,7 @@ async fn clear_covered_pending(
     Ok(())
 }
 
-async fn claim_is_held(
+pub(crate) async fn claim_is_held(
     tx: &mut Transaction<'_, Postgres>,
     job_id: &str,
     claim_id: &str,

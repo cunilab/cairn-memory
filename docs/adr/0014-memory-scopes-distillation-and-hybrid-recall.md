@@ -269,11 +269,11 @@ visible only when the viewer can read both memories. Dismiss changes the
 review only. Marking a contradiction or a supersede from the review uses the
 same writes as the direct actions.
 
-Declare and dismiss follow edit rights: the author of the contradicted memory
-or the project owner, the personal author, or the global author or
-administrator. Dismiss is allowed when the caller can edit either memory in
-the pair. Supersede also requires edit rights on the successor, because it
-writes that memory's `supersedes` field. It does not call `correct`.
+Declare follows edit rights on the contradicted memory: its author or the
+project owner, the personal author, or the global author or administrator.
+Dismiss requires edit rights on both memories in the pair. Supersede requires
+edit rights on both, because it writes the successor's `supersedes` field.
+It does not call `correct`.
 
 ## Trust and limits
 

@@ -366,3 +366,335 @@ fn project_edit_rights_gate_reviews_and_a_reader_cannot_see_a_hidden_pair() {
     );
     fs::remove_file(path).unwrap();
 }
+
+fn project_fact(store: &mut MemoryStore, token: &str, project_id: &str, title: &str) -> Memory {
+    store
+        .save_for_account(
+            token,
+            serde_json::from_value(json!({
+                "scope": "project",
+                "kind": "fact",
+                "title": title,
+                "summary": title,
+                "reason": "verified",
+                "statement": title,
+                "context": {"project_id": project_id}
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+}
+
+fn session_note(session: &str, event: &str, content: &str) -> crate::capture::ObservationInput {
+    crate::capture::ObservationInput {
+        event_id: event.to_owned(),
+        session_id: session.to_owned(),
+        content: content.to_owned(),
+        role: "user".to_owned(),
+        source: "test".to_owned(),
+        importance: None,
+        lifecycle: Default::default(),
+        context: WorkContext::default(),
+    }
+}
+
+fn same_direction() -> Vec<f32> {
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    vector
+}
+
+#[test]
+fn dismiss_requires_edit_rights_on_both_memories() {
+    let path = temp_store_path("dismiss-both");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let left_author = store
+        .register_account("left@example.test", "correct horse battery staple")
+        .unwrap();
+    let right_author = store
+        .register_account("right@example.test", "correct horse battery staple")
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .unwrap();
+    join_project(&mut store, &left_author.token, &project.project_id).unwrap();
+    join_project(&mut store, &right_author.token, &project.project_id).unwrap();
+    let left = project_fact(
+        &mut store,
+        &left_author.token,
+        &project.project_id,
+        "dismiss-left",
+    );
+    let right = project_fact(
+        &mut store,
+        &right_author.token,
+        &project.project_id,
+        "dismiss-right",
+    );
+    embed(&mut store, &left, same_direction());
+    embed(&mut store, &right, same_direction());
+    store.ensure_similarity_job(1_000).unwrap();
+    let claim = store
+        .poll_jobs(JobKind::Similarity, 1, 1_000)
+        .unwrap()
+        .remove(0);
+    assert_eq!(store.finish_similarity_scan(&claim, 1_000).unwrap(), 1);
+    let review = store
+        .similarity_reviews_for_account(&left_author.token)
+        .unwrap()
+        .into_iter()
+        .find(|review| review.left_id == left.memory_id || review.right_id == left.memory_id)
+        .unwrap();
+    let declare = store
+        .declare_contradiction(&left_author.token, &left.memory_id, &right.memory_id)
+        .unwrap_err();
+    assert!(declare.to_string().contains("author or project owner"));
+    let dismissed = store
+        .dismiss_review(&left_author.token, &review.review_id)
+        .unwrap_err();
+    assert!(dismissed.to_string().contains("author or project owner"));
+    store
+        .dismiss_review(&owner.token, &review.review_id)
+        .unwrap();
+    assert!(
+        store
+            .similarity_reviews_for_account(&owner.token)
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cross_author_project_supersede_hides_the_target() {
+    let path = temp_store_path("cross-supersede");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .unwrap();
+    join_project(&mut store, &member.token, &project.project_id).unwrap();
+    let target = project_fact(
+        &mut store,
+        &owner.token,
+        &project.project_id,
+        "crosstoken target",
+    );
+    let source = project_fact(
+        &mut store,
+        &member.token,
+        &project.project_id,
+        "crosstoken source",
+    );
+    store
+        .supersede_memory(&owner.token, &source.memory_id, &target.memory_id)
+        .unwrap();
+    assert!(
+        !store
+            .memories_for_account(&owner.token)
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    let found = store
+        .search_for_account(&owner.token, "crosstoken", 10, &RecallFilter::default())
+        .unwrap();
+    assert!(found.iter().all(|hit| hit.memory_id != target.memory_id));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn rederived_summary_keeps_an_explicit_supersede() {
+    let path = temp_store_path("rederive-supersede");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let target = save(&mut store, &owner.token, "personal", "summary-target");
+    store
+        .start_session_for_account(&owner.token, "reuse", WorkContext::default())
+        .unwrap();
+    store
+        .capture_for_account(
+            &owner.token,
+            session_note(
+                "reuse",
+                "first",
+                "Decision: use first because tests passed.",
+            ),
+        )
+        .unwrap();
+    let summary = store
+        .end_session_for_account(&owner.token, "reuse")
+        .unwrap();
+    store
+        .supersede_memory(&owner.token, &summary.memory_id, &target.memory_id)
+        .unwrap();
+    assert!(
+        !store
+            .memories_for_account(&owner.token)
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    store
+        .capture_for_account(
+            &owner.token,
+            session_note(
+                "reuse",
+                "second",
+                "Decision: use second because tests passed.",
+            ),
+        )
+        .unwrap();
+    let derived = store
+        .end_session_for_account(&owner.token, "reuse")
+        .unwrap();
+    assert_eq!(
+        derived.supersedes.as_deref(),
+        Some(target.memory_id.as_str())
+    );
+    assert!(
+        !store
+            .memories_for_account(&owner.token)
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn distilled_notes_do_not_inherit_declared_contradictions() {
+    let path = temp_store_path("inherit-contradicts");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let target = save(&mut store, &owner.token, "personal", "shade-target");
+    store
+        .start_session_for_account(&owner.token, "inherit", WorkContext::default())
+        .unwrap();
+    store
+        .capture_for_account(
+            &owner.token,
+            session_note("inherit", "first", "Fact: unrelated first"),
+        )
+        .unwrap();
+    let summary = store
+        .end_session_for_account(&owner.token, "inherit")
+        .unwrap();
+    store
+        .declare_contradiction(&owner.token, &summary.memory_id, &target.memory_id)
+        .unwrap();
+    assert_eq!(
+        contradiction_counts(&store.memories_for_account(&owner.token).unwrap())[&target.memory_id],
+        1
+    );
+    store
+        .capture_for_account(
+            &owner.token,
+            session_note("inherit", "second", "Fact: unrelated second"),
+        )
+        .unwrap();
+    store
+        .end_session_for_account(&owner.token, "inherit")
+        .unwrap();
+    let memories = store.memories_for_account(&owner.token).unwrap();
+    assert_eq!(contradiction_counts(&memories)[&target.memory_id], 1);
+    assert!(memories.iter().all(|memory| {
+        memory.kind != MemoryKind::Fact || !memory.contradicts.contains(&target.memory_id)
+    }));
+    let successor = save(&mut store, &owner.token, "personal", "summary-successor");
+    store
+        .supersede_memory(&owner.token, &successor.memory_id, &summary.memory_id)
+        .unwrap();
+    let remaining = contradiction_counts(&store.memories_for_account(&owner.token).unwrap());
+    assert_eq!(remaining.get(&target.memory_id).copied().unwrap_or(0), 0);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn expired_similarity_claim_publishes_nothing() {
+    let path = temp_store_path("expired-scan");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let left = save(&mut store, &owner.token, "global", "scan-a");
+    let right = save(&mut store, &owner.token, "global", "scan-b");
+    embed(&mut store, &left, same_direction());
+    embed(&mut store, &right, same_direction());
+    store.ensure_similarity_job(1_000).unwrap();
+    let claim = store
+        .poll_jobs(JobKind::Similarity, 1, 1_000)
+        .unwrap()
+        .remove(0);
+    assert!(
+        store
+            .poll_jobs(JobKind::Similarity, 1, 1_121)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.finish_similarity_scan(&claim, 1_121).unwrap(), 0);
+    assert!(
+        store
+            .similarity_reviews_for_account(&owner.token)
+            .unwrap()
+            .is_empty()
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn identical_normalized_embeddings_stay_in_the_similarity_band() {
+    let mut state = 17_u32;
+    for _case in 0..100 {
+        let mut vector = (0..384)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32
+            })
+            .collect::<Vec<_>>();
+        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        for value in &mut vector {
+            *value /= norm;
+        }
+        crate::validate_vector(&vector).unwrap();
+        let score = cosine(&vector, &vector).unwrap();
+        assert!(
+            similarity_band(score).is_some(),
+            "identical embeddings left the review band at {score}"
+        );
+        let mut left = crate::build_saved_memory(
+            serde_json::from_value(json!({
+                "scope": "personal",
+                "kind": "fact",
+                "title": "same",
+                "summary": "same",
+                "reason": "verified",
+                "statement": "same"
+            }))
+            .unwrap(),
+            "author",
+        )
+        .unwrap();
+        let mut right = left.clone();
+        left.memory_id = "left".to_owned();
+        right.memory_id = "right".to_owned();
+        let vectors = HashMap::from([
+            ("left".to_owned(), vector.clone()),
+            ("right".to_owned(), vector),
+        ]);
+        let found = similarity_candidates(&[left, right], &vectors, &HashSet::new(), 1_000);
+        assert_eq!(found.len(), 1, "{score}");
+    }
+}

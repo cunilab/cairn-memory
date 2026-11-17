@@ -3,10 +3,18 @@ use sha2::{Digest, Sha256};
 
 const MAX_TYPED_NOTES: usize = 64;
 
+/// Declared links stay on the summary. A derived note is a different memory.
+fn note_from_summary(summary: &Memory) -> Memory {
+    let mut note = summary.clone();
+    note.contradicts.clear();
+    note.supersedes = None;
+    note
+}
+
 /// Derive bounded, evidence-linked work notes. Scope is inherited from the checked
 /// session summary so mixed or unattached captures cannot broaden visibility.
 pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> Vec<Memory> {
-    let mut handoff = summary.clone();
+    let mut handoff = note_from_summary(summary);
     handoff.memory_id = format!("handoff-{}", summary.memory_id);
     handoff.kind = MemoryKind::Handoff;
     handoff.fields.title = format!("Handoff {}", summary.session_id);
@@ -51,7 +59,7 @@ pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> 
                 if value.is_empty() {
                     continue;
                 }
-                let mut note = summary.clone();
+                let mut note = note_from_summary(summary);
                 let mut identity = Sha256::new();
                 for part in [&summary.memory_id, &observation.event_id] {
                     identity.update((part.len() as u64).to_le_bytes());

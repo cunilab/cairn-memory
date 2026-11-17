@@ -259,7 +259,8 @@ session/source identifiers and the source line index to avoid ambiguous joins.
 Re-ending an unchanged session preserves records and timestamps. Late captures
 refresh the same session note/handoff and existing typed IDs; forgotten or
 superseded records are never regenerated. Refresh keeps creation time,
-verification and lifecycle state. Forgetting a project note hides only that
+verification, lifecycle state, and the session note's `contradicts` and
+`supersedes` links. Notes distilled from that summary do not copy those links. Forgetting a project note hides only that
 record; explicitly forgetting a source capture suppresses every derivation.
 Private personal memory retains its owned-source cascade; see the
 [lifecycle contract](lifecycle-v1.md#forgetting-shared-knowledge).
@@ -287,7 +288,9 @@ does not run the job in that tick. A newer job for the same key replaces an
 older pending row and starts at attempt 0. A live lease is not replaced; a
 pending successor waits behind it. Keys are `memory_id` for `embed`, a
 length-prefixed `person_id` plus `session_id` for `distill`, and
-`similarity-scan` for the similarity review job.
+`similarity-scan` for the similarity review job. The scan publishes reviews
+only while its claim still owns the job. It does not open a review for a pair
+that already has a declared contradiction or an explicit supersede link.
 
 `POST session/end` and the idle sweep enqueue the distill job, claim it, and
 finish the existing summary function before they return. The poller only runs a
@@ -416,14 +419,16 @@ a second id.
 Who may declare, dismiss a review, or supersede follows the edit rule in
 [the scope contract](project-layer4.md#changes-and-governance), not the
 feedback vote. Declare requires edit rights on the contradicted memory.
-Dismiss requires edit rights on either memory in the pair. Supersede requires
+Dismiss requires edit rights on both memories in the pair. Supersede requires
 edit rights on both. Personal memory is editable by its author, project memory
 by its author or the current project owner, and global memory by its author or
 an administrator.
 
 Explicit supersede sets `supersedes` on existing memory B to A's id. It does
-not insert a correction. Recall already hides A while B is a live successor.
-The call is rejected when B already supersedes a different id, when A
+not insert a correction. Recall hides A while B is a live successor in the same
+scope and project, including when a project owner supersedes one member's
+memory with another member's memory. The call is rejected when B already
+supersedes a different id, when A
 supersedes B, or when either id is the same memory. `correct` remains the path
 that creates a new correction memory.
 

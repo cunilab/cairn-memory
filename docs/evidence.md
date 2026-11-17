@@ -455,3 +455,38 @@ was unset. The rerun below includes them.
 - Web `typecheck`, `lint`, and `build` passed, and `scripts/smoke_web.sh` passed.
 - Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
   server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.
+
+### Stage 7 review fixes (2026-11-17)
+
+The independent review of `3930784` was fixed on `v0.1.4`. Dismiss now requires
+edit rights on both memories. A project supersede hides the target when the
+successor is another member's published memory. Re-deriving a summary keeps
+`contradicts` and `supersedes`, and new distilled notes do not copy those
+links. Project declare, dismiss, and supersede take a shared lock on the
+project row before they authorize the write. A similarity scan publishes
+reviews in the same transaction as its claim, drops a pair that was declared
+or superseded before commit, and publishes nothing when the claim is gone.
+Cosine values a few ulps past 1 stay inside the near-duplicate band.
+
+Each new test failed on the previous code, then passed. File storage already
+hid a cross-author project supersede and already refused an expired similarity
+claim; those two file tests were green before the fix. The PostgreSQL copies
+of both were red.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 223 passed, 0 failed, 55 ignored.
+- `scripts/ci_postgres_tests.sh`: 55 passed, 0 failed, including the seven new
+  PostgreSQL regressions and both real-model semantic tests. The pinned MiniLM
+  directory was `/tmp/cairn-stage7-fix-minilm`.
+- `scripts/smoke_hook_auth.py`: 29 passed. `scripts/smoke_hook_offline.py`: 23
+  passed. `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, and
+  `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web files were unchanged, so web checks were not rerun.
+- The retained-job enqueue check printed 3.8 ms at 100 rows, 4.2 ms at 1,000,
+  and 3.5 ms at 5,000. The review's unbounded similarity read was not one of
+  the eight findings and was not changed or benchmarked separately.
+- Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
+  server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.

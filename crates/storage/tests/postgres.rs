@@ -5038,3 +5038,576 @@ async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
             .is_empty()
     );
 }
+
+fn stage7_fact(scope: &str, title: &str, project: Option<&str>) -> cairn_core::SaveMemoryInput {
+    serde_json::from_value(serde_json::json!({
+        "scope": scope,
+        "kind": "fact",
+        "title": title,
+        "summary": title,
+        "reason": "verified",
+        "statement": title,
+        "context": {"project_id": project}
+    }))
+    .unwrap()
+}
+
+fn unit_embedding(memory: &cairn_core::Memory) -> cairn_core::MemoryEmbedding {
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    cairn_core::MemoryEmbedding::new(memory, vector).unwrap()
+}
+
+async fn stage7_accounts(
+    store: &PostgresStore,
+) -> (
+    cairn_core::AuthSessionResult,
+    cairn_core::AuthSessionResult,
+    cairn_core::AuthSessionResult,
+    cairn_core::Project,
+) {
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let left = store
+        .register_account("left@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let right = store
+        .register_account("right@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&left.token, &project.project_id)
+        .await
+        .unwrap();
+    store
+        .join_project(&right.token, &project.project_id)
+        .await
+        .unwrap();
+    (owner, left, right, project)
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_dismiss_requires_edit_rights_on_both_project_memories() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let (owner, left_author, right_author, project) = stage7_accounts(&store).await;
+    let left = store
+        .save(
+            &left_author.token,
+            stage7_fact("project", "dismiss-left", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let right = store
+        .save(
+            &right_author.token,
+            stage7_fact("project", "dismiss-right", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    store.put_embedding(unit_embedding(&left)).await.unwrap();
+    store.put_embedding(unit_embedding(&right)).await.unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, 1_000).await.unwrap(),
+        1
+    );
+    let review = store
+        .similarity_reviews(&left_author.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|review| review.left_id == left.memory_id || review.right_id == left.memory_id)
+        .unwrap();
+    let declare = store
+        .declare_contradiction(&left_author.token, &left.memory_id, &right.memory_id)
+        .await
+        .unwrap_err();
+    assert!(declare.to_string().contains("author or project owner"));
+    let dismissed = store
+        .dismiss_review(&left_author.token, &review.review_id)
+        .await
+        .unwrap_err();
+    assert!(dismissed.to_string().contains("author or project owner"));
+    store
+        .dismiss_review(&owner.token, &review.review_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_cross_author_project_supersede_hides_the_target() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let target = store
+        .save(
+            &owner.token,
+            stage7_fact("project", "crosstoken target", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let source = store
+        .save(
+            &member.token,
+            stage7_fact("project", "crosstoken source", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    store
+        .supersede_memory(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    let found = store
+        .search(&owner.token, "crosstoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(found.iter().all(|hit| hit.memory_id != target.memory_id));
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_rederived_summary_keeps_an_explicit_supersede() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = device_for(&store, &owner, "rederive").await;
+    let target = store
+        .save(
+            &owner.token,
+            stage7_fact("personal", "summary-target", None),
+        )
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "reuse", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "first".to_owned(),
+                session_id: "reuse".to_owned(),
+                content: "Decision: use first because tests passed.".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let summary = store.end_session(&owner.token, "reuse").await.unwrap();
+    store
+        .supersede_memory(&owner.token, &summary.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "second".to_owned(),
+                session_id: "reuse".to_owned(),
+                content: "Decision: use second because tests passed.".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let derived = store.end_session(&owner.token, "reuse").await.unwrap();
+    assert_eq!(
+        derived.supersedes.as_deref(),
+        Some(target.memory_id.as_str())
+    );
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_distilled_notes_do_not_inherit_declared_contradictions() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = device_for(&store, &owner, "inherit").await;
+    let target = store
+        .save(&owner.token, stage7_fact("personal", "shade-target", None))
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "inherit", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "first".to_owned(),
+                session_id: "inherit".to_owned(),
+                content: "Fact: unrelated first".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let summary = store.end_session(&owner.token, "inherit").await.unwrap();
+    store
+        .declare_contradiction(&owner.token, &summary.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        cairn_core::contradiction_counts(&store.memories(&owner.token).await.unwrap())
+            [&target.memory_id],
+        1
+    );
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "second".to_owned(),
+                session_id: "inherit".to_owned(),
+                content: "Fact: unrelated second".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    store.end_session(&owner.token, "inherit").await.unwrap();
+    let memories = store.memories(&owner.token).await.unwrap();
+    assert_eq!(
+        cairn_core::contradiction_counts(&memories)[&target.memory_id],
+        1
+    );
+    assert!(memories.iter().all(|memory| {
+        memory.kind != cairn_core::MemoryKind::Fact
+            || !memory.contradicts.contains(&target.memory_id)
+    }));
+    let successor = store
+        .save(
+            &owner.token,
+            stage7_fact("personal", "summary-successor", None),
+        )
+        .await
+        .unwrap();
+    store
+        .supersede_memory(&owner.token, &successor.memory_id, &summary.memory_id)
+        .await
+        .unwrap();
+    let remaining = cairn_core::contradiction_counts(&store.memories(&owner.token).await.unwrap());
+    assert_eq!(remaining.get(&target.memory_id).copied().unwrap_or(0), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_owner_transfer_waits_for_the_in_flight_edit() {
+    let (pool, store) = pool_and_store().await;
+    let (owner, left_author, right_author, project) = stage7_accounts(&store).await;
+    let left = store
+        .save(
+            &left_author.token,
+            stage7_fact("project", "race-left", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let right = store
+        .save(
+            &right_author.token,
+            stage7_fact("project", "race-right", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let (ordered_left, ordered_right) = cairn_core::ordered_pair(&left.memory_id, &right.memory_id);
+    sqlx::query(
+        "INSERT INTO cairn_similarity_reviews
+            (review_id, left_id, right_id, scope, project_id, cosine, band, status, created_at)
+         VALUES ('race-review', $1, $2, 'project', $3, 1, 'near_duplicate', 'open', 1000)",
+    )
+    .bind(&ordered_left)
+    .bind(&ordered_right)
+    .bind(&project.project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut block = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT review_id FROM cairn_similarity_reviews WHERE review_id = 'race-review' FOR UPDATE",
+    )
+    .fetch_one(&mut *block)
+    .await
+    .unwrap();
+    let editing = store.clone();
+    let owner_token = owner.token.clone();
+    let left_id = left.memory_id.clone();
+    let right_id = right.memory_id.clone();
+    let edit = tokio::spawn(async move {
+        editing
+            .declare_contradiction(&owner_token, &left_id, &right_id)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%UPDATE cairn_similarity_reviews%'
+                )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let transferring = store.clone();
+    let transfer_token = owner.token.clone();
+    let project_id = project.project_id.clone();
+    let new_owner = left_author.account.person_id.clone();
+    let transfer = tokio::spawn(async move {
+        transferring
+            .transfer_project(&transfer_token, &project_id, &new_owner)
+            .await
+    });
+    let finished_early = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if transfer.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        finished_early.is_err(),
+        "owner transfer committed while the edit still held the review row"
+    );
+    block.commit().await.unwrap();
+    let edited = edit.await.unwrap().unwrap();
+    assert!(edited.contradicts.contains(&right.memory_id));
+    transfer.await.unwrap().unwrap();
+    let after = store
+        .declare_contradiction(&owner.token, &left.memory_id, &right.memory_id)
+        .await;
+    assert!(after.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_expired_similarity_claim_publishes_nothing() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let left = store
+        .save(&owner.token, stage7_fact("global", "scan-a", None))
+        .await
+        .unwrap();
+    let right = store
+        .save(&owner.token, stage7_fact("global", "scan-b", None))
+        .await
+        .unwrap();
+    store.put_embedding(unit_embedding(&left)).await.unwrap();
+    store.put_embedding(unit_embedding(&right)).await.unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(
+        store
+            .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_121)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.finish_similarity_scan(&claim, 1_121).await.unwrap(),
+        0
+    );
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let succeeded: bool = sqlx::query_scalar("SELECT succeeded FROM cairn_jobs WHERE job_id = $1")
+        .bind(&claim.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!succeeded);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_overlapping_scan_does_not_reopen_a_declared_pair() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let mut memories = Vec::new();
+    for title in ["scan-left", "scan-right"] {
+        let memory = store
+            .save(&owner.token, stage7_fact("personal", title, None))
+            .await
+            .unwrap();
+        store.put_embedding(unit_embedding(&memory)).await.unwrap();
+        memories.push(memory);
+    }
+    // The trigger only pauses the insert so a real declaration can commit first.
+    sqlx::raw_sql(
+        "CREATE FUNCTION pause_review() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(777777); RETURN NEW; END $$;
+         CREATE TRIGGER pause_review BEFORE INSERT ON cairn_similarity_reviews
+         FOR EACH ROW EXECUTE FUNCTION pause_review();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut block = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(777777)")
+        .execute(&mut *block)
+        .await
+        .unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    let worker = store.clone();
+    let scan = tokio::spawn(async move { worker.finish_similarity_scan(&claim, 1_000).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND wait_event = 'advisory'
+                )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    store
+        .declare_contradiction(&owner.token, &memories[1].memory_id, &memories[0].memory_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    block.commit().await.unwrap();
+    assert_eq!(scan.await.unwrap().unwrap(), 0);
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

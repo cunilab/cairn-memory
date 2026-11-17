@@ -14,6 +14,7 @@ pub const SIMILARITY_CANDIDATES: usize = 60;
 pub const SIMILARITY_REVIEW_CAP: usize = 25;
 pub const SIMILARITY_INTERVAL_SECONDS: u64 = 3600;
 pub const SIMILARITY_JOB_KEY: &str = "similarity-scan";
+const COSINE_SLOP: f32 = 1e-5;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -106,7 +107,21 @@ pub fn cosine(left: &[f32], right: &[f32]) -> Option<f32> {
         right_norm += b * b;
     }
     let denom = left_norm.sqrt() * right_norm.sqrt();
-    (denom > 0.0 && dot.is_finite()).then_some(dot / denom)
+    if denom <= 0.0 {
+        return None;
+    }
+    let score = dot / denom;
+    if !score.is_finite() {
+        return None;
+    }
+    // A normalized vector dotted with itself can land a few ulps past 1.
+    if (1.0..=1.0 + COSINE_SLOP).contains(&score) {
+        return Some(1.0);
+    }
+    if (-1.0 - COSINE_SLOP..=-1.0).contains(&score) {
+        return Some(-1.0);
+    }
+    Some(score)
 }
 
 pub fn ordered_pair(left: &str, right: &str) -> (String, String) {
@@ -240,14 +255,11 @@ impl MemoryStore {
             .ok_or_else(|| StoreError::Validation(format!("unknown memory: {memory_id}")))
     }
 
-    fn may_edit_one(&self, token: &str, left_id: &str, right_id: &str) -> Result<(), StoreError> {
+    fn may_edit_both(&self, token: &str, left_id: &str, right_id: &str) -> Result<(), StoreError> {
         let account = self.authenticate_account(token)?;
-        if self.reject_member_mutation(&account, left_id).is_ok()
-            || self.reject_member_mutation(&account, right_id).is_ok()
-        {
-            return Ok(());
-        }
-        self.reject_member_mutation(&account, left_id)
+        self.reject_member_mutation(&account, left_id)?;
+        self.reject_member_mutation(&account, right_id)?;
+        Ok(())
     }
 
     fn close_review(&mut self, left_id: &str, right_id: &str, status: ReviewStatus, person: &str) {
@@ -370,7 +382,7 @@ impl MemoryStore {
 
     pub fn dismiss_review(&mut self, token: &str, review_id: &str) -> Result<(), StoreError> {
         let review = self.open_review(token, review_id)?;
-        self.may_edit_one(token, &review.left_id, &review.right_id)?;
+        self.may_edit_both(token, &review.left_id, &review.right_id)?;
         let account = self.authenticate_account(token)?;
         let now = now_seconds();
         let row = self
