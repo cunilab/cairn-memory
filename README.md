@@ -163,10 +163,16 @@ cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --embedding-mo
 The directory can also be set with `CAIRN_EMBEDDING_MODEL_DIR`. The server
 verifies local files and makes no model network calls. Health reports
 `semantic_search: enabled` when loaded; missing or invalid files leave lexical,
-entity and link retrieval available. A bounded background worker backfills and
-refreshes vectors; searches do not wait for indexing. See the
-[retrieval contract](docs/contracts/continuity-v1.md#hybrid-recall-v014) for
-ranking, bounds, fallback and deployment requirements.
+entity and link retrieval available. Embedding and session distillation share a
+durable job table. The worker polls every 2 seconds, claims a job for 120
+seconds, and retries a transient failure at most 5 times (waits of 30, 60, 120
+and 240 seconds). A crashed worker's lease can be reclaimed. Jobs that will not
+succeed sit in quarantine until an admin requeues or discards them on the Jobs
+page. Succeeded jobs are removed after 24 hours. Searches do not wait for
+indexing. Operators with an admin web session can read pending, running and
+quarantined counts at `GET /cairn-memory/admin/jobs`. See the
+[jobs contract](docs/contracts/continuity-v1.md#durable-jobs-v014) and the
+[retrieval contract](docs/contracts/continuity-v1.md#hybrid-recall-v014).
 
 The local viewer is available at:
 

@@ -25,6 +25,31 @@ impl PostgresStore {
         rows.iter().map(memory_from_row).collect()
     }
 
+    pub async fn memories_needing_embedding(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<Memory>, PostgresError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "{} LEFT JOIN cairn_memory_embeddings e ON e.memory_id=m.memory_id
+            WHERE {} AND {} AND m.memory_id = ANY($3) AND (e.model_id IS DISTINCT FROM $1 OR e.model_version IS DISTINCT FROM $2
+                OR e.source_revision IS DISTINCT FROM {})",
+            memory_select_sql(),
+            live_memory_sql(),
+            not_superseded_by_live_memory_sql(false),
+            SOURCE_REVISION
+        );
+        let rows = sqlx::query(&sql)
+            .bind(EMBEDDING_MODEL)
+            .bind(EMBEDDING_VERSION)
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(memory_from_row).collect()
+    }
+
     pub async fn put_embedding(&self, embedding: MemoryEmbedding) -> Result<bool, PostgresError> {
         validate_vector(&embedding.vector)?;
         let mut tx = self.pool.begin().await?;

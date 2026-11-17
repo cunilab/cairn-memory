@@ -84,6 +84,20 @@ pub fn embedding_fingerprint(memory: &Memory) -> String {
     format!("{:x}", Sha256::digest(embedding_text(memory).as_bytes()))
 }
 
+pub(crate) fn embedding_source_changed(before: &Memory, after: &Memory) -> bool {
+    before.content != after.content
+        || before.fields.title != after.fields.title
+        || before.fields.summary != after.fields.summary
+        || before.fields.details != after.fields.details
+        || before.fields.reason != after.fields.reason
+        || before.fields.tags != after.fields.tags
+        || before.fields.entities != after.fields.entities
+        || before.fields.applies_to != after.fields.applies_to
+        || before.context.files != after.context.files
+        || before.context.symbols != after.context.symbols
+        || before.context.commands != after.context.commands
+}
+
 impl MemoryStore {
     /// Internal server job input, not an authenticated read surface.
     pub fn embedding_jobs(&self, limit: usize) -> Vec<Memory> {

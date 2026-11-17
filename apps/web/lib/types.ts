@@ -25,6 +25,25 @@ export type Account = {
 
 export type AccountRow = Required<Account> & { created_at: string };
 
+export type QuarantinedJob = {
+  job_id: string;
+  kind: string;
+  key: string;
+  label: string;
+  attempts: number;
+  last_error: string;
+  created_at: number;
+  failed_at: number;
+  quarantined_at: number;
+};
+
+export type JobQueue = {
+  pending: number;
+  running: number;
+  quarantined: number;
+  quarantine: QuarantinedJob[];
+};
+
 export type ProjectMemory = {
   memory_id: string;
   title: string;

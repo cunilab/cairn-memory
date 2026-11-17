@@ -136,7 +136,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 - [ ] Add semantic retrieval with a versioned embedding pipeline and exact-search evaluation.
 - [ ] Add bounded graph-assisted retrieval across code, work, and memory graphs.
-- [ ] Add durable background jobs with leases, retries, backoff, quarantine, and dead-letter inspection.
+- [x] Add durable background jobs with leases, retries, backoff, quarantine, and dead-letter inspection.
 - [ ] Add automatic consolidation, staleness detection, contradiction detection, and promotion suggestions.
 - [ ] Add local or server-side model options while keeping capture and basic recall available during provider failure.
 - [ ] Expand the viewer into operational health, permissions, audit, and recovery surfaces.

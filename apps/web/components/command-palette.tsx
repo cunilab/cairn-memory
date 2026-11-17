@@ -6,6 +6,7 @@ import {
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  ListTodoIcon,
   LogOutIcon,
   MonitorIcon,
   MoonIcon,
@@ -99,10 +100,16 @@ export function CommandPalette({
             Devices
           </CommandItem>
           {account?.is_admin ? (
-            <CommandItem value="accounts users" onSelect={() => go("/accounts")}>
-              <UsersIcon />
-              Accounts
-            </CommandItem>
+            <>
+              <CommandItem value="accounts users" onSelect={() => go("/accounts")}>
+                <UsersIcon />
+                Accounts
+              </CommandItem>
+              <CommandItem value="jobs queue" onSelect={() => go("/jobs")}>
+                <ListTodoIcon />
+                Jobs
+              </CommandItem>
+            </>
           ) : null}
         </CommandGroup>
         {projects.length > 0 ? (

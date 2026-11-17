@@ -5,6 +5,7 @@
 //! the transport can migrate without changing the account or sync contracts.
 
 mod embeddings;
+mod jobs;
 
 use cairn_core::{
     AUTH_SESSION_SECONDS, Account, AccountStatus, AuditEvent, AuthSessionResult, ContextPack,
@@ -44,6 +45,7 @@ const SESSION_PENDING_MIGRATION: &str =
 const ADMIN_ROLE_MIGRATION: &str = include_str!("../../../migrations/0013_admin_role.sql");
 const EMBEDDING_MIGRATION: &str = include_str!("../../../migrations/0014_hybrid_embeddings.sql");
 const RETENTION_MIGRATION: &str = include_str!("../../../migrations/0015_retention_feedback.sql");
+const JOBS_MIGRATION: &str = include_str!("../../../migrations/0016_background_jobs.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 /// A session whose newest retained observation is older than this is finished on the next
 /// capture or session start of the same person.
@@ -168,6 +170,7 @@ impl PostgresStore {
         sqlx::raw_sql(RETENTION_MIGRATION)
             .execute(&self.pool)
             .await?;
+        sqlx::raw_sql(JOBS_MIGRATION).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -758,7 +761,7 @@ impl PostgresStore {
         person_id: &str,
         session_id: &str,
     ) -> Result<Memory, PostgresError> {
-        self.finish_session_summary(person_id, session_id)
+        self.run_distill(person_id, session_id, true)
             .await?
             .ok_or_else(|| {
                 PostgresError::Validation(format!(
@@ -924,9 +927,9 @@ impl PostgresStore {
 
     /// Finishes this person's sessions that have been pending (a capture the summary may not
     /// cover) for longer than `IDLE_SESSION_SECONDS`, at most `MAX_SWEEP_SESSIONS` per call.
-    /// Reads only the partial pending index. A session that fails is marked pending again, so
-    /// it is retried after another idle period, not on every push. Failures are logged; the
-    /// capture or session start that called this has already succeeded.
+    /// Reads only the partial pending index. A session that already has a distill job is left
+    /// for that job. Quarantine clears the pending mark so the sweep does not spin. Failures
+    /// are logged; the capture or session start that called this has already succeeded.
     async fn finish_idle_sessions(&self, person_id: &str) {
         let sessions = sqlx::query_scalar::<_, String>(
             "SELECT session_id FROM cairn_sessions
@@ -951,7 +954,7 @@ impl PostgresStore {
 
     /// Periodic close: the idle sweep for every person, at most `MAX_SWEEP_SESSIONS` sessions
     /// per call, oldest pending first, from the same partial pending index. Failures are
-    /// logged and never returned; a failed session backs off like `finish_idle_sessions`.
+    /// logged and never returned. Retry timing belongs to the distill job.
     pub async fn sweep_idle_sessions(&self) {
         let sessions = sqlx::query_as::<_, (String, String)>(
             "SELECT person_id, session_id FROM cairn_sessions
@@ -974,20 +977,13 @@ impl PostgresStore {
     }
 
     async fn finish_idle_session(&self, person_id: &str, session_id: &str) {
-        // A summary the person hid comes back as `None` and is left as it is.
-        if let Err(error) = self.finish_session_summary(person_id, session_id).await {
-            eprintln!("cairn: automatic session close failed: {error}");
-            let backoff = sqlx::query(
-                "UPDATE cairn_sessions SET pending_since = now()
-                 WHERE person_id = $1 AND session_id = $2",
+        if let Err(error) = self.run_distill(person_id, session_id, false).await
+            && !matches!(
+                cairn_core::distill_job_end(&error.to_string()),
+                cairn_core::JobEnd::Succeeded
             )
-            .bind(person_id)
-            .bind(session_id)
-            .execute(&self.pool)
-            .await;
-            if let Err(error) = backoff {
-                eprintln!("cairn: automatic session close failed: {error}");
-            }
+        {
+            eprintln!("cairn: automatic session close failed: {error}");
         }
     }
 
@@ -3519,6 +3515,7 @@ async fn insert_memory(
     .bind(Json(&memory.feedback))
     .execute(&mut **transaction)
     .await?;
+    jobs::enqueue_embed_tx(transaction, &memory.memory_id, now_seconds()).await?;
     Ok(())
 }
 

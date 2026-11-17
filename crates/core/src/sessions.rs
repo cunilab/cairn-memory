@@ -1,4 +1,7 @@
 use crate::capture::Observation;
+use crate::jobs::{
+    BackgroundJob, JobEnd, JobKind, distill_job_end, distill_key, parse_distill_key,
+};
 use crate::lifecycle::{
     Lifecycle, MemoryKind, MemoryScope, Retention, is_expired, stricter_sensitivity,
 };
@@ -97,11 +100,9 @@ impl MemoryStore {
         Ok(session)
     }
 
-    /// Finishes this person's sessions that have retained observations, none newer than
-    /// `IDLE_SESSION_SECS`, and no current summary: open ones, and ended ones whose id was
-    /// reused for observations the summary does not cover. A session with no retained
-    /// observations is skipped. Failures are logged; the trigger that called this has
-    /// already succeeded.
+    /// Finishes this person's idle sessions that still need a summary. A session that already
+    /// has a distill job is left for that job. A quarantined session waits for a newer
+    /// observation. Failures are logged; the trigger that called this has already succeeded.
     pub(crate) fn finish_idle_sessions(&mut self, person_id: &str) {
         let now = now_seconds();
         let retained = self.retained_by_session(person_id);
@@ -145,7 +146,12 @@ impl MemoryStore {
 
     fn finish_sessions(&mut self, person_id: &str, session_ids: &[String]) {
         for session_id in session_ids {
-            if let Err(error) = self.finish_session(Some(person_id.to_owned()), session_id) {
+            if self.distill_is_idle_paused(person_id, session_id) {
+                continue;
+            }
+            if let Err(error) = self.finish_session(Some(person_id.to_owned()), session_id)
+                && !matches!(distill_job_end(&error.to_string()), JobEnd::Succeeded)
+            {
                 eprintln!("cairn: automatic session close failed: {error}");
             }
         }
@@ -215,14 +221,57 @@ impl MemoryStore {
     }
 
     /// A refused end leaves the session open: `ended_at` is set before the checks that can fail.
+    /// The distill job is claimed in the same write as its enqueue, then the summary runs.
     fn finish_session(
         &mut self,
         person_id: Option<String>,
         session_id: &str,
     ) -> Result<Memory, StoreError> {
-        let finished = self.finish_session_staged(person_id, session_id);
+        let now = now_seconds();
+        let key = distill_key(person_id.as_deref(), session_id);
+        let claim = self.with_jobs(|book| {
+            book.enqueue(JobKind::Distill, &key, now, true);
+            book.claim_key(JobKind::Distill, &key, now)
+        });
+        let Some(claim) = claim else {
+            self.state = self.persisted.clone();
+            return Err(StoreError::Validation(
+                "distill job was not claimable".to_owned(),
+            ));
+        };
+        self.persist()?;
+        self.finish_claimed_distill(claim)
+    }
+
+    pub fn finish_claimed_distill(&mut self, claim: BackgroundJob) -> Result<Memory, StoreError> {
+        let Some((person_id, session_id)) = parse_distill_key(&claim.key) else {
+            let now = now_seconds();
+            let claim_id = claim.claim_id.unwrap_or_default();
+            self.settle_job(
+                &claim.job_id,
+                &claim_id,
+                now,
+                JobEnd::Quarantine("distill job key is invalid".to_owned()),
+            )?;
+            return Err(StoreError::Validation(
+                "distill job key is invalid".to_owned(),
+            ));
+        };
+        let finished = self.finish_session_staged(person_id, &session_id);
         if finished.is_err() {
             self.state = self.persisted.clone();
+        }
+        let now = now_seconds();
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
+        let end = match &finished {
+            Ok(_) => JobEnd::Succeeded,
+            Err(error) => distill_job_end(&error.to_string()),
+        };
+        if let Err(persist_error) = self.settle_job(&claim.job_id, &claim_id, now, end) {
+            return match finished {
+                Err(original) => Err(original),
+                Ok(_) => Err(persist_error),
+            };
         }
         finished
     }

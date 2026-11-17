@@ -1,5 +1,8 @@
 use crate::{AppState, PostgresAppState};
-use cairn_core::{Memory, MemoryEmbedding, embedding_text};
+use cairn_core::{
+    BackgroundJob, EMBED_BATCH, JOB_POLL_SECONDS, JobEnd, JobKind, Memory, MemoryEmbedding,
+    embed_job_end, embedding_text, now_seconds,
+};
 use fastembed::{
     AutoDevicePolicy, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
     UserDefinedEmbeddingModel,
@@ -12,8 +15,7 @@ use std::{
     time::Duration,
 };
 
-const BATCH_SIZE: usize = 8;
-const JOB_INTERVAL: Duration = Duration::from_secs(2);
+const JOB_INTERVAL: Duration = Duration::from_secs(JOB_POLL_SECONDS);
 
 #[derive(Clone)]
 pub struct LocalEmbeddings(Arc<Mutex<TextEmbedding>>);
@@ -87,7 +89,7 @@ impl LocalEmbeddings {
                 .lock()
                 .map_err(|_| "embedding model lock poisoned".to_owned())?;
             let vectors = model
-                .embed(texts, Some(BATCH_SIZE))
+                .embed(texts, Some(EMBED_BATCH))
                 .map_err(|_| "embedding inference failed".to_owned())?;
             if vectors.len() != memories.len() {
                 return Err("embedding batch length mismatch".to_owned());
@@ -103,61 +105,244 @@ impl LocalEmbeddings {
     }
 }
 
-pub(crate) fn spawn_file_jobs(state: &AppState) {
-    let Some(model) = state.embeddings.clone() else {
-        return;
-    };
-    let state = state.clone();
+fn spawn_interval<F, Fut>(tick: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(JOB_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let jobs = state.store.lock().await.embedding_jobs(BATCH_SIZE);
-            match model.embed(jobs).await {
-                Ok(rows) => {
-                    let mut store = state.store.lock().await;
-                    for row in rows {
-                        if store.put_embedding(row).is_err() {
-                            eprintln!("file embedding job persistence failed; will retry");
-                            break;
-                        }
-                    }
-                }
-                Err(_) => eprintln!("file embedding job failed; will retry"),
-            }
+            tick().await;
         }
     });
 }
 
-pub(crate) fn spawn_postgres_jobs(state: &PostgresAppState) {
-    let Some(model) = state.embeddings.clone() else {
-        return;
-    };
-    let state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(JOB_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            let rows = match state.store.embedding_jobs(BATCH_SIZE).await {
-                Ok(rows) => rows,
-                Err(_) => {
-                    eprintln!("PostgreSQL embedding scan failed; will retry");
-                    continue;
-                }
-            };
-            match model.embed(rows).await {
-                Ok(rows) => {
-                    for row in rows {
-                        if state.store.put_embedding(row).await.is_err() {
-                            eprintln!("PostgreSQL embedding persistence failed; will retry");
-                            break;
-                        }
-                    }
-                }
-                Err(_) => eprintln!("PostgreSQL embedding job failed; will retry"),
+async fn run_file_tick(state: &AppState, model: Option<&LocalEmbeddings>) {
+    let now = now_seconds();
+    let embed_work = {
+        let mut store = state.store.lock().await;
+        let distill = match store.poll_jobs(JobKind::Distill, EMBED_BATCH, now) {
+            Ok(claims) => claims,
+            Err(error) => {
+                eprintln!("file distill poll failed: {error}");
+                return;
+            }
+        };
+        for claim in distill {
+            if let Err(error) = store.finish_claimed_distill(claim)
+                && !matches!(
+                    cairn_core::distill_job_end(&error.to_string()),
+                    JobEnd::Succeeded
+                )
+            {
+                eprintln!("file distill job failed: {error}");
             }
         }
+        if model.is_none() {
+            if let Err(error) = store.reconcile_embeddings(EMBED_BATCH, now_seconds()) {
+                eprintln!("file embedding reconcile failed: {error}");
+            }
+            return;
+        }
+        let claims = match store.poll_jobs(JobKind::Embed, EMBED_BATCH, now_seconds()) {
+            Ok(claims) => claims,
+            Err(error) => {
+                eprintln!("file embedding poll failed: {error}");
+                return;
+            }
+        };
+        match store.prepare_embed_work(claims, now_seconds()) {
+            Ok(work) => work,
+            Err(error) => {
+                eprintln!("file embedding prepare failed: {error}");
+                return;
+            }
+        }
+    };
+    let Some(model) = model else {
+        return;
+    };
+    if embed_work.is_empty() {
+        return;
+    }
+    let (claims, memories): (Vec<BackgroundJob>, Vec<Memory>) = embed_work.into_iter().unzip();
+    match model.embed(memories).await {
+        Ok(rows) => {
+            let mut store = state.store.lock().await;
+            for (claim, row) in claims.into_iter().zip(rows) {
+                let claim_id = claim.claim_id.unwrap_or_default();
+                let end = match store.put_embedding(row) {
+                    Ok(_) => JobEnd::Succeeded,
+                    Err(error) => embed_job_end(&error.to_string()),
+                };
+                if let Err(error) = store.settle_job(&claim.job_id, &claim_id, now_seconds(), end) {
+                    eprintln!("file embedding settle failed: {error}");
+                }
+            }
+        }
+        Err(error) => {
+            let end = embed_job_end(&error);
+            let mut store = state.store.lock().await;
+            for claim in claims {
+                let claim_id = claim.claim_id.unwrap_or_default();
+                if let Err(settle) =
+                    store.settle_job(&claim.job_id, &claim_id, now_seconds(), end.clone())
+                {
+                    eprintln!("file embedding settle failed: {settle}");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn_file_jobs(state: &AppState) {
+    let state = state.clone();
+    let model = state.embeddings.clone();
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut store = state.store.lock().await;
+            if let Err(error) = store.reconcile_embeddings(512, now_seconds()) {
+                eprintln!("file embedding reconcile failed: {error}");
+            }
+        });
+    }
+    spawn_interval(move || {
+        let state = state.clone();
+        let model = model.clone();
+        async move { run_file_tick(&state, model.as_ref()).await }
+    });
+}
+
+async fn run_postgres_tick(state: &PostgresAppState, model: Option<&LocalEmbeddings>) {
+    let now = now_seconds();
+    let distill = match state
+        .store
+        .poll_jobs(JobKind::Distill, EMBED_BATCH, now)
+        .await
+    {
+        Ok(claims) => claims,
+        Err(error) => {
+            eprintln!("PostgreSQL distill poll failed: {error}");
+            return;
+        }
+    };
+    for claim in distill {
+        if let Err(error) = state.store.execute_claimed_distill(&claim).await
+            && !matches!(
+                cairn_core::distill_job_end(&error.to_string()),
+                JobEnd::Succeeded
+            )
+        {
+            eprintln!("PostgreSQL distill job failed: {error}");
+        }
+    }
+    if model.is_none() {
+        if let Err(error) = state
+            .store
+            .reconcile_embeddings(EMBED_BATCH, now_seconds())
+            .await
+        {
+            eprintln!("PostgreSQL embedding reconcile failed: {error}");
+        }
+        return;
+    }
+    let claims = match state
+        .store
+        .poll_jobs(JobKind::Embed, EMBED_BATCH, now_seconds())
+        .await
+    {
+        Ok(claims) => claims,
+        Err(error) => {
+            eprintln!("PostgreSQL embedding poll failed: {error}");
+            return;
+        }
+    };
+    if claims.is_empty() {
+        return;
+    }
+    let ids = claims
+        .iter()
+        .map(|claim| claim.key.clone())
+        .collect::<Vec<_>>();
+    let needed = match state.store.memories_needing_embedding(&ids).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("PostgreSQL embedding load failed: {error}");
+            return;
+        }
+    };
+    let mut store_claims = Vec::new();
+    let mut memories = Vec::new();
+    for claim in claims {
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
+        if let Some(memory) = needed.iter().find(|memory| memory.memory_id == claim.key) {
+            memories.push(memory.clone());
+            store_claims.push(claim);
+        } else if let Err(error) = state
+            .store
+            .settle_job(&claim.job_id, &claim_id, now_seconds(), JobEnd::Succeeded)
+            .await
+        {
+            eprintln!("PostgreSQL embedding settle failed: {error}");
+        }
+    }
+    let Some(model) = model else {
+        return;
+    };
+    if memories.is_empty() {
+        return;
+    }
+    match model.embed(memories).await {
+        Ok(rows) => {
+            for (claim, row) in store_claims.into_iter().zip(rows) {
+                let claim_id = claim.claim_id.unwrap_or_default();
+                let end = match state.store.put_embedding(row).await {
+                    Ok(_) => JobEnd::Succeeded,
+                    Err(error) => embed_job_end(&error.to_string()),
+                };
+                if let Err(error) = state
+                    .store
+                    .settle_job(&claim.job_id, &claim_id, now_seconds(), end)
+                    .await
+                {
+                    eprintln!("PostgreSQL embedding settle failed: {error}");
+                }
+            }
+        }
+        Err(error) => {
+            let end = embed_job_end(&error);
+            for claim in store_claims {
+                let claim_id = claim.claim_id.unwrap_or_default();
+                if let Err(settle) = state
+                    .store
+                    .settle_job(&claim.job_id, &claim_id, now_seconds(), end.clone())
+                    .await
+                {
+                    eprintln!("PostgreSQL embedding settle failed: {settle}");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn_postgres_jobs(state: &PostgresAppState) {
+    let state = state.clone();
+    let model = state.embeddings.clone();
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state.store.reconcile_embeddings(512, now_seconds()).await {
+                eprintln!("PostgreSQL embedding reconcile failed: {error}");
+            }
+        });
+    }
+    spawn_interval(move || {
+        let state = state.clone();
+        let model = model.clone();
+        async move { run_postgres_tick(&state, model.as_ref()).await }
     });
 }

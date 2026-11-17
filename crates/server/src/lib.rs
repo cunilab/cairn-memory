@@ -12,12 +12,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cairn_core::{
     ADMIN_ONLY_ERROR, Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack,
-    DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, ImportResult, LifecycleInput,
-    LifecycleSummary, Memory, MemoryStore, ObservationInput, Project, ProjectBranch,
-    ProjectConflict, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
+    DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, ImportResult, JobSnapshot,
+    LifecycleInput, LifecycleSummary, Memory, MemoryStore, ObservationInput, Project,
+    ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
     ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson, ProjectWorktree, RecallFilter,
     RecallResult, Session, StoreError, SyncDiagnostics, SyncPullResult, SyncPushResult,
-    WEB_ONLY_ERROR, WorkContext,
+    WEB_ONLY_ERROR, WorkContext, job_label, now_seconds,
 };
 use cairn_storage::{PostgresError, PostgresStore};
 use serde::{Deserialize, Serialize};
@@ -501,6 +501,15 @@ pub fn app(state: AppState) -> Router {
             post(auth_reset_password),
         )
         .route("/cairn-memory/auth/password", post(auth_change_password))
+        .route("/cairn-memory/admin/jobs", get(admin_jobs))
+        .route(
+            "/cairn-memory/admin/jobs/{job_id}/requeue",
+            post(admin_requeue),
+        )
+        .route(
+            "/cairn-memory/admin/jobs/{job_id}/discard",
+            post(admin_discard),
+        )
         .route(
             "/cairn-memory/projects",
             get(list_projects).post(register_project),
@@ -629,6 +638,15 @@ pub fn postgres_app_with_embeddings(
         .route(
             "/cairn-memory/auth/password",
             post(postgres_auth_change_password),
+        )
+        .route("/cairn-memory/admin/jobs", get(postgres_admin_jobs))
+        .route(
+            "/cairn-memory/admin/jobs/{job_id}/requeue",
+            post(postgres_admin_requeue),
+        )
+        .route(
+            "/cairn-memory/admin/jobs/{job_id}/discard",
+            post(postgres_admin_discard),
         )
         .route(
             "/cairn-memory/projects",
@@ -1718,6 +1736,127 @@ async fn auth_audit(
             .audit_events(auth_token(&headers)?, 100)
             .map_err(account_api_error)?,
     ))
+}
+
+#[derive(Serialize)]
+struct JobQueueResponse {
+    pending: usize,
+    running: usize,
+    quarantined: usize,
+    quarantine: Vec<QuarantineItem>,
+}
+
+#[derive(Serialize)]
+struct QuarantineItem {
+    job_id: String,
+    kind: String,
+    key: String,
+    label: String,
+    attempts: u32,
+    last_error: String,
+    created_at: u64,
+    failed_at: u64,
+    quarantined_at: u64,
+}
+
+fn queue_response(snapshot: JobSnapshot) -> JobQueueResponse {
+    JobQueueResponse {
+        pending: snapshot.pending,
+        running: snapshot.running,
+        quarantined: snapshot.quarantined,
+        quarantine: snapshot
+            .quarantine
+            .into_iter()
+            .map(|row| {
+                let label = job_label(&row.kind, &row.key);
+                QuarantineItem {
+                    job_id: row.job_id,
+                    kind: row.kind,
+                    key: row.key,
+                    label,
+                    attempts: row.attempts,
+                    last_error: row.last_error,
+                    created_at: row.created_at,
+                    failed_at: row.failed_at,
+                    quarantined_at: row.quarantined_at,
+                }
+            })
+            .collect(),
+    }
+}
+
+async fn admin_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<JobQueueResponse>, ApiError> {
+    let store = state.store.lock().await;
+    Ok(Json(queue_response(
+        store
+            .admin_jobs(auth_token(&headers)?, now_seconds())
+            .map_err(account_api_error)?,
+    )))
+}
+
+async fn admin_requeue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut store = state.store.lock().await;
+    store.authenticate_admin(auth_token(&headers)?)?;
+    store
+        .requeue_job(&job_id, now_seconds())
+        .map_err(account_api_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_discard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut store = state.store.lock().await;
+    store.authenticate_admin(auth_token(&headers)?)?;
+    store.discard_job(&job_id).map_err(account_api_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn postgres_admin_jobs(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+) -> Result<Json<JobQueueResponse>, PostgresApiError> {
+    Ok(Json(queue_response(
+        state
+            .store
+            .admin_jobs(postgres_token(&headers)?, now_seconds())
+            .await?,
+    )))
+}
+
+async fn postgres_admin_requeue(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<StatusCode, PostgresApiError> {
+    state
+        .store
+        .authenticate_admin(postgres_token(&headers)?)
+        .await?;
+    state.store.requeue_job(&job_id, now_seconds()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn postgres_admin_discard(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<StatusCode, PostgresApiError> {
+    state
+        .store
+        .authenticate_admin(postgres_token(&headers)?)
+        .await?;
+    state.store.discard_job(&job_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn auth_accounts(
@@ -2820,6 +2959,84 @@ mod tests {
         let (status, livez) = json_request(router, "GET", "/cairn-memory/livez", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(livez["ok"], true);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn admin_can_inspect_and_discard_a_quarantined_job() {
+        let path = temp_store_path("admin-jobs");
+        let router = app(AppState::open(&path).unwrap());
+        let (admin, user, _) = bootstrap_and_register(
+            &router,
+            ["jobs-admin@example.test", "jobs-user@example.test"],
+        )
+        .await;
+        let (status, _) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/admin/jobs",
+            Value::Null,
+            &user,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = json_request(
+            router.clone(),
+            "GET",
+            "/cairn-memory/admin/jobs",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, started) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId": "empty-job"}),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let (status, ended) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "empty-job"}),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{ended}");
+        let (status, queue) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/admin/jobs",
+            Value::Null,
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{queue}");
+        assert!(queue["quarantined"].as_u64().unwrap() >= 1);
+        let job_id = queue["quarantine"][0]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let discard = format!("/cairn-memory/admin/jobs/{job_id}/discard");
+        let (status, _) =
+            json_request_auth(router.clone(), "POST", &discard, Value::Null, &user).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) =
+            json_request_auth(router.clone(), "POST", &discard, Value::Null, &admin).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, queue) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/admin/jobs",
+            Value::Null,
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{queue}");
+        assert_eq!(queue["quarantined"], 0);
         let _ = std::fs::remove_file(path);
     }
 

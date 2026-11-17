@@ -224,6 +224,31 @@ feedback state into the replacement. Imports clear votes and recompute their
 counts in both stores: a backup cannot authenticate a voter. The
 [export contract](../contracts/export-v1.md#import-behavior) owns that rule.
 
+### Stage 6 contract decisions (2026-11-17)
+
+The owner approved one durable job table in both stores, plus a separate quarantine
+table, for embedding, session distillation and later jobs. A job is claimed with a
+120-second lease. An expired lease counts as one attempt and then waits. Five
+attempts is the cap. Waits after failures are 30, 60, 120 and 240 seconds. The
+480-second slot in the published schedule is unused because the fifth failure
+quarantines. The worker polls every 2 seconds and embeds at most 8 memories per
+tick. Succeeded rows are deleted after 24 hours. Quarantine rows stay until an
+admin requeues or discards them.
+
+`POST session/end` and the idle sweep enqueue a distill job and finish it before
+returning, so the summary, handoff and typed notes are still stored before the
+response. The poller finishes a job left behind by a crash. Search never enqueues
+and never waits. A missing embedding model leaves embed jobs pending. IO and
+inference failures retry. A bad vector, a batch-length mismatch, an unknown or
+empty session, a session with nothing left to summarize, and a store conflict
+quarantine immediately. A stale embedding publish, or a summary that is already
+current, forgotten or superseded, is success. Explicit session end of a forgotten
+summary still returns the validation error.
+
+Queue counts and the quarantine list are admin-only. Public health is unchanged.
+Exact fields and error classes are in the
+[jobs contract](../contracts/continuity-v1.md#durable-jobs-v014).
+
 ## Trust and limits
 
 - Project membership is by project ID (ADR 0013), so raw captures, not only
@@ -233,7 +258,7 @@ counts in both stores: a backup cannot authenticate a voter. The
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score and feedback are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions) and [stage 5](../evidence.md#v014-stage-5--retention-and-feedback) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score, feedback, and durable embedding and distillation jobs are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions) and [stage 5](../evidence.md#v014-stage-5--retention-and-feedback) checks.
 
 ## Implementation checklist
 
@@ -288,3 +313,10 @@ tests; ranking in `crates/core/src/recall.rs` and
 feedback on both HTTP adapters, the MCP/CLI tool table, and the web memory
 sheets. See the
 [stage 5 check record](../evidence.md#v014-stage-5--retention-and-feedback).
+
+Stage 6 implementation evidence: `crates/core/src/jobs.rs` and sibling tests;
+file-store claims in that module; `crates/storage/src/jobs.rs`, migration
+`0016_background_jobs.sql` and `crates/storage/tests/jobs.rs`; the worker in
+`crates/server/src/embeddings.rs`; admin routes on both HTTP adapters; and the
+console page `apps/web/app/jobs/page.tsx`. See the
+[stage 6 check record](../evidence.md#v014-stage-6--durable-jobs-and-quarantine).

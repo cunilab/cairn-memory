@@ -259,6 +259,56 @@ Private personal memory retains its owned-source cascade; see the
 Typed extraction stops after 64 notes; all source IDs remain on the session
 note, even when its bounded details omit text.
 
+### Durable jobs (v0.1.4)
+
+Embedding and session distillation share one job table in the file store and in
+PostgreSQL (`cairn_jobs`, file fields `jobs`). A second table, `cairn_job_quarantine`
+(file field `job_quarantine`), holds jobs that will not retry. There is no
+separate jobs crate.
+
+| Constant | Value |
+| --- | --- |
+| Lease | 120 seconds. Completion is accepted only for the claim that still holds the row. |
+| Attempts | 5. The fifth failure quarantines. |
+| Backoff | 30, 60, 120, 240 seconds after failures 1–4. The 480-second schedule slot is unused. |
+| Poll | 2 seconds. Embedding claims at most 8 jobs and embeds them as one batch. |
+| Succeeded rows | Deleted 24 hours after they finish. |
+| Quarantine | Kept until an admin requeues or discards the row. |
+
+An expired lease counts as a failed attempt, then uses the same backoff. Reclaim
+does not run the job in that tick. A newer job for the same key replaces an
+older pending row and starts at attempt 0. A live lease is not replaced; a
+pending successor waits behind it. Keys are `memory_id` for `embed` and a
+length-prefixed `person_id` plus `session_id` for `distill`.
+
+`POST session/end` and the idle sweep enqueue the distill job, claim it, and
+finish the existing summary function before they return. The poller only runs a
+claim left by a crash or by backoff. Idle close does not reset a job that is
+already active. After quarantine, PostgreSQL clears `pending_since` and the file
+store skips that session until a newer observation arrives, so automatic close
+does not spin. A forgotten or superseded summary completes the job and the
+explicit end still returns its validation error.
+
+Transient failures retry: store IO, JSON encoding, PostgreSQL connection and pool
+errors, embedding inference failure, embedding worker-task failure, and a
+poisoned model lock. Permanent failures quarantine immediately: a vector that is
+not a finite normalized 384-vector, an embedding batch-length mismatch, an
+unknown or empty session, a session with no retained observations, and a store
+conflict. Publishing an embedding that no longer matches, or finding a summary
+already current, is success.
+
+Search never enqueues a job and never waits for one. Startup and each embedding
+poll enqueue missing or stale vectors only when that memory has no active embed
+job. Writes that change embedding text replace a pending embed job. If the model
+is not loaded, embed jobs stay pending and are not failed.
+
+Admin web sessions may `GET /cairn-memory/admin/jobs` (pending, running,
+quarantined, and the quarantine rows), `POST .../admin/jobs/{job_id}/requeue`,
+and `POST .../admin/jobs/{job_id}/discard`. A non-admin receives the admin-only
+error. Requeue is rejected while a job for that key is already active. Public
+`/cairn-memory/health` does not include queue counts. The console page is
+`/jobs`, shown for admins.
+
 Ending a session deterministically extracts two structured lists from captured
 observations:
 
@@ -322,9 +372,9 @@ summary memory:
 - PostgreSQL marks a session pending (`cairn_sessions.pending_since`) when a
   capture lands or one of its observations is forgotten, and clears it when the
   summary is derived. The sweep reads only that partial index, at most 16
-  sessions per call, so its cost does not grow with finished sessions. A session
-  whose close fails is marked pending again and retried after another idle
-  period, not on every push.
+  sessions per call, so its cost does not grow with finished sessions. Retry
+  timing belongs to the distill job in [durable jobs](#durable-jobs-v014).
+  Quarantine clears the pending mark. A newer capture sets it again.
 - Automatic project registration validates the repository and branch against the
   same 512-byte limit as `register_project`; an oversized value registers nothing
   and does not fail the capture.

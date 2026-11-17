@@ -63,6 +63,10 @@ pub(crate) struct StoreState {
     pub(crate) project_members: Vec<ProjectMemberRecord>,
     #[serde(default)]
     pub(crate) audit_events: Vec<StoredAuditEvent>,
+    #[serde(default)]
+    pub(crate) jobs: Vec<crate::jobs::BackgroundJob>,
+    #[serde(default)]
+    pub(crate) job_quarantine: Vec<crate::jobs::QuarantinedJob>,
 }
 
 impl Default for StoreState {
@@ -90,6 +94,8 @@ impl Default for StoreState {
             sync_deletions: Vec::new(),
             project_members: Vec::new(),
             audit_events: Vec::new(),
+            jobs: Vec::new(),
+            job_quarantine: Vec::new(),
         }
     }
 }
@@ -130,6 +136,7 @@ impl MemoryStore {
     /// Writes the state. Every mutator commits through here, so a failed write restores the
     /// last persisted state and memory never runs ahead of the disk.
     pub(crate) fn persist(&mut self) -> Result<(), StoreError> {
+        self.queue_changed_embeddings();
         let written = self.write_state();
         match written {
             Ok(()) => self.persisted = self.state.clone(),

@@ -14,6 +14,7 @@ import {
   MonitorIcon,
   MoonIcon,
   SunIcon,
+  ListTodoIcon,
   UsersIcon,
 } from "lucide-react";
 import { CairnMark } from "@/components/cairn-logo";
@@ -194,6 +195,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <SidebarGroupContent>
               <SidebarMenu>
                 <NavItem href="/accounts" label="Accounts" icon={UsersIcon} pathname={pathname} />
+                <NavItem href="/jobs" label="Jobs" icon={ListTodoIcon} pathname={pathname} />
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

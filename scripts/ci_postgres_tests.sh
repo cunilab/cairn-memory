@@ -13,7 +13,7 @@ cleanup() {
   if [ -n "$current_db" ]; then psql "$CAIRN_TEST_SERVER_URL/postgres" -v ON_ERROR_STOP=1 -q -c "DROP DATABASE IF EXISTS $current_db WITH (FORCE)"; fi
 }
 trap cleanup EXIT
-for target in "cairn-storage --test postgres" "cairn-client --test agent_flow" "cairn-server --test project_model" "cairn-server --test semantic"; do
+for target in "cairn-storage --test postgres" "cairn-storage --test jobs" "cairn-client --test agent_flow" "cairn-server --test project_model" "cairn-server --test semantic"; do
   read -ra cargo_target <<<"$target"
   cargo test -p "${cargo_target[@]}" --no-run
   names="$(cargo test -p "${cargo_target[@]}" -- --ignored --list | sed -n 's/: test$//p')"

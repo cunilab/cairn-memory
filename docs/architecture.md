@@ -85,7 +85,7 @@ flowchart LR
 | `services` crate | Product behavior independent of transport | Capture, share, recall, remember, context, export/import, privacy, audit, lifecycle |
 | `search` crate | Retrieval streams and authorization-aware ranking | PostgreSQL FTS, pgvector, graph traversal, score fusion, optional reranker |
 | `providers` crate | Optional LLM and embedding integrations | HTTP clients, provider configuration, retries, circuit state |
-| `jobs` crate | Background work with leases and recovery | Compression, summaries, embeddings, sharing proposals, consolidation, retention |
+| `jobs` seam | Background work with leases and recovery. v0.1.4 stores that work in `cairn_jobs` and `cairn_job_quarantine` inside the file and PostgreSQL adapters, not in a separate crate. | Embeddings, session distillation, and later maintenance |
 | `api` crate | REST routes, authentication, request limits, error mapping, and OpenAPI-facing schemas | Axum, Tower middleware, service layer |
 | `client` crate (`cairn-client`) | The agent-facing `cairn` CLI and `cairn mcp` stdio server: one shared tool table, one REST call per command or tool, device-token credential | Blocking HTTP client, user config file (mode `0600`), export/import files |
 | `apps/web` | Human-facing collaboration and operations console | Next.js App Router, shadcn/ui, typed API client, live event client |

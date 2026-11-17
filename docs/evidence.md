@@ -361,3 +361,35 @@ checks because the model-directory variable was unset. The final complete
 run used the checksum-verified pinned MiniLM model and passed both semantic
 checks. MCP setup emitted a nonfatal hook-script download HTTP 404 warning;
 the MCP flow passed. Web files were unchanged, so web checks were not rerun.
+
+## v0.1.4 stage 6 — durable jobs and quarantine
+
+Verified on 2026-11-17 on macOS, branch `v0.1.4`. No live Cairn server was
+contacted. Verification shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN` and
+`CAIRN_OUTBOX`. PostgreSQL used a disposable `pgvector/pgvector:pg17` container
+on the Colima socket with a scratch Docker config, one database per ignored
+test, then the container was removed.
+
+- `cargo fmt --all -- --check`: passed before the final formatting pass, which
+  was applied and included in the PostgreSQL run.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 209 passed, 0 failed, 40 ignored.
+- `scripts/ci_postgres_tests.sh`: 40 passed, 0 failed, including
+  `postgres_jobs_lease_backoff_quarantine_and_exclusion`, the idle-sweep
+  quarantine case, and both real-model semantic tests. The pinned MiniLM
+  directory was a scratch download checked by `scripts/download_embedding_model.py`.
+- `scripts/smoke_hook_auth.py`: 29 passed.
+- `scripts/smoke_hook_offline.py`: 23 passed.
+- `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/test_agent_hooks.py`: 7 passed.
+- `scripts/test_agent_setup.py`: 10 passed.
+- `scripts/smoke_hook.sh`, `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`
+  and `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web `typecheck`, `lint`, `build` and `scripts/smoke_web.sh`: passed, including
+  the admin Jobs page and a non-admin 403 on `admin/jobs`.
+
+Job behavior was tested on the file store and on PostgreSQL: exclusive claim,
+lease expiry, backoff, permanent and transient errors, supersede, quarantine,
+requeue, discard, and a lost claim. `POST session/end` still returns the summary
+after the notes are stored. Public `/health` is unchanged.

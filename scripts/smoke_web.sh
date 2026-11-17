@@ -437,6 +437,11 @@ curl -fsS -o /dev/null -c "$member_accounts_jar" -H 'content-type: application/j
   -d "{\"email\":\"member@example.test\",\"password\":\"${password}\"}" \
   "${web}/api/cairn/auth/login"
 member_accounts_code="$(curl -sS -o /dev/null -b "$member_accounts_jar" -w '%{http_code}' "${web}/api/cairn/auth/accounts")"
+member_jobs_code="$(curl -sS -o /dev/null -b "$member_accounts_jar" -w '%{http_code}' "${web}/api/cairn/admin/jobs")"
+if [ "$member_jobs_code" != "403" ]; then
+  printf '%s\n' "a non-admin must not list jobs: ${member_jobs_code}" >&2
+  exit 1
+fi
 if [ "$member_accounts_code" != "403" ]; then
   printf '%s\n' "a non-admin must not list accounts: ${member_accounts_code}" >&2
   exit 1
@@ -577,7 +582,7 @@ import json, os
 status = {b["name"]: b["status"] for b in json.load(open(os.environ["BRANCHES"]))}
 assert status["feature-merge"] == "merged" and status["feature-close"] == "closed", status
 PY
-for page in accounts memories "projects/${project_id}"; do
+for page in accounts jobs memories "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
     printf '%s\n' "${page} page status: ${page_code}" >&2

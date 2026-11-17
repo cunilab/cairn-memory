@@ -12,6 +12,7 @@ mod devices;
 mod distillation;
 mod embeddings;
 mod hybrid;
+mod jobs;
 mod lifecycle;
 mod memories;
 mod ownership;
@@ -69,6 +70,12 @@ pub use embeddings::{
     embedding_fingerprint, embedding_text, validate_vector,
 };
 pub use hybrid::{SEMANTIC_CANDIDATES, hybrid_rank};
+pub use jobs::{
+    BackgroundJob, EMBED_BATCH, JOB_ATTEMPT_CAP, JOB_BACKOFF_SECONDS, JOB_LEASE_SECONDS,
+    JOB_POLL_SECONDS, JOB_SUCCEEDED_RETENTION_SECONDS, JobBook, JobEnd, JobKind, JobOpError,
+    JobSnapshot, QuarantinedJob, distill_job_end, distill_key, embed_job_end, job_label,
+    parse_distill_key,
+};
 pub use retention::{
     ACCESS_SATURATION, ACCESS_WEIGHT, AGE_HALF_LIFE_DAYS, AGE_WEIGHT, BELOW_THRESHOLD_FLOOR,
     FEEDBACK_CAP, FEEDBACK_STEP, FeedbackVote, MemoryFeedback, RECENCY_HALF_LIFE_DAYS,

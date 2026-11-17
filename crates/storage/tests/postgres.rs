@@ -2324,7 +2324,7 @@ async fn postgres_rederived_summary_keeps_state_and_respects_hidden_summaries() 
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures() {
+async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empty_one() {
     let (pool, store) = pool_and_store().await;
     let account = store
         .bootstrap_account("sweep@example.test", "correct horse battery staple")
@@ -2356,8 +2356,8 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures(
         .expect("end");
     assert_eq!(pending("done").await, None);
 
-    // A permanently failing session (its only observation was forgotten) is retried only
-    // after another idle period, not on every push.
+    // A session whose only observation was forgotten cannot be summarised. The distill job
+    // is quarantined and leaves the pending index, so the next sweep does not spin.
     push_in(&store, &dev, "bad", "bad-1", WorkContext::default()).await;
     store.forget(&account.token, "bad-1").await.expect("forget");
     sqlx::query("UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE person_id = $1 AND session_id = 'bad'")
@@ -2367,8 +2367,20 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures(
         .expect("age pending");
     assert_eq!(pending("bad").await, Some(true));
     push_in(&store, &dev, "trigger", "sweep-1", WorkContext::default()).await;
-    assert_eq!(pending("bad").await, Some(false), "backed off, not retried");
+    assert_eq!(
+        pending("bad").await,
+        None,
+        "quarantine clears the pending mark"
+    );
     assert!(!session_ended(&pool, &person, "bad").await);
+    let quarantined: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_job_quarantine WHERE kind = 'distill' AND job_key LIKE '%' || $1",
+    )
+    .bind("bad")
+    .fetch_one(&pool)
+    .await
+    .expect("quarantine count");
+    assert_eq!(quarantined, 1);
 }
 
 #[tokio::test]
