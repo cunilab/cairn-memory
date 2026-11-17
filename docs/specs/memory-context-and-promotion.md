@@ -1,14 +1,14 @@
 ---
 id: CM-SPEC-002
 title: "Specification — Memory Context and Promotion"
-status: draft
+status: superseded
 ---
 
 # Specification — Memory Context and Promotion
 
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Superseded by ADR 0014 |
 | Owner | Cairn Memory maintainers |
 | Target | Layers 1–6: personal memory, branch-aware context, promotion, and advanced retrieval |
 | Related | [Product](../product.md), [Roadmap](../roadmap.md), [Architecture](../architecture.md), [Graph-assisted retrieval](./graph-assisted-retrieval.md) |
