@@ -4600,9 +4600,9 @@ async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(
-        summaries >= 1,
-        "idle sweep did not summarize the newer capture"
+    assert_eq!(
+        summaries, 3,
+        "one Decision capture derives the summary, the handoff, and that note"
     );
 }
 
@@ -4831,4 +4831,210 @@ async fn postgres_enqueue_does_not_rewrite_retained_jobs() {
         assert_eq!(after.len(), before.len() + 1);
         eprintln!("enqueue with {retained} retained rows: {elapsed:?}");
     }
+}
+
+fn unit_pair(cosine: f32) -> (Vec<f32>, Vec<f32>) {
+    let mut left = vec![0.0; 384];
+    let mut right = vec![0.0; 384];
+    left[0] = 1.0;
+    right[0] = cosine;
+    right[1] = (1.0 - cosine * cosine).sqrt();
+    (left, right)
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
+    let (_pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let save = |token: &str, scope: &str, title: &str| {
+        let store = &store;
+        let token = token.to_owned();
+        let scope = scope.to_owned();
+        let title = title.to_owned();
+        async move {
+            store
+                .save(
+                    &token,
+                    serde_json::from_value(serde_json::json!({
+                        "scope": scope,
+                        "kind": "fact",
+                        "title": title,
+                        "summary": title,
+                        "reason": "verified",
+                        "statement": title
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let target = save(&owner.token, "personal", "sharedtoken").await;
+    let source = save(&owner.token, "personal", "sharedtoken").await;
+    let before = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    let before_target = before
+        .iter()
+        .find(|hit| hit.memory_id == target.memory_id)
+        .unwrap()
+        .score;
+    let hidden = store
+        .declare_contradiction(&other.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown memory"));
+    store
+        .declare_contradiction(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    let after = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    let target_score = after
+        .iter()
+        .find(|hit| hit.memory_id == target.memory_id)
+        .unwrap()
+        .score;
+    assert!(
+        (target_score / before_target - 0.5).abs() < 1e-3,
+        "{target_score} {before_target}"
+    );
+    let global = save(&owner.token, "global", "globaltoken").await;
+    let crossed = store
+        .declare_contradiction(&owner.token, &source.memory_id, &global.memory_id)
+        .await
+        .unwrap_err();
+    assert!(crossed.to_string().contains("same scope"));
+    store
+        .supersede_memory(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    let recalled = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(recalled.iter().all(|hit| hit.memory_id != target.memory_id));
+    let history = store.export_bundle(&owner.token).await.unwrap();
+    assert!(
+        history
+            .memories
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let left = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "left-note",
+        context.clone(),
+    )
+    .await;
+    let right = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "right-note",
+        context,
+    )
+    .await;
+    let refused = store
+        .declare_contradiction(&member.token, &right.memory_id, &left.memory_id)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("author or project owner"));
+    let (low, high) = unit_pair(0.5);
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&left, low).unwrap())
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&right, high).unwrap())
+        .await
+        .unwrap();
+    let now = 1_000_u64;
+    store.ensure_similarity_job(now).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(store.finish_similarity_scan(&claim, now).await.unwrap(), 1);
+    assert!(
+        store
+            .poll_jobs(
+                cairn_core::JobKind::Similarity,
+                1,
+                now + cairn_core::SIMILARITY_INTERVAL_SECONDS - 1
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let reviews = store.similarity_reviews(&owner.token).await.unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(
+        reviews[0].band,
+        cairn_core::SimilarityBand::PossibleConflict
+    );
+    assert!(
+        store
+            .similarity_reviews(&other.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let leaked = store
+        .dismiss_review(&other.token, &reviews[0].review_id)
+        .await
+        .unwrap_err();
+    assert!(leaked.to_string().contains("unknown review"));
+    let member_refused = store
+        .dismiss_review(&member.token, &reviews[0].review_id)
+        .await
+        .unwrap_err();
+    assert!(
+        member_refused
+            .to_string()
+            .contains("author or project owner")
+    );
+    let contradicted = store
+        .contradict_review(&owner.token, &reviews[0].review_id, &left.memory_id)
+        .await
+        .unwrap();
+    assert!(contradicted.contradicts.contains(&left.memory_id));
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

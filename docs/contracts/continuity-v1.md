@@ -99,8 +99,15 @@ Retention and feedback multiply that fused score before the tiebreaks and
 before limit truncation. `omitted_count` still counts every eligible hit.
 
 ```
-score = fused * type_weight * pin_weight * retention_factor * feedback_factor
+score = fused * type_weight * pin_weight * retention_factor * feedback_factor * contradiction_factor
 ```
+
+`contradiction_factor` is `1` when no live declared contradiction names this memory.
+Otherwise it is `max(0.25, 1/(1+n))`. `n` counts contradicting memories in the
+caller's readable live set that list this id in `contradicts` and share its
+scope and project. A search filter does not remove a contradicting memory from
+`n`. The memory stays in the result set. The lexical `contradiction_ids` signal
+and the equal-score newer-first swap do not use this factor.
 
 Salience is `lifecycle.importance / 100`. Age and recency are unix-second
 elapsed time divided by 86400. Recency uses `last_accessed_at`, or
@@ -278,8 +285,9 @@ separate jobs crate.
 An expired lease counts as a failed attempt, then uses the same backoff. Reclaim
 does not run the job in that tick. A newer job for the same key replaces an
 older pending row and starts at attempt 0. A live lease is not replaced; a
-pending successor waits behind it. Keys are `memory_id` for `embed` and a
-length-prefixed `person_id` plus `session_id` for `distill`.
+pending successor waits behind it. Keys are `memory_id` for `embed`, a
+length-prefixed `person_id` plus `session_id` for `distill`, and
+`similarity-scan` for the similarity review job.
 
 `POST session/end` and the idle sweep enqueue the distill job, claim it, and
 finish the existing summary function before they return. The poller only runs a
@@ -297,6 +305,19 @@ not a finite normalized 384-vector, an embedding batch-length mismatch, an
 unknown or empty session, a session with no retained observations, and a store
 conflict. Publishing an embedding that no longer matches, or finding a summary
 already current, is success.
+
+The similarity job uses stored embeddings only. It does not call the model.
+With no current vectors it succeeds and does nothing. Each success schedules
+the next run 3600 seconds later. A run inspects the 60 coldest eligible
+memories (lowest `access_count`, then oldest `created_at`, then memory id)
+that have a current embedding, excluding captures, forgotten, expired, and
+superseded rows. It inserts at most 25 new open reviews for pairs in the same
+scope and project whose cosine is from 0.40 through 1.0. Cosine below 0.75 is
+`possible_conflict`; 0.75 and above is `near_duplicate`. Pairs already stored
+in any status, pairs linked by `supersedes` either way, and pairs linked by
+`contradicts` either way are skipped. Lease, attempts, backoff, and quarantine
+are the same as the other jobs. The worker ensures one pending row on each
+poll when none is active and none is quarantined.
 
 Search never enqueues a job and never waits for one. Startup and each embedding
 poll enqueue missing or stale vectors only when that memory has no active embed
@@ -383,6 +404,44 @@ summary memory:
 Implemented in `finish_idle_sessions` and `sweep_idle_sessions` (`crates/core/src/sessions.rs`,
 `crates/storage/src/lib.rs`); the pending column is
 `migrations/0012_session_summary_pending.sql`.
+
+## Declared contradictions (v0.1.4)
+
+An authenticated caller may declare that memory B contradicts memory A. The
+link is stored on B as `contradicts`, a list of ids. Only A is shaded, by the
+factor above. A is not hidden or deleted. Both memories must be readable, in
+the same scope, and in the same project. Repeating a declaration does not add
+a second id.
+
+Who may declare, dismiss a review, or supersede follows the edit rule in
+[the scope contract](project-layer4.md#changes-and-governance), not the
+feedback vote. Declare requires edit rights on the contradicted memory.
+Dismiss requires edit rights on either memory in the pair. Supersede requires
+edit rights on both. Personal memory is editable by its author, project memory
+by its author or the current project owner, and global memory by its author or
+an administrator.
+
+Explicit supersede sets `supersedes` on existing memory B to A's id. It does
+not insert a correction. Recall already hides A while B is a live successor.
+The call is rejected when B already supersedes a different id, when A
+supersedes B, or when either id is the same memory. `correct` remains the path
+that creates a new correction memory.
+
+A similarity review is returned only when the caller can read both memories
+under the ordinary read gate, including forgotten rows, expiry, and a live
+successor. Otherwise it is omitted, and acting on its id is the same not-found
+error as an unknown review. Open reviews are listed by `GET
+/cairn-memory/similarity-reviews`. Dismiss, contradict, and supersede are
+`POST` under `/cairn-memory/similarity-reviews/`. Direct declare and supersede
+are `POST /cairn-memory/contradict` and `POST /cairn-memory/supersede`. MCP
+tools are `memory_contradict`, `memory_supersede`, `memory_similarity_reviews`,
+`memory_review_dismiss`, `memory_review_contradict`, and
+`memory_review_supersede`. The CLI commands are `contradict`, `supersede`,
+`reviews`, `review-dismiss`, `review-contradict`, and `review-supersede`.
+The console Memories page lists open reviews for the signed-in viewer.
+
+Import stores `contradicts` with the memory. A link whose target is missing,
+unreadable, or in another scope or project does not change rank.
 
 ## Contradiction ordering
 

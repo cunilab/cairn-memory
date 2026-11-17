@@ -8,6 +8,7 @@
 mod accounts;
 mod brief;
 mod capture;
+mod contradictions;
 mod devices;
 mod distillation;
 mod embeddings;
@@ -36,6 +37,13 @@ pub use accounts::{
 };
 pub use brief::{SESSION_BRIEF_MAX_BYTES, session_brief};
 pub use capture::{CaptureResult, Observation, ObservationInput, normalize_observation};
+pub use contradictions::{
+    CONTRADICTION_FLOOR, ReviewStatus, SIMILARITY_BAND_MIN, SIMILARITY_CANDIDATES,
+    SIMILARITY_INTERVAL_SECONDS, SIMILARITY_JOB_KEY, SIMILARITY_NEAR_DUPLICATE,
+    SIMILARITY_REVIEW_CAP, SimilarityBand, SimilarityReview, contradiction_counts,
+    contradiction_factor, cosine, ordered_pair, same_scope, similarity_band, similarity_candidates,
+    supersede_allowed,
+};
 pub use devices::{DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, DeviceStatus};
 pub use distillation::distill_session_notes;
 pub use lifecycle::{

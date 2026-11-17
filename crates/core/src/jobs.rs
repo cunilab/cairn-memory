@@ -13,6 +13,7 @@ pub const EMBED_BATCH: usize = 8;
 pub enum JobKind {
     Embed,
     Distill,
+    Similarity,
 }
 
 impl JobKind {
@@ -20,6 +21,7 @@ impl JobKind {
         match self {
             Self::Embed => "embed",
             Self::Distill => "distill",
+            Self::Similarity => "similarity",
         }
     }
 }
@@ -111,6 +113,9 @@ pub fn job_label(kind: &str, key: &str) -> String {
     }
     if kind == JobKind::Embed.as_str() {
         return format!("embed {key}");
+    }
+    if kind == JobKind::Similarity.as_str() {
+        return "similarity scan".to_owned();
     }
     format!("{kind} {key}")
 }

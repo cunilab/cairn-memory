@@ -248,6 +248,33 @@ Queue counts and the quarantine list are admin-only. Public health is unchanged.
 Exact fields and error classes are in the
 [jobs contract](../contracts/continuity-v1.md#durable-jobs-v014).
 
+### Stage 7 contract decisions (2026-11-17)
+
+The owner confirmed declared contradictions, a similarity review job, and
+explicit supersede on the existing `supersedes` field.
+
+A declared link stores the contradicted id on the contradicting memory. Only
+the contradicted memory is shaded, and only for a viewer who can read both
+ends. The factor is `max(0.25, 1/(1+n))`, multiplied after the stage-3 fused
+score and the stage-5 retention and feedback factors, before tiebreaks and
+truncation. The memory stays in the result set. The lexical contradiction
+signal is unchanged.
+
+The similarity job runs on the stage-6 table under the key `similarity-scan`.
+It uses stored vectors only. Cosine from 0.40 through 1.0 is reviewed; below
+0.75 is a possible conflict and 0.75 and above is a near-duplicate. Each run
+looks at the 60 coldest eligible memories, inserts at most 25 new open
+reviews, skips captures, and schedules the next run an hour later. A review is
+visible only when the viewer can read both memories. Dismiss changes the
+review only. Marking a contradiction or a supersede from the review uses the
+same writes as the direct actions.
+
+Declare and dismiss follow edit rights: the author of the contradicted memory
+or the project owner, the personal author, or the global author or
+administrator. Dismiss is allowed when the caller can edit either memory in
+the pair. Supersede also requires edit rights on the successor, because it
+writes that memory's `supersedes` field. It does not call `correct`.
+
 ## Trust and limits
 
 - Project membership is by project ID (ADR 0013), so raw captures, not only
@@ -257,7 +284,7 @@ Exact fields and error classes are in the
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score, feedback, and durable embedding and distillation jobs are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions) and [stage 5](../evidence.md#v014-stage-5--retention-and-feedback) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score, feedback, durable embedding and distillation jobs, and declared contradiction handling are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions), [stage 5](../evidence.md#v014-stage-5--retention-and-feedback), [stage 6](../evidence.md#v014-stage-6--durable-jobs-and-quarantine) and [stage 7](../evidence.md#v014-stage-7--contradiction-handling) checks.
 
 ## Implementation checklist
 
@@ -319,3 +346,10 @@ file-store claims in that module; `crates/storage/src/jobs.rs`, migration
 `crates/server/src/embeddings.rs`; admin routes on both HTTP adapters; and the
 console page `apps/web/app/jobs/page.tsx`. See the
 [stage 6 check record](../evidence.md#v014-stage-6--durable-jobs-and-quarantine).
+
+Stage 7 implementation evidence: `crates/core/src/contradictions.rs` and sibling
+tests; ranking in `crates/core/src/recall.rs` and
+`crates/storage/src/embeddings.rs`; migration `0017_contradictions.sql`;
+review storage in both adapters; MCP/CLI tools; and the Memories page review
+list. See the
+[stage 7 check record](../evidence.md#v014-stage-7--contradiction-handling).

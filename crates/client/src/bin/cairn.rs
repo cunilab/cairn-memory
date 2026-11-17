@@ -78,6 +78,32 @@ const COMMANDS: &[Command] = &[
     command("memories", "memory_list", &[], 0),
     command("memory", "memory_get", &["memoryId"], 1),
     command("feedback", "memory_feedback", &["memoryId", "vote"], 2),
+    command(
+        "contradict",
+        "memory_contradict",
+        &["contradictingId", "contradictedId"],
+        2,
+    ),
+    command(
+        "supersede",
+        "memory_supersede",
+        &["successorId", "targetId"],
+        2,
+    ),
+    command("reviews", "memory_similarity_reviews", &[], 0),
+    command("review-dismiss", "memory_review_dismiss", &["reviewId"], 1),
+    command(
+        "review-contradict",
+        "memory_review_contradict",
+        &["reviewId", "contradictedId"],
+        2,
+    ),
+    command(
+        "review-supersede",
+        "memory_review_supersede",
+        &["reviewId", "successorId"],
+        2,
+    ),
     command("correct", "memory_correct", &["targetId", "content"], 2),
     command(
         "project-register",
@@ -138,6 +164,12 @@ fn print_usage() {
   cairn save|lesson [JSON-record] (or stdin)\n\
   cairn memories | memory <memory-id>\n\
   cairn feedback <memory-id> helpful|stale\n\
+  cairn contradict <contradicting-id> <contradicted-id>\n\
+  cairn supersede <successor-id> <target-id>\n\
+  cairn reviews\n\
+  cairn review-dismiss <review-id>\n\
+  cairn review-contradict <review-id> <contradicted-id>\n\
+  cairn review-supersede <review-id> <successor-id>\n\
   cairn correct <memory-or-event-id> <content>\n\
   cairn export <output>\n\
   cairn import <input>\n\

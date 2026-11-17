@@ -214,6 +214,32 @@ pub struct FeedbackRequest {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct ContradictRequest {
+    #[serde(rename = "contradictingId", alias = "contradicting_id")]
+    pub contradicting_id: String,
+    #[serde(rename = "contradictedId", alias = "contradicted_id")]
+    pub contradicted_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SupersedeRequest {
+    #[serde(rename = "successorId", alias = "successor_id")]
+    pub successor_id: String,
+    #[serde(rename = "targetId", alias = "target_id")]
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewRequest {
+    #[serde(rename = "reviewId", alias = "review_id")]
+    pub review_id: String,
+    #[serde(rename = "contradictedId", alias = "contradicted_id")]
+    pub contradicted_id: Option<String>,
+    #[serde(rename = "successorId", alias = "successor_id")]
+    pub successor_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct CorrectRequest {
     #[serde(
         rename = "targetId",
@@ -585,6 +611,21 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/memories", get(memories))
         .route("/cairn-memory/memories/{id}", get(memory))
         .route("/cairn-memory/feedback", post(feedback))
+        .route("/cairn-memory/contradict", post(contradict))
+        .route("/cairn-memory/supersede", post(supersede))
+        .route("/cairn-memory/similarity-reviews", get(similarity_reviews))
+        .route(
+            "/cairn-memory/similarity-reviews/dismiss",
+            post(dismiss_review),
+        )
+        .route(
+            "/cairn-memory/similarity-reviews/contradict",
+            post(contradict_review),
+        )
+        .route(
+            "/cairn-memory/similarity-reviews/supersede",
+            post(supersede_review),
+        )
         .route("/cairn-memory/correct", post(correct))
         .route("/cairn-memory/export", post(export))
         .route("/cairn-memory/import", post(import))
@@ -724,6 +765,24 @@ pub fn postgres_app_with_embeddings(
         .route("/cairn-memory/memories", get(postgres_memories))
         .route("/cairn-memory/memories/{id}", get(postgres_memory))
         .route("/cairn-memory/feedback", post(postgres_feedback))
+        .route("/cairn-memory/contradict", post(postgres_contradict))
+        .route("/cairn-memory/supersede", post(postgres_supersede))
+        .route(
+            "/cairn-memory/similarity-reviews",
+            get(postgres_similarity_reviews),
+        )
+        .route(
+            "/cairn-memory/similarity-reviews/dismiss",
+            post(postgres_dismiss_review),
+        )
+        .route(
+            "/cairn-memory/similarity-reviews/contradict",
+            post(postgres_contradict_review),
+        )
+        .route(
+            "/cairn-memory/similarity-reviews/supersede",
+            post(postgres_supersede_review),
+        )
         .route("/cairn-memory/correct", post(postgres_correct))
         .route("/cairn-memory/export", post(postgres_export))
         .route("/cairn-memory/import", post(postgres_import))
@@ -1432,6 +1491,104 @@ async fn postgres_feedback(
         state
             .store
             .feedback(postgres_token(&headers)?, &request.memory_id, &request.vote)
+            .await?,
+    ))
+}
+
+async fn postgres_contradict(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ContradictRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .declare_contradiction(
+                postgres_token(&headers)?,
+                &request.contradicting_id,
+                &request.contradicted_id,
+            )
+            .await?,
+    ))
+}
+
+async fn postgres_supersede(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<SupersedeRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .supersede_memory(
+                postgres_token(&headers)?,
+                &request.successor_id,
+                &request.target_id,
+            )
+            .await?,
+    ))
+}
+
+async fn postgres_similarity_reviews(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<cairn_core::SimilarityReview>>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .similarity_reviews(postgres_token(&headers)?)
+            .await?,
+    ))
+}
+
+async fn postgres_dismiss_review(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<StatusCode, PostgresApiError> {
+    state
+        .store
+        .dismiss_review(postgres_token(&headers)?, &request.review_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn postgres_contradict_review(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    let contradicted_id = request.contradicted_id.ok_or_else(|| {
+        PostgresApiError(PostgresError::Validation(
+            "contradictedId is required".to_owned(),
+        ))
+    })?;
+    Ok(Json(
+        state
+            .store
+            .contradict_review(
+                postgres_token(&headers)?,
+                &request.review_id,
+                &contradicted_id,
+            )
+            .await?,
+    ))
+}
+
+async fn postgres_supersede_review(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    let successor_id = request.successor_id.ok_or_else(|| {
+        PostgresApiError(PostgresError::Validation(
+            "successorId is required".to_owned(),
+        ))
+    })?;
+    Ok(Json(
+        state
+            .store
+            .supersede_review(postgres_token(&headers)?, &request.review_id, &successor_id)
             .await?,
     ))
 }
@@ -2505,6 +2662,98 @@ async fn feedback(
     Ok(Json(
         store
             .feedback_for_account(auth_token(&headers)?, &request.memory_id, &request.vote)
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn contradict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ContradictRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .declare_contradiction(
+                auth_token(&headers)?,
+                &request.contradicting_id,
+                &request.contradicted_id,
+            )
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn supersede(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SupersedeRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .supersede_memory(
+                auth_token(&headers)?,
+                &request.successor_id,
+                &request.target_id,
+            )
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn similarity_reviews(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<cairn_core::SimilarityReview>>, ApiError> {
+    let store = state.store.lock().await;
+    Ok(Json(
+        store
+            .similarity_reviews_for_account(auth_token(&headers)?)
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn dismiss_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut store = state.store.lock().await;
+    store
+        .dismiss_review(auth_token(&headers)?, &request.review_id)
+        .map_err(account_api_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn contradict_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let contradicted_id = request.contradicted_id.ok_or_else(|| {
+        ApiError::Store(StoreError::Validation(
+            "contradictedId is required".to_owned(),
+        ))
+    })?;
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .contradict_review(auth_token(&headers)?, &request.review_id, &contradicted_id)
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn supersede_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let successor_id = request.successor_id.ok_or_else(|| {
+        ApiError::Store(StoreError::Validation("successorId is required".to_owned()))
+    })?;
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .supersede_review(auth_token(&headers)?, &request.review_id, &successor_id)
             .map_err(account_api_error)?,
     ))
 }

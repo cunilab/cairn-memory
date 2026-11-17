@@ -92,6 +92,18 @@ export type ProjectMemory = {
 
 export type PersonalMemory = ProjectMemory;
 
+export type SimilarityReview = {
+  review_id: string;
+  left_id: string;
+  right_id: string;
+  scope: "project" | "personal" | "global";
+  project_id?: string | null;
+  cosine: number;
+  band: "possible_conflict" | "near_duplicate";
+  status: "open" | "dismissed" | "contradicted" | "superseded";
+  created_at: number;
+};
+
 export type ProjectMember = {
   person_id: string;
   email: string;

@@ -442,6 +442,72 @@ fn build_tools() -> Vec<Tool> {
             object_schema(&[("memoryId", string_schema())], &["memoryId"]),
         ),
         spec(
+            "memory_contradict",
+            "Declare that one visible memory contradicts another. The contradicted memory ranks lower and stays visible. Same scope and project. Project: author of the contradicted memory or the project owner. Personal: the author. Global: the author or an administrator.",
+            Post,
+            "/contradict",
+            object_schema(
+                &[
+                    ("contradictingId", string_schema()),
+                    ("contradictedId", string_schema()),
+                ],
+                &["contradictingId", "contradictedId"],
+            ),
+        ),
+        spec(
+            "memory_supersede",
+            "Mark an existing memory as superseding another in the same scope and project. The older memory leaves normal recall and stays in history. Requires edit rights on both.",
+            Post,
+            "/supersede",
+            object_schema(
+                &[
+                    ("successorId", string_schema()),
+                    ("targetId", string_schema()),
+                ],
+                &["successorId", "targetId"],
+            ),
+        ),
+        spec(
+            "memory_similarity_reviews",
+            "List open similarity reviews whose memories the caller can both read.",
+            Get,
+            "/similarity-reviews",
+            object_schema(&[], &[]),
+        ),
+        spec(
+            "memory_review_dismiss",
+            "Dismiss an open similarity review without changing either memory. Requires edit rights on either memory.",
+            Post,
+            "/similarity-reviews/dismiss",
+            object_schema(&[("reviewId", string_schema())], &["reviewId"]),
+        ),
+        spec(
+            "memory_review_contradict",
+            "From an open review, declare that the other memory contradicts contradictedId.",
+            Post,
+            "/similarity-reviews/contradict",
+            object_schema(
+                &[
+                    ("reviewId", string_schema()),
+                    ("contradictedId", string_schema()),
+                ],
+                &["reviewId", "contradictedId"],
+            ),
+        ),
+        spec(
+            "memory_review_supersede",
+            "From an open review, mark successorId as superseding the other memory.",
+            Post,
+            "/similarity-reviews/supersede",
+            object_schema(
+                &[
+                    ("reviewId", string_schema()),
+                    ("successorId", string_schema()),
+                ],
+                &["reviewId", "successorId"],
+            ),
+        ),
+        spec(
             "memory_feedback",
             "Mark a visible memory helpful or stale. One vote per person; repeating replaces it. Project votes change ranking for every member, global votes for every user, and personal votes are owner-only.",
             Post,

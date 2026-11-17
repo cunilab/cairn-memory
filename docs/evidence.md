@@ -422,3 +422,36 @@ socket, and `CARGO_TARGET_DIR=/tmp/cairn-e2e-20261117-target`.
 - Web files were unchanged, so web checks were not rerun.
 - One enqueue beside retained succeeded rows took 4.1 ms at 100 rows, 4.2 ms
   at 1,000, and 10.2 ms at 5,000. Those retained row identities did not change.
+
+## v0.1.4 stage 7 — contradiction handling
+
+Checked on 2026-11-17. A declared `contradicts` link shades only the contradicted
+memory by `max(0.25, 1/(1+n))` after the stage-3 and stage-5 score, for a viewer
+who can read both ends. The similarity job `similarity-scan` reviews cosine
+0.40 through 1.0, labels below 0.75 as `possible_conflict` and 0.75 and above
+as `near_duplicate`, inspects the 60 coldest non-capture memories, and inserts
+at most 25 open reviews per hourly run. Explicit supersede writes `supersedes`
+on the existing successor. Reviews are omitted unless the caller can read both
+memories. Edit rights gate declare, dismiss, and supersede.
+
+`postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker` again
+asserts exactly 3 memories. One `Decision:` capture derives the session
+summary, the handoff, and that typed note. The first PostgreSQL script run
+failed only the two semantic tests, because `CAIRN_TEST_EMBEDDING_MODEL_DIR`
+was unset. The rerun below includes them.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 217 passed, 0 failed, 48 ignored.
+- `scripts/ci_postgres_tests.sh`: 48 passed, 0 failed, including
+  `postgres_contradiction_shades_reviews_and_supersede_hides`, the exact
+  quarantine count, and both real-model semantic tests. The pinned MiniLM
+  directory was `/tmp/cairn-stage7-minilm`.
+- `scripts/smoke_hook_auth.py`: 29 passed. `scripts/smoke_hook_offline.py`: 23
+  passed. `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, and
+  `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web `typecheck`, `lint`, and `build` passed, and `scripts/smoke_web.sh` passed.
+- Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
+  server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.

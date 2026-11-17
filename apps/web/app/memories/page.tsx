@@ -10,23 +10,26 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { MemoryFeedback } from "@/components/memory-feedback";
+import { SimilarityReviews } from "@/components/similarity-reviews";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
-import type { ProjectMemory } from "@/lib/types";
+import type { ProjectMemory, SimilarityReview } from "@/lib/types";
 
 const scopeLabel = { project: "Project", personal: "Personal behaviour", global: "Global" };
 
 export default function MemoriesPage() {
   const router = useRouter();
   const [memories, setMemories] = useState<ProjectMemory[]>([]);
+  const [reviews, setReviews] = useState<SimilarityReview[]>([]);
   const [detail, setDetail] = useState<ProjectMemory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  useResetOnHide(() => { setMemories([]); setDetail(null); setError(null); });
+  const [reload, setReload] = useState(0);
+  useResetOnHide(() => { setMemories([]); setReviews([]); setDetail(null); setError(null); });
   useEffect(() => {
     let cancelled = false;
-    cairn<ProjectMemory[]>("memories")
-      .then((rows) => { if (!cancelled) setMemories(rows); })
+    Promise.all([cairn<ProjectMemory[]>("memories"), cairn<SimilarityReview[]>("similarity-reviews")])
+      .then(([rows, open]) => { if (!cancelled) { setMemories(rows); setReviews(open); } })
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) router.replace("/");
@@ -34,7 +37,7 @@ export default function MemoriesPage() {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [router]);
+  }, [router, reload]);
   const columns = useMemo<ColumnDef<ProjectMemory>[]>(() => [
     {
       id: "memory", header: "Memory", accessorFn: (m) => `${m.title} ${m.summary}`,
@@ -49,6 +52,7 @@ export default function MemoriesPage() {
   return <ConsoleShell crumbs={[{ label: "Memories" }]}>
     <PageHeader title="Memories" description="Project knowledge, your private behaviour preferences, and global lessons shared across this server." />
     {error ? <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert> : null}
+    <SimilarityReviews reviews={reviews} memories={memories} onChanged={() => setReload((value) => value + 1)} />
     <DataTable label="memories" data={memories} columns={columns} getRowId={(m) => m.memory_id} filterPlaceholder="Filter memories" empty={<p className="p-6 text-sm text-muted-foreground">{loading ? "Loading memories…" : "No memories yet."}</p>} />
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent className="overflow-y-auto">

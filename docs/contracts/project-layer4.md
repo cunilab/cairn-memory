@@ -115,6 +115,7 @@ A live successor hides its predecessor within its scope and project; deletion of
 The author and current owner may call `POST projects/verify` with
 `projectId`, `memoryId`, `commit`, `POST correct` with `targetId`, `content`, or
 `POST delete` with `id`. Other members read only. Project corrections remain project-visible and retain their author. Global corrections keep global scope and require the author or administrator. Delete is retained.
+Declaring a contradiction, dismissing a similarity review, and explicit supersede use this same mutation rule. The ranking factor, review visibility, and routes are in [the continuity contract](continuity-v1.md#declared-contradictions-v014).
 Corrections retain typed fields and author attribution, and record the actor.
 
 `POST projects/{id}/ownership` takes `{"personId":"person-…"}`. The owner's or

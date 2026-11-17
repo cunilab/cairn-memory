@@ -181,7 +181,7 @@ disabled account gets `401` on `sync/push`, `sync/pull`, and `sync/diagnose`. A
 | Identity | `auth/me` | yes | yes |
 | Capture and sync | `session/start`, `session/end`, `observe`, `sync/push`, `sync/pull`, `sync/diagnose` | start, end: yes; observe: yes on the file store, `401` on PostgreSQL (device only, it is a sync push); sync: `401` (device only) | yes |
 | Recall | `search`, `smart-search`, `context`, `recall`, `resume`, `unresolved`, `why-changed`, `diagnose` | yes | yes |
-| Memory | `remember`, `correct`, `forget`, `delete`, `export`, `import` | yes | yes |
+| Memory | `remember`, `correct`, `forget`, `delete`, `contradict`, `supersede`, `similarity-reviews`, `export`, `import` | yes | yes |
 | Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `projects/verify`, `projects/{id}/confirm` (verify an existing project memory), branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `maintenance`, `memories` | yes | yes |
 | Ownership transfer | `projects/{id}/ownership` | owner or admin, to an existing member | `403` |
 

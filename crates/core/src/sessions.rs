@@ -547,6 +547,7 @@ pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
         .last_accessed_at
         .clone_from(&earlier.last_accessed_at);
     derived.feedback.clone_from(&earlier.feedback);
+    derived.contradicts.clone_from(&earlier.contradicts);
     derived.helpful_count = earlier.helpful_count;
     derived.stale_count = earlier.stale_count;
 }
@@ -610,6 +611,7 @@ pub fn derive_session_memory(
         next_steps: digest.next_steps,
         unresolved_work: digest.unresolved_work,
         supersedes: None,
+        contradicts: Vec::new(),
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,

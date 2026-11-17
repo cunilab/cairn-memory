@@ -67,6 +67,8 @@ pub(crate) struct StoreState {
     pub(crate) jobs: Vec<crate::jobs::BackgroundJob>,
     #[serde(default)]
     pub(crate) job_quarantine: Vec<crate::jobs::QuarantinedJob>,
+    #[serde(default)]
+    pub(crate) similarity_reviews: Vec<crate::SimilarityReview>,
 }
 
 impl Default for StoreState {
@@ -96,6 +98,7 @@ impl Default for StoreState {
             audit_events: Vec::new(),
             jobs: Vec::new(),
             job_quarantine: Vec::new(),
+            similarity_reviews: Vec::new(),
         }
     }
 }

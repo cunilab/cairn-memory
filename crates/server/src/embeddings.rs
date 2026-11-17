@@ -124,6 +124,19 @@ async fn run_file_tick(state: &AppState, model: Option<&LocalEmbeddings>) {
     let now = now_seconds();
     let embed_work = {
         let mut store = state.store.lock().await;
+        if let Err(error) = store.ensure_similarity_job(now) {
+            eprintln!("file similarity enqueue failed: {error}");
+        }
+        match store.poll_jobs(JobKind::Similarity, 1, now) {
+            Ok(claims) => {
+                for claim in claims {
+                    if let Err(error) = store.finish_similarity_scan(&claim, now) {
+                        eprintln!("file similarity scan failed: {error}");
+                    }
+                }
+            }
+            Err(error) => eprintln!("file similarity poll failed: {error}"),
+        }
         let distill = match store.poll_jobs(JobKind::Distill, EMBED_BATCH, now) {
             Ok(claims) => claims,
             Err(error) => {
@@ -219,6 +232,19 @@ pub(crate) fn spawn_file_jobs(state: &AppState) {
 
 async fn run_postgres_tick(state: &PostgresAppState, model: Option<&LocalEmbeddings>) {
     let now = now_seconds();
+    if let Err(error) = state.store.ensure_similarity_job(now).await {
+        eprintln!("PostgreSQL similarity enqueue failed: {error}");
+    }
+    match state.store.poll_jobs(JobKind::Similarity, 1, now).await {
+        Ok(claims) => {
+            for claim in claims {
+                if let Err(error) = state.store.finish_similarity_scan(&claim, now).await {
+                    eprintln!("PostgreSQL similarity scan failed: {error}");
+                }
+            }
+        }
+        Err(error) => eprintln!("PostgreSQL similarity poll failed: {error}"),
+    }
     let distill = match state
         .store
         .poll_jobs(JobKind::Distill, EMBED_BATCH, now)

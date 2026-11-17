@@ -1,7 +1,8 @@
 use super::*;
 use cairn_core::{
-    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_VERSION, MemoryEmbedding, hybrid_rank,
-    now_seconds, ranking_multiplier, validate_vector,
+    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_VERSION, MemoryEmbedding,
+    contradiction_counts, contradiction_factor, hybrid_rank, now_seconds, ranking_multiplier,
+    validate_vector,
 };
 
 const SOURCE_REVISION: &str = "encode(sha256(convert_to(jsonb_build_array(m.content,m.record,m.context)::text,'UTF8')),'hex')";
@@ -151,6 +152,7 @@ impl PostgresStore {
             return Err(PostgresError::Validation("query must not be empty".into()));
         }
         let mut memories = self.all_memories_for_person(&account.person_id).await?;
+        let counts = contradiction_counts(&memories);
         memories.retain(|m| memory_matches_filter(m, filter));
         let ids = memories
             .iter()
@@ -192,9 +194,10 @@ impl PostgresStore {
             .into_iter()
             .map(|(id, score)| {
                 let memory = by_id[id.as_str()];
+                let shaded = contradiction_factor(counts.get(id.as_str()).copied().unwrap_or(0));
                 recall_result(
                     memory,
-                    score * ranking_multiplier(memory, now),
+                    score * ranking_multiplier(memory, now) * shaded,
                     &memories,
                     &HashSet::new(),
                     filter,

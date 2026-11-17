@@ -80,6 +80,12 @@ configuration is the only credential, and the server scopes every call to its ac
 | `memory_export` | `POST /export` | Return a versioned portable memory bundle |
 | `memory_import` | `POST /import` | Merge a versioned bundle idempotently |
 | `memory_correct` | `POST /correct` | Supersede a memory or observation with a corrected durable memory |
+| `memory_contradict` | `POST /contradict` | Declare that one visible memory contradicts another |
+| `memory_supersede` | `POST /supersede` | Set `supersedes` on an existing memory |
+| `memory_similarity_reviews` | `GET /similarity-reviews` | List open reviews the caller can read on both sides |
+| `memory_review_dismiss` | `POST /similarity-reviews/dismiss` | Dismiss one open review |
+| `memory_review_contradict` | `POST /similarity-reviews/contradict` | Declare a contradiction from a review |
+| `memory_review_supersede` | `POST /similarity-reviews/supersede` | Supersede one side of a review |
 
 Project tools run the same routes as the web console, with the same
 account scope. Their behavior is owned by the contract named here:
@@ -122,7 +128,7 @@ cairn memories
 cairn memory memory-id
 ```
 
-Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
+Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `contradict`, `supersede`, `reviews`, `review-dismiss`, `review-contradict`, `review-supersede`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
 
 All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v014); no external model API is used.
 

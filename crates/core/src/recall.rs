@@ -1,3 +1,4 @@
+use crate::contradictions::{contradiction_counts, contradiction_factor};
 use crate::hybrid::tokenize;
 use crate::lifecycle::{Lifecycle, MemoryKind, MemoryScope, is_expired};
 use crate::memories::Memory;
@@ -147,12 +148,13 @@ impl MemoryStore {
                     .collect()
             }
         };
-        memories.retain(|m| memory_matches_filter(m, filter));
         for m in &mut memories {
             if m.published_by.is_some() {
                 m.promoted_from = None;
             }
         }
+        let counts = contradiction_counts(&memories);
+        memories.retain(|m| memory_matches_filter(m, filter));
         let semantic = self.semantic_scores(&memories, vector)?;
         let ranked = crate::hybrid_rank(&memories, query, filter, None, semantic)?;
         let by_id = memories
@@ -164,9 +166,10 @@ impl MemoryStore {
             .into_iter()
             .map(|(id, score)| {
                 let memory = by_id[id.as_str()];
+                let shaded = contradiction_factor(counts.get(id.as_str()).copied().unwrap_or(0));
                 recall_result(
                     memory,
-                    score * ranking_multiplier(memory, now),
+                    score * ranking_multiplier(memory, now) * shaded,
                     &memories,
                     &self.state.forgotten_ids,
                     filter,
