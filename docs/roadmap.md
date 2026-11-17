@@ -8,6 +8,8 @@ status: draft
 
 This roadmap turns AgentMemory's capture and retrieval foundation into Cairn Memory: an AI-managed, person-owned memory layer for people and coding agents. Graphify is a reference for deterministic, explainable code relationships. Collaboration, federation, and advanced graph behavior are later layers, not prerequisites for the first useful product.
 
+The current memory model is the three scopes in [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md), which supersedes the promotion and per-repository personal-memory parts of [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md). Project memory is saved directly and is visible to project members. Personal memory stays private to that person. Global memory is visible on the server. Explicit promotion, invites, per-memory sharing, and team spaces are not the current model. The historical layer text below records what shipped before that decision.
+
 The project should ship in small, reviewable layers. **Every layer must produce a usable Cairn on its own.** A feature is not complete because it exists in code; it needs a clear boundary, a recovery story, and evidence that it behaves safely.
 
 **Current focus:** Layer 6 — Advanced Intelligence and Operations
@@ -93,21 +95,12 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** A repository has durable, branch-aware project knowledge created from verified personal work.
 
-> **Layer 4 status:** The first project-promotion vertical slice and project
-> entity inspection slice are complete:
-> person-scoped project registration, explicit branch-to-project promotion,
-> source evidence/provenance, repository matching, secret blocking, idempotent
-> replay, project-scoped retrieval, branch/worktree registration, and project
-> memory inspection are implemented in file-backed and PostgreSQL modes.
-> Merge confirmation is implemented. Maintenance listing and linked correction
-> history are implemented. The `cairn` CLI and `cairn mcp` (device token) can register a project,
-> promote a memory, list project memories, and read freshness. Retiring project
-> entities is not part of this layer.
+> **Layer 4 status:** Explicit promotion is superseded by [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md). v0.1.4 saves project memory directly; there is no promote step. The earlier slice shipped person-scoped project registration, source evidence, repository matching, secret blocking, idempotent replay, project-scoped retrieval, branch and worktree registration, inspection, merge confirmation, maintenance listing, and linked correction history in both stores. Retiring project entities was not part of that slice.
 
 - [x] Add project, repository, branch, worktree, and decision entities, with file, symbol, handoff, and runbook evidence carried in memory context.
 - [x] Keep branch and worktree hypotheses scoped until merge, independent confirmation, or explicit promotion.
 - [x] Add source-backed decision cards and evidence trails for files, commits, tests, and commands.
-- [x] Add explicit promotion from personal or branch memory into project memory.
+- [x] Add explicit promotion from personal or branch memory into project memory. Superseded by [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md): project memory is saved directly and the promote step is removed.
 - [x] Mark project memories stale when later retrieval uses a different commit, and refresh them through explicit verification.
 - [x] Add project search and context packs without requiring a team space.
 - [x] Keep the viewer focused on inspection, exceptions, and correction rather than manual editing.
@@ -118,12 +111,12 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** Authorized people and agents can share selected project memory without exposing private personal memory.
 
-> **Layer 5 status:** An owner and one member (who joins through the committed `.cairn/project.json`, with no invite) can explicitly share, read, and revoke one promoted project memory. The default space policy is manual, so promotion creates no share. The owner can list explainable share candidates, dismiss one without sharing it, or accept it through the existing share method. The only automatic policy is `auto_nonsensitive_project_memory`: promoting a project memory that is not secret and not sensitive shares it with current members and writes the share audit. Secrets, sensitive memories, and private observations stay unshared. Turning the policy off does not revoke existing shares. Owner and member can read a conflict list that keeps both contradictory project memories. Shared reads include the share reason and source memory id when those values exist. The project inspection page shows current decisions, handoffs, stale memories, conflicts, and revocations. The team space is project-scoped. The only roles are owner and member. The owner creates the team, names it, and adds or removes an existing project member. A member can list the team and its members. Removing a member removes that project membership and active shares. Delete retains the stored record: it hides the memory the same way forget does, keeps it in storage and export, and writes an audit event that the delete was retained. Offline purge, encryption, federation, and CRDTs remain unimplemented.
+> **Layer 5 status:** Invites, per-memory sharing, share policies, and team spaces are superseded by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md). A member joins through the committed `.cairn/project.json`. Project memory is visible to project members. Personal memory stays private. Global memory is visible on the server. The only roles are owner and member. Delete retains the stored record. Offline purge, encryption, federation, and CRDTs remain unimplemented. The historical share-and-team slice is the checklist below.
 
-- [x] Add project and team spaces, memberships, roles, and permission checks.
-- [x] Add explicit promote, share, revoke, forget, and delete operations with audit entries.
-- [x] Add explainable share candidates and reviewable exceptions.
-- [x] Allow automatic sharing only when an explicit space policy matches and privacy checks pass.
+- [x] Add project and team spaces, memberships, roles, and permission checks. Team spaces are superseded by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md); membership and the owner or member role remain.
+- [x] Add explicit promote, share, revoke, forget, and delete operations with audit entries. Promote and per-memory share are superseded by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md) and [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md). Forget and retained delete remain.
+- [x] Add explainable share candidates and reviewable exceptions. Superseded by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md): there is no share-candidate review.
+- [x] Allow automatic sharing only when an explicit space policy matches and privacy checks pass. Superseded by [ADR 0013](adr/0013-shared-project-decisions-and-personal-memory-scopes.md): there is no share policy.
 - [x] Preserve source actors and trails when memories are summarized or merged.
 - [x] Represent contradictions and competing versions instead of silently choosing a winner.
 - [x] Add collaboration views for handoffs, decisions, stale facts, conflicts, and revocations.
@@ -134,27 +127,29 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** Cairn improves retrieval and memory maintenance at scale without weakening ownership or trust boundaries.
 
-- [ ] Add semantic retrieval with a versioned embedding pipeline and exact-search evaluation.
-- [x] Add a permission-filtered memory link graph with one-hop recall and one canvas (v0.1.4). No code graph.
+> **Layer 6 status:** Semantic retrieval with the versioned local embedding pipeline is implemented in v0.1.4. Exact-search evaluation is still open. The permission-filtered memory link graph and one canvas are implemented. The code graph is open. Durable background jobs are implemented. Declared contradiction handling is implemented. Local or server-side LLM options are open. The operations viewer is partial: the Jobs page is implemented, and the wider health, permissions, audit, and recovery surfaces are open. Multimodal memory is open.
+
+- [x] Add semantic retrieval with a versioned local embedding pipeline (v0.1.4). Exact-search evaluation is still open.
+- [x] Add a permission-filtered memory link graph with one-hop recall and one canvas (v0.1.4). The code graph is open.
 - [ ] Add bounded graph-assisted retrieval across code and work graphs.
-- [x] Add durable background jobs with leases, retries, backoff, quarantine, and dead-letter inspection.
-- [ ] Add automatic consolidation, staleness detection, contradiction detection, and promotion suggestions.
+- [x] Add durable background jobs with leases, retries, backoff, quarantine, and dead-letter inspection (v0.1.4).
+- [x] Add declared contradiction handling (v0.1.4). Automatic consolidation and staleness decay beyond the retention score are still open. Promotion suggestions are superseded by [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
 - [ ] Add local or server-side model options while keeping capture and basic recall available during provider failure.
-- [ ] Expand the viewer into operational health, permissions, audit, and recovery surfaces.
+- [x] Show durable jobs on the Jobs page (v0.1.4). Wider operational health, permissions, audit, and recovery surfaces are still open.
 - [ ] Add multimodal memory only with explicit privacy, retention, and storage policies.
 
 **Gate:** Automatic processing improves recall and handoffs while provider failures or ambiguous classifications cannot broaden access.
 
 ### v1.0 — Trusted personal and project memory
 
-> **Outcome:** Cairn is a stable, inspectable, portable memory source that works across a person's sessions, agents, projects, and trusted devices.
+> **Outcome:** Cairn is a stable, inspectable, portable memory source across a person's sessions, agents, projects, and trusted devices, under the three scopes in [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
 
-- [ ] Personal memory is automatic by default and remains person-owned.
-- [ ] Session and branch context is scoped, evidence-backed, and retrievable.
-- [ ] Personal memory synchronizes across trusted devices with recovery and revocation.
-- [ ] Project memory supports explicit promotion, provenance, freshness, correction, and forget.
+- [x] Personal memory is automatic by default and remains person-owned.
+- [x] Session and branch context is scoped, evidence-backed, and retrievable.
+- [x] Personal memory synchronizes across trusted devices with recovery and revocation.
+- [x] Project memory is the project scope: members can read it, the author or owner can edit it, and explicit promotion is superseded by [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md). Personal memory stays private. Global memory is visible on the server. Provenance, correction, and forget remain.
 - [ ] REST, MCP, hook, sync, and export contracts are versioned and governed.
-- [ ] The viewer explains what Cairn remembers, why it appeared, and how to correct or remove it.
+- [x] The viewer explains what Cairn remembers, why it appeared, and how to correct or remove it. Operational health beyond the Jobs page is still open.
 - [ ] Security, operations, user guide, launch, and evidence documents are accepted.
 
 ## Later
@@ -169,6 +164,6 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 - A roadmap item is an outcome or a gate, not a task dump.
 - Automatic processing must not bypass identity, permissions, or privacy policy.
-- Personal memory autopilot precedes cross-device sync; cross-device sync precedes project promotion; project promotion precedes cross-person sharing; collaboration precedes federation.
+- Personal memory autopilot precedes cross-device sync; cross-device sync precedes project memory. The older order, in which promotion preceded cross-person sharing, is superseded by [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md). Collaboration of the current member model precedes federation.
 - A phase may move only when evidence or a reviewed decision changes the priority.
 - A feature that changes a public contract, storage model, trust boundary, or synchronization behavior needs an ADR before it enters an active phase.
