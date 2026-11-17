@@ -5,7 +5,8 @@ use crate::store::MemoryStore;
 use crate::types::{StoreError, now_seconds};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 pub const CONTRADICTION_FLOOR: f32 = 0.25;
 pub const SIMILARITY_BAND_MIN: f32 = 0.40;
@@ -446,28 +447,62 @@ impl MemoryStore {
     }
 
     fn stage_similarity_reviews(&mut self, now: u64) -> usize {
-        let hidden = self.live_superseded_targets();
-        let memories = self
-            .state
-            .memories
-            .iter()
-            .filter(|memory| self.memory_is_recalled(memory, &hidden))
-            .cloned()
-            .collect::<Vec<_>>();
-        let vectors = self
-            .state
-            .embeddings
-            .iter()
-            .filter(|embedding| memories.iter().any(|memory| embedding.matches(memory)))
-            .map(|embedding| (embedding.memory_id.clone(), embedding.vector.clone()))
-            .collect::<HashMap<_, _>>();
-        let existing = self
-            .state
-            .similarity_reviews
-            .iter()
-            .map(|review| (review.left_id.clone(), review.right_id.clone()))
-            .collect::<HashSet<_>>();
-        let found = similarity_candidates(&memories, &vectors, &existing, now);
+        let found = {
+            let hidden = self.live_superseded_targets();
+            let embeddings = self
+                .state
+                .embeddings
+                .iter()
+                .map(|embedding| (embedding.memory_id.as_str(), embedding))
+                .collect::<HashMap<_, _>>();
+            let mut coldest = BinaryHeap::new();
+            for memory in &self.state.memories {
+                if memory.kind == MemoryKind::Capture || !self.memory_is_recalled(memory, &hidden) {
+                    continue;
+                }
+                let Some(embedding) = embeddings.get(memory.memory_id.as_str()) else {
+                    continue;
+                };
+                if !embedding.matches(memory) {
+                    continue;
+                }
+                coldest.push(ColdMemory(memory));
+                if coldest.len() > SIMILARITY_CANDIDATES {
+                    coldest.pop();
+                }
+            }
+            let mut ranked = coldest
+                .into_iter()
+                .map(|memory| memory.0)
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| cold_order(left, right));
+            let ids = ranked
+                .iter()
+                .map(|memory| memory.memory_id.as_str())
+                .collect::<HashSet<_>>();
+            let memories = ranked
+                .iter()
+                .map(|memory| (*memory).clone())
+                .collect::<Vec<_>>();
+            let vectors = ranked
+                .iter()
+                .filter_map(|memory| {
+                    embeddings
+                        .get(memory.memory_id.as_str())
+                        .map(|embedding| (memory.memory_id.clone(), embedding.vector.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            let existing = self
+                .state
+                .similarity_reviews
+                .iter()
+                .filter(|review| {
+                    ids.contains(review.left_id.as_str()) && ids.contains(review.right_id.as_str())
+                })
+                .map(|review| (review.left_id.clone(), review.right_id.clone()))
+                .collect::<HashSet<_>>();
+            similarity_candidates(&memories, &vectors, &existing, now)
+        };
         let added = found.len();
         self.state.similarity_reviews.extend(found);
         added
@@ -496,6 +531,36 @@ impl MemoryStore {
         });
         self.persist()?;
         Ok(added)
+    }
+}
+
+/// Warmer compares greater, so a bounded heap drops the warmest memory past the cap.
+struct ColdMemory<'a>(&'a Memory);
+
+fn cold_order(left: &Memory, right: &Memory) -> Ordering {
+    left.access_count
+        .cmp(&right.access_count)
+        .then(left.created_at.cmp(&right.created_at))
+        .then(left.memory_id.cmp(&right.memory_id))
+}
+
+impl Eq for ColdMemory<'_> {}
+
+impl PartialEq for ColdMemory<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        cold_order(self.0, other.0) == Ordering::Equal
+    }
+}
+
+impl PartialOrd for ColdMemory<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ColdMemory<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cold_order(self.0, other.0)
     }
 }
 

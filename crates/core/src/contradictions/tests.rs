@@ -42,6 +42,116 @@ fn embed(store: &mut MemoryStore, memory: &Memory, vector: Vec<f32>) {
         .unwrap();
 }
 
+fn unit_vector() -> Vec<f32> {
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    vector
+}
+
+#[test]
+fn similarity_scan_keeps_sixty_current_memories_and_skips_stale_and_warm_rows() {
+    let path = temp_store_path("similarity-bound");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .unwrap();
+    let vector = unit_vector();
+    let mut stale = Vec::new();
+    let mut current = Vec::new();
+    for index in 0..60 {
+        let memory = save(
+            &mut store,
+            &owner.token,
+            "personal",
+            &format!("bare-{index}"),
+        );
+        store
+            .state
+            .memories
+            .iter_mut()
+            .find(|item| item.memory_id == memory.memory_id)
+            .unwrap()
+            .access_count = 0;
+        let memory = save(
+            &mut store,
+            &owner.token,
+            "personal",
+            &format!("stale-{index}"),
+        );
+        embed(&mut store, &memory, vector.clone());
+        let stored = store
+            .state
+            .memories
+            .iter_mut()
+            .find(|item| item.memory_id == memory.memory_id)
+            .unwrap();
+        stored.fields.title = format!("rewritten-{index}");
+        stored.access_count = 1;
+        stale.push(stored.memory_id.clone());
+        let memory = save(
+            &mut store,
+            &owner.token,
+            "personal",
+            &format!("cold-{index}"),
+        );
+        embed(&mut store, &memory, vector.clone());
+        store
+            .state
+            .memories
+            .iter_mut()
+            .find(|item| item.memory_id == memory.memory_id)
+            .unwrap()
+            .access_count = 2;
+        current.push(memory.memory_id);
+    }
+    let warm = save(&mut store, &owner.token, "personal", "warm-extra");
+    embed(&mut store, &warm, vector.clone());
+    store
+        .state
+        .memories
+        .iter_mut()
+        .find(|item| item.memory_id == warm.memory_id)
+        .unwrap()
+        .access_count = 3;
+    let capture = save(&mut store, &owner.token, "personal", "capture-row");
+    embed(&mut store, &capture, vector);
+    let stored = store
+        .state
+        .memories
+        .iter_mut()
+        .find(|item| item.memory_id == capture.memory_id)
+        .unwrap();
+    stored.kind = MemoryKind::Capture;
+    stored.access_count = 0;
+    let now = 1_000_u64;
+    store.ensure_similarity_job(now).unwrap();
+    let claim = store
+        .poll_jobs(JobKind::Similarity, 1, now)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, now).unwrap(),
+        SIMILARITY_REVIEW_CAP
+    );
+    let reviews = store.similarity_reviews_for_account(&owner.token).unwrap();
+    assert_eq!(reviews.len(), SIMILARITY_REVIEW_CAP);
+    let current_ids = current.iter().map(String::as_str).collect::<HashSet<_>>();
+    assert!(reviews.iter().all(|review| {
+        current_ids.contains(review.left_id.as_str())
+            && current_ids.contains(review.right_id.as_str())
+    }));
+    assert!(reviews.iter().all(|review| {
+        review.left_id != warm.memory_id
+            && review.right_id != warm.memory_id
+            && review.left_id != capture.memory_id
+            && review.right_id != capture.memory_id
+            && !stale
+                .iter()
+                .any(|id| id == &review.left_id || id == &review.right_id)
+    }));
+    fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn contradiction_factor_floors_and_band_edges_are_exact() {
     assert_eq!(contradiction_factor(0), 1.0);

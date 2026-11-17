@@ -5951,3 +5951,129 @@ async fn postgres_links_permissions_visibility_cap_and_one_hop() {
             .all(|hit| hit.memory_id != "imported-cross-scope")
     );
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_similarity_scan_reads_the_coldest_current_page() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let vector = {
+        let mut values = vec![0.0; 384];
+        values[0] = 1.0;
+        values
+    };
+    let mut stale = Vec::new();
+    let mut current = Vec::new();
+    for index in 0..60 {
+        let bare = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("bare-{index}"), None),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cairn_memories SET access_count = 0 WHERE memory_id = $1")
+            .bind(&bare.memory_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let memory = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("stale-{index}"), None),
+            )
+            .await
+            .unwrap();
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&memory, vector.clone()).unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE cairn_memories SET access_count = 1, record = jsonb_set(record, '{title}', to_jsonb($2::text)) WHERE memory_id = $1",
+        )
+        .bind(&memory.memory_id)
+        .bind(format!("rewritten-{index}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        stale.push(memory.memory_id);
+        let memory = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("cold-{index}"), None),
+            )
+            .await
+            .unwrap();
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&memory, vector.clone()).unwrap())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cairn_memories SET access_count = 2 WHERE memory_id = $1")
+            .bind(&memory.memory_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        current.push(memory.memory_id);
+    }
+    let warm = store
+        .save(&owner.token, stage7_fact("personal", "warm-extra", None))
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&warm, vector.clone()).unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_memories SET access_count = 3 WHERE memory_id = $1")
+        .bind(&warm.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let capture = store
+        .save(&owner.token, stage7_fact("personal", "capture-row", None))
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&capture, vector).unwrap())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE cairn_memories SET kind = 'capture', access_count = 0 WHERE memory_id = $1",
+    )
+    .bind(&capture.memory_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = 1_000_u64;
+    store.ensure_similarity_job(now).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, now).await.unwrap(),
+        cairn_core::SIMILARITY_REVIEW_CAP
+    );
+    let reviews = store.similarity_reviews(&owner.token).await.unwrap();
+    assert_eq!(reviews.len(), cairn_core::SIMILARITY_REVIEW_CAP);
+    let current_ids = current
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(reviews.iter().all(|review| {
+        current_ids.contains(review.left_id.as_str())
+            && current_ids.contains(review.right_id.as_str())
+    }));
+    assert!(reviews.iter().all(|review| {
+        review.left_id != warm.memory_id
+            && review.right_id != warm.memory_id
+            && review.left_id != capture.memory_id
+            && review.right_id != capture.memory_id
+            && !stale
+                .iter()
+                .any(|id| id == &review.left_id || id == &review.right_id)
+    }));
+}

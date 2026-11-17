@@ -1,10 +1,10 @@
 use super::*;
 use cairn_core::{
-    EMBEDDING_MODEL, EMBEDDING_VERSION, GraphFilter, JobEnd, JobKind, LinkRelation, Memory,
-    MemoryGraph, MemoryLink, MemoryScope, ReviewStatus, SIMILARITY_CANDIDATES,
-    SIMILARITY_INTERVAL_SECONDS, SIMILARITY_JOB_KEY, SimilarityBand, SimilarityReview,
-    build_memory_graph, embedding_fingerprint, graph_node_cap, ordered_pair, same_scope,
-    similarity_candidates, supersede_allowed,
+    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_VERSION, GraphFilter, JobEnd, JobKind,
+    LinkRelation, Memory, MemoryGraph, MemoryLink, MemoryScope, ReviewStatus,
+    SIMILARITY_CANDIDATES, SIMILARITY_INTERVAL_SECONDS, SIMILARITY_JOB_KEY, SimilarityBand,
+    SimilarityReview, build_memory_graph, embedding_fingerprint, graph_node_cap, ordered_pair,
+    same_scope, similarity_candidates, supersede_allowed,
 };
 use sqlx::{Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
@@ -434,63 +434,92 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn similarity_found(&self, now: u64) -> Result<Vec<SimilarityReview>, PostgresError> {
+    async fn similarity_page(
+        &self,
+        cursor: Option<(i64, &str, &str)>,
+    ) -> Result<Vec<sqlx::postgres::PgRow>, PostgresError> {
         let sql = format!(
-            "{}, e.model_id AS embed_model, e.model_version AS embed_version, e.fingerprint AS embed_fingerprint
-             {} LEFT JOIN cairn_memory_embeddings e ON e.memory_id = m.memory_id
-             WHERE m.kind <> 'capture' AND {} AND {}",
+            "{}, e.fingerprint AS embed_fingerprint, e.embedding::text AS embed_vector
+             FROM cairn_memories m
+             JOIN cairn_memory_embeddings e ON e.memory_id = m.memory_id
+             WHERE m.kind <> 'capture' AND {} AND {}
+               AND e.model_id = $1 AND e.model_version = $2
+               AND e.dimensions = {EMBEDDING_DIMENSIONS} AND e.normalized
+               AND ($3::bigint IS NULL OR (m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text, m.memory_id)
+                    > ($3::bigint, $4::text, $5::text))
+             ORDER BY m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text, m.memory_id
+             LIMIT {SIMILARITY_CANDIDATES}",
             memory_select_sql().trim_end_matches("FROM cairn_memories m"),
-            "FROM cairn_memories m",
             live_memory_sql(),
             not_superseded_by_live_memory_sql(false)
         );
-        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(&sql)
+            .bind(EMBEDDING_MODEL)
+            .bind(EMBEDDING_VERSION)
+            .bind(cursor.map(|item| item.0))
+            .bind(cursor.map(|item| item.1).unwrap_or(""))
+            .bind(cursor.map(|item| item.2).unwrap_or(""))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn similarity_found(&self, now: u64) -> Result<Vec<SimilarityReview>, PostgresError> {
         let mut ranked = Vec::new();
-        for row in &rows {
-            let memory = memory_from_row(row)?;
-            let model: Option<String> = row.try_get("embed_model")?;
-            let version: Option<String> = row.try_get("embed_version")?;
-            let fingerprint: Option<String> = row.try_get("embed_fingerprint")?;
-            if model.as_deref() == Some(EMBEDDING_MODEL)
-                && version.as_deref() == Some(EMBEDDING_VERSION)
-                && fingerprint.as_deref() == Some(embedding_fingerprint(&memory).as_str())
-            {
+        let mut vectors = HashMap::new();
+        let mut cursor: Option<(i64, String, String)> = None;
+        loop {
+            let rows = self
+                .similarity_page(
+                    cursor
+                        .as_ref()
+                        .map(|(access, created, id)| (*access, created.as_str(), id.as_str())),
+                )
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            let page_len = rows.len();
+            let last = memory_from_row(rows.last().expect("page is not empty"))?;
+            for row in &rows {
+                if ranked.len() == SIMILARITY_CANDIDATES {
+                    break;
+                }
+                let memory = memory_from_row(row)?;
+                let fingerprint: String = row.try_get("embed_fingerprint")?;
+                if fingerprint != embedding_fingerprint(&memory) {
+                    continue;
+                }
+                let text: String = row.try_get("embed_vector")?;
+                if let Some(vector) = parse_vector(&text) {
+                    vectors.insert(memory.memory_id.clone(), vector);
+                }
                 ranked.push(memory);
             }
+            if ranked.len() == SIMILARITY_CANDIDATES || page_len < SIMILARITY_CANDIDATES {
+                break;
+            }
+            cursor = Some((
+                i64::try_from(last.access_count).unwrap_or(i64::MAX),
+                last.created_at,
+                last.memory_id,
+            ));
         }
-        ranked.sort_by(|left, right| {
-            left.access_count
-                .cmp(&right.access_count)
-                .then(left.created_at.cmp(&right.created_at))
-                .then(left.memory_id.cmp(&right.memory_id))
-        });
-        ranked.truncate(SIMILARITY_CANDIDATES);
         let ids = ranked
             .iter()
             .map(|memory| memory.memory_id.clone())
             .collect::<Vec<_>>();
-        let vectors = if ids.is_empty() {
-            HashMap::new()
+        let stored = if ids.is_empty() {
+            Vec::new()
         } else {
-            let rows = sqlx::query(
-                "SELECT memory_id, embedding::text AS embedding FROM cairn_memory_embeddings WHERE memory_id = ANY($1)",
+            sqlx::query(
+                "SELECT left_id, right_id FROM cairn_similarity_reviews
+                 WHERE left_id = ANY($1) AND right_id = ANY($1)",
             )
             .bind(&ids)
             .fetch_all(&self.pool)
-            .await?;
-            let mut vectors = HashMap::new();
-            for row in &rows {
-                let id: String = row.try_get("memory_id")?;
-                let text: String = row.try_get("embedding")?;
-                if let Some(vector) = parse_vector(&text) {
-                    vectors.insert(id, vector);
-                }
-            }
-            vectors
+            .await?
         };
-        let stored = sqlx::query("SELECT left_id, right_id FROM cairn_similarity_reviews")
-            .fetch_all(&self.pool)
-            .await?;
         let existing = stored
             .iter()
             .map(|row| {
