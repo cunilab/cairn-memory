@@ -470,8 +470,8 @@ fn summary_is_stale(
             .any(|event_id| forgotten_ids.contains(event_id))
 }
 
-/// A re-derived summary keeps what the earlier one accumulated: verification, lifecycle (the
-/// sensitivity can only rise) and creation time.
+/// A re-derived summary keeps verification, lifecycle (sensitivity can only rise),
+/// creation time, reinforcement and feedback.
 pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
     derived.lifecycle = Lifecycle {
         sensitivity: stricter_sensitivity(
@@ -482,6 +482,13 @@ pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
     };
     derived.verified_commit.clone_from(&earlier.verified_commit);
     derived.created_at.clone_from(&earlier.created_at);
+    derived.access_count = earlier.access_count;
+    derived
+        .last_accessed_at
+        .clone_from(&earlier.last_accessed_at);
+    derived.feedback.clone_from(&earlier.feedback);
+    derived.helpful_count = earlier.helpful_count;
+    derived.stale_count = earlier.stale_count;
 }
 
 pub fn session_memory_id(person_id: Option<&str>, session_id: &str) -> String {

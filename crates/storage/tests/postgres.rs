@@ -3607,6 +3607,19 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
         .execute(&pool)
         .await
         .unwrap();
+    let file_path = std::env::temp_dir().join(format!(
+        "cairn-retention-parity-{}.json",
+        cairn_core::random_token("test")
+    ));
+    let mut file = cairn_core::MemoryStore::open(&file_path).unwrap();
+    let file_owner = file
+        .bootstrap_account("retain@example.test", "correct horse battery staple")
+        .unwrap();
+    file.import_for_account(
+        &file_owner.token,
+        store.export_bundle(&owner.token).await.unwrap(),
+    )
+    .unwrap();
     let before = store.memories(&owner.token).await.unwrap().len();
     let hits = store
         .search(&owner.token, "decaytoken", 10, &RecallFilter::default())
@@ -3614,6 +3627,24 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
         .unwrap();
     assert_eq!(store.memories(&owner.token).await.unwrap().len(), before);
     assert_eq!(hits.len(), 2);
+    let file_hits = file
+        .search_for_account(
+            &file_owner.token,
+            "decaytoken",
+            10,
+            &RecallFilter::default(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), file_hits.len());
+    for (pg, local) in hits.iter().zip(&file_hits) {
+        assert_eq!(pg.memory_id, local.memory_id);
+        assert!(
+            (pg.score - local.score).abs() < 1e-5,
+            "{} / {}",
+            pg.score,
+            local.score
+        );
+    }
     let fresh_hit = hits
         .iter()
         .find(|hit| hit.memory_id == fresh.memory_id)
@@ -3627,7 +3658,24 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
         .search(&owner.token, "decaytoken", 1, &RecallFilter::default())
         .await
         .unwrap();
+    let file_limited = file
+        .search_for_account(&file_owner.token, "decaytoken", 1, &RecallFilter::default())
+        .unwrap();
+    assert_eq!(limited[0].memory_id, file_limited[0].memory_id);
     let counts = store.memories(&owner.token).await.unwrap();
+    for pg in &counts {
+        let local = file
+            .memories_for_account(&file_owner.token)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == pg.memory_id)
+            .unwrap();
+        assert_eq!(pg.access_count, local.access_count);
+        assert_eq!(
+            pg.last_accessed_at.is_some(),
+            local.last_accessed_at.is_some()
+        );
+    }
     let top = counts
         .iter()
         .find(|memory| memory.memory_id == limited[0].memory_id)
@@ -3696,6 +3744,10 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
             .is_err()
     );
     join_project(&store, &other, &project.project_id).await;
+    let before_vote = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
     let voted = store
         .feedback(&other.token, &shared.memory_id, "helpful")
         .await
@@ -3706,6 +3758,40 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
         .await
         .unwrap();
     assert_eq!(owner_view.len(), 1);
+    assert!(owner_view[0].score > before_vote[0].score);
+    let duplicate = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            duplicate.helpful_count,
+            duplicate.stale_count,
+            duplicate.feedback.len()
+        ),
+        (1, 0, 1)
+    );
+    let stale = store
+        .feedback(&other.token, &shared.memory_id, "stale")
+        .await
+        .unwrap();
+    assert_eq!(
+        (stale.helpful_count, stale.stale_count, stale.feedback.len()),
+        (0, 1, 1)
+    );
+    assert_eq!(stale.feedback[0].vote, cairn_core::FeedbackVote::Stale);
+    let helpful = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            helpful.helpful_count,
+            helpful.stale_count,
+            helpful.feedback.len()
+        ),
+        (1, 0, 1)
+    );
     let global = store
         .save(
             &owner.token,
@@ -3780,6 +3866,22 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
             .iter()
             .any(|hit| hit.memory_id == rule_fresh.memory_id)
     );
+    for vote in ["helpful", "helpful", "stale", "helpful"] {
+        let pg = store
+            .feedback(&owner.token, &fresh.memory_id, vote)
+            .await
+            .unwrap();
+        let local = file
+            .feedback_for_account(&file_owner.token, &fresh.memory_id, vote)
+            .unwrap();
+        assert_eq!(
+            (pg.helpful_count, pg.stale_count),
+            (local.helpful_count, local.stale_count)
+        );
+        assert_eq!(pg.feedback.len(), local.feedback.len());
+        assert_eq!(pg.feedback[0].vote, local.feedback[0].vote);
+    }
+    std::fs::remove_file(file_path).unwrap();
     pool.close().await;
 }
 
@@ -3792,4 +3894,342 @@ async fn counts_after(store: &PostgresStore, token: &str, memory_id: &str) -> u6
         .find(|memory| memory.memory_id == memory_id)
         .unwrap()
         .access_count
+}
+
+fn feedback_test_input(scope: &str, title: &str) -> cairn_core::SaveMemoryInput {
+    serde_json::from_value(serde_json::json!({
+        "scope": scope, "kind": "fact", "title": title,
+        "summary": title, "reason": "verified", "statement": "holds"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_feedback_rejects_every_memory_hidden_from_reads() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for hidden in [
+        "forgotten",
+        "source-forgotten",
+        "superseded",
+        "expired",
+        "successor",
+    ] {
+        let saved = store
+            .save(&owner.token, feedback_test_input("global", hidden))
+            .await
+            .unwrap();
+        match hidden {
+            "forgotten" => store.forget(&owner.token, &saved.memory_id).await.unwrap(),
+            "source-forgotten" => {
+                sqlx::query(
+                    "INSERT INTO cairn_forgotten_items (person_id, item_id) VALUES ($1, $2)",
+                )
+                .bind(&owner.account.person_id)
+                .bind(&saved.source_event_ids[0])
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            "superseded" => {
+                sqlx::query("UPDATE cairn_memories SET record=jsonb_set(record, '{status}', '\"superseded\"'::jsonb) WHERE memory_id=$1")
+                    .bind(&saved.memory_id).execute(&pool).await.unwrap();
+            }
+            "expired" => {
+                sqlx::query("UPDATE cairn_memories SET lifecycle=jsonb_set(lifecycle, '{expiresAt}', '\"1\"'::jsonb) WHERE memory_id=$1")
+                    .bind(&saved.memory_id).execute(&pool).await.unwrap();
+            }
+            "successor" => {
+                let successor = store
+                    .save(&owner.token, feedback_test_input("global", "successor"))
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE cairn_memories SET supersedes=$1 WHERE memory_id=$2")
+                    .bind(&saved.memory_id)
+                    .bind(&successor.memory_id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !store
+                .memories(&other.token)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.memory_id == saved.memory_id),
+            "{hidden}"
+        );
+        for token in [&owner.token, &other.token] {
+            let error = store
+                .feedback(token, &saved.memory_id, "helpful")
+                .await
+                .expect_err(hidden);
+            assert_eq!(
+                error.to_string(),
+                format!("validation error: unknown memory: {}", saved.memory_id)
+            );
+        }
+        let votes: serde_json::Value =
+            sqlx::query_scalar("SELECT feedback FROM cairn_memories WHERE memory_id=$1")
+                .bind(&saved.memory_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(votes, serde_json::json!([]));
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_concurrent_feedback_preserves_every_persons_vote() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let memory = store
+        .save(
+            &owner.token,
+            feedback_test_input("global", "concurrentneedle"),
+        )
+        .await
+        .unwrap();
+    let mut guard = pool.begin().await.unwrap();
+    sqlx::query("SELECT memory_id FROM cairn_memories WHERE memory_id=$1 FOR UPDATE")
+        .bind(&memory.memory_id)
+        .fetch_one(&mut *guard)
+        .await
+        .unwrap();
+    let mut votes = Vec::new();
+    for token in [&owner.token, &other.token] {
+        let store = store.clone();
+        let token = token.clone();
+        let id = memory.memory_id.clone();
+        votes.push(tokio::spawn(async move {
+            store.feedback(&token, &id, "helpful").await
+        }));
+    }
+    // Both requests must reach the locked row before either can write its vote.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%cairn_memories%' AND query LIKE '%feedback%'")
+                .fetch_one(&pool).await.unwrap();
+            if blocked == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("both feedback requests blocked on the held row lock");
+    guard.commit().await.unwrap();
+    for vote in votes {
+        vote.await.unwrap().unwrap();
+    }
+    let saved = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.memory_id == memory.memory_id)
+        .unwrap();
+    assert_eq!(
+        (saved.helpful_count, saved.stale_count, saved.feedback.len()),
+        (2, 0, 2)
+    );
+    for person in [&owner.account.person_id, &other.account.person_id] {
+        assert_eq!(
+            saved
+                .feedback
+                .iter()
+                .filter(|vote| &vote.person_id == person)
+                .count(),
+            1
+        );
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_summary_regeneration_preserves_reinforcement_and_feedback() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "summary-feedback-device",
+            &owner.account.person_id,
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "summary-feedback", WorkContext::default())
+        .await
+        .unwrap();
+    let observation = |event: &str| ObservationInput {
+        event_id: event.to_owned(),
+        session_id: "summary-feedback".to_owned(),
+        content: "summaryneedle capture".to_owned(),
+        role: "user".to_owned(),
+        source: "test".to_owned(),
+        importance: None,
+        lifecycle: Default::default(),
+        context: WorkContext::default(),
+    };
+    store
+        .sync_push(&device.token, observation("first"))
+        .await
+        .unwrap();
+    let summary = store
+        .end_session(&owner.token, "summary-feedback")
+        .await
+        .unwrap();
+    for (event, vote) in [("second", "stale"), ("third", "helpful")] {
+        store
+            .feedback(&owner.token, &summary.memory_id, vote)
+            .await
+            .unwrap();
+        store
+            .search(&owner.token, "summaryneedle", 20, &RecallFilter::default())
+            .await
+            .unwrap();
+        let before = store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == summary.memory_id)
+            .unwrap();
+        assert!(before.access_count > 0);
+        assert!(before.last_accessed_at.is_some());
+        assert_eq!(before.feedback.len(), 1);
+        store
+            .sync_push(&device.token, observation(event))
+            .await
+            .unwrap();
+        let after = store
+            .end_session(&owner.token, "summary-feedback")
+            .await
+            .unwrap();
+        assert_eq!(after.memory_id, before.memory_id);
+        assert!(after.source_event_ids.len() > before.source_event_ids.len());
+        assert_eq!(after.access_count, before.access_count);
+        assert_eq!(after.last_accessed_at, before.last_accessed_at);
+        assert_eq!(after.feedback, before.feedback);
+        assert_eq!(after.helpful_count, before.helpful_count);
+        assert_eq!(after.stale_count, before.stale_count);
+        let stored = store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == summary.memory_id)
+            .unwrap();
+        assert_eq!(stored, after);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_import_discards_foreign_votes_and_untrusted_counts() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let saved = store
+        .save(
+            &owner.token,
+            feedback_test_input("personal", "importneedle"),
+        )
+        .await
+        .unwrap();
+    let mut bundle = store.export_bundle(&owner.token).await.unwrap();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    bundle.memories = ["forged-votes", "counts-only"]
+        .into_iter()
+        .map(|id| {
+            let mut memory = saved.clone();
+            memory.memory_id = id.to_owned();
+            memory.helpful_count = 999;
+            memory.stale_count = 4;
+            if id == "forged-votes" {
+                memory.feedback = vec![
+                    cairn_core::MemoryFeedback {
+                        person_id: other.account.person_id.clone(),
+                        vote: cairn_core::FeedbackVote::Helpful
+                    };
+                    3
+                ];
+            }
+            memory
+        })
+        .collect();
+    assert_eq!(
+        store
+            .import_bundle(&owner.token, bundle.clone())
+            .await
+            .unwrap()
+            .imported_memories,
+        2
+    );
+    for memory in store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.memory_id == "forged-votes" || m.memory_id == "counts-only")
+    {
+        assert!(memory.feedback.is_empty(), "{}", memory.memory_id);
+        assert_eq!((memory.helpful_count, memory.stale_count), (0, 0));
+        let error = store
+            .feedback(&other.token, &memory.memory_id, "helpful")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown memory"));
+    }
+    let counts: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT helpful_count, stale_count FROM cairn_memories WHERE memory_id IN ('forged-votes', 'counts-only')",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(counts, vec![(0, 0); 2]);
+    assert_eq!(
+        store
+            .import_bundle(&owner.token, bundle)
+            .await
+            .unwrap()
+            .imported_memories,
+        0
+    );
+    pool.close().await;
 }

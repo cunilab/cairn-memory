@@ -326,3 +326,38 @@ lessons and corrections stay at factor 1. One helpful or stale vote per person
 is shared for project and global memories and owner-only for personal memory.
 Returned search, context and why-changed hits reinforce access stats. The
 separate temporary-observation expiry sweep is unchanged.
+
+### Stage 5 review corrections
+
+Verified on 2026-11-17 on macOS, branch `v0.1.4`, with the same isolated
+PostgreSQL setup and cleared live-server environment described above.
+
+- Feedback visibility: `feedback_rejects_every_memory_hidden_from_reads` and
+  its `postgres_` counterpart cover forgotten memories and source events,
+  superseded status, expiry and live successors. PostgreSQL first failed by
+  returning a forgotten memory; the file gate already passed. Both now pass.
+- Concurrent votes: `postgres_concurrent_feedback_preserves_every_persons_vote`
+  coordinates two blocked voters with a held row lock. It first persisted one
+  accepted vote instead of two; it now retains both identities and counts.
+- Summary state: `summary_regeneration_preserves_reinforcement_and_feedback`
+  and its `postgres_` counterpart first reset access count from 1 to 0.
+  Both now preserve access count, last access time, votes and both counts
+  across delayed-capture regeneration, with stale and helpful votes.
+- Import: `import_discards_foreign_votes_and_untrusted_counts` and its
+  `postgres_` counterpart first retained forged votes or counts. Both now
+  clear votes, zero derived counts and permit idempotent repeat import.
+  PostgreSQL also asserts the raw stored count columns are zero.
+- Existing tests now assert stale replacement before helpful replacement,
+  compare the owner's score before and after a member's vote, and compare
+  PostgreSQL ranking, reinforcement and feedback against a real file store.
+
+Final checks: `cargo fmt --all -- --check`, `cargo check --workspace`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+`cargo test --workspace` (199 passed, 39 ignored),
+`scripts/ci_postgres_tests.sh` (39 passed), `scripts/smoke_full_flow.sh`,
+`scripts/smoke_mcp.sh` and `python3 scripts/validate_phase0.py` passed.
+The first PostgreSQL suite run passed 37 tests and failed its two semantic
+checks because the model-directory variable was unset. The final complete
+run used the checksum-verified pinned MiniLM model and passed both semantic
+checks. MCP setup emitted a nonfatal hook-script download HTTP 404 warning;
+the MCP flow passed. Web files were unchanged, so web checks were not rerun.

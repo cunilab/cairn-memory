@@ -216,6 +216,14 @@ ranking, and only the owner can vote on personal memory. Returned hits of
 search, context and why-changed reinforce access stats. Resume, unresolved,
 the session brief and list/get do not.
 
+Feedback uses the ordinary read gate, including forgotten sources, expiry,
+record status and live successors. PostgreSQL locks the memory before reading
+and replacing its votes so concurrent voters cannot overwrite each other.
+Summary regeneration locks and carries the same memory's reinforcement and
+feedback state into the replacement. Imports clear votes and recompute their
+counts in both stores: a backup cannot authenticate a voter. The
+[export contract](../contracts/export-v1.md#import-behavior) owns that rule.
+
 ## Trust and limits
 
 - Project membership is by project ID (ADR 0013), so raw captures, not only

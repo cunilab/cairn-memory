@@ -339,6 +339,8 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
         validate_lifecycle(&observation.lifecycle)?;
     }
     for memory in &mut bundle.memories {
+        memory.feedback.clear();
+        crate::sync_feedback_counts(memory);
         memory.published_by = None;
         memory.scope = crate::MemoryScope::Personal;
         memory.project_id = None;

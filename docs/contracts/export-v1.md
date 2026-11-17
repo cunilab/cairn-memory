@@ -102,6 +102,11 @@ additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entr
   project tag or publication marker cannot publish a decision. Personal exports
   exclude published decisions and do not back up project identity, membership or
   governance. Project decisions are read online; explicit re-promotion is required.
+- Every import clears the memory's feedback votes and recomputes `helpful_count`
+  and `stale_count` as zero. Exported voter identities are not authority to vote
+  as another person, and supplied counts are not trusted. Access statistics are
+  retained. This normalization applies before same-ID conflict comparison;
+  an existing local vote is never erased by importing a bundle.
 - PostgreSQL import runs in one transaction keyed to the authenticated person.
   It does not apply the file-store rules on session `person_id` or `forgottenIds`
   ownership. It ignores a bundle session's

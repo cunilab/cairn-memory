@@ -256,7 +256,10 @@ fn aged_rules_keep_stage3_weight_and_feedback_reorders_without_hiding() -> Resul
         .unwrap();
     assert_eq!(voted.helpful_count, 1);
     assert_eq!(voted.feedback.len(), 1);
-    store.feedback_for_account(&owner.token, &twins[0], "stale")?;
+    let stale = store.feedback_for_account(&owner.token, &twins[0], "stale")?;
+    assert_eq!((stale.helpful_count, stale.stale_count), (0, 1));
+    assert_eq!(stale.feedback.len(), 1);
+    assert_eq!(stale.feedback[0].vote, FeedbackVote::Stale);
     store.feedback_for_account(&owner.token, &twins[0], "helpful")?;
     let hits = store.search_for_account(&owner.token, "feedtoken", 10, &RecallFilter::default())?;
     assert_eq!(hits.len(), 2);
@@ -311,12 +314,14 @@ fn feedback_follows_visibility_and_one_vote_per_person() -> Result<(), StoreErro
         .expect_err("non-member");
     assert!(outsider.to_string().contains("unknown memory"));
     join_project(&mut store, &other.token, &project.project_id)?;
+    let before =
+        store.search_for_account(&owner.token, "sharedtoken", 5, &RecallFilter::default())?;
     let voted = store.feedback_for_account(&other.token, &shared.memory_id, "helpful")?;
     assert_eq!(voted.helpful_count, 1);
     let seen =
         store.search_for_account(&owner.token, "sharedtoken", 5, &RecallFilter::default())?;
     assert_eq!(seen.len(), 1);
-    assert!(seen[0].score > 0.0);
+    assert!(seen[0].score > before[0].score);
 
     let global = store.save_for_account(
         &owner.token,
@@ -336,6 +341,214 @@ fn feedback_follows_visibility_and_one_vote_per_person() -> Result<(), StoreErro
         .feedback_for_account(&owner.token, &global.memory_id, "maybe")
         .expect_err("vote");
     assert!(bad.to_string().contains("helpful or stale"));
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn feedback_rejects_every_memory_hidden_from_reads() -> Result<(), StoreError> {
+    let path = temp_store_path("feedback-hidden");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    let other = store.register_account("other@example.test", "correct horse battery staple")?;
+    for hidden in [
+        "forgotten",
+        "source-forgotten",
+        "superseded",
+        "expired",
+        "successor",
+    ] {
+        let saved = store.save_for_account(
+            &owner.token,
+            serde_json::from_value(json!({
+                "scope": "global", "kind": "fact", "title": hidden,
+                "summary": hidden, "reason": "verified", "statement": "holds"
+            }))?,
+        )?;
+        match hidden {
+            "forgotten" => store.forget_for_account(&owner.token, &saved.memory_id)?,
+            "source-forgotten" => {
+                store
+                    .state
+                    .forgotten_ids
+                    .insert(saved.source_event_ids[0].clone());
+            }
+            "superseded" => {
+                store
+                    .state
+                    .memories
+                    .iter_mut()
+                    .find(|m| m.memory_id == saved.memory_id)
+                    .unwrap()
+                    .fields
+                    .status = crate::MemoryStatus::Superseded
+            }
+            "expired" => {
+                store
+                    .state
+                    .memories
+                    .iter_mut()
+                    .find(|m| m.memory_id == saved.memory_id)
+                    .unwrap()
+                    .lifecycle
+                    .expires_at = Some("1".to_owned())
+            }
+            "successor" => {
+                let mut successor = saved.clone();
+                successor.memory_id.push_str("-successor");
+                successor.supersedes = Some(saved.memory_id.clone());
+                store.record_memory_owner(&owner.account.person_id, &successor.memory_id);
+                store.state.memories.push(successor);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !store
+                .memories_for_account(&other.token)?
+                .iter()
+                .any(|m| m.memory_id == saved.memory_id),
+            "{hidden}"
+        );
+        for token in [&owner.token, &other.token] {
+            let error = store
+                .feedback_for_account(token, &saved.memory_id, "helpful")
+                .expect_err(hidden);
+            assert_eq!(
+                error.to_string(),
+                format!("validation error: unknown memory: {}", saved.memory_id)
+            );
+        }
+        assert!(
+            store
+                .state
+                .memories
+                .iter()
+                .find(|m| m.memory_id == saved.memory_id)
+                .unwrap()
+                .feedback
+                .is_empty()
+        );
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn summary_regeneration_preserves_reinforcement_and_feedback() -> Result<(), StoreError> {
+    let path = temp_store_path("summary-feedback");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    store.start_session_for_account(&owner.token, "summary-feedback", WorkContext::default())?;
+    store.capture_for_account(
+        &owner.token,
+        crate::test_support::observation_for(
+            "summary-feedback",
+            "first",
+            "summaryneedle initial capture",
+        ),
+    )?;
+    let summary = store.end_session_for_account(&owner.token, "summary-feedback")?;
+    for (event, vote) in [("second", "stale"), ("third", "helpful")] {
+        store.feedback_for_account(&owner.token, &summary.memory_id, vote)?;
+        store.search_for_account(&owner.token, "summaryneedle", 20, &RecallFilter::default())?;
+        let before = store
+            .memories_for_account(&owner.token)?
+            .into_iter()
+            .find(|m| m.memory_id == summary.memory_id)
+            .unwrap();
+        assert!(before.access_count > 0);
+        assert!(before.last_accessed_at.is_some());
+        assert_eq!(before.feedback.len(), 1);
+        store.capture_for_account(
+            &owner.token,
+            crate::test_support::observation_for(
+                "summary-feedback",
+                event,
+                "summaryneedle delayed capture",
+            ),
+        )?;
+        let after = store.end_session_for_account(&owner.token, "summary-feedback")?;
+        assert_eq!(after.memory_id, before.memory_id);
+        assert!(after.source_event_ids.len() > before.source_event_ids.len());
+        assert_eq!(after.access_count, before.access_count);
+        assert_eq!(after.last_accessed_at, before.last_accessed_at);
+        assert_eq!(after.feedback, before.feedback);
+        assert_eq!(after.helpful_count, before.helpful_count);
+        assert_eq!(after.stale_count, before.stale_count);
+        assert_eq!(
+            MemoryStore::open(&path)?
+                .memories_for_account(&owner.token)?
+                .into_iter()
+                .find(|m| m.memory_id == summary.memory_id)
+                .unwrap(),
+            after
+        );
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn import_discards_foreign_votes_and_untrusted_counts() -> Result<(), StoreError> {
+    let path = temp_store_path("import-feedback");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    let other = store.register_account("other@example.test", "correct horse battery staple")?;
+    let saved = store.save_for_account(
+        &owner.token,
+        serde_json::from_value(json!({
+            "scope": "personal", "kind": "fact", "title": "importneedle",
+            "summary": "importneedle", "reason": "verified", "statement": "holds"
+        }))?,
+    )?;
+    let mut bundle = store.export_for_account(&owner.token)?;
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    bundle.memories = ["forged-votes", "counts-only"]
+        .into_iter()
+        .map(|id| {
+            let mut memory = saved.clone();
+            memory.memory_id = id.to_owned();
+            memory.helpful_count = 999;
+            memory.stale_count = 4;
+            if id == "forged-votes" {
+                memory.feedback = vec![
+                    MemoryFeedback {
+                        person_id: other.account.person_id.clone(),
+                        vote: FeedbackVote::Helpful
+                    };
+                    3
+                ];
+            }
+            memory
+        })
+        .collect();
+    assert_eq!(
+        store
+            .import_for_account(&owner.token, bundle.clone())?
+            .imported_memories,
+        2
+    );
+    assert_eq!(
+        store
+            .import_for_account(&owner.token, bundle)?
+            .imported_memories,
+        0
+    );
+    let mut reopened = MemoryStore::open(&path)?;
+    for memory in reopened
+        .memories_for_account(&owner.token)?
+        .into_iter()
+        .filter(|m| m.memory_id == "forged-votes" || m.memory_id == "counts-only")
+    {
+        assert!(memory.feedback.is_empty(), "{}", memory.memory_id);
+        assert_eq!((memory.helpful_count, memory.stale_count), (0, 0));
+        let error = reopened
+            .feedback_for_account(&other.token, &memory.memory_id, "helpful")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown memory"));
+    }
     fs::remove_file(path)?;
     Ok(())
 }

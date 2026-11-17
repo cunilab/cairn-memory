@@ -1187,9 +1187,11 @@ impl PostgresStore {
         let account = self.authenticate_account(token).await?;
         let mut tx = self.pool.begin().await?;
         let query = format!(
-            "{} WHERE m.memory_id = $2 AND {}",
+            "{} WHERE m.memory_id = $2 AND {} AND {} AND {} FOR UPDATE OF m",
             memory_select_sql(),
-            recall_access_sql()
+            recall_access_sql(),
+            live_memory_sql(),
+            not_superseded_by_live_memory_sql(false)
         );
         let row = sqlx::query(&query)
             .bind(&account.person_id)
@@ -3775,7 +3777,7 @@ fn live_memory_sql() -> &'static str {
 
 fn session_memory_select_sql() -> String {
     format!(
-        "{} WHERE m.person_id = $1 AND m.memory_id = $2",
+        "{} WHERE m.person_id = $1 AND m.memory_id = $2 FOR UPDATE OF m",
         memory_select_sql()
     )
 }
