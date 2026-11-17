@@ -65,6 +65,10 @@ export type ProjectMemory = {
   changed_by?: string | null;
   changed_at?: string | null;
   created_at?: string;
+  access_count?: number;
+  last_accessed_at?: string | null;
+  helpful_count?: number;
+  stale_count?: number;
 };
 
 export type PersonalMemory = ProjectMemory;

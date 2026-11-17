@@ -530,7 +530,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
             MemoryKind::Explicit,
         )
     };
-    let quiet = |store: &MemoryStore, query: &str| -> Result<(), StoreError> {
+    let quiet = |store: &mut MemoryStore, query: &str| -> Result<(), StoreError> {
         for results in [
             store.search_for_account(&owner.token, query, 5, &filter)?,
             store
@@ -706,7 +706,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
         MemoryKind::Explicit,
     )?;
     assert!(!store.state.forgotten_ids.contains(&expired.memory_id));
-    quiet(&store, "expquota")?;
+    quiet(&mut store, "expquota")?;
     let unscoped_expired = store.search_with_filter("expquota", 5, &filter)?;
     assert_eq!(unscoped_expired.len(), 1);
     assert_eq!(unscoped_expired[0].memory_id, current.memory_id);
@@ -754,7 +754,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
     store.forget_for_account(&owner.token, "sum-dead-event")?;
     assert!(store.state.forgotten_ids.contains("sum-dead-event"));
     assert!(!store.state.forgotten_ids.contains(&dead_summary.memory_id));
-    quiet(&store, "sumquota")?;
+    quiet(&mut store, "sumquota")?;
     assert!(
         !store.search_for_account(&owner.token, "sumquota", 5, &filter)?[0]
             .content
@@ -780,7 +780,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
     let kept = owned(&mut store, "idquota beacon does apply", branch.clone())?;
     let forgotten = owned(&mut store, "idquota beacon does not apply", branch.clone())?;
     store.forget_for_account(&owner.token, &forgotten.memory_id)?;
-    quiet(&store, "idquota")?;
+    quiet(&mut store, "idquota")?;
     assert_eq!(
         store.search_for_account(&owner.token, "idquota", 5, &filter)?[0].memory_id,
         kept.memory_id
@@ -966,7 +966,7 @@ fn contradicting_equal_scores_rank_the_newer_memory_first() -> Result<(), StoreE
                 .memory_id,
         );
     }
-    let ranked = |store: &MemoryStore| -> Result<Vec<String>, StoreError> {
+    let ranked = |store: &mut MemoryStore| -> Result<Vec<String>, StoreError> {
         let mut hits = store.search_for_account(&owner.token, "gammaquota", 5, &filter)?;
         // RRF assigns distinct ranks; exercise the final equal-score tiebreak explicitly.
         for hit in &mut hits {
@@ -998,7 +998,7 @@ fn contradicting_equal_scores_rank_the_newer_memory_first() -> Result<(), StoreE
             }
             .to_owned();
         }
-        let order = ranked(&store)?;
+        let order = ranked(&mut store)?;
         assert_eq!(&order[0], newer_id);
         assert_eq!(order.len(), 2);
     }
@@ -1027,7 +1027,7 @@ fn hybrid_type_weight_prioritizes_decisions_over_repeated_terms() -> Result<(), 
             Vec::new(),
             WorkContext::default(),
             LifecycleInput::default(),
-            kind.clone(),
+            kind,
         )?;
         if kind == MemoryKind::Decision {
             decision = memory.memory_id;

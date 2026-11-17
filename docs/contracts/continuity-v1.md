@@ -92,9 +92,55 @@ rank. Sum contributions, then multiply by type (`rule`/`decision`: 3,
 other notes including session notes/handoffs: 2, `capture`: 1) and by 2 when
 pinned. Title is the strongest lexical field and appears first, repeated three
 times, in semantic input. These named policy constants are tunable in code;
-changing them requires updated contract/tests. No retention or feedback signal
-is added by this stage. Final equal-score decision/contradiction tiebreaks
+changing them requires updated contract/tests. Final equal-score decision/contradiction tiebreaks
 remain; equal raw lexical scores may have distinct fused ranks.
+
+Retention and feedback multiply that fused score before the tiebreaks and
+before limit truncation. `omitted_count` still counts every eligible hit.
+
+```
+score = fused * type_weight * pin_weight * retention_factor * feedback_factor
+```
+
+Salience is `lifecycle.importance / 100`. Age and recency are unix-second
+elapsed time divided by 86400. Recency uses `last_accessed_at`, or
+`created_at` when the memory has never been returned. `access_count` starts
+at 0.
+
+```
+retention = 0.35 * salience
+          + 0.25 * 0.5 ^ (age_days / 30)
+          + 0.20 * (1 - 0.5 ^ (access_count / 5))
+          + 0.20 * 0.5 ^ (recency_days / 14)
+```
+
+`retention_factor` is 1 when the kind does not decay or `retention` is at
+least 0.45. Otherwise it is `0.25 + 0.75 * (retention / 0.45)`, so a
+below-threshold memory ranks lower and stays in the result set. Nothing is
+deleted or hidden because of this score. The temporary-observation expiry
+sweep is a separate lifecycle and is unchanged.
+
+Decay applies only to `capture`, `session_summary` and `handoff`. Rule,
+decision, gotcha, procedure, fact, preference, explicit, lesson and correction
+keep factor 1. Access stats still update.
+
+```
+feedback_factor = clamp(1 + 0.15 * (helpful_count - stale_count), 0.55, 1.45)
+```
+
+One `helpful` or `stale` vote per person; repeating the same vote does
+nothing and the other value replaces it. Feedback does not change
+`status`. Project votes from any member change ranking for every member.
+Global votes from any authenticated user change ranking for everyone.
+Personal votes are accepted only from the owner. A caller who cannot read
+the memory gets the unknown-memory error.
+
+Returned hits of `search`, `smart-search`, `context`, `recall` and
+`why-changed` increment `access_count` and set `last_accessed_at`. Omitted
+ids, `resume`, `unresolved`, the session brief and list/get do not. Both
+stores persist `access_count`, `last_accessed_at`, the vote list and the
+derived counts. These constants are tunable in `crates/core/src/retention.rs`;
+changing them requires updated contract text and tests.
 
 ### Local model and background indexing
 

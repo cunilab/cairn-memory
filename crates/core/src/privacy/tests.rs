@@ -659,6 +659,11 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
             verified_commit: Some("abc1234".to_owned()),
             published_by: None, changed_by: None, changed_at: None,
             created_at: "10".to_owned(),
+            access_count: 0,
+            last_accessed_at: None,
+            helpful_count: 0,
+            stale_count: 0,
+            feedback: Vec::new(),
         }],
         forgotten_ids: vec![],
     };

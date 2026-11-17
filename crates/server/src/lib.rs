@@ -207,6 +207,13 @@ pub struct ForgetRequest {
 pub type RememberRequest = cairn_core::SaveMemoryInput;
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct FeedbackRequest {
+    #[serde(rename = "memoryId", alias = "memory_id")]
+    pub memory_id: String,
+    pub vote: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct CorrectRequest {
     #[serde(
         rename = "targetId",
@@ -568,6 +575,7 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/remember", post(remember))
         .route("/cairn-memory/memories", get(memories))
         .route("/cairn-memory/memories/{id}", get(memory))
+        .route("/cairn-memory/feedback", post(feedback))
         .route("/cairn-memory/correct", post(correct))
         .route("/cairn-memory/export", post(export))
         .route("/cairn-memory/import", post(import))
@@ -697,6 +705,7 @@ pub fn postgres_app_with_embeddings(
         .route("/cairn-memory/remember", post(postgres_remember))
         .route("/cairn-memory/memories", get(postgres_memories))
         .route("/cairn-memory/memories/{id}", get(postgres_memory))
+        .route("/cairn-memory/feedback", post(postgres_feedback))
         .route("/cairn-memory/correct", post(postgres_correct))
         .route("/cairn-memory/export", post(postgres_export))
         .route("/cairn-memory/import", post(postgres_import))
@@ -1394,6 +1403,19 @@ async fn postgres_memory(
         .find(|m| m.memory_id == id)
         .map(Json)
         .ok_or_else(|| PostgresApiError(PostgresError::Validation("unknown memory".to_owned())))
+}
+
+async fn postgres_feedback(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<FeedbackRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .feedback(postgres_token(&headers)?, &request.memory_id, &request.vote)
+            .await?,
+    ))
 }
 
 async fn postgres_correct(
@@ -2116,31 +2138,20 @@ async fn end_session(
     }
 }
 
-async fn file_matches(
+async fn file_query_vector(
     state: &AppState,
     headers: &HeaderMap,
-    request: &SearchRequest,
-) -> Result<Vec<RecallResult>, ApiError> {
+    query: &str,
+) -> Result<Option<Vec<f32>>, ApiError> {
     // Authenticate before spending CPU on inference and recheck after it.
     {
         let store = state.store.lock().await;
         file_bearer(&store, headers)?;
     }
-    let vector = match &state.embeddings {
-        Some(model) => model.query(&request.query).await,
+    Ok(match &state.embeddings {
+        Some(model) => model.query(query).await,
         None => None,
-    };
-    let store = state.store.lock().await;
-    let token = file_bearer(&store, headers)?;
-    store
-        .search_with_vector(
-            token,
-            &request.query,
-            usize::MAX,
-            &request.recall_filter(),
-            vector.as_deref(),
-        )
-        .map_err(account_api_error)
+    })
 }
 
 async fn search(
@@ -2148,9 +2159,20 @@ async fn search(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<RecallResult>>, ApiError> {
-    let mut results = file_matches(&state, &headers, &request).await?;
-    results.truncate(request.limit);
-    Ok(Json(results))
+    let vector = file_query_vector(&state, &headers, &request.query).await?;
+    let mut store = state.store.lock().await;
+    let token = file_bearer(&store, &headers)?;
+    Ok(Json(
+        store
+            .search_with_vector(
+                token,
+                &request.query,
+                request.limit,
+                &request.recall_filter(),
+                vector.as_deref(),
+            )
+            .map_err(account_api_error)?,
+    ))
 }
 
 async fn why_changed(
@@ -2158,19 +2180,20 @@ async fn why_changed(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
-    let mut results = file_matches(&state, &headers, &request).await?;
-    results.sort_by(|a, b| {
-        b.decision_reason
-            .is_some()
-            .cmp(&a.decision_reason.is_some())
-            .then_with(|| b.relationships.len().cmp(&a.relationships.len()))
-            .then_with(|| b.score.total_cmp(&a.score))
-    });
-    Ok(Json(cairn_core::build_context_pack(
-        format!("why changed: {}", request.query),
-        &mut results,
-        request.limit,
-    )))
+    let vector = file_query_vector(&state, &headers, &request.query).await?;
+    let mut store = state.store.lock().await;
+    let token = file_bearer(&store, &headers)?;
+    Ok(Json(
+        store
+            .why_changed_with_vector(
+                token,
+                &request.query,
+                request.limit,
+                &request.recall_filter(),
+                vector.as_deref(),
+            )
+            .map_err(account_api_error)?,
+    ))
 }
 
 async fn context(
@@ -2178,12 +2201,20 @@ async fn context(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
-    let mut results = file_matches(&state, &headers, &request).await?;
-    Ok(Json(cairn_core::build_context_pack(
-        request.query,
-        &mut results,
-        request.limit,
-    )))
+    let vector = file_query_vector(&state, &headers, &request.query).await?;
+    let mut store = state.store.lock().await;
+    let token = file_bearer(&store, &headers)?;
+    Ok(Json(
+        store
+            .context_with_vector(
+                token,
+                &request.query,
+                request.limit,
+                &request.recall_filter(),
+                vector.as_deref(),
+            )
+            .map_err(account_api_error)?,
+    ))
 }
 
 /// The same selection and data fence serve every agent and both storage adapters.
@@ -2324,6 +2355,19 @@ async fn memory(
         .find(|m| m.memory_id == id)
         .map(Json)
         .ok_or_else(|| ApiError::Store(StoreError::Validation("unknown memory".to_owned())))
+}
+
+async fn feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FeedbackRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .feedback_for_account(auth_token(&headers)?, &request.memory_id, &request.vote)
+            .map_err(account_api_error)?,
+    ))
 }
 
 async fn correct(

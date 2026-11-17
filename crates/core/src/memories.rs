@@ -47,6 +47,16 @@ pub struct Memory {
     #[serde(default)]
     pub changed_at: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub access_count: u64,
+    #[serde(default)]
+    pub last_accessed_at: Option<String>,
+    #[serde(default)]
+    pub helpful_count: u32,
+    #[serde(default)]
+    pub stale_count: u32,
+    #[serde(default)]
+    pub feedback: Vec<crate::MemoryFeedback>,
 }
 
 /// Common and typed note fields, flattened in the public memory record.
@@ -236,6 +246,11 @@ pub fn capture_memory(observation: &crate::Observation, author: &str) -> Memory 
         changed_by: Some(author.to_owned()),
         changed_at: Some(observation.captured_at.clone()),
         created_at: observation.captured_at.clone(),
+        access_count: 0,
+        last_accessed_at: None,
+        helpful_count: 0,
+        stale_count: 0,
+        feedback: Vec::new(),
     }
 }
 
@@ -544,6 +559,11 @@ impl MemoryStore {
             changed_by: None,
             changed_at: None,
             created_at: timestamp(),
+            access_count: 0,
+            last_accessed_at: None,
+            helpful_count: 0,
+            stale_count: 0,
+            feedback: Vec::new(),
         };
         self.state.memories.push(memory.clone());
         Ok(memory)
@@ -679,6 +699,11 @@ pub fn build_explicit_memory_record(
         changed_by: None,
         changed_at: None,
         created_at: timestamp(),
+        access_count: 0,
+        last_accessed_at: None,
+        helpful_count: 0,
+        stale_count: 0,
+        feedback: Vec::new(),
     })
 }
 

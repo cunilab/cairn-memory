@@ -77,6 +77,7 @@ const COMMANDS: &[Command] = &[
     command("lesson", "memory_lesson_save", &["record"], 0),
     command("memories", "memory_list", &[], 0),
     command("memory", "memory_get", &["memoryId"], 1),
+    command("feedback", "memory_feedback", &["memoryId", "vote"], 2),
     command("correct", "memory_correct", &["targetId", "content"], 2),
     command(
         "project-register",
@@ -136,6 +137,7 @@ fn print_usage() {
   cairn forget <memory-or-event-id>\n\
   cairn save|lesson [JSON-record] (or stdin)\n\
   cairn memories | memory <memory-id>\n\
+  cairn feedback <memory-id> helpful|stale\n\
   cairn correct <memory-or-event-id> <content>\n\
   cairn export <output>\n\
   cairn import <input>\n\

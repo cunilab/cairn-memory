@@ -209,7 +209,7 @@ fn foreign_tombstones_reject_the_whole_import_and_change_nothing() -> Result<(),
         assert_eq!(fs::read(&path)?, before, "nothing is written on rejection");
     }
 
-    let reopened = MemoryStore::open(&path)?;
+    let mut reopened = MemoryStore::open(&path)?;
     let hits = reopened.search_for_account(&owner.token, "tombfact", 10, &filter)?;
     assert_eq!(ids_of(&hits), vec![kept.memory_id.as_str()]);
     let resume = reopened.resume_for_account(&owner.token, 10, &filter)?;
@@ -586,7 +586,7 @@ fn export_import_round_trip_is_idempotent_and_preserves_forget() -> Result<(), S
         }
     );
     drop(target);
-    let restored = MemoryStore::open(&target_path)?;
+    let mut restored = MemoryStore::open(&target_path)?;
     assert!(restored.search("providers", 5)?.is_empty());
 
     fs::remove_file(source_path)?;
@@ -639,6 +639,11 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
             changed_by: None,
             changed_at: None,
             created_at: "0".to_owned(),
+            access_count: 0,
+            last_accessed_at: None,
+            helpful_count: 0,
+            stale_count: 0,
+            feedback: Vec::new(),
         }],
         forgotten_ids: vec![],
     };

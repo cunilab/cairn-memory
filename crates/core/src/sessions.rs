@@ -554,6 +554,11 @@ pub fn derive_session_memory(
         changed_by: None,
         changed_at: None,
         created_at: timestamp(),
+        access_count: 0,
+        last_accessed_at: None,
+        helpful_count: 0,
+        stale_count: 0,
+        feedback: Vec::new(),
     };
     memory.project_id = memory.context.project_id.clone().filter(|id| {
         observations

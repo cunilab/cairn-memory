@@ -36,6 +36,7 @@ import { deleteDecisionImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
+import { MemoryFeedback } from "@/components/memory-feedback";
 import type { ListedProject, ProjectBranch, ProjectMember, ProjectMemory } from "@/lib/types";
 
 type Action = { kind: "verify" | "correct" | "delete"; memory: ProjectMemory };
@@ -398,6 +399,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             <SheetDescription>{detail?.memory_id}</SheetDescription>
           </SheetHeader>
           <div className="space-y-4 p-4">
+            {detail ? <MemoryFeedback memory={detail} onUpdated={(updated) => {
+              setDetail(updated);
+              setDecisions((rows) => rows.map((row) => row.memory_id === updated.memory_id ? updated : row));
+            }} /> : null}
             {detail ? Object.entries(detail).map(([field, value]) => (
               <div key={field}>
                 <p className="text-xs font-medium text-muted-foreground">{field.replaceAll("_", " ")}</p>

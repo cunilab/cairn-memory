@@ -175,7 +175,7 @@ fn structured_save_requires_scope_title_summary_reason_and_preserves_type_fields
         }
     }
     drop(store);
-    let store = MemoryStore::open(&path).unwrap();
+    let mut store = MemoryStore::open(&path).unwrap();
     assert_eq!(
         store
             .search_for_account(&admin.token, "Reason", 20, &RecallFilter::default())

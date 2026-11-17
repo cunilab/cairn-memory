@@ -442,6 +442,19 @@ fn build_tools() -> Vec<Tool> {
             object_schema(&[("memoryId", string_schema())], &["memoryId"]),
         ),
         spec(
+            "memory_feedback",
+            "Mark a visible memory helpful or stale. One vote per person; repeating replaces it. Project votes change ranking for every member, global votes for every user, and personal votes are owner-only.",
+            Post,
+            "/feedback",
+            object_schema(
+                &[
+                    ("memoryId", string_schema()),
+                    ("vote", json!({"type":"string","enum":["helpful","stale"]})),
+                ],
+                &["memoryId", "vote"],
+            ),
+        ),
+        spec(
             "memory_project_memories",
             "List live project memories.",
             Get,

@@ -18,6 +18,7 @@ mod ownership;
 mod privacy;
 mod projects;
 mod recall;
+mod retention;
 mod sessions;
 mod sharing;
 mod store;
@@ -68,3 +69,9 @@ pub use embeddings::{
     embedding_fingerprint, embedding_text, validate_vector,
 };
 pub use hybrid::{SEMANTIC_CANDIDATES, hybrid_rank};
+pub use retention::{
+    ACCESS_SATURATION, ACCESS_WEIGHT, AGE_HALF_LIFE_DAYS, AGE_WEIGHT, BELOW_THRESHOLD_FLOOR,
+    FEEDBACK_CAP, FEEDBACK_STEP, FeedbackVote, MemoryFeedback, RECENCY_HALF_LIFE_DAYS,
+    RECENCY_WEIGHT, RETENTION_THRESHOLD, SALIENCE_WEIGHT, apply_feedback, decays, feedback_factor,
+    ranking_multiplier, retention_factor, retention_score, sync_feedback_counts,
+};

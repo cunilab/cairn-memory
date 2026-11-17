@@ -818,7 +818,7 @@ fn failed_account_capture_persist_leaves_no_unowned_observation() -> Result<(), 
 
     store.end_session_for_account(&owner.token, "sess-commit")?;
     drop(store);
-    let reopened = MemoryStore::open(&path)?;
+    let mut reopened = MemoryStore::open(&path)?;
     assert_eq!(
         reopened
             .observations()

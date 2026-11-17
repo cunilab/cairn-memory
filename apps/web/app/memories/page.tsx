@@ -9,6 +9,7 @@ import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
+import { MemoryFeedback } from "@/components/memory-feedback";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
 import type { ProjectMemory } from "@/lib/types";
@@ -52,7 +53,10 @@ export default function MemoriesPage() {
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent className="overflow-y-auto">
         <SheetHeader><SheetTitle>{detail?.title ?? "Memory"}</SheetTitle><SheetDescription>{detail ? scopeLabel[detail.scope] : "Memory fields"}</SheetDescription></SheetHeader>
-        <div className="space-y-4 p-4">{detail ? Object.entries(detail).map(([field, value]) => <div key={field}>
+        <div className="space-y-4 p-4">{detail ? <MemoryFeedback memory={detail} onUpdated={(updated) => {
+          setDetail(updated);
+          setMemories((rows) => rows.map((row) => row.memory_id === updated.memory_id ? updated : row));
+        }} /> : null}{detail ? Object.entries(detail).map(([field, value]) => <div key={field}>
           <p className="text-xs font-medium text-muted-foreground">{field.replaceAll("_", " ")}</p>
           <p className="whitespace-pre-wrap break-words text-sm">{typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : String(value ?? "—")}</p>
         </div>) : null}</div>

@@ -376,7 +376,7 @@ fn forget_suppresses_derived_memory_after_restart() -> Result<(), StoreError> {
         assert!(store.search("private debugging note", 5)?.is_empty());
     }
 
-    let store = MemoryStore::open(&path)?;
+    let mut store = MemoryStore::open(&path)?;
     assert!(store.search("private debugging note", 5)?.is_empty());
 
     fs::remove_file(path)?;
@@ -454,7 +454,7 @@ fn older_store_records_receive_default_lifecycle_values() -> Result<(), StoreErr
         "forgotten_ids": []
     });
     fs::write(&path, serde_json::to_string(&legacy)?)?;
-    let store = MemoryStore::open(&path)?;
+    let mut store = MemoryStore::open(&path)?;
     let results = store.search("legacy", 5)?;
     assert_eq!(results[0].lifecycle, Lifecycle::default());
     fs::remove_file(path)?;
@@ -477,7 +477,7 @@ fn opening_a_store_sweeps_expired_records_into_tombstones() -> Result<(), StoreE
     )?;
     drop(store);
 
-    let reopened = MemoryStore::open(&path)?;
+    let mut reopened = MemoryStore::open(&path)?;
     assert!(reopened.search("already expired", 5)?.is_empty());
     assert!(
         reopened

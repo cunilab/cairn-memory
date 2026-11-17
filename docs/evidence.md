@@ -296,3 +296,33 @@ and the hook lifecycle adapter. The [hook contract](contracts/hook-v1.md#verifie
 records per-agent official documentation and capabilities. All four stage 4
 checklist items (3, 8, 9, 10) are implemented with the documented OpenCode
 instruction-file fallback. No retention, feedback or new LLM behavior is claimed.
+
+## v0.1.4 stage 5 — retention and feedback
+
+Verified on 2026-11-17 on macOS, branch `v0.1.4`. No live Cairn server was
+contacted. Verification shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN` and
+`CAIRN_OUTBOX`. PostgreSQL used a disposable `pgvector/pgvector:pg17` container
+on the Colima socket with a scratch Docker config, one database per ignored
+test, then the container was removed.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings`: passed.
+- `cargo test --workspace --offline`: 196 passed, 0 failed, 35 ignored.
+- `scripts/ci_postgres_tests.sh`: 35 passed, 0 failed, including
+  `postgres_retention_and_feedback_match_the_file_store` and both real-model
+  semantic tests. Scratch databases were dropped with the container.
+- `scripts/smoke_hook_auth.py`: 29 passed.
+- `scripts/smoke_hook_offline.py`: 23 passed.
+- `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh` and
+  `scripts/validate_phase0.py`: passed.
+- Web `typecheck`, `lint`, `build` and `scripts/smoke_web.sh`: passed.
+
+The approved multipliers live in `crates/core/src/retention.rs` and the
+[continuity contract](contracts/continuity-v1.md#hybrid-recall-v014). A score
+below 0.45 lowers rank only. Captures, session summaries and handoffs decay.
+Rules, decisions, gotchas, procedures, facts, preferences, explicit saves,
+lessons and corrections stay at factor 1. One helpful or stale vote per person
+is shared for project and global memories and owner-only for personal memory.
+Returned search, context and why-changed hits reinforce access stats. The
+separate temporary-observation expiry sweep is unchanged.

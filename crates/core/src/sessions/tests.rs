@@ -120,7 +120,7 @@ fn reopening_store_preserves_session_memory() -> Result<(), StoreError> {
         store.end_session("sess-auth-001")?;
     }
 
-    let store = MemoryStore::open(&path)?;
+    let mut store = MemoryStore::open(&path)?;
     let results = store.search("restart persistence", 5)?;
     assert_eq!(results.len(), 2, "session note and linked handoff");
     assert!(

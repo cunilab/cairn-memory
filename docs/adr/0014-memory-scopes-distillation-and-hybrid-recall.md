@@ -17,7 +17,7 @@ capture hygiene. Cairn's current split into project, personal-per-repo and
 personal-global memory, plus an explicit promote step, makes members do manual
 work that the product direction (minimal human interaction) rejects.
 
-Items 0, 1, 2, 3, 5, 7, 8, 9 and 10 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
+Items 0 through 10 are implemented on the v0.1.4 branch. The scope and record changes supersede the scope, personal-memory and
 promotion parts of [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md)
 (decisions 1, 2 and 5 there, and the `source: personal | project` labelling in
 decision 7). The rest of ADR 0013 remains. Pre-release rules still apply: no
@@ -200,7 +200,21 @@ The authenticated brief route is shared by both adapters; deterministic section
 selection, field truncation and the 4096-byte data fence are defined by the
 [continuity contract](../contracts/continuity-v1.md#session-start-brief-v014).
 All agent scope/field guidance comes from one bounded instruction source. No
-LLM, retention score, feedback or new recall-ranking signal is added.
+LLM or new recall-ranking signal is added by stage 4.
+
+### Stage 5 contract decisions (2026-11-17)
+
+The owner approved the retention and feedback multipliers in the
+[continuity contract](../contracts/continuity-v1.md#hybrid-recall-v014). They
+multiply the stage-3 fused score before tiebreaks and truncation. A memory
+below the retention threshold ranks lower only. Rules, decisions, gotchas,
+procedures, facts, preferences and other purposeful saves (explicit, lesson,
+correction) do not decay. Captures, automatic session summaries and handoffs
+do. Helpful or stale feedback is one vote per person on any visible memory:
+project members affect every member, any authenticated user affects global
+ranking, and only the owner can vote on personal memory. Returned hits of
+search, context and why-changed reinforce access stats. Resume, unresolved,
+the session brief and list/get do not.
 
 ## Trust and limits
 
@@ -211,7 +225,7 @@ LLM, retention score, feedback or new recall-ranking signal is added.
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation, hybrid retrieval and capture hygiene are implemented. No recall-quality benchmark, retention score or feedback is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score and feedback are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions) and [stage 5](../evidence.md#v014-stage-5--retention-and-feedback) checks.
 
 ## Implementation checklist
 
@@ -219,9 +233,9 @@ LLM, retention score, feedback or new recall-ranking signal is added.
 - [x] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
 - [x] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
 - [x] 3. Bounded, data-fenced session-start brief from the hook.
-- [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
+- [x] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
 - [x] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
-- [ ] 6. Helpful/stale feedback affecting shared ranking.
+- [x] 6. Helpful/stale feedback affecting shared ranking.
 - [x] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
 - [x] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
 - [x] 9. Start / first-work / end hooks with token bounds.
@@ -259,3 +273,10 @@ both server `/session/brief` handlers and shared HTTP visibility scenarios;
 JSONC/preservation tests; `crates/client/src/agents.rs`, setup integration tests,
 and the shared instruction text used by MCP/hooks/OpenCode. See the
 [stage 4 check record](../evidence.md#v014-stage-4--session-brief-and-agent-instructions).
+
+Stage 5 implementation evidence: `crates/core/src/retention.rs` and sibling
+tests; ranking in `crates/core/src/recall.rs` and
+`crates/storage/src/embeddings.rs`; migration `0015_retention_feedback.sql`;
+feedback on both HTTP adapters, the MCP/CLI tool table, and the web memory
+sheets. See the
+[stage 5 check record](../evidence.md#v014-stage-5--retention-and-feedback).

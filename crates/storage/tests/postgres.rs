@@ -2840,7 +2840,7 @@ async fn postgres_equal_scores_rank_decisions_before_other_memories() {
                 Vec::new(),
                 WorkContext::default(),
                 Default::default(),
-                kind.clone(),
+                kind,
             )
             .await
             .expect("remember");
@@ -3561,4 +3561,235 @@ async fn postgres_hybrid_entities_links_vectors_and_visibility() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_retention_and_feedback_match_the_file_store() {
+    let database_url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&database_url).await.unwrap();
+    let owner = store
+        .bootstrap_account("retain@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("retain-other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let capture = |title: &str, kind: &str| {
+        serde_json::json!({
+            "scope": "personal",
+            "kind": kind,
+            "title": title,
+            "summary": title,
+            "reason": "verified"
+        })
+    };
+    let fresh = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let old = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let pool = PgPool::connect(&database_url).await.unwrap();
+    let aged = (cairn_core::now_seconds() - 120 * 86_400) as f64;
+    sqlx::query("UPDATE cairn_memories SET created_at = to_timestamp($1), lifecycle = jsonb_set(lifecycle, '{importance}', '50'::jsonb) WHERE memory_id = $2")
+        .bind(aged)
+        .bind(&old.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = store.memories(&owner.token).await.unwrap().len();
+    let hits = store
+        .search(&owner.token, "decaytoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(store.memories(&owner.token).await.unwrap().len(), before);
+    assert_eq!(hits.len(), 2);
+    let fresh_hit = hits
+        .iter()
+        .find(|hit| hit.memory_id == fresh.memory_id)
+        .unwrap();
+    let old_hit = hits
+        .iter()
+        .find(|hit| hit.memory_id == old.memory_id)
+        .unwrap();
+    assert!(fresh_hit.score > old_hit.score);
+    let limited = store
+        .search(&owner.token, "decaytoken", 1, &RecallFilter::default())
+        .await
+        .unwrap();
+    let counts = store.memories(&owner.token).await.unwrap();
+    let top = counts
+        .iter()
+        .find(|memory| memory.memory_id == limited[0].memory_id)
+        .unwrap();
+    let rest = counts
+        .iter()
+        .find(|memory| {
+            memory.memory_id != limited[0].memory_id
+                && (memory.memory_id == fresh.memory_id || memory.memory_id == old.memory_id)
+        })
+        .unwrap();
+    assert_eq!(top.access_count, 2);
+    assert_eq!(rest.access_count, 1);
+    let pack = store
+        .context(&owner.token, "decaytoken", 1, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(pack.omitted_count, 1);
+    let omitted_id = &pack.omitted_memory_ids[0];
+    let expected = counts
+        .iter()
+        .find(|memory| &memory.memory_id == omitted_id)
+        .unwrap()
+        .access_count;
+    assert_eq!(
+        counts_after(&store, &owner.token, omitted_id).await,
+        expected
+    );
+
+    let personal = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("privatepref", "preference")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let refused = store
+        .feedback(&other.token, &personal.memory_id, "stale")
+        .await
+        .expect_err("owner only");
+    assert!(refused.to_string().contains("unknown memory"));
+    let project = store
+        .register_project(&owner.token, "retain-repo", "Retain", None)
+        .await
+        .unwrap();
+    let shared = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "project",
+                "kind": "fact",
+                "title": "sharedtoken",
+                "summary": "sharedtoken",
+                "reason": "verified",
+                "statement": "holds",
+                "context": {"project_id": project.project_id}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .feedback(&other.token, &shared.memory_id, "helpful")
+            .await
+            .is_err()
+    );
+    join_project(&store, &other, &project.project_id).await;
+    let voted = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(voted.helpful_count, 1);
+    let owner_view = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(owner_view.len(), 1);
+    let global = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "global",
+                "kind": "fact",
+                "title": "globaltoken",
+                "summary": "globaltoken",
+                "reason": "verified",
+                "statement": "holds"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let global_vote = store
+        .feedback(&other.token, &global.memory_id, "stale")
+        .await
+        .unwrap();
+    assert_eq!(global_vote.stale_count, 1);
+    assert!(
+        store
+            .feedback(&owner.token, &global.memory_id, "maybe")
+            .await
+            .is_err()
+    );
+    let rule = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "rule",
+                "title": "ruletoken shared",
+                "summary": "ruletoken shared",
+                "reason": "verified",
+                "rule": "keep"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rule_fresh = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "rule",
+                "title": "ruletoken shared",
+                "summary": "ruletoken shared",
+                "reason": "verified",
+                "rule": "keep"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_memories SET created_at = to_timestamp($1) WHERE memory_id = $2")
+        .bind((cairn_core::now_seconds() - 400 * 86_400) as f64)
+        .bind(&rule.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rules = store
+        .search(&owner.token, "ruletoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    let high = rules.iter().map(|hit| hit.score).fold(0.0_f32, f32::max);
+    let low = rules.iter().map(|hit| hit.score).fold(f32::MAX, f32::min);
+    assert!(high / low < 1.2, "{high} / {low}");
+    assert!(
+        rules
+            .iter()
+            .any(|hit| hit.memory_id == rule_fresh.memory_id)
+    );
+    pool.close().await;
+}
+
+async fn counts_after(store: &PostgresStore, token: &str, memory_id: &str) -> u64 {
+    store
+        .memories(token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == memory_id)
+        .unwrap()
+        .access_count
 }

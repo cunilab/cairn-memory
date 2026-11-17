@@ -1,8 +1,9 @@
 use crate::hybrid::tokenize;
 use crate::lifecycle::{Lifecycle, MemoryKind, MemoryScope, is_expired};
 use crate::memories::Memory;
+use crate::retention::ranking_multiplier;
 use crate::store::MemoryStore;
-use crate::types::{StoreError, WorkContext};
+use crate::types::{StoreError, WorkContext, now_seconds};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -74,12 +75,12 @@ pub struct RecallFilter {
 }
 
 impl MemoryStore {
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<RecallResult>, StoreError> {
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Vec<RecallResult>, StoreError> {
         self.search_with_filter(query, limit, &RecallFilter::default())
     }
 
     pub fn search_with_filter(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
@@ -89,10 +90,48 @@ impl MemoryStore {
 
     /// Server semantic channel; a missing vector keeps lexical/entity/link retrieval.
     pub fn search_with_vector(
-        &self,
+        &mut self,
         token: Option<&str>,
         query: &str,
         limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<Vec<RecallResult>, StoreError> {
+        let mut results = self.rank(token, query, filter, vector)?;
+        results.truncate(limit);
+        self.record_recall(&results);
+        Ok(results)
+    }
+
+    pub fn context(&mut self, query: &str, limit: usize) -> Result<ContextPack, StoreError> {
+        self.context_with_filter(query, limit, &RecallFilter::default())
+    }
+
+    pub fn context_with_filter(
+        &mut self,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+    ) -> Result<ContextPack, StoreError> {
+        self.context_with_vector(None, query, limit, filter, None)
+    }
+
+    pub fn context_with_vector(
+        &mut self,
+        token: Option<&str>,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<ContextPack, StoreError> {
+        let results = self.rank(token, query, filter, vector)?;
+        self.pack_reinforced(query.to_owned(), results, limit)
+    }
+
+    fn rank(
+        &self,
+        token: Option<&str>,
+        query: &str,
         filter: &RecallFilter,
         vector: Option<&[f32]>,
     ) -> Result<Vec<RecallResult>, StoreError> {
@@ -120,12 +159,14 @@ impl MemoryStore {
             .iter()
             .map(|m| (m.memory_id.as_str(), m))
             .collect::<HashMap<_, _>>();
+        let now = now_seconds();
         let mut results = ranked
             .into_iter()
             .map(|(id, score)| {
+                let memory = by_id[id.as_str()];
                 recall_result(
-                    by_id[id.as_str()],
-                    score,
+                    memory,
+                    score * ranking_multiplier(memory, now),
                     &memories,
                     &self.state.forgotten_ids,
                     filter,
@@ -134,22 +175,18 @@ impl MemoryStore {
             .collect::<Vec<_>>();
         prefer_decision(&mut results, &memories);
         prefer_newer_contradiction(&mut results, &memories);
-        results.truncate(limit);
         Ok(results)
     }
 
-    pub fn context(&self, query: &str, limit: usize) -> Result<ContextPack, StoreError> {
-        self.context_with_filter(query, limit, &RecallFilter::default())
-    }
-
-    pub fn context_with_filter(
-        &self,
-        query: &str,
+    fn pack_reinforced(
+        &mut self,
+        query: String,
+        mut results: Vec<RecallResult>,
         limit: usize,
-        filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_with_filter(query, usize::MAX, filter)?;
-        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+        let pack = build_context_pack(query, &mut results, limit);
+        self.record_recall(&pack.results);
+        Ok(pack)
     }
 
     fn retain_account_recall(&self, person_id: &str, results: &mut Vec<RecallResult>) {
@@ -196,7 +233,7 @@ impl MemoryStore {
     }
 
     pub fn search_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
@@ -206,14 +243,13 @@ impl MemoryStore {
     }
 
     pub fn context_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
-        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+        self.context_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn resume_for_account(
@@ -249,31 +285,13 @@ impl MemoryStore {
     }
 
     pub fn why_changed_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
-        results.sort_by(|left, right| {
-            right
-                .decision_reason
-                .is_some()
-                .cmp(&left.decision_reason.is_some())
-                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
-                .then_with(|| {
-                    right
-                        .score
-                        .partial_cmp(&left.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        Ok(build_context_pack(
-            format!("why changed: {query}"),
-            &mut results,
-            limit,
-        ))
+        self.why_changed_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn resume_context(
@@ -338,30 +356,25 @@ impl MemoryStore {
     }
 
     pub fn why_changed_context(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_with_filter(query, usize::MAX, filter)?;
-        results.sort_by(|left, right| {
-            right
-                .decision_reason
-                .is_some()
-                .cmp(&left.decision_reason.is_some())
-                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
-                .then_with(|| {
-                    right
-                        .score
-                        .partial_cmp(&left.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        Ok(build_context_pack(
-            format!("why changed: {query}"),
-            &mut results,
-            limit,
-        ))
+        self.why_changed_with_vector(None, query, limit, filter, None)
+    }
+
+    pub fn why_changed_with_vector(
+        &mut self,
+        token: Option<&str>,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<ContextPack, StoreError> {
+        let mut results = self.rank(token, query, filter, vector)?;
+        order_why_changed(&mut results);
+        self.pack_reinforced(format!("why changed: {query}"), results, limit)
     }
 
     pub(crate) fn memory_is_forgotten(&self, memory: &Memory) -> bool {
@@ -437,6 +450,22 @@ fn decision_ids(memories: &[Memory]) -> HashSet<&str> {
         .filter(|memory| memory.kind == MemoryKind::Decision)
         .map(|memory| memory.memory_id.as_str())
         .collect()
+}
+
+fn order_why_changed(results: &mut [RecallResult]) {
+    results.sort_by(|left, right| {
+        right
+            .decision_reason
+            .is_some()
+            .cmp(&left.decision_reason.is_some())
+            .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
+            .then_with(|| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
 }
 
 /// Among results with equal scores, a decision (project decision) ranks before any other

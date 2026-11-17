@@ -43,6 +43,7 @@ const SESSION_PENDING_MIGRATION: &str =
     include_str!("../../../migrations/0012_session_summary_pending.sql");
 const ADMIN_ROLE_MIGRATION: &str = include_str!("../../../migrations/0013_admin_role.sql");
 const EMBEDDING_MIGRATION: &str = include_str!("../../../migrations/0014_hybrid_embeddings.sql");
+const RETENTION_MIGRATION: &str = include_str!("../../../migrations/0015_retention_feedback.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 /// A session whose newest retained observation is older than this is finished on the next
 /// capture or session start of the same person.
@@ -162,6 +163,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(EMBEDDING_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(RETENTION_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1171,6 +1175,47 @@ impl PostgresStore {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn feedback(
+        &self,
+        token: &str,
+        memory_id: &str,
+        vote: &str,
+    ) -> Result<Memory, PostgresError> {
+        let vote = cairn_core::FeedbackVote::parse(vote)?;
+        let account = self.authenticate_account(token).await?;
+        let mut tx = self.pool.begin().await?;
+        let query = format!(
+            "{} WHERE m.memory_id = $2 AND {}",
+            memory_select_sql(),
+            recall_access_sql()
+        );
+        let row = sqlx::query(&query)
+            .bind(&account.person_id)
+            .bind(memory_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            return Err(PostgresError::Validation(format!(
+                "unknown memory: {memory_id}"
+            )));
+        };
+        let mut memory = memory_from_row(&row)?;
+        cairn_core::apply_feedback(&mut memory, &account.person_id, vote);
+        sqlx::query(
+            "UPDATE cairn_memories
+             SET feedback = $1, helpful_count = $2, stale_count = $3
+             WHERE memory_id = $4",
+        )
+        .bind(Json(&memory.feedback))
+        .bind(i32::try_from(memory.helpful_count).unwrap_or(i32::MAX))
+        .bind(i32::try_from(memory.stale_count).unwrap_or(i32::MAX))
+        .bind(memory_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(memory)
     }
 
     pub async fn search(
@@ -3427,9 +3472,12 @@ async fn insert_memory(
         "INSERT INTO cairn_memories
             (memory_id, person_id, session_id, content, source_event_ids, context,
              lifecycle, kind, scope, project_id, next_steps, unresolved_work,
-             supersedes, promoted_from, promotion_reason, verified_commit, created_at, published_by, changed_by, changed_at, record)
+             supersedes, promoted_from, promotion_reason, verified_commit, created_at,
+             published_by, changed_by, changed_at, record, access_count, last_accessed_at,
+             helpful_count, stale_count, feedback)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                  to_timestamp($17::double precision), $18, $19, $20, $21)",
+                  to_timestamp($17::double precision), $18, $19, $20, $21, $22,
+                  to_timestamp($23::double precision), $24, $25, $26)",
     )
     .bind(&memory.memory_id)
     .bind(person_id)
@@ -3457,6 +3505,16 @@ async fn insert_memory(
     .bind(&memory.changed_by)
     .bind(&memory.changed_at)
     .bind(Json(&memory.fields))
+    .bind(i64::try_from(memory.access_count).unwrap_or(i64::MAX))
+    .bind(
+        memory
+            .last_accessed_at
+            .as_deref()
+            .and_then(|stamp| stamp.parse::<f64>().ok()),
+    )
+    .bind(i32::try_from(memory.helpful_count).unwrap_or(i32::MAX))
+    .bind(i32::try_from(memory.stale_count).unwrap_or(i32::MAX))
+    .bind(Json(&memory.feedback))
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -3771,7 +3829,11 @@ fn memory_select_sql() -> &'static str {
             m.project_id, m.next_steps, m.unresolved_work, m.supersedes,
             m.promoted_from, m.promotion_reason,
             m.verified_commit, m.published_by, m.changed_by, m.changed_at,
-            EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at
+            EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at,
+            m.access_count,
+            CASE WHEN m.last_accessed_at IS NULL THEN NULL
+                 ELSE EXTRACT(EPOCH FROM m.last_accessed_at)::bigint::text END AS last_accessed_at,
+            m.helpful_count, m.stale_count, m.feedback
      FROM cairn_memories m"
 }
 
@@ -3808,7 +3870,7 @@ fn observation_select_sql() -> &'static str {
 }
 
 fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
-    Ok(Memory {
+    let mut memory = Memory {
         fields: row
             .try_get::<Json<cairn_core::MemoryFields>, _>("record")?
             .0,
@@ -3831,7 +3893,16 @@ fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
         changed_by: row.try_get("changed_by")?,
         changed_at: row.try_get("changed_at")?,
         created_at: row.try_get("created_at")?,
-    })
+        access_count: u64::try_from(row.try_get::<i64, _>("access_count")?).unwrap_or(0),
+        last_accessed_at: row.try_get("last_accessed_at")?,
+        helpful_count: 0,
+        stale_count: 0,
+        feedback: row
+            .try_get::<Json<Vec<cairn_core::MemoryFeedback>>, _>("feedback")?
+            .0,
+    };
+    cairn_core::sync_feedback_counts(&mut memory);
+    Ok(memory)
 }
 
 fn import_conflict(kind: &str, id: &str) -> PostgresError {

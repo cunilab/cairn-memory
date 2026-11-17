@@ -1,7 +1,7 @@
 use super::*;
 use cairn_core::{
     EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_VERSION, MemoryEmbedding, hybrid_rank,
-    validate_vector,
+    now_seconds, ranking_multiplier, validate_vector,
 };
 
 const SOURCE_REVISION: &str = "encode(sha256(convert_to(jsonb_build_array(m.content,m.record,m.context)::text,'UTF8')),'hex')";
@@ -70,6 +70,7 @@ impl PostgresStore {
     ) -> Result<Vec<RecallResult>, PostgresError> {
         let mut results = self.hybrid_matches(token, query, filter, vector).await?;
         results.truncate(limit.min(MAX_SEARCH_RESULTS as usize));
+        self.record_recall(&results).await?;
         Ok(results)
     }
 
@@ -94,7 +95,7 @@ impl PostgresStore {
         }
         let total = results.len();
         results.truncate(MAX_SEARCH_RESULTS as usize);
-        Ok(pack_window(
+        let pack = pack_window(
             if why {
                 format!("why changed: {query}")
             } else {
@@ -103,7 +104,9 @@ impl PostgresStore {
             &mut results,
             limit,
             total,
-        ))
+        );
+        self.record_recall(&pack.results).await?;
+        Ok(pack)
     }
 
     pub(super) async fn hybrid_matches(
@@ -154,12 +157,14 @@ impl PostgresStore {
             .iter()
             .map(|m| (m.memory_id.as_str(), m))
             .collect::<HashMap<_, _>>();
+        let now = now_seconds();
         let mut results = ranked
             .into_iter()
             .map(|(id, score)| {
+                let memory = by_id[id.as_str()];
                 recall_result(
-                    by_id[id.as_str()],
-                    score,
+                    memory,
+                    score * ranking_multiplier(memory, now),
                     &memories,
                     &HashSet::new(),
                     filter,
@@ -169,5 +174,26 @@ impl PostgresStore {
         cairn_core::prefer_decision(&mut results, &memories);
         prefer_newer_contradiction(&mut results, &memories);
         Ok(results)
+    }
+
+    async fn record_recall(&self, results: &[RecallResult]) -> Result<(), PostgresError> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        let ids = results
+            .iter()
+            .map(|result| result.memory_id.clone())
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "UPDATE cairn_memories
+             SET access_count = access_count + 1,
+                 last_accessed_at = to_timestamp($2::double precision)
+             WHERE memory_id = ANY($1)",
+        )
+        .bind(&ids)
+        .bind(now_seconds() as f64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
