@@ -622,3 +622,105 @@ async fn postgres_http_session_distillation() {
     ))
     .await;
 }
+
+async fn brief_scenario(router: Router) {
+    let pw = "correct horse battery staple";
+    let admin = ok(
+        &router,
+        "POST",
+        "auth/bootstrap",
+        json!({"email":"brief-admin@example.test","password":pw}),
+        None,
+    )
+    .await;
+    let token = admin["token"].as_str().unwrap();
+    let other = ok(
+        &router,
+        "POST",
+        "auth/register",
+        json!({"email":"brief-other@example.test","password":pw}),
+        Some(token),
+    )
+    .await;
+    let other = other["token"].as_str().unwrap();
+    let project = ok(
+        &router,
+        "POST",
+        "projects/init",
+        json!({"repository":"brief-repo","name":"Brief"}),
+        Some(token),
+    )
+    .await;
+    let id = project["project_id"].as_str().unwrap();
+    let context = json!({"project_id":id,"repository":"brief-repo","branch":"feature"});
+    let device = ok(
+        &router,
+        "POST",
+        "devices/register",
+        json!({"name":"brief"}),
+        Some(token),
+    )
+    .await;
+    let device = device["token"].as_str().unwrap();
+    for (title, scope, kind, owner) in [
+        ("personal-visible", "personal", "preference", token),
+        ("private-hidden", "personal", "preference", other),
+        ("project-visible", "project", "rule", token),
+        ("global-visible", "global", "fact", other),
+    ] {
+        ok(&router, "POST", "remember", json!({"title":title,"summary":title,"reason":"evidence","scope":scope,"kind":kind,"context":context}), Some(owner)).await;
+    }
+    let (status, _) = request(
+        &router,
+        "POST",
+        "session/brief",
+        json!({"context":context}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+    let reply = ok(
+        &router,
+        "POST",
+        "session/brief",
+        json!({"context":context}),
+        Some(device),
+    )
+    .await;
+    let text = reply["brief"].as_str().unwrap();
+    assert!(text.len() <= reply["max_bytes"].as_u64().unwrap() as usize);
+    for title in ["personal-visible", "project-visible", "global-visible"] {
+        assert!(text.contains(title), "{text}");
+    }
+    assert!(!text.contains("private-hidden"));
+    let reply = ok(
+        &router,
+        "POST",
+        "session/brief",
+        json!({"context":context}),
+        Some(other),
+    )
+    .await;
+    let text = reply["brief"].as_str().unwrap();
+    assert!(!text.contains("project-visible"));
+    assert!(!text.contains("personal-visible"));
+    assert!(text.contains("global-visible"));
+}
+
+#[tokio::test]
+async fn file_http_session_brief() {
+    let path = std::env::temp_dir().join(format!("cairn-brief-http-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    brief_scenario(app(AppState::open(&path).unwrap())).await;
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_http_session_brief() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    brief_scenario(postgres_app(
+        cairn_storage::PostgresStore::connect(&url).await.unwrap(),
+    ))
+    .await;
+}

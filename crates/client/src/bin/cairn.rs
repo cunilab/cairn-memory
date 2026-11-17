@@ -119,7 +119,7 @@ const CONTEXT_KEYS: [&str; 4] = ["repository", "branch", "worktree", "commit"];
 fn print_usage() {
     println!(
         "Usage:\n\
-  cairn setup <server-url>      (reads the device token from stdin)\n\
+  cairn setup <server-url> [--agent claude|codex|opencode] [--remove]\n\
   cairn init [name]             (create or join; write .cairn/project.json)\n\
   cairn init --rename <name>    (owner only; update server and project file)\n\
   cairn mcp\n\
@@ -174,7 +174,9 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     for (index, value) in args.iter().enumerate() {
         let allowed = (index == 0 && value == "--version")
             || (index == 1 && args[0] == "update" && value == "--check")
-            || (index == 1 && args[0] == "init" && value == "--rename");
+            || (index == 1 && args[0] == "init" && value == "--rename")
+            || (args[0] == "setup"
+                && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
         if value.starts_with('-') && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -234,13 +236,39 @@ fn main() {
 }
 
 fn setup(args: &[String]) -> Result<(), Error> {
-    let [url] = args else { usage() };
+    let (url, agent, remove) = match args {
+        [url] => (url, None, false),
+        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), false),
+        [url, flag, agent, remove] if flag == "--agent" && remove == "--remove" => {
+            (url, Some(agent.as_str()), true)
+        }
+        _ => usage(),
+    };
+    if agent.is_some_and(|a| !cairn_client::agents::AGENTS.contains(&a)) {
+        return Err(Error::Input(
+            "agent must be claude, codex or opencode".into(),
+        ));
+    }
+    if remove {
+        println!(
+            "{}",
+            cairn_client::agents::configure(agent.expect("remove has an agent"), true)?
+        );
+        return Ok(());
+    }
     let config = Config::new(url, &read_token()?)?;
     let path = config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
-    // The hook scripts come from the release matching this binary; being offline (or running a
-    // build with no release) must not undo a good setup.
+    if let Some(agent) = agent {
+        println!("{}", update::install_bundled_hooks()?);
+        println!("{}", cairn_client::agents::configure(agent, false)?);
+        if agent == "codex" {
+            println!("Review and trust the installed hooks with /hooks in Codex before they run.");
+        }
+        return Ok(());
+    }
+    // Offline URL-only setup still retains its valid credentials.
     match update::install_hooks() {
         Ok(message) => println!("{message}"),
         Err(error) => eprintln!(

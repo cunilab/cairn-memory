@@ -181,7 +181,7 @@ impl McpServer {
                 "name": "cairn-memory",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Cairn manages bounded personal memory with evidence-backed recall."
+            "instructions": crate::agents::INSTRUCTIONS
         });
         rpc_result(id, result)
     }

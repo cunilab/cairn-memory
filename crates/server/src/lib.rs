@@ -561,6 +561,7 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/context", post(context))
         .route("/cairn-memory/recall", post(context))
         .route("/cairn-memory/resume", post(resume))
+        .route("/cairn-memory/session/brief", post(brief))
         .route("/cairn-memory/unresolved", post(unresolved))
         .route("/cairn-memory/forget", post(forget))
         .route("/cairn-memory/delete", post(delete_memory))
@@ -690,6 +691,7 @@ pub fn postgres_app_with_embeddings(
         .route("/cairn-memory/context", post(postgres_context))
         .route("/cairn-memory/recall", post(postgres_context))
         .route("/cairn-memory/resume", post(postgres_resume))
+        .route("/cairn-memory/session/brief", post(postgres_brief))
         .route("/cairn-memory/unresolved", post(postgres_unresolved))
         .route("/cairn-memory/why-changed", post(postgres_why_changed))
         .route("/cairn-memory/remember", post(postgres_remember))
@@ -1286,6 +1288,17 @@ async fn postgres_context(
                 false,
             )
             .await?,
+    ))
+}
+
+async fn postgres_brief(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<ContinuityRequest>,
+) -> Result<Json<serde_json::Value>, PostgresApiError> {
+    let memories = state.store.memories(postgres_token(&headers)?).await?;
+    Ok(Json(
+        serde_json::json!({"brief": cairn_core::session_brief(&memories, &request.context.unwrap_or_default()), "max_bytes": cairn_core::SESSION_BRIEF_MAX_BYTES}),
     ))
 }
 
@@ -2171,6 +2184,21 @@ async fn context(
         &mut results,
         request.limit,
     )))
+}
+
+/// The same selection and data fence serve every agent and both storage adapters.
+async fn brief(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ContinuityRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = state.store.lock().await;
+    let memories = store
+        .memories_for_account(auth_token(&headers)?)
+        .map_err(account_api_error)?;
+    Ok(Json(
+        serde_json::json!({"brief": cairn_core::session_brief(&memories, &request.context.unwrap_or_default()), "max_bytes": cairn_core::SESSION_BRIEF_MAX_BYTES}),
+    ))
 }
 
 async fn resume(

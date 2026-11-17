@@ -1,6 +1,6 @@
 # Capture Claude Code activity into Cairn
 
-`claude-code-hooks.json` wires four Claude Code hook events to
+`claude-code-hooks.json` wires five Claude Code hook events to
 `cairn_hook.py`. Field mapping and limits are in the
 [hook contract](../docs/contracts/hook-v1.md#claude-code-hook-input).
 
@@ -8,8 +8,15 @@
 | --- | --- |
 | `UserPromptSubmit` | role `user`, the prompt |
 | `PostToolUse` (`Bash`, `Edit`, `Write`, `MultiEdit`) | role `tool`, tool name, input, and output (cut to 16000 characters) |
-| `Stop` | role `assistant`, the final reply of the turn |
-| `SessionEnd` | role `tool`, the session end input |
+| `SessionStart` | short Cairn note plus bounded server brief |
+| `Stop` | asks to save only after new work, with a recursion guard; assistant capture stays opt-in |
+| `SessionEnd` | best-effort rule-based session distillation |
+
+Automatic installation is `cairn setup <url> --agent claude` with the device
+token on stdin; it installs hooks plus MCP and preserves unrelated config.
+The manual example below is for a custom project-only integration. The
+[hook contract](../docs/contracts/hook-v1.md#verified-agent-capabilities) owns
+capabilities, official references, work tracking and bounds.
 
 ## Setup
 
@@ -18,7 +25,7 @@
    It is shown once. Use a device token, not an account or web session token.
    Install the `cairn` CLI from a [release](../docs/release.md) and run
    `cairn setup <server-url>` with the token on stdin. Besides the config it
-   installs `cairn_hook.py` and `cairn_outbox.py` into the `hook/` directory next to
+   installs `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` into the `hook/` directory next to
    `config.json` (`~/.config/cairn/hook/`, or under `$XDG_CONFIG_HOME` /
    `%APPDATA%`), checked against the release's `SHA256SUMS`. `cairn update`
    refreshes them. Setup only warns if it is offline; run `cairn update` later.
@@ -56,9 +63,7 @@
 
 ## Notes
 
-- The command ends in `>/dev/null` so the server reply is not added to the
-  model's context on `UserPromptSubmit`. Errors still reach stderr, and a
-  failing hook never blocks Claude Code (only exit code 2 blocks).
-- `PostToolUse` is limited to tools that change state or run commands. Reads
-  and searches are noisy and large; add them to the matcher if you want them.
-- `SessionStart` can be added the same way; it records only the start input.
+- Agent-mode commands keep capture acknowledgements off stdout; instruction
+  delivery requires the hook JSON to reach Claude, so leave stdout connected.
+- `PostToolUse` counts file edits and commands as work. Reads/searches do not.
+- Generic invocation without `--agent` remains the one-shot capture interface.

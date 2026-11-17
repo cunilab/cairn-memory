@@ -52,6 +52,7 @@ fn command(config_home: &Path) -> Command {
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("CAIRN_URL")
         .env_remove("CAIRN_DEVICE_TOKEN")
+        .env("CAIRN_NO_UPDATE_CHECK", "1")
         // `setup` fetches the hook scripts; keep tests off the network (refused at once).
         .env("CAIRN_UPDATE_URL", "http://127.0.0.1:1/releases/latest");
     command
@@ -805,4 +806,73 @@ fn help_and_flag_errors_never_make_a_request() {
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_setup_is_idempotent_removable_and_preserves_unrelated_config() {
+    for agent in ["claude", "codex", "opencode"] {
+        let home = temp_dir(&format!("agent-setup-{agent}"));
+        let config_home = home.join(".config");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["codex", "opencode"] {
+            let path = bin.join(name);
+            std::fs::write(&path, include_bytes!("fixtures/native_mcp.py")).unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let run = |remove: bool| {
+            let mut cmd = command(&config_home);
+            cmd.env("HOME", &home)
+                .env("PATH", &path)
+                .env("USERPROFILE", &home)
+                .env_remove("CODEX_HOME")
+                .env_remove("CLAUDE_CONFIG_DIR");
+            cmd.args(["setup", "https://unused.example.test", "--agent", agent]);
+            if remove {
+                cmd.arg("--remove");
+            }
+            let output = with_stdin(&mut cmd, "test-device");
+            assert!(
+                output.status.success(),
+                "{agent}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(false);
+        let files = match agent {
+            "claude" => vec![
+                home.join(".claude/settings.json"),
+                home.join(".claude.json"),
+            ],
+            "codex" => vec![
+                home.join(".codex/hooks.json"),
+                home.join(".codex/config.toml"),
+            ],
+            _ => vec![
+                config_home.join("opencode/AGENTS.md"),
+                config_home.join("opencode/opencode.json"),
+            ],
+        };
+        let first: Vec<_> = files.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        run(false);
+        for (file, expected) in files.iter().zip(&first) {
+            assert_eq!(&std::fs::read(file).unwrap(), expected);
+        }
+        run(true);
+        run(true);
+        for file in files {
+            let text = std::fs::read_to_string(file).unwrap();
+            assert!(!text.contains("--cairn-managed"));
+            assert!(!text.contains("CAIRN_SETUP_MANAGED"));
+            assert!(!text.contains("<!-- cairn:begin -->"));
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

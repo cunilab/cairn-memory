@@ -53,7 +53,7 @@ cairn update --check   # report only
 cairn update           # install the latest release and refresh the hook scripts
 ```
 
-`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` of the release that matches the installed binary into `hook/` beside the config file (see [examples](examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` of the release that matches the installed binary into `hook/` beside the config file (see [examples](examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
 
 ## Agent CLI and MCP
 
@@ -69,6 +69,25 @@ cargo run -p cairn-client --bin cairn -- context "signed cookie" 5
 cargo run -p cairn-client --bin cairn -- forget event-1
 cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
 ```
+
+For an installed agent, opt in to its hooks/instructions and MCP registration:
+
+```sh
+printf %s "<device-token>" | cairn setup https://cairn.example.test --agent claude
+printf %s "<device-token>" | cairn setup https://cairn.example.test --agent codex
+printf %s "<device-token>" | cairn setup https://cairn.example.test --agent opencode
+cairn setup https://cairn.example.test --agent codex --remove
+```
+
+Python 3 is required; Codex/OpenCode setup also needs that agent's installed CLI.
+Plain URL-only setup keeps its existing behavior. Repeating setup/removal preserves
+unrelated agent config; removal reads no token and keeps the Cairn credentials.
+Claude Code and Codex receive a short start note plus a bounded data-fenced brief,
+compact save instructions once after first work, and a guarded Stop request only
+after new work. In Codex, review/trust the hooks through `/hooks` before they run.
+OpenCode V2 gets a marked global `AGENTS.md` block and MCP registration, using its
+native CLI to preserve JSONC comments; this adapter has no automatic hook brief or
+Stop request. [Capabilities, official references and limits](docs/contracts/hook-v1.md#agent-instructions-and-setup-v014).
 
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 

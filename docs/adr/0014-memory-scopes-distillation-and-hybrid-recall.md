@@ -17,7 +17,7 @@ capture hygiene. Cairn's current split into project, personal-per-repo and
 personal-global memory, plus an explicit promote step, makes members do manual
 work that the product direction (minimal human interaction) rejects.
 
-Items 0, 1, 2, 5 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
+Items 0, 1, 2, 3, 5, 7, 8, 9 and 10 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
 promotion parts of [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md)
 (decisions 1, 2 and 5 there, and the `source: personal | project` labelling in
 decision 7). The rest of ADR 0013 remains. Pre-release rules still apply: no
@@ -149,8 +149,8 @@ Resume/unresolved and PostgreSQL omission/why-changed cap semantics remain.
 
 Decision 8.
 
-- Today setup installs hooks and MCP with only a one-line MCP instruction;
-  nothing tells the agent when or how to save.
+- Setup installs agent guidance alongside capture and MCP so agents know
+  when and how to save.
 - **Agents with hooks** (e.g. Claude Code SessionStart/PostToolUse/Stop):
   instructions are injected by hook.
   - Session start: a short note (1-2 lines: Cairn exists, use its memory tools).
@@ -158,7 +158,7 @@ Decision 8.
     compact instructions, once: three scopes, required fields, per-type
     fields, when to save.
   - Both injections are token-bounded.
-- **Agents without hooks** (e.g. OpenCode): the instructions go in the first
+- **Agents using instruction-file fallback** (e.g. this OpenCode adapter): the instructions go in the first
   file the agent reads (`AGENTS.md` or the agent's equivalent).
 - **Session end**: only if the session had real work (edited files or ran
   commands), the hook asks the agent to save what is worth remembering
@@ -174,6 +174,34 @@ Decision 8.
 The record shape is a storage and public-contract change; it lands with the
 checklist items below (pre-release, no data compatibility).
 
+### Stage 4 contract decisions (2026-11-17)
+
+The owner approved explicit `cairn setup <url> --agent claude|codex|opencode`
+and `--remove`, including MCP registration and only marked integration changes.
+URL-only setup retains its behavior. Explicit agent setup uses the matching
+binary's bundled scripts/instruction text; updates verify release assets as usual.
+
+Official Claude Code and Codex docs support start/post-tool context and Stop
+continuation; SessionEnd cannot prompt continuation. Therefore Stop asks after
+new work since the preceding ask, with `stop_hook_active` recursion suppression;
+SessionEnd retains rule-based distillation. OpenCode V2 has plugin hooks, but
+Cairn uses the approved global instruction-file fallback without a plugin or
+shell continuation protocol. No automatic brief/first-work/Stop injection is
+claimed for OpenCode. Exact capabilities and official citations live in the
+[hook contract](../contracts/hook-v1.md#verified-agent-capabilities).
+
+Native Codex/OpenCode MCP commands preserve TOML/JSONC configuration. Since the
+OpenCode CLI has no removal command, the owner approved a tested JSONC span
+scanner for ownership checks and deletion of only the Cairn-marked entry, with
+all unrelated bytes/comments preserved. Missing CLIs and unmarked name conflicts
+fail safely; no parser dependency or Python version increase is required.
+
+The authenticated brief route is shared by both adapters; deterministic section
+selection, field truncation and the 4096-byte data fence are defined by the
+[continuity contract](../contracts/continuity-v1.md#session-start-brief-v014).
+All agent scope/field guidance comes from one bounded instruction source. No
+LLM, retention score, feedback or new recall-ranking signal is added.
+
 ## Trust and limits
 
 - Project membership is by project ID (ADR 0013), so raw captures, not only
@@ -183,21 +211,21 @@ checklist items below (pre-release, no data compatibility).
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation, hybrid retrieval and capture hygiene are implemented. No recall-quality benchmark, retention score, feedback or instruction injection is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval and capture hygiene are implemented. No recall-quality benchmark, retention score or feedback is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
 
 ## Implementation checklist
 
 - [x] 0. Three scopes: scope parameter in MCP/CLI, per-repo personal scope and promote removed, captures in initialized repos go to project memory.
 - [x] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
 - [x] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
-- [ ] 3. Bounded, data-fenced session-start brief from the hook.
+- [x] 3. Bounded, data-fenced session-start brief from the hook.
 - [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
 - [x] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
 - [ ] 6. Helpful/stale feedback affecting shared ranking.
 - [x] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
-- [ ] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
-- [ ] 9. Start / first-work / end hooks with token bounds.
-- [ ] 10. Per-agent capability verification from official docs (hook events, context injection, continue request).
+- [x] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
+- [x] 9. Start / first-work / end hooks with token bounds.
+- [x] 10. Per-agent capability verification from official docs (hook events, context injection, continue request).
 
 ## Evidence
 
@@ -224,3 +252,10 @@ uses Debian trixie slim for ONNX's C/C++ runtime requirements. The CLI keeps
 static musl Linux releases; Linux server releases use GNU targets. See
 [release requirements](../release.md#014-upgrade-notes) and the recorded
 [checks and resource measurements](../evidence.md#v014-stage-3--hybrid-recall).
+
+Stage 4 implementation evidence: `crates/core/src/brief.rs` and sibling tests;
+both server `/session/brief` handlers and shared HTTP visibility scenarios;
+`scripts/cairn_hook.py`, hook lifecycle tests and `scripts/cairn_setup.py` with
+JSONC/preservation tests; `crates/client/src/agents.rs`, setup integration tests,
+and the shared instruction text used by MCP/hooks/OpenCode. See the
+[stage 4 check record](../evidence.md#v014-stage-4--session-brief-and-agent-instructions).

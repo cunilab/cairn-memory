@@ -161,3 +161,15 @@ The query tools `memory_recall`, `memory_context`, `memory_reflect`,
 - `scripts/smoke_mcp.sh`, `scripts/smoke_layer1.sh`, `scripts/smoke_layer4_cli.sh`,
   `scripts/smoke_layer5_cli.sh`, and `scripts/smoke_export.sh` drive the binaries against a
   spawned `cairn-server`.
+
+## Agent guidance (v0.1.4)
+
+MCP `initialize.instructions` returns the same compact text used by hook and
+instruction-file integration (`scripts/cairn_instructions.txt`, at most 2048
+UTF-8 bytes). It tells the agent when to recall/save, choose project/personal/global
+scope explicitly, supply title/summary/reason and fill known per-type fields and
+evidence. Save/lesson tool descriptions repeat their required fields and scope
+visibility; missing causal fields must never be invented. Tool schemas and REST
+validation still enforce required fields. This is agent guidance, not a
+server-side memory-writing LLM. Setup, removal, per-agent capabilities and limits
+are owned by [the hook contract](hook-v1.md#agent-instructions-and-setup-v014).

@@ -6,6 +6,7 @@
 //! layers; the server-authoritative PostgreSQL adapter remains later.
 
 mod accounts;
+mod brief;
 mod capture;
 mod devices;
 mod distillation;
@@ -31,6 +32,7 @@ pub use accounts::{
     WEB_ONLY_ERROR, hash_password, hash_token, normalize_email, random_token, validate_password,
     verify_password,
 };
+pub use brief::{SESSION_BRIEF_MAX_BYTES, session_brief};
 pub use capture::{CaptureResult, Observation, ObservationInput, normalize_observation};
 pub use devices::{DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, DeviceStatus};
 pub use distillation::distill_session_notes;

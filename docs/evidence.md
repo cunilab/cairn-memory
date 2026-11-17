@@ -244,3 +244,55 @@ independent helper review was run in this single-worker dispatch. No retention,
 feedback, brief injection, instruction lifecycle, external embedding API or
 recall-quality benchmark was added. Release-hook setup can still emit the
 existing 404 warning for unreleased 0.1.4 assets while the local MCP smoke passes.
+
+## v0.1.4 stage 4 — Session brief and agent instructions
+
+Verified on 2026-11-17 on macOS, branch `v0.1.4`, with isolated file stores,
+temporary agent homes and a scratch pgvector PostgreSQL 17 container. No live
+Cairn server or real agent configuration was used.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  passed.
+- `cargo check --workspace --locked`: passed.
+- `cargo test --workspace --locked`: 191 passed, 0 failed, 34 ignored. Ignored
+  tests ran separately below.
+- `scripts/ci_postgres_tests.sh`: 34 passed, 0 failed, one fresh database per
+  test; includes both adapters' real-model tests and the new authenticated brief
+  visibility scenario. Used the requested Colima socket, scratch Docker config
+  and pinned MiniLM artifacts. Zero `cairn_ci_*` databases remained before the
+  auto-remove container was stopped.
+- Python hook-auth: 29 passed; offline capture/outbox: 23 and 32 passed.
+- `scripts/test_agent_hooks.py`: 7 passed. Covers short start plus brief, full
+  first-work instruction once, concurrent first-work delivery, resume, no-work
+  and after-new-work Stop behavior, recursion suppression, marker exclusion,
+  offline instruction delivery, stored credentials, once flags across 260 open
+  sessions without payload/token text, and explicit assistant-capture opt-in.
+- `scripts/test_agent_setup.py`: 10 passed. Covers JSONC comments, trailing
+  commas, nested objects, strings with braces/comment markers, missing-entry
+  no-op, duplicate/malformed input, native-CLI availability, a fresh Codex
+  directory, all three unmarked-name conflict paths and unrelated config.
+- Real `cairn setup --agent` integration test passed with native CLI stand-ins
+  and temporary HOME directories. Isolated probes of actual Codex 0.169.0 and
+  OpenCode 2.1.4 verified native install/reinstall/removal plus TOML/JSONC comment
+  preservation; neither probe started a model or memory server.
+- `smoke_full_flow.sh`, `smoke_mcp.sh`, `smoke_hook.sh` and
+  `validate_phase0.py`: passed. CI/release `actionlint` passed with optional
+  shellcheck/pyflakes integrations disabled. Web files were unchanged; web
+  checks were not run.
+
+Tests were written failing before the brief, hook lifecycle, setup and JSONC
+implementations. Additional failing regressions caught instruction loss on an
+offline capture, assistant opt-in being skipped by Stop handling, a missing
+Codex home directory, and reinjection after session-state eviction. Each passed
+after the shared fix. The first hook-auth run
+timed out behind overlapping Cargo builds; the final passing run prebuilt the
+server and ran sequentially, with no readiness timeout change.
+
+Implementation: `crates/core/src/brief.rs` and sibling tests, both server brief
+routes, `crates/server/tests/project_model.rs`, `crates/client/src/agents.rs`,
+setup CLI/integration tests, `scripts/cairn_setup.py`, shared instruction text,
+and the hook lifecycle adapter. The [hook contract](contracts/hook-v1.md#verified-agent-capabilities)
+records per-agent official documentation and capabilities. All four stage 4
+checklist items (3, 8, 9, 10) are implemented with the documented OpenCode
+instruction-file fallback. No retention, feedback or new LLM behavior is claimed.

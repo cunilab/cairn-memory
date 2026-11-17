@@ -249,7 +249,7 @@ fn build_tools() -> Vec<Tool> {
     vec![
         spec(
             "memory_save",
-            "Save an explicit durable memory.",
+            "Save verified reusable knowledge at decisions, corrections and task completion. Agent chooses scope: project (members), personal (private behaviour), global (all server users). Required: scope/title/summary/reason; fill known kind-specific fields and evidence. Avoid duplicates and secrets.",
             Post,
             "/remember",
             content_schema(),
@@ -291,7 +291,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_lesson_save",
-            "Save an explicit lesson as durable memory.",
+            "Save a verified lesson after a correction or resolved failure. Required: scope/title/summary/reason. Defaults to gotcha: fill symptom/cause/fix and evidence when known. Agent chooses project, private personal behaviour or server-wide global scope; never invent causal fields.",
             Post,
             "/remember",
             content_schema(),

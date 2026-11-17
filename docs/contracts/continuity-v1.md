@@ -377,3 +377,40 @@ stability, branch scope precision, and stale/contradiction signal coverage.
   fields survive real REST retrieval.
 - `scripts/measure_layer2.py` runs the Layer 2 golden-corpus checks against a
   real Cairn server process.
+
+## Session-start brief (v0.1.4)
+
+`POST /cairn-memory/session/brief` accepts `{"context":{...WorkContext...}}`
+and returns `{"brief":"...", "max_bytes":4096}`. An account/device bearer is
+required on both adapters, including the file backend before bootstrap. Reads
+use the same authorized, retained memory set as memory listing: another person's
+private notes and projects without membership never become candidates. The
+endpoint does not join a project or initiate model inference.
+
+Shared `cairn_core::session_brief` builds four independently budgeted sections:
+
+1. Personal behaviour notes, excluding raw captures, session notes, handoffs and
+   `work-note`-tagged automatic work notes.
+2. The newest handoff matching the exact nonempty requested repository and
+   branch, plus project ID (or both absent for private work). Missing repository
+   or branch gives no handoff; other branches never supply one.
+3. Rules/decisions in the requested project ID, with no branch or the matching
+   branch. Missing project ID gives no project section.
+4. Global notes, excluding raw captures/session notes/handoffs.
+
+Only active records are included. Notes rank by pinned first, lifecycle
+importance descending, creation timestamp descending, then stable ID. Handoffs
+rank by newest creation then ID, regardless of pin. This is deterministic brief
+selection, separate from query-driven hybrid recall. At most three notes per
+section and one handoff are returned, under a 900-byte JSON budget per section.
+Fields include ID, title, summary and reason; handoffs also carry bounded next
+steps and unresolved work. Oversized records shrink to a compact ID/title/summary
+preview; complete records remain accessible through memory tools.
+
+`SESSION_BRIEF_MAX_BYTES=4096` bounds the complete UTF-8 text, including its data
+label and JSON code fence. Field cuts respect UTF-8 boundaries and JSON escape
+expansion. Backticks are escaped inside JSON so a stored string cannot terminate
+the fence. The label explicitly identifies memory as evidence/data, never agent
+instructions. No tokenization service or LLM is required. Every hook uses this
+single route and the same selection function on both storage adapters. Hook
+instruction and work-delivery limits live in [the hook contract](hook-v1.md#hook-output-and-work-tracking).
