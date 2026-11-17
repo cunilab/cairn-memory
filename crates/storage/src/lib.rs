@@ -12,9 +12,9 @@ use cairn_core::{
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson,
     ProjectWorktree, RecallFilter, RecallResult, Session, SyncDeletion, SyncDiagnostics, SyncEvent,
     SyncPullResult, SyncPushResult, WorkContext, build_context_pack, build_explicit_memory_record,
-    carry_summary_state, competing_project_memories, derive_session_memory, memory_matches_filter,
-    normalize_email, normalize_export_bundle, normalize_observation, now_seconds,
-    prefer_newer_contradiction, publication_fingerprint, random_token, recall_result,
+    carry_summary_state, competing_project_memories, derive_session_memory, distill_session_notes,
+    memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
+    now_seconds, prefer_newer_contradiction, publication_fingerprint, random_token, recall_result,
     redact_sensitive_content, redact_work_context, sensitivity_including_context,
     session_memory_id, validate_password, why_changed_priority,
 };
@@ -881,6 +881,30 @@ impl PostgresStore {
         }
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
+        }
+        for mut note in distill_session_notes(&memory, &observations) {
+            let hidden: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM cairn_forgotten_items WHERE person_id = $1 AND item_id = $2)
+                    OR EXISTS (SELECT 1 FROM cairn_memories m WHERE m.person_id = $1 AND m.memory_id = $2 AND NOT {})",
+                not_superseded_by_live_memory_sql(false)
+            )).bind(person_id).bind(&note.memory_id).fetch_one(&mut *transaction).await?;
+            if hidden {
+                continue;
+            }
+            if let Some(row) = sqlx::query(&session_memory_select_sql())
+                .bind(person_id)
+                .bind(&note.memory_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+            {
+                carry_summary_state(&memory_from_row(&row)?, &mut note);
+                sqlx::query("DELETE FROM cairn_memories WHERE person_id = $1 AND memory_id = $2")
+                    .bind(person_id)
+                    .bind(&note.memory_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            insert_memory(&mut transaction, person_id, &note).await?;
         }
         insert_memory(&mut transaction, person_id, &memory).await?;
         clear_session_pending(&mut transaction, person_id, session_id).await?;
@@ -4231,6 +4255,7 @@ fn parse_scope(value: &str) -> Result<MemoryScope, PostgresError> {
 fn parse_memory_kind(value: String) -> Result<MemoryKind, PostgresError> {
     match value.as_str() {
         "session_summary" => Ok(MemoryKind::SessionSummary),
+        "handoff" => Ok(MemoryKind::Handoff),
         "explicit" => Ok(MemoryKind::Explicit),
         "lesson" => Ok(MemoryKind::Lesson),
         "correction" => Ok(MemoryKind::Correction),
@@ -4250,6 +4275,7 @@ fn parse_memory_kind(value: String) -> Result<MemoryKind, PostgresError> {
 fn memory_kind_name(kind: &MemoryKind) -> &'static str {
     match kind {
         MemoryKind::SessionSummary => "session_summary",
+        MemoryKind::Handoff => "handoff",
         MemoryKind::Explicit => "explicit",
         MemoryKind::Lesson => "lesson",
         MemoryKind::Correction => "correction",

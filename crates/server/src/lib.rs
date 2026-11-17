@@ -4569,7 +4569,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(imported["imported_memories"], 1);
+        assert_eq!(imported["imported_memories"], 2);
         assert_eq!(imported["imported_forgotten_ids"], 1);
 
         let (status, results) = json_request(

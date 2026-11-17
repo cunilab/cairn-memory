@@ -909,8 +909,9 @@ pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
         MemoryScope::Personal => {
             if !matches!(
                 memory.kind,
-                MemoryKind::SessionSummary | MemoryKind::Capture
-            ) {
+                MemoryKind::SessionSummary | MemoryKind::Capture | MemoryKind::Handoff
+            ) && !memory.fields.tags.iter().any(|tag| tag == "work-note")
+            {
                 return true;
             }
             if let Some(id) = &filter.session_id

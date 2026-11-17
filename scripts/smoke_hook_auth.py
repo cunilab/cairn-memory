@@ -20,6 +20,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import cairn_outbox
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "scripts" / "cairn_hook.py"
@@ -30,13 +32,13 @@ SECRET = "api_key=hook-secret-value"
 
 def fingerprint(session_id, content, source):
     encoded = json.dumps(
-        {"sessionId": session_id, "content": content, "source": source},
+        {"sessionId": session_id, "content": cairn_outbox.redact_content(content), "source": source},
         sort_keys=True,
     ).encode()
     return "hook-" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
-def run_hook(url, payload, **env):
+def run_hook(url, payload, *, cwd=ROOT, **env):
     child = os.environ.copy()
     child.pop("CAIRN_ACCOUNT_TOKEN", None)
     child.pop("CAIRN_OUTBOX", None)
@@ -55,7 +57,7 @@ def run_hook(url, payload, **env):
         text=True,
         capture_output=True,
         env=child,
-        cwd=ROOT,
+        cwd=cwd,
         timeout=20,
         check=False,
     )
@@ -133,6 +135,76 @@ class StubHookTests(unittest.TestCase):
         else:
             self.assertTrue(header == "Bearer " + token)
 
+    def test_assistant_capture_requires_explicit_opt_in(self):
+        for payload in (
+            {"role": "assistant", "content": "private answer"},
+            {"hook_event_name": "Stop", "last_assistant_message": "private answer"},
+            {"payload": {"role": "assistant", "content": "private answer"}},
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                queue = Path(directory) / "queue.json"
+                result = run_hook(self.url, dict(payload, sessionId="assistant"),
+                                  CAIRN_CAPTURE_ASSISTANT=None, CAIRN_OUTBOX=str(queue))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.server.captured, [])
+                self.assertEqual(list(Path(directory).iterdir()), [])
+        result = run_hook(self.url, {"sessionId": "assistant", "role": "assistant", "content": "allowed"},
+                          CAIRN_CAPTURE_ASSISTANT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.server.captured), 1)
+
+    def test_skip_marker_stops_at_git_root_and_applies_to_non_git_ancestors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repo = make_repo(parent, "repo")
+            nested = repo / "src"
+            nested.mkdir()
+            queue = parent / "queue.json"
+            payload = {"sessionId": "skip", "content": "private", "cwd": str(nested)}
+            (repo / ".cairnignore").touch()
+            result = run_hook(self.url, payload, CAIRN_OUTBOX=str(queue))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.server.captured, [])
+            self.assertFalse(queue.exists())
+            self.assertFalse(Path(str(queue) + ".lock").exists())
+            (repo / ".cairnignore").unlink()
+            (parent / ".cairnignore").touch()
+            result = run_hook(self.url, payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.server.captured), 1, "outside the Git root is ignored")
+            self.server.captured = []
+            plain = parent / "plain"
+            plain.mkdir()
+            result = run_hook(self.url, dict(payload, cwd=str(plain)))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.server.captured, [])
+            (parent / ".cairnignore").unlink()
+            (nested / ".cairnignore").mkdir()
+            result = run_hook(self.url, payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.server.captured), 1, "a directory is not a marker")
+
+    def test_skip_marker_uses_process_cwd_when_payload_has_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".cairnignore").touch()
+            result = run_hook(self.url, {"sessionId": "skip", "content": "private"}, cwd=directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.server.captured, [])
+
+    def test_secrets_are_scrubbed_before_content_and_tool_truncation(self):
+        # Redaction first preserves useful text after a secret longer than either cap.
+        for payload in (
+            {"content": "token=" + "q" * 70000 + " kept-after-secret"},
+            {"tool_name": "Bash", "tool_response": "token=" + "q" * 20000 + " kept-after-secret"},
+        ):
+            self.server.captured = []
+            result = run_hook(self.url, dict(payload, sessionId="redact-first"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            body = json.loads(self.server.captured[0]["body"])
+            self.assertNotIn("q" * 32, body["content"])
+            self.assertIn("[REDACTED]", body["content"])
+            self.assertIn("kept-after-secret", body["content"])
+
     def test_missing_device_token_rejects_before_post(self):
         for token in (None, "", "  "):
             result = run_hook(
@@ -157,6 +229,7 @@ class StubHookTests(unittest.TestCase):
                 "context": {"repository": "cairn"},
             },
             CAIRN_ACCOUNT_TOKEN=ACCOUNT,
+            CAIRN_CAPTURE_ASSISTANT="1",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.server.captured), 1)
@@ -238,7 +311,7 @@ class StubHookTests(unittest.TestCase):
             "source": "PostToolUse",
         }
         first = run_hook(self.url, dict(payload, role="tool"))
-        second = run_hook(self.url, dict(payload, role="assistant"))
+        second = run_hook(self.url, dict(payload, role="assistant"), CAIRN_CAPTURE_ASSISTANT="1")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         bodies = [json.loads(item["body"]) for item in self.server.captured]
@@ -281,7 +354,7 @@ class StubHookTests(unittest.TestCase):
         ]
         for extra, content, role, source in cases:
             self.server.captured = []
-            result = run_hook(self.url, dict(common, **extra))
+            result = run_hook(self.url, dict(common, **extra), CAIRN_CAPTURE_ASSISTANT="1")
             self.assertEqual(result.returncode, 0, result.stderr)
             body = json.loads(self.server.captured[0]["body"])
             self.assertEqual((body["sessionId"], body["role"], body["source"]), ("cc-session", role, source))

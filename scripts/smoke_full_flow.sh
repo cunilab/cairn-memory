@@ -14,7 +14,7 @@ unresolved="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-unresolved.XXXXXX")"
 search_before="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-search-before.XXXXXX")"
 project_memory="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-project-memory.XXXXXX")"
 branch_memory="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-branch-memory.XXXXXX")"
-global_memory="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-global-memory.XXXXXX")"
+preference_memory="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-global-memory.XXXXXX")"
 scoped_main="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-scoped-main.XXXXXX")"
 scoped_branch="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-scoped-branch.XXXXXX")"
 search_after_restart="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-search-after-restart.XXXXXX")"
@@ -41,7 +41,7 @@ cleanup() {
   fi
   rm -f "$store" "$restored" "$log" "$restored_log" "$bundle" \
     "$hook_first" "$hook_duplicate" "$summary" "$resume" "$unresolved" "$search_before" \
-    "$project_memory" "$branch_memory" "$global_memory" "$scoped_main" "$scoped_branch" \
+    "$project_memory" "$branch_memory" "$preference_memory" "$scoped_main" "$scoped_branch" \
     "$search_after_restart" "$corrected" "$search_after_correction" \
     "$search_after_forget" "$import_result" "$search_restored"
 }
@@ -130,25 +130,32 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/unresol
   -H 'Content-Type: application/json' \
   -d '{"limit":5,"context":{"repository":"cairn-demo","branch":"main"}}' >"$unresolved"
 
-curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
+project_id="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/projects/init" \
   -H 'Content-Type: application/json' \
-  -d '{"content":"The project cache convention is documented.","context":{"repository":"cairn-demo","files":["src/cache.rs"],"symbols":["Cache::get"],"commands":["cargo test cache"],"tests":["cache_reads_are_consistent"],"services":["cache"]}}' >"$project_memory"
+  -d '{"repository":"cairn-demo","name":"Full flow"}' | json_field '["project_id"]')"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
   -H 'Content-Type: application/json' \
-  -d '{"content":"The Redis cache experiment is branch-local and not yet verified.","context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$branch_memory"
+  -d '{"scope":"project","kind":"fact","title":"Project cache convention","summary":"The project cache convention is documented.","reason":"Keep the verified convention available to members.","context":{"project_id":"'"$project_id"'","repository":"cairn-demo","files":["src/cache.rs"],"symbols":["Cache::get"],"commands":["cargo test cache"],"tests":["cache_reads_are_consistent"],"services":["cache"]}}' >"$project_memory"
+
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/sync/push" \
+  -H 'Content-Type: application/json' \
+  -d '{"eventId":"full-flow-branch-event","sessionId":"full-flow-branch","role":"tool","source":"smoke","content":"The Redis cache experiment is branch-local and not yet verified.","context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >/dev/null
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/end" \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"full-flow-branch"}' >"$branch_memory"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
   -H 'Content-Type: application/json' \
-  -d '{"content":"The user prefers evidence-backed cache decisions."}' >"$global_memory"
+  -d '{"scope":"personal","kind":"preference","title":"Evidence-backed cache decisions","summary":"The user prefers evidence-backed cache decisions.","reason":"Use the stated personal preference.","preference":"evidence-backed cache decisions"}' >"$preference_memory"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
-  -d '{"query":"cache","limit":10,"context":{"repository":"cairn-demo","branch":"main","worktree":"wt-main"}}' >"$scoped_main"
+  -d '{"query":"cache","limit":10,"context":{"project_id":"'"$project_id"'","repository":"cairn-demo","branch":"main","worktree":"wt-main"}}' >"$scoped_main"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/context" \
   -H 'Content-Type: application/json' \
-  -d '{"query":"cache","limit":2,"context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$scoped_branch"
+  -d '{"query":"cache","limit":2,"context":{"project_id":"'"$project_id"'","repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$scoped_branch"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \
@@ -158,7 +165,7 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/export"
   -H 'Content-Type: application/json' \
   -d '{}' >"$bundle"
 
-SUMMARY_JSON="$summary" RESUME_JSON="$resume" UNRESOLVED_JSON="$unresolved" SEARCH_JSON="$search_before" BUNDLE_JSON="$bundle" PROJECT_JSON="$project_memory" BRANCH_JSON="$branch_memory" GLOBAL_JSON="$global_memory" MAIN_JSON="$scoped_main" BRANCH_CONTEXT_JSON="$scoped_branch" python3 - <<'PY'
+SUMMARY_JSON="$summary" RESUME_JSON="$resume" UNRESOLVED_JSON="$unresolved" SEARCH_JSON="$search_before" BUNDLE_JSON="$bundle" PROJECT_JSON="$project_memory" BRANCH_JSON="$branch_memory" PREFERENCE_JSON="$preference_memory" MAIN_JSON="$scoped_main" BRANCH_CONTEXT_JSON="$scoped_branch" python3 - <<'PY'
 import json
 import os
 
@@ -169,7 +176,7 @@ search = json.load(open(os.environ["SEARCH_JSON"]))
 bundle = json.load(open(os.environ["BUNDLE_JSON"]))
 project = json.load(open(os.environ["PROJECT_JSON"]))
 branch = json.load(open(os.environ["BRANCH_JSON"]))
-global_memory = json.load(open(os.environ["GLOBAL_JSON"]))
+preference_memory = json.load(open(os.environ["PREFERENCE_JSON"]))
 main_results = json.load(open(os.environ["MAIN_JSON"]))
 branch_pack = json.load(open(os.environ["BRANCH_CONTEXT_JSON"]))
 assert summary["kind"] == "session_summary"
@@ -181,26 +188,35 @@ assert len(resume["results"]) == 1
 assert resume["results"][0]["next_steps"] == summary["next_steps"]
 assert len(unresolved["results"]) == 1
 assert unresolved["results"][0]["unresolved_work"] == summary["unresolved_work"]
-assert len(search) == 1
-assert search[0]["source_event_ids"] == ["full-flow-event"]
+assert len(search) == 2
+assert {m["memory_id"] for m in search} == {summary["memory_id"], "handoff-" + summary["memory_id"]}
+assert all(m["source_event_ids"] == ["full-flow-event"] for m in search)
 main_ids = {result["memory_id"] for result in main_results}
 assert project["scope"] == "project"
-assert branch["scope"] == "worktree"
+assert branch["scope"] == "personal"
+assert "work-note" in branch["tags"]
+assert preference_memory["scope"] == "personal"
+assert preference_memory["kind"] == "preference"
 assert project["context"]["symbols"] == ["Cache::get"]
 assert project["context"]["commands"] == ["cargo test cache"]
 assert project["context"]["tests"] == ["cache_reads_are_consistent"]
 assert project["context"]["services"] == ["cache"]
 assert project["memory_id"] in main_ids
 assert branch["memory_id"] not in main_ids
+assert "handoff-" + branch["memory_id"] not in main_ids
+assert main_ids == {project["memory_id"], preference_memory["memory_id"]}
 assert len(branch_pack["results"]) == 2
-assert branch_pack["omitted_count"] == 1
+assert branch_pack["omitted_count"] == 2
 assert branch_pack["recovery_hint"]
-assert global_memory["memory_id"] in branch_pack["omitted_memory_ids"]
+assert {m["memory_id"] for m in branch_pack["results"]} | set(branch_pack["omitted_memory_ids"]) == {
+    project["memory_id"], branch["memory_id"], "handoff-" + branch["memory_id"], preference_memory["memory_id"]
+}
 assert bundle["format"] == "cairn-memory"
 assert bundle["version"] == 1
 assert "full-flow-secret" not in json.dumps(bundle)
-assert len(bundle["observations"]) == 1
-assert len(bundle["memories"]) == 4
+assert len(bundle["observations"]) == 2
+assert len(bundle["memories"]) == 5
+assert project["memory_id"] not in {m["memory_id"] for m in bundle["memories"]}, "personal export excludes project records"
 PY
 
 page="$(curl -fsS "$base/viewer")"
@@ -221,7 +237,7 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search"
   -H 'Content-Type: application/json' \
   -d '{"query":"authentication signed cookie","limit":5}' >"$search_after_restart"
 
-MEMORY_ID="$(SEARCH_JSON="$search_after_restart" python3 -c 'import json, os; print(json.load(open(os.environ["SEARCH_JSON"]))[0]["memory_id"])')"
+MEMORY_ID="$(SUMMARY_JSON="$summary" SEARCH_JSON="$search_after_restart" python3 -c 'import json, os; summary=json.load(open(os.environ["SUMMARY_JSON"])); hits=json.load(open(os.environ["SEARCH_JSON"])); assert any(m["memory_id"]==summary["memory_id"] for m in hits); print(summary["memory_id"])')"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/correct" \
   -H 'Content-Type: application/json' \
@@ -239,9 +255,9 @@ corrected = json.load(open(os.environ["CORRECTED_JSON"]))
 search = json.load(open(os.environ["SEARCH_JSON"]))
 assert corrected["kind"] == "correction"
 assert corrected["supersedes"]
-assert len(search) == 1
-assert search[0]["memory_id"] == corrected["memory_id"]
-assert search[0]["memory_id"] != corrected["supersedes"]
+assert len(search) == 2
+assert {m["memory_id"] for m in search} == {corrected["memory_id"], "handoff-" + corrected["supersedes"]}
+assert all(m["memory_id"] != corrected["supersedes"] for m in search)
 PY
 
 CORRECTED_ID="$(CORRECTED_JSON="$corrected" python3 -c 'import json, os; print(json.load(open(os.environ["CORRECTED_JSON"]))["memory_id"])')"
@@ -258,9 +274,9 @@ import json
 import os
 
 search = json.load(open(os.environ["SEARCH_JSON"]))
-assert len(search) == 1
-assert search[0]["memory_id"] == os.environ["MEMORY_ID"]
-assert search[0]["memory_id"] != os.environ["CORRECTED_ID"]
+assert len(search) == 2
+assert {m["memory_id"] for m in search} == {os.environ["MEMORY_ID"], "handoff-" + os.environ["MEMORY_ID"]}
+assert all(m["memory_id"] != os.environ["CORRECTED_ID"] for m in search)
 PY
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/export" \
@@ -304,13 +320,13 @@ import os
 result = json.load(open(os.environ["IMPORT_JSON"]))
 search = json.load(open(os.environ["SEARCH_JSON"]))
 bundle = json.load(open(os.environ["BUNDLE_JSON"]))
-assert result["imported_sessions"] == 1
-assert result["imported_observations"] == 1
-assert result["imported_memories"] == 5
+assert result["imported_sessions"] == 2
+assert result["imported_observations"] == 2
+assert result["imported_memories"] == 6
 assert os.environ["CORRECTED_ID"] in bundle["forgottenIds"]
 assert os.environ["MEMORY_ID"] not in bundle["forgottenIds"]
-assert len(search) == 1
-assert search[0]["memory_id"] == os.environ["MEMORY_ID"]
+assert len(search) == 2
+assert {m["memory_id"] for m in search} == {os.environ["MEMORY_ID"], "handoff-" + os.environ["MEMORY_ID"]}
 PY
 
 echo "Full Layer 1/2 acceptance flow passed"

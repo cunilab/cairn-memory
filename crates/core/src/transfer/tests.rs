@@ -568,7 +568,10 @@ fn export_import_round_trip_is_idempotent_and_preserves_forget() -> Result<(), S
     let first = target.import_bundle(bundle.clone())?;
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_observations, 1);
-    assert_eq!(first.imported_memories, 1);
+    assert_eq!(
+        first.imported_memories, 2,
+        "session note and separate handoff"
+    );
     assert_eq!(first.imported_forgotten_ids, 1);
     assert!(target.search("providers", 5)?.is_empty());
 

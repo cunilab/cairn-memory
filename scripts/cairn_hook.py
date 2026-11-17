@@ -167,6 +167,25 @@ def project_file_id(cwd):
     return None, "invalid .cairn/project.json project id; capture remains personal"
 
 
+def skip_capture(source):
+    nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+    role = first(source, "role") or first(nested, "role") or HOST_ROLES.get(source.get("hook_event_name"))
+    if (str(role).lower() == "assistant" or source.get("hook_event_name") == "Stop") and os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1":
+        return True
+    cwd = first(source, "cwd") or first(nested, "cwd") or os.getcwd()
+    if not isinstance(cwd, str):
+        raise SystemExit("hook cwd must be a folder path")
+    folder = Path(cwd).resolve()
+    top = _git(str(folder), "rev-parse", "--show-toplevel")
+    boundary = Path(top).resolve() if top else None
+    for parent in (folder, *folder.parents):
+        if (parent / ".cairnignore").is_file():
+            return True
+        if parent == boundary:
+            break
+    return False
+
+
 def build_request(source):
     nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
     session_id = first(source, "sessionId", "session_id") or first(nested, "sessionId", "session_id") or os.environ.get("CAIRN_SESSION_ID")
@@ -175,10 +194,10 @@ def build_request(source):
     content = first(source, "content", "text", "message", "prompt", "last_assistant_message") or first(nested, "content", "text", "message")
     if not content and source.get("tool_name"):
         detail = json.dumps({"tool_input": source.get("tool_input"), "tool_response": source.get("tool_response")}, sort_keys=True, separators=(",", ":"))
-        content = f"{source['tool_name']} {detail}"[:TOOL_CONTENT_CHARS]
+        content = cairn_outbox.redact_content(f"{source['tool_name']} {detail}")[:TOOL_CONTENT_CHARS]
     if not content:
         content = json.dumps(source, sort_keys=True, separators=(",", ":"))
-    content = str(content)
+    content = cairn_outbox.redact_content(str(content))
     if len(content.encode()) > cairn_outbox.MAX_CONTENT_BYTES:
         keep = cairn_outbox.MAX_CONTENT_BYTES - len(TRUNCATED_MARKER)
         content = content.encode()[:keep].decode(errors="ignore") + TRUNCATED_MARKER
@@ -369,6 +388,8 @@ def main():
     # Bad origin fails before stdin and before a lock file or a request.
     origin = _bound_origin() if bound else _unbound_base()
     raw, source = read_input()
+    if skip_capture(source):
+        return
     request, content, attachment_warning = build_request(source)
     request = prepare_body(request, token, content, raw)
     spool = None

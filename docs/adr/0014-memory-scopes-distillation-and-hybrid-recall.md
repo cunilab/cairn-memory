@@ -17,7 +17,7 @@ capture hygiene. Cairn's current split into project, personal-per-repo and
 personal-global memory, plus an explicit promote step, makes members do manual
 work that the product direction (minimal human interaction) rejects.
 
-Items 0 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
+Items 0, 1, 5 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
 promotion parts of [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md)
 (decisions 1, 2 and 5 there, and the `source: personal | project` labelling in
 decision 7). The rest of ADR 0013 remains. Pre-release rules still apply: no
@@ -105,7 +105,28 @@ Everything else is optional.
 
 **Constraint.** Rule-based distillation (no LLM) can reliably fill only
 `title`, `evidence`, `applies_to` and `tags`. `reason`, alternatives, cause and
-fix come from the agent.
+fix come from the agent. The fallback may copy explicitly labelled source
+summary/details and fields verbatim; it never infers missing causal or typed
+fields. The [continuity contract](../contracts/continuity-v1.md#session-end-distillation-v014)
+defines the bounded grammar.
+
+### Stage 2 contract decisions (2026-11-17)
+
+- Session end keeps the `session_summary` response and stores a separate
+  `handoff` plus typed notes. Automatic notes without an attached project,
+  including mixed project/unattached sessions, remain private in `personal`,
+  tagged `work-note`; they never become global automatically.
+- The hook opt-in is `CAIRN_CAPTURE_ASSISTANT=1`. A regular `.cairnignore`
+  file skips automatic capture. Lookup starts at resolved payload `cwd`, or
+  process cwd, and stops at the inclusive Git toplevel inside Git, otherwise
+  at filesystem root. Secret scrubbing precedes every content cut and the
+  generated fingerprint. Exact behavior lives in the
+  [hook contract](../contracts/hook-v1.md#capture-hygiene-v014).
+- Forgetting a project note hides that record only, preserving shared captures
+  and sibling notes on both stores. Explicit source-event forgetting suppresses
+  every derivation. This implements the owner's rule that hiding one item
+  must not silently remove other shared knowledge; see the
+  [lifecycle contract](../contracts/lifecycle-v1.md#forgetting-shared-knowledge).
 
 ## Agent instructions and agent-written memories (decided 2026-11-17)
 
@@ -145,16 +166,16 @@ checklist items below (pre-release, no data compatibility).
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Only scope and record-shape items 0 and 7 are implemented; no recall-quality benchmark, distillation, hybrid retrieval, retention score, feedback or instruction injection is claimed. See the recorded stage 1 checks in [evidence](../evidence.md#v014-stage-1--memory-scopes-and-record-shape).
+- Scope, record shape, rule-based distillation and capture hygiene are implemented. No recall-quality benchmark, hybrid retrieval, retention score, feedback or instruction injection is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
 
 ## Implementation checklist
 
 - [x] 0. Three scopes: scope parameter in MCP/CLI, per-repo personal scope and promote removed, captures in initialized repos go to project memory.
-- [ ] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
+- [x] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
 - [ ] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
 - [ ] 3. Bounded, data-fenced session-start brief from the hook.
 - [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
-- [ ] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
+- [x] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
 - [ ] 6. Helpful/stale feedback affecting shared ranking.
 - [x] 7. Memory schema (common + per-type fields) and migration (pre-release, no data compat); MCP, CLI and web forms show the fields.
 - [ ] 8. `cairn setup` installs agent instructions per agent (hook injection or instruction file).
@@ -169,3 +190,11 @@ capture). Related: [ADR 0013](./0013-shared-project-decisions-and-personal-memor
 [ADR 0010](./0010-correction-keeps-linked-history.md).
 
 Stage 1 implementation evidence: `crates/core/src/memories.rs`, `capture.rs`, `recall.rs`, `sessions.rs`; `crates/storage/src/lib.rs`; both server routers; `crates/client/src/tools.rs`; and `apps/web/app/memories/page.tsx`. Scoped HTTP tests run identically on both adapters in `crates/server/tests/project_model.rs`; typed round trips and title-weight regressions are in the core sibling tests and PostgreSQL integration tests. The development base migration now stores the flat record in `record` JSONB and derives a title-weighted lexical index. Reset older databases/file stores before running this build: old private `global` values must never be interpreted as server-wide global notes.
+
+Stage 2 implementation evidence: `scripts/cairn_hook.py` and its authentication,
+offline and outbox smokes; `crates/core/src/distillation.rs` and sibling tests;
+session-end paths in both stores; shared HTTP scenarios in
+`crates/server/tests/project_model.rs`; and the end-to-end full-flow, hook and
+MCP smokes. [Recorded checks](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation)
+cover idempotence, evidence, project/private visibility, late captures,
+correction, forgetting and distinct derived-ID namespaces.

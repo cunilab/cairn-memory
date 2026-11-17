@@ -71,7 +71,30 @@ If none of `content`, `text`, or `message` is present, the whole input object
 becomes the content as compact sorted JSON. `role` defaults to `tool` and the
 source defaults to `hook`.
 
-## Claude Code hook input
+## Capture hygiene (v0.1.4)
+
+Automatic assistant text is skipped by default: explicit `role: assistant`
+(top level or nested payload) and Claude Code `Stop` events produce no HTTP
+request and do not create or touch an outbox. Set
+`CAIRN_CAPTURE_ASSISTANT=1` on the hook process to opt in. Other values keep
+the default. Explicit CLI/MCP saves and captures remain agent-directed.
+
+A regular file named `.cairnignore` skips hook capture for that folder and its
+descendants. Lookup starts at the resolved payload `cwd` (top level, then
+nested payload), or the process working directory if absent. Within Git it
+checks each ancestor through the Git toplevel, inclusive, and stops there;
+outside Git it checks through the filesystem root. A marker directory does
+not count. A skip performs no network or outbox/lock writes. Existing queued
+events are not purged. Credential and URL validation still run before stdin.
+
+Secret scrubbing runs on the complete content before either the 16000-character
+tool cut or the 64-KiB content cut, and before event fingerprinting. The outbox
+and server also retain their redaction boundaries. A generated fingerprint
+uses the scrubbed, bounded content, so captures differing only in scrubbed
+secret values can coalesce. Explicit event IDs are unchanged. Redaction is
+best-effort; markers are the way to exclude a sensitive folder altogether.
+
+## Claude Code hook fields
 
 Claude Code runs a hook command with one JSON object on stdin
 ([hooks reference](https://code.claude.com/docs/en/hooks)). The adapter reads
@@ -83,7 +106,7 @@ these fields directly, so a settings entry needs no wrapper script. Setup is in
 | `session_id` | `sessionId` | Same as the `session_id` alias above. |
 | `hook_event_name` | `source` | First choice for `source` (before `source`, `hook`, `type`), so a `SessionStart` input with `source: "startup"` is still recorded as `SessionStart`. |
 | `prompt` (`UserPromptSubmit`) | `content` | After `content`, `text`, `message`. |
-| `last_assistant_message` (`Stop`) | `content` | After `prompt`. |
+| `last_assistant_message` (`Stop`) | `content` | After `prompt`, only with assistant capture opted in. |
 | `tool_name`, `tool_input`, `tool_response` (`PostToolUse`) | `content` | With no field above: `<tool_name> {"tool_input":...,"tool_response":...}` as compact sorted JSON, cut to 16000 characters. |
 | other events, e.g. `SessionStart`, `SessionEnd` | `content` | Whole input object as compact sorted JSON (the fallback above). |
 | `hook_event_name` | `role` | `UserPromptSubmit` is `user`, `Stop` is `assistant`, anything else is `tool`. An explicit `role` wins. |

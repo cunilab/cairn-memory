@@ -85,8 +85,9 @@ server and CLI are upgraded to 0.1.4. Captures also join by the stable ID.
 `cairn init --help`, `cairn init -h`, `cairn --help` and `cairn help init` print
 usage without connecting; unknown options and flag-like positional values are
 rejected before any request. See the [project contract](docs/contracts/project-layer4.md#init-and-membership).
-Repositories without the file create no project: captures remain private personal
-repository memory. Broken/unknown files warn while personal capture continues.
+Repositories without the file create no project: captures and automatic work
+notes remain private under `personal`, marked as work notes rather than personal
+behaviour preferences. Broken/unknown files warn while private capture continues.
 
 Memories have three explicit scopes: **project** (all members, including initialized-repository captures and summaries), **personal** (private behaviour and preferences), and **global** (all server users; author/admin edits). There is no personal-per-repository scope or promote step. Redaction runs before storage; project members can read raw captures.
 
@@ -127,7 +128,7 @@ explicit memory, corrections, context retrieval, lifecycle diagnostics,
 export/import, audit history, and keyword search routes from `cairn-storage`.
 It applies the Layer 3 migrations on startup.
 
-It serves health, readiness, self-hosted account bootstrap/login/logout/current-account, account-authorized device registration, project registration, branch/worktree registration, explicit promotion, merge confirmation, branch closure, project verification, session lifecycle, observation capture, search, context, resume, unresolved-work, why-changed, forget, smart-search, recall, explicit remember, correction, export/import, and lifecycle diagnostics under `/cairn-memory/`. It currently proves bounded capture, secret redaction, idempotent event capture, lifecycle classification, deterministic session compression, lessons, corrections, retention sweep, evidence-backed session summaries, branch-aware scopes, structured code context, deterministic code relationships, stale and contradiction signals, keyword recall, context packing, forget suppression, export/import, restart persistence, and account/device ownership checks.
+It serves health, readiness, self-hosted account bootstrap/login/logout/current-account, account-authorized device registration, project registration, branch/worktree registration, scoped memory saves, merge confirmation, branch closure, project verification, session lifecycle, observation capture, search, context, resume, unresolved-work, why-changed, forget, smart-search, recall, explicit remember, correction, export/import, and lifecycle diagnostics under `/cairn-memory/`. It currently proves bounded capture, secret redaction, idempotent event capture, lifecycle classification, deterministic session compression, lessons, corrections, retention sweep, evidence-backed session summaries, branch-aware scopes, structured code context, deterministic code relationships, stale and contradiction signals, keyword recall, context packing, forget suppression, export/import, restart persistence, and account/device ownership checks.
 
 The local viewer is available at:
 
@@ -160,6 +161,19 @@ printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"too
 ```
 
 The adapter needs `CAIRN_DEVICE_TOKEN` (a device token from the web console) and posts `sync/push` to `CAIRN_URL` (default `http://127.0.0.1:3111`, an optional path prefix such as `https://host/agent` is kept); Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery. A reused event id with different content is a `409`.
+
+Assistant text is skipped by default; opt in with `CAIRN_CAPTURE_ASSISTANT=1`.
+Place a regular `.cairnignore` file in a folder to skip it and its descendants.
+Lookup stops at the Git root, or filesystem root outside Git. Skips make no
+network or outbox writes. The hook scrubs secrets before truncating content;
+see the [hook contract](docs/contracts/hook-v1.md#capture-hygiene-v014).
+
+Session end (including idle close) saves an evidence-linked session note,
+separate handoff and explicitly labelled decision/gotcha/procedure/rule/fact
+notes, without an LLM. Re-ending does not duplicate them. Project captures
+produce project notes; unattached or mixed work stays private. The exact
+[distillation grammar and limits](docs/contracts/continuity-v1.md#session-end-distillation-v014)
+explain which fields the rules can fill without guessing.
 
 To verify the complete local application flow with real server processes and temporary stores:
 

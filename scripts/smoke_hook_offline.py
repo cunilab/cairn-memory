@@ -49,7 +49,7 @@ OUTBOX = load_outbox()
 
 def fingerprint(session_id, content, source):
     encoded = json.dumps(
-        {"sessionId": session_id, "content": content, "source": source},
+        {"sessionId": session_id, "content": OUTBOX.redact_content(content), "source": source},
         sort_keys=True,
     ).encode()
     return "hook-" + hashlib.sha256(encoded).hexdigest()[:24]

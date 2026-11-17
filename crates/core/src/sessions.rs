@@ -336,6 +336,28 @@ impl MemoryStore {
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
         }
+        let superseded = self.live_superseded_targets();
+        let mut notes = crate::distill_session_notes(&memory, &observations);
+        notes.retain(|note| {
+            !self.state.forgotten_ids.contains(&note.memory_id)
+                && !superseded.contains(note.memory_id.as_str())
+        });
+        for mut note in notes {
+            if let Some(person_id) = person_id.as_deref() {
+                self.record_memory_owner(person_id, &note.memory_id);
+            }
+            if let Some(existing) = self
+                .state
+                .memories
+                .iter_mut()
+                .find(|m| m.memory_id == note.memory_id)
+            {
+                carry_summary_state(existing, &mut note);
+                *existing = note;
+            } else {
+                self.state.memories.push(note);
+            }
+        }
         self.state.memories.push(memory.clone());
         if let Some(person_id) = person_id.as_deref() {
             self.record_memory_owner(person_id, &memory.memory_id);
@@ -382,38 +404,41 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
         content.push_str(&observation.event_id);
         content.push_str("]\n");
 
-        let lower = normalized.to_ascii_lowercase();
-        let evidence = format!("{normalized} [evidence: {}]", observation.event_id);
-        if contains_marker(
-            &lower,
-            &[
-                "next step",
-                "next:",
-                "follow up",
-                "follow-up",
-                "should ",
-                "need to ",
-                "todo",
-                "remaining",
-            ],
-        ) {
-            push_unique(&mut next_steps, evidence.clone());
-        }
-        if contains_marker(
-            &lower,
-            &[
-                "todo",
-                "unresolved",
-                "blocked",
-                "not yet",
-                "not covered",
-                "untested",
-                "follow up",
-                "follow-up",
-                "remaining",
-            ],
-        ) {
-            push_unique(&mut unresolved_work, evidence);
+        for source_line in observation.content.lines() {
+            let normalized = source_line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let lower = normalized.to_ascii_lowercase();
+            let evidence = format!("{normalized} [evidence: {}]", observation.event_id);
+            if contains_marker(
+                &lower,
+                &[
+                    "next step",
+                    "next:",
+                    "follow up",
+                    "follow-up",
+                    "should ",
+                    "need to ",
+                    "todo",
+                    "remaining",
+                ],
+            ) {
+                push_unique(&mut next_steps, evidence.clone());
+            }
+            if contains_marker(
+                &lower,
+                &[
+                    "todo",
+                    "unresolved",
+                    "blocked",
+                    "not yet",
+                    "not covered",
+                    "untested",
+                    "follow up",
+                    "follow-up",
+                    "remaining",
+                ],
+            ) {
+                push_unique(&mut unresolved_work, evidence);
+            }
         }
     }
     if omitted > 0 {
@@ -493,7 +518,13 @@ pub fn derive_session_memory(
     let mut memory = Memory {
         fields: crate::MemoryFields {
             title: format!("Session {session_id}"),
-            summary: digest.content.clone(),
+            summary: format!(
+                "Session {session_id}: {} retained captures.",
+                observations.len()
+            ),
+            details: Some(digest.content.clone()),
+            evidence: observations.iter().map(|o| o.event_id.clone()).collect(),
+            tags: vec!["work-note".to_owned(), "distilled".to_owned()],
             author: person_id.map(str::to_owned),
             ..Default::default()
         },
@@ -536,6 +567,10 @@ pub fn derive_session_memory(
     };
     memory.published_by = memory.project_id.as_ref().and(person_id).map(str::to_owned);
     memory.fields.importance = Some(memory.lifecycle.importance);
+    memory.fields.applies_to.clone_from(&memory.context.files);
+    if let Some(branch) = &memory.context.branch {
+        push_unique(&mut memory.fields.applies_to, branch.clone());
+    }
     memory.changed_by = person_id.map(str::to_owned);
     memory.changed_at = Some(memory.created_at.clone());
     redact_memory_metadata(&mut memory);

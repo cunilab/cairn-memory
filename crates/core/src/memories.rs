@@ -214,6 +214,7 @@ pub fn capture_memory(observation: &crate::Observation, author: &str) -> Memory 
             author: Some(author.to_owned()),
             importance: Some(observation.lifecycle.importance),
             evidence: vec![observation.event_id.clone()],
+            tags: vec!["work-note".to_owned()],
             ..MemoryFields::default()
         },
         memory_id: format!("capture-{author}-{}", observation.event_id),

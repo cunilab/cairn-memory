@@ -120,3 +120,50 @@ Verified 2026-11-17 on branch `v0.1.4`, limited to [ADR 0014](adr/0014-memory-sc
 New assertions cover project-member access to captures and summaries, private personal behaviour, server-wide global reads, author/admin global mutation, required save fields, all six typed field groups, title weighting, full list/get records, removed promotion/private-repository routes and tools, and private fallback for mixed-source summaries. Title-weight tests failed first on both stores, then passed after the lexical-index change; required-save tests were added before the save entrypoints were implemented. Obsolete publication-copy/preview tests were removed with those entrypoints; retained capture, authentication, ownership, sync, lifecycle, import, branch and rename checks remain in the suites.
 
 This is a pre-release schema change, not an in-place upgrade: start a fresh PostgreSQL database and file store. The edited development base migration adds `record`, personal defaults and a weighted lexical index. Applying only the column change to an old database is unsafe because its old private `global` rows require reclassification. No legacy repair or live migration was executed. Browser visual inspection and later ADR 0014 stages were not run or implemented.
+
+## v0.1.4 stage 2 — capture hygiene and session distillation
+
+Verified 2026-11-17 on `v0.1.4`, limited to ADR 0014 items 1 and 5 and the
+owner-confirmed shared-note forgetting boundary. Every verification shell
+cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN` and `CAIRN_OUTBOX`. No live Cairn API
+was contacted; server smokes used disposable loopback file stores, and the
+database suite used a disposable PostgreSQL 17 container on Colima with a
+fresh database per test.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check`, `cargo check --workspace` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | 179 passed; 30 database tests ignored here and executed below |
+| `scripts/ci_postgres_tests.sh` | 30 passed, zero failed; scratch databases dropped |
+| `python3 scripts/smoke_hook_auth.py` | 29 passed |
+| `python3 scripts/smoke_hook_offline.py` | 23 passed |
+| `python3 scripts/smoke_outbox.py` | 32 passed |
+| `scripts/smoke_full_flow.sh`, `scripts/smoke_layer3.sh` | Passed |
+| `scripts/smoke_mcp.sh`, `scripts/smoke_hook.sh` | Passed |
+| `python3 scripts/validate_phase0.py` | Passed |
+
+Hook regressions failed before the hygiene implementation, then passed for
+assistant opt-in, marker lookup/skip without network or queue writes, and
+redaction before both truncation boundaries. Shared HTTP scenarios were
+written before adapter changes and run on both stores: session note/handoff,
+all five explicit note prefixes, source evidence, structured fields without
+inference, project-member reads, private fallback, unchanged repeated end,
+late captures, correction and forgetting. Project-note forgetting preserves
+shared source captures and siblings; explicit source-event forgetting hides
+every derivation. The file-store parity regression failed before that fix.
+Core tests also cover bounded extraction, metadata termination, case-insensitive
+prefixes and ID collisions with legal session names; the ID regression failed
+before separate handoff/typed namespaces were introduced.
+
+The full-flow fixtures now use the stage-1 required save fields and scopes:
+initialized project records, private branch work captures and personal
+preferences. They retain restart, correction, forgetting, export/import,
+context omission and branch-isolation checks, including separate handoffs.
+MCP and hook assertions likewise account for the additional record.
+
+No web files changed, so web checks and browser inspection were not run.
+Independent worker review was not run in this single-worker dispatch. No LLM,
+new dependency, hybrid recall, retention scoring, feedback or instruction
+injection was added. The release setup smoke still emits its existing 404
+warning for unreleased 0.1.4 hook assets; its local MCP assertions pass.

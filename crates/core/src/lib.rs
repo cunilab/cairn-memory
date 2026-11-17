@@ -8,6 +8,7 @@
 mod accounts;
 mod capture;
 mod devices;
+mod distillation;
 mod lifecycle;
 mod memories;
 mod ownership;
@@ -30,6 +31,7 @@ pub use accounts::{
 };
 pub use capture::{CaptureResult, Observation, ObservationInput, normalize_observation};
 pub use devices::{DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, DeviceStatus};
+pub use distillation::distill_session_notes;
 pub use lifecycle::{
     Lifecycle, LifecycleInput, LifecycleSummary, MemoryKind, MemoryScope, Retention, Sensitivity,
     sensitivity_including_context,

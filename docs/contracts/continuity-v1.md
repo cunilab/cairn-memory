@@ -92,6 +92,52 @@ and the file store has no cap.
 
 ## Session handoff retrieval
 
+### Session-end distillation (v0.1.4)
+
+Both stores atomically persist a `session_summary`, a separate `handoff`, and
+up to 64 typed notes per session end. `POST session/end` still returns the
+session summary; list/get exposes all records. Automatic idle close uses the
+same path. No LLM or external model is used.
+
+Every record has a title, summary, optional details, `evidence` and
+`source_event_ids` linking retained captures, `applies_to` from touched files
+and branch, and `work-note`/`distilled` tags. A handoff contains only the
+extracted next steps and unresolved work (empty lists when none is stated).
+An initialized project's notes are project-visible. Without an attached
+project, or with mixed project/unattached sources, automatic work notes stay
+private under `personal`; they are not personal behaviour preferences and
+are never automatically global. Context filters still select these work notes
+by repository, branch, worktree and session.
+
+The typed grammar is deliberately explicit:
+
+- A trimmed line beginning with `Decision:`, `Gotcha:`, `Procedure:`, `Rule:`
+  or `Fact:` (case-insensitive) starts a note. Empty values are ignored.
+  Its value is copied into summary and a bounded title; source lines are
+  preserved in details. Ordinary prose alone creates no typed note.
+- Immediately following labelled lines may fill `Reason:` for every type;
+  `Decision context:`, `Alternative:`/`Alternatives:` and `Consequences:` for
+  decisions; `Rule text:` and `Exceptions:` for rules; `Symptom:`, `Cause:`
+  and `Fix:` for gotchas; `Step:` and `When:` for procedures; `Statement:`
+  and `Source:` for facts. Each alternative or step line adds one array item
+  without splitting or inference. Other lines end that note's metadata.
+- Missing reason and per-type fields remain empty. A note type prefix alone
+  does not populate its per-type fields, and causal language is not inferred.
+  Agent saves still require title, summary and reason; this fallback does not.
+
+Derived IDs are deterministic per person/session and source event/line, in
+separate `handoff-` and `distilled-` namespaces. Typed IDs hash length-prefixed
+session/source identifiers and the source line index to avoid ambiguous joins.
+Re-ending an unchanged session preserves records and timestamps. Late captures
+refresh the same session note/handoff and existing typed IDs; forgotten or
+superseded records are never regenerated. Refresh keeps creation time,
+verification and lifecycle state. Forgetting a project note hides only that
+record; explicitly forgetting a source capture suppresses every derivation.
+Private personal memory retains its owned-source cascade; see the
+[lifecycle contract](lifecycle-v1.md#forgetting-shared-knowledge).
+Typed extraction stops after 64 notes; all source IDs remain on the session
+note, even when its bounded details omit text.
+
 Ending a session deterministically extracts two structured lists from captured
 observations:
 
@@ -100,7 +146,8 @@ observations:
 - `unresolved_work` — observations containing explicit uncertainty or incomplete
   work such as `not yet`, `blocked`, `unresolved`, `untested`, or `todo`.
 
-The lists retain the normalized observation text and source event ID. They are
+The lists retain the normalized source line and source event ID, at most 16
+items of 2048 characters per list. They are
 returned on session-summary results and can be retrieved without a query:
 
 | Surface | Resume | Unresolved work |

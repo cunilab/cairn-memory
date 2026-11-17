@@ -424,9 +424,21 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
         .find(|result| result.memory_id == owner_neg.memory_id)
         .unwrap();
     assert!(pos.contradictory);
-    assert_eq!(pos.contradiction_ids, vec![owner_neg.memory_id.clone()]);
+    assert_eq!(
+        pos.contradiction_ids,
+        vec![
+            format!("handoff-{}", owner_neg.memory_id),
+            owner_neg.memory_id.clone()
+        ]
+    );
     assert!(neg.contradictory);
-    assert_eq!(neg.contradiction_ids, vec![owner_pos.memory_id.clone()]);
+    assert_eq!(
+        neg.contradiction_ids,
+        vec![
+            format!("handoff-{}", owner_pos.memory_id),
+            owner_pos.memory_id.clone()
+        ]
+    );
     hides_foreign(&resume);
 
     let packed = store.resume_for_account(&owner.token, 1, &filter)?;
@@ -434,7 +446,10 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     assert_eq!(packed.results[0].memory_id, owner_pos.memory_id);
     assert_eq!(
         packed.results[0].contradiction_ids,
-        vec![owner_neg.memory_id.clone()]
+        vec![
+            format!("handoff-{}", owner_neg.memory_id),
+            owner_neg.memory_id.clone()
+        ]
     );
     assert_eq!(
         packed.omitted_memory_ids,
@@ -471,7 +486,10 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     assert!(unresolved_neg.contradictory);
     assert_eq!(
         unresolved_neg.contradiction_ids,
-        vec![owner_pos.memory_id.clone()]
+        vec![
+            format!("handoff-{}", owner_pos.memory_id),
+            owner_pos.memory_id.clone()
+        ]
     );
     hides_foreign(&unresolved);
     let unresolved_zero = store.unresolved_for_account(&owner.token, 0, &filter)?;
@@ -479,8 +497,8 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     hides_foreign(&unresolved_zero);
 
     let hits = store.search_for_account(&owner.token, "quotadelta", 5, &filter)?;
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].memory_id, owner_handoff.memory_id);
+    assert_eq!(hits.len(), 2, "session note and separate handoff");
+    assert!(hits.iter().any(|m| m.memory_id == owner_handoff.memory_id));
     assert!(!hits[0].contradictory);
     assert!(hits[0].contradiction_ids.is_empty());
     let context = store.context_for_account(&owner.token, "quotadelta", 1, &filter)?;
@@ -546,9 +564,18 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
                 .why_changed_for_account(&owner.token, query, 5, &filter)?
                 .results,
         ] {
-            assert_eq!(results.len(), 1, "{query}");
-            assert!(!results[0].contradictory, "{query}");
-            assert!(results[0].contradiction_ids.is_empty(), "{query}");
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|m| !m.memory_id.starts_with("handoff-"))
+                    .count(),
+                1,
+                "{query}"
+            );
+            for result in results {
+                assert!(!result.contradictory, "{query}");
+                assert!(result.contradiction_ids.is_empty(), "{query}");
+            }
         }
         Ok(())
     };
@@ -743,7 +770,10 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
         .unwrap();
     assert_eq!(
         live_row.contradiction_ids,
-        vec![dead_summary.memory_id.clone()]
+        vec![
+            format!("handoff-{}", dead_summary.memory_id),
+            dead_summary.memory_id.clone()
+        ]
     );
     store.forget_for_account(&owner.token, "sum-dead-event")?;
     assert!(store.state.forgotten_ids.contains("sum-dead-event"));

@@ -140,7 +140,10 @@ try:
             "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
-    assert len(recalled["result"]["structuredContent"]["results"]) == 1
+    assert {m["memory_id"] for m in recalled["result"]["structuredContent"]["results"]} == {
+        ended["result"]["structuredContent"]["memory_id"],
+        "handoff-" + ended["result"]["structuredContent"]["memory_id"],
+    }
 
     why_changed = call(
         7,
@@ -150,7 +153,8 @@ try:
             "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
-    why_result = why_changed["result"]["structuredContent"]["results"][0]
+    why_result = next(m for m in why_changed["result"]["structuredContent"]["results"]
+                      if m["memory_id"] == ended["result"]["structuredContent"]["memory_id"])
     assert why_result["decision_reason"] == "the stdio protocol remained replay-safe"
     assert any(
         relationship["relation"] == "memory_touches_file"

@@ -266,8 +266,12 @@ fn durable_summary_survives_raw_observation_expiry_until_forget() -> Result<(), 
         .expires_at = Some((now_seconds() - 1).to_string());
     store.sweep_expired()?;
     let recalled = store.search("durable summary source evidence", 5)?;
-    assert_eq!(recalled.len(), 1);
-    assert_eq!(recalled[0].memory_id, summary.memory_id);
+    assert_eq!(
+        recalled.len(),
+        2,
+        "session note and separate handoff survive raw expiry"
+    );
+    assert!(recalled.iter().any(|m| m.memory_id == summary.memory_id));
     store.forget(&summary.memory_id)?;
     assert!(
         store

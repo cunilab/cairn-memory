@@ -34,8 +34,12 @@ fn captures_and_recalls_evidence_backed_session_memory() -> Result<(), StoreErro
     assert_eq!(memory.context.services, context().services);
 
     let results = store.search("missing signature", 5)?;
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].memory_id, "memory-sess-auth-001");
+    assert_eq!(results.len(), 2, "session note and separate handoff");
+    assert!(
+        results
+            .iter()
+            .any(|m| m.memory_id == "memory-sess-auth-001")
+    );
     assert!(
         results[0]
             .source_event_ids
@@ -175,7 +179,7 @@ fn session_continuity_fixture_runs_through_capture_to_recall() -> Result<(), Sto
     let memory = memory.expect("fixture must end the session");
     assert_eq!(memory.source_event_ids.len(), 2);
     let pack = store.context("missing signature", 5)?;
-    assert_eq!(pack.results.len(), 1);
+    assert_eq!(pack.results.len(), 2, "session note and separate handoff");
     assert!(
         pack.results[0]
             .source_event_ids

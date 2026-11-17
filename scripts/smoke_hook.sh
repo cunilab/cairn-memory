@@ -71,7 +71,11 @@ RESULTS_JSON="$results" python3 - <<'PY'
 import json
 import os
 
-assert len(json.loads(os.environ["RESULTS_JSON"])) == 1
+results = json.loads(os.environ["RESULTS_JSON"])
+assert len(results) == 2
+assert all(m["source_event_ids"] == ["hook-smoke-event"] for m in results)
+ids = {m["memory_id"] for m in results}
+assert any("handoff-" + memory_id in ids for memory_id in ids)
 PY
 
 echo "Hook adapter smoke check passed"

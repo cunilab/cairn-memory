@@ -31,6 +31,7 @@ pub enum Retention {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
     SessionSummary,
+    Handoff,
     #[default]
     Explicit,
     Lesson,
@@ -250,7 +251,13 @@ impl MemoryStore {
             memory.changed_by = Some(person_id.clone());
             memory.changed_at = Some(crate::types::timestamp());
         }
-        let sources = self.hide_id(id, Some(&person_id))?;
+        let sources = if published {
+            // Hiding shared knowledge must not also hide its captures or sibling notes.
+            self.state.forgotten_ids.insert(id.to_owned());
+            Vec::new()
+        } else {
+            self.hide_id(id, Some(&person_id))?
+        };
         self.note_sync_deletions(Some(&person_id), id, &sources);
         self.record_share_audit(&person_id, action, Some(id), serde_json::json!({}));
         self.persist()
