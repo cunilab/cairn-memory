@@ -74,7 +74,8 @@ source defaults to `hook`.
 ## Capture hygiene (v0.1.4)
 
 Automatic assistant text is skipped by default: explicit `role: assistant`
-(top level or nested payload) and Claude Code `Stop` events produce no HTTP
+(top level or nested payload), the presence of `last_assistant_message` at either
+level, and Claude Code `Stop` events produce no HTTP
 request and do not create or touch an outbox. Set
 `CAIRN_CAPTURE_ASSISTANT=1` on the hook process to opt in. Other values keep
 the default. Explicit CLI/MCP saves and captures remain agent-directed.

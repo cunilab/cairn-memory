@@ -169,8 +169,12 @@ def project_file_id(cwd):
 
 def skip_capture(source):
     nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
-    role = first(source, "role") or first(nested, "role") or HOST_ROLES.get(source.get("hook_event_name"))
-    if (str(role).lower() == "assistant" or source.get("hook_event_name") == "Stop") and os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1":
+    assistant = (
+        source.get("hook_event_name") == "Stop"
+        or any(str(value.get("role")).lower() == "assistant" or "last_assistant_message" in value
+               for value in (source, nested))
+    )
+    if assistant and os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1":
         return True
     cwd = first(source, "cwd") or first(nested, "cwd") or os.getcwd()
     if not isinstance(cwd, str):

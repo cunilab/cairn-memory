@@ -139,6 +139,9 @@ class StubHookTests(unittest.TestCase):
         for payload in (
             {"role": "assistant", "content": "private answer"},
             {"hook_event_name": "Stop", "last_assistant_message": "private answer"},
+            {"last_assistant_message": "private answer"},
+            {"payload": {"last_assistant_message": "private answer"}},
+            {"role": "tool", "payload": {"role": "assistant", "content": "private answer"}},
             {"payload": {"role": "assistant", "content": "private answer"}},
         ):
             with tempfile.TemporaryDirectory() as directory:
