@@ -4,6 +4,8 @@
 //! offline tests. This crate owns the async, server-authoritative boundary so
 //! the transport can migrate without changing the account or sync contracts.
 
+mod embeddings;
+
 use cairn_core::{
     AUTH_SESSION_SECONDS, Account, AccountStatus, AuditEvent, AuthSessionResult, ContextPack,
     Device, DeviceRegistration, DeviceStatus, ExportBundle, ImportResult, Lifecycle,
@@ -16,7 +18,7 @@ use cairn_core::{
     memory_matches_filter, normalize_email, normalize_export_bundle, normalize_observation,
     now_seconds, prefer_newer_contradiction, publication_fingerprint, random_token, recall_result,
     redact_sensitive_content, redact_work_context, sensitivity_including_context,
-    session_memory_id, validate_password, why_changed_priority,
+    session_memory_id, validate_password,
 };
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
@@ -40,6 +42,7 @@ const SYNC_DELETION_MIGRATION: &str = include_str!("../../../migrations/0011_syn
 const SESSION_PENDING_MIGRATION: &str =
     include_str!("../../../migrations/0012_session_summary_pending.sql");
 const ADMIN_ROLE_MIGRATION: &str = include_str!("../../../migrations/0013_admin_role.sql");
+const EMBEDDING_MIGRATION: &str = include_str!("../../../migrations/0014_hybrid_embeddings.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 /// A session whose newest retained observation is older than this is finished on the next
 /// capture or session start of the same person.
@@ -156,6 +159,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::raw_sql(ADMIN_ROLE_MIGRATION)
+            .execute(&self.pool)
+            .await?;
+        sqlx::raw_sql(EMBEDDING_MIGRATION)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1174,83 +1180,19 @@ impl PostgresStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, PostgresError> {
-        Ok(self
-            .search_window(account_token, query, limit, filter)
-            .await?
-            .0)
-    }
-
-    /// Returns the capped result window and the number of eligible matches before the cap.
-    ///
-    /// The total comes from `COUNT(*) OVER ()` in the same statement, so it shares the
-    /// snapshot and predicate of the rows. It is read from the returned rows, so callers
-    /// that need it must ask for at least one row (`context` passes `usize::MAX`;
-    /// `why_changed_context` has its own query).
-    async fn search_window(
-        &self,
-        account_token: &str,
-        query: &str,
-        limit: usize,
-        filter: &RecallFilter,
-    ) -> Result<(Vec<RecallResult>, usize), PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
-        if query.trim().is_empty() {
-            return Err(PostgresError::Validation(
-                "query must not be empty".to_owned(),
-            ));
-        }
-        let limit = i64::try_from(limit.min(MAX_SEARCH_RESULTS as usize))
-            .map_err(|_| PostgresError::Validation("limit exceeds PostgreSQL range".to_owned()))?;
-        let (conditions, binds) = search_conditions(&account.person_id, query, filter);
-        let limit_bind = binds.len() + 1;
-        let sql = format!(
-            "{} WHERE {} ORDER BY ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) DESC,
-             (m.kind = 'decision') DESC, m.memory_id ASC LIMIT ${limit_bind}",
-            memory_search_select_sql(),
-            conditions.join(" AND ")
-        );
-        let mut request = sqlx::query(&sql);
-        for value in &binds {
-            request = request.bind(value);
-        }
-        request = request.bind(limit);
-        let rows = request.fetch_all(&self.pool).await?;
-        let total = match rows.first() {
-            Some(row) => usize::try_from(row.try_get::<i64, _>("total_matches")?)
-                .map_err(|_| PostgresError::Validation("match count is out of range".to_owned()))?,
-            None => 0,
-        };
-        let all_memories = self.all_memories_for_person(&account.person_id).await?;
-        let mut results = rows
-            .iter()
-            .map(|row| {
-                let memory = memory_from_row(row)?;
-                let score: f32 = row.try_get("search_score")?;
-                Ok(recall_result(
-                    &memory,
-                    score,
-                    &all_memories,
-                    &HashSet::new(),
-                    filter,
-                ))
-            })
-            .collect::<Result<Vec<_>, PostgresError>>()?;
-        // Applies inside the SQL window; a tie cut by the row cap stays in memory_id order.
-        prefer_newer_contradiction(&mut results, &all_memories);
-        Ok((results, total))
+        self.search_with_vector(account_token, query, limit, filter, None)
+            .await
     }
 
     pub async fn context(
         &self,
-        account_token: &str,
+        token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, PostgresError> {
-        let (mut results, total) = self
-            .search_window(account_token, query, usize::MAX, filter)
-            .await?;
-        Ok(pack_window(query.to_owned(), &mut results, limit, total))
+        self.context_with_vector(token, query, limit, filter, None, false)
+            .await
     }
 
     pub async fn resume_context(
@@ -1292,76 +1234,15 @@ impl PostgresStore {
         ))
     }
 
-    /// Ranks decision evidence across every eligible match, then applies the 512 cap.
-    ///
-    /// One uncapped query returns only `(memory_id, score)` for each eligible match, in the
-    /// same lexical order as `search`. Each id is resolved in the person's live memories
-    /// (the set recall metadata already loads), ranked with `why_changed_priority`, stably
-    /// sorted by decision, then relationship count, then that lexical order, and cut to
-    /// `MAX_SEARCH_RESULTS` before full results are built. Cost grows with the number of
-    /// matches, not with 512: every match is scored and inspected in Rust.
     pub async fn why_changed_context(
         &self,
-        account_token: &str,
+        token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, PostgresError> {
-        let account = self.authenticate_account(account_token).await?;
-        if query.trim().is_empty() {
-            return Err(PostgresError::Validation(
-                "query must not be empty".to_owned(),
-            ));
-        }
-        let (conditions, binds) = search_conditions(&account.person_id, query, filter);
-        let sql = format!(
-            "SELECT m.memory_id,
-                    ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score
-             FROM cairn_memories m WHERE {}
-             ORDER BY ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) DESC,
-             m.memory_id ASC",
-            conditions.join(" AND ")
-        );
-        let mut request = sqlx::query(&sql);
-        for value in &binds {
-            request = request.bind(value);
-        }
-        let rows = request.fetch_all(&self.pool).await?;
-        let all_memories = self.all_memories_for_person(&account.person_id).await?;
-        let by_id: HashMap<&str, &Memory> = all_memories
-            .iter()
-            .map(|memory| (memory.memory_id.as_str(), memory))
-            .collect();
-        // A match deleted between the two reads has no memory to rank and is not counted.
-        let mut ranked = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let id: String = row.try_get("memory_id")?;
-            if let Some(memory) = by_id.get(id.as_str()) {
-                ranked.push((*memory, row.try_get::<f32, _>("search_score")?));
-            }
-        }
-        let total = ranked.len();
-        // Stable: equal priority keeps the lexical order from the query.
-        ranked.sort_by_cached_key(|(memory, _)| {
-            let (decision, relationships) = why_changed_priority(memory);
-            (
-                std::cmp::Reverse(decision),
-                std::cmp::Reverse(relationships),
-            )
-        });
-        let mut results = ranked
-            .into_iter()
-            .take(MAX_SEARCH_RESULTS as usize)
-            .map(|(memory, score)| {
-                recall_result(memory, score, &all_memories, &HashSet::new(), filter)
-            })
-            .collect::<Vec<_>>();
-        Ok(pack_window(
-            format!("why changed: {query}"),
-            &mut results,
-            limit,
-            total,
-        ))
+        self.context_with_vector(token, query, limit, filter, None, true)
+            .await
     }
 
     pub async fn correct(
@@ -3894,24 +3775,6 @@ fn memory_select_sql() -> &'static str {
      FROM cairn_memories m"
 }
 
-/// The eligibility, query, and filter predicate shared by every PostgreSQL search path.
-/// `$1` is the person, `$2` the query; filter binds follow.
-fn search_conditions(
-    person_id: &str,
-    query: &str,
-    filter: &RecallFilter,
-) -> (Vec<String>, Vec<String>) {
-    let mut binds = vec![person_id.to_owned(), query.to_owned()];
-    let mut conditions = vec![
-        recall_access_sql(),
-        "m.search_tsv @@ plainto_tsquery('simple', $2)".to_owned(),
-        live_memory_sql().to_owned(),
-        not_superseded_by_live_memory_sql(false),
-    ];
-    append_filter_conditions(filter, &mut conditions, &mut binds);
-    (conditions, binds)
-}
-
 /// Packs a capped search window. `omitted_count` is every eligible match not returned,
 /// including matches past `MAX_SEARCH_RESULTS`; `omitted_memory_ids` lists only the window.
 fn pack_window(
@@ -3928,24 +3791,6 @@ fn pack_window(
         ));
     }
     pack
-}
-
-fn memory_search_select_sql() -> String {
-    format!(
-        "{} , ts_rank_cd(m.search_tsv, plainto_tsquery('simple', $2)) AS search_score,
-         COUNT(*) OVER () AS total_matches
-         FROM cairn_memories m",
-        memory_select_columns()
-    )
-}
-
-fn memory_select_columns() -> &'static str {
-    "SELECT m.record, m.memory_id, m.person_id, m.session_id, m.content,
-            m.source_event_ids, m.context, m.lifecycle, m.kind, m.scope,
-            m.project_id, m.next_steps, m.unresolved_work, m.supersedes,
-            m.promoted_from, m.promotion_reason,
-            m.verified_commit, m.published_by, m.changed_by, m.changed_at,
-            EXTRACT(EPOCH FROM m.created_at)::bigint::text AS created_at"
 }
 
 fn observation_select_sql() -> &'static str {
@@ -3987,46 +3832,6 @@ fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
         changed_at: row.try_get("changed_at")?,
         created_at: row.try_get("created_at")?,
     })
-}
-
-fn append_filter_conditions(
-    filter: &RecallFilter,
-    conditions: &mut Vec<String>,
-    binds: &mut Vec<String>,
-) {
-    if filter.session_id.is_none() && filter.context.is_none() {
-        return;
-    }
-    let mut personal = vec!["m.scope = 'personal'".to_owned()];
-    if let Some(id) = &filter.session_id {
-        binds.push(id.clone());
-        personal.push(format!("m.session_id = ${}", binds.len()));
-    }
-    if let Some(context) = &filter.context {
-        for (key, value) in [
-            ("repository", &context.repository),
-            ("branch", &context.branch),
-            ("worktree", &context.worktree),
-        ] {
-            if let Some(value) = value {
-                binds.push(value.clone());
-                personal.push(format!("m.context->>'{key}' = ${}", binds.len()));
-            }
-        }
-    }
-    let mut alternatives = vec![
-        "m.scope = 'global'".to_owned(),
-        "(m.scope = 'personal' AND m.kind NOT IN ('session_summary', 'capture'))".to_owned(),
-        format!("({})", personal.join(" AND ")),
-    ];
-    if let Some(id) = filter.context.as_ref().and_then(|c| c.project_id.as_ref()) {
-        binds.push(id.clone());
-        alternatives.push(format!(
-            "(m.scope = 'project' AND m.project_id = ${})",
-            binds.len()
-        ));
-    }
-    conditions.push(format!("({})", alternatives.join(" OR ")));
 }
 
 fn import_conflict(kind: &str, id: &str) -> PostgresError {

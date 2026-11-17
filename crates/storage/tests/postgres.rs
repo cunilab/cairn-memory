@@ -2207,6 +2207,12 @@ async fn postgres_contradicting_equal_ranks_put_the_newer_memory_first() {
             .expect("search");
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|hit| hit.contradictory));
+        let mut hits = hits;
+        for hit in &mut hits {
+            hit.score = 1.0;
+        }
+        let memories = store.memories(&owner.token).await.unwrap();
+        cairn_core::prefer_newer_contradiction(&mut hits, &memories);
         assert_eq!(hits[0].memory_id, ids[newer]);
     }
 }
@@ -3437,4 +3443,122 @@ async fn postgres_record_title_has_highest_lexical_weight() {
         .await
         .unwrap();
     assert_eq!(rows[0].fields.title, "weightneedle");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_hybrid_entities_links_vectors_and_visibility() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM cairn_schema_migrations WHERE version='0014_hybrid_embeddings')"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    let owner = store
+        .bootstrap_account("hybrid@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account_as_admin(
+            &owner.token,
+            "other@hybrid.test",
+            "correct horse battery staple",
+        )
+        .await
+        .unwrap();
+    let seed=store.save(&owner.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Orchard cultivation","summary":"Grow apples","reason":"food","tags":["planting"],"entities":["Tree::grow"]})).unwrap()).await.unwrap();
+    let neighbour=store.save(&owner.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Seasonal advice","summary":"Water regularly","reason":"health","evidence":[seed.memory_id]})).unwrap()).await.unwrap();
+    let hidden=store.save(&other.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Secret horticulture","summary":"Keep private","reason":"privacy","evidence":[seed.memory_id]})).unwrap()).await.unwrap();
+    for query in ["planting", "Tree::grow", "Orchard"] {
+        let hits = store
+            .search(&owner.token, query, 10, &RecallFilter::default())
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+        assert!(hits.iter().any(|r| r.memory_id == neighbour.memory_id));
+        assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    }
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    for m in [&seed, &hidden] {
+        assert!(
+            store
+                .put_embedding(cairn_core::MemoryEmbedding::new(m, vector.clone()).unwrap())
+                .await
+                .unwrap()
+        );
+    }
+    let hits = store
+        .search_with_vector(
+            &owner.token,
+            "unrelated",
+            10,
+            &RecallFilter::default(),
+            Some(&vector),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+    assert!(hits.iter().any(|r| r.memory_id == neighbour.memory_id));
+    assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    assert!(hits.iter().all(|r| r.source == "personal"));
+    sqlx::query("UPDATE cairn_memories SET record=jsonb_set(record,'{title}','\"Updated title\"') WHERE memory_id=$1").bind(&seed.memory_id).execute(&pool).await.unwrap();
+    assert!(
+        store
+            .search_with_vector(
+                &owner.token,
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&seed, vector.clone()).unwrap())
+            .await
+            .unwrap()
+    );
+    let current = store
+        .embedding_jobs(512)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.memory_id == seed.memory_id)
+        .unwrap();
+    assert!(
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&current, vector.clone()).unwrap())
+            .await
+            .unwrap()
+    );
+    store.forget(&owner.token, &seed.memory_id).await.unwrap();
+    assert!(
+        store
+            .search_with_vector(
+                &owner.token,
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&seed, vector).unwrap())
+            .await
+            .unwrap()
+    );
 }

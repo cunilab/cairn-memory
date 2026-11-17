@@ -26,7 +26,7 @@ REST is the one application boundary: the web console (web session), hooks, `cai
 
 ### Layer 1 prototype boundary
 
-The current Layer 1 implementation is the `cairn-core` crate plus REST and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, keyword recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter now provides the first server-authoritative PostgreSQL account, device, observation, and sync-event path.
+The current Layer 1 implementation is the `cairn-core` crate plus REST and a dependency-free local viewer in `cairn-server`. It uses a versioned, file-backed JSON adapter so capture, redaction, lifecycle classification, session summarization, hybrid recall, forget, export/import, and restart persistence can be exercised without requiring PostgreSQL. The Layer 3 `cairn-storage` adapter provides the server-authoritative PostgreSQL account, device, observation, and sync-event path. Both adapters use the [hybrid recall contract](contracts/continuity-v1.md#hybrid-recall-v014): full text, entities, one-hop links and local server embeddings, with lexical fallback when the model is unavailable.
 
 `apps/web` is the first Next.js App Router console. The browser calls same-origin Next.js routes, those routes proxy to the Rust API at `CAIRN_API_URL`, and the embedded `/viewer` remains.
 
@@ -261,4 +261,4 @@ Evidence is a first-class relationship from a memory to the observation, session
 - [Roadmap — Cairn Memory](roadmap.md) — owns phase order and milestone gates.
 - [Collaborative memory specification](specs/collaborative-memory.md) — owns the first feature-level behavior and acceptance criteria.
 - [Memory context and promotion](specs/memory-context-and-promotion.md) — owns scopes, branch/worktree context, promotion, and context packing.
-- [Graph-assisted retrieval](specs/graph-assisted-retrieval.md) — owns embeddings, code graphs, memory graphs, and hybrid retrieval.
+- [Hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014) — owns implemented embeddings, entity/link channels and ranking; [graph-assisted retrieval](specs/graph-assisted-retrieval.md) retains the broader historical graph proposal.

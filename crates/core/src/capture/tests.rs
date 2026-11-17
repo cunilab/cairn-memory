@@ -217,7 +217,7 @@ fn account_sessions_isolate_context_for_one_public_id() -> Result<(), StoreError
 
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 1);
+    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
     assert_eq!(
         owner_hits[0].context.branch.as_deref(),
         Some("owner-branch")
@@ -415,8 +415,17 @@ fn two_accounts_keep_distinct_session_summaries_for_one_session_id() -> Result<(
     assert!(!owner_summary.content.contains("memberfact"));
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 1);
-    assert_eq!(owner_hits[0].memory_id, owner_summary.memory_id);
+    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
+    assert!(
+        owner_hits
+            .iter()
+            .any(|m| m.memory_id == owner_summary.memory_id)
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .all(|m| m.source_event_ids == owner_summary.source_event_ids)
+    );
     let member_hits =
         store.search_for_account(&member.token, "ownerfact", 5, &RecallFilter::default())?;
     assert!(member_hits.is_empty());
@@ -821,8 +830,12 @@ fn failed_account_capture_persist_leaves_no_unowned_observation() -> Result<(), 
     assert!(!reopened.observation_owned_by("retry-event", &member.account.person_id));
     let hits =
         reopened.search_for_account(&owner.token, "retrybetafact", 5, &RecallFilter::default())?;
-    assert_eq!(hits.len(), 1);
-    assert!(hits[0].content.contains("retrybetafact"));
+    assert_eq!(hits.len(), 2, "session note and linked handoff");
+    assert!(hits.iter().any(|m| m.content.contains("retrybetafact")));
+    assert!(
+        hits.iter()
+            .all(|m| m.source_event_ids.contains(&"retry-event".to_owned()))
+    );
     let member_hits =
         reopened.search_for_account(&member.token, "retrybetafact", 5, &RecallFilter::default())?;
     assert!(member_hits.is_empty());

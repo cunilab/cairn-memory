@@ -68,11 +68,11 @@ configuration is the only credential, and the server scopes every call to its ac
 | `memory_why_changed` | `POST /why-changed` | Return decisions, reasons, evidence, relationships, and conflict signals |
 | `memory_diagnose` | `GET /diagnose` | Report the account's lifecycle counts |
 | `memory_lesson_save` | `POST /remember` | Save a scoped record; defaults to gotcha unless kind is explicit |
-| `memory_reflect` | `POST /context` | Return retrieval candidates; no model is invoked |
+| `memory_reflect` | `POST /context` | Return hybrid retrieval candidates; local embeddings when enabled |
 | `memory_session_start` | `POST /session/start` | Start or resume a session |
 | `memory_observe` | `POST /observe` | Capture one bounded, idempotent observation |
 | `memory_session_end` | `POST /session/end` | Alias for session consolidation |
-| `memory_search` | `POST /search` | Keyword search |
+| `memory_search` | `POST /search` | Hybrid search |
 | `memory_context` | `POST /context` | Bounded context assembly |
 | `memory_resume` | `POST /resume` | Recover recent session summaries for current work context |
 | `memory_unresolved` | `POST /unresolved` | Recover session summaries with unresolved work |
@@ -123,6 +123,8 @@ cairn memory memory-id
 ```
 
 Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
+
+All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v014); no external model API is used.
 
 ## Layer 2 context filters
 

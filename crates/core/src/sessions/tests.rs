@@ -122,8 +122,12 @@ fn reopening_store_preserves_session_memory() -> Result<(), StoreError> {
 
     let store = MemoryStore::open(&path)?;
     let results = store.search("restart persistence", 5)?;
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].source_event_ids, vec!["evt-restart"]);
+    assert_eq!(results.len(), 2, "session note and linked handoff");
+    assert!(
+        results
+            .iter()
+            .all(|r| r.source_event_ids == vec!["evt-restart"])
+    );
 
     fs::remove_file(path)?;
     Ok(())
@@ -434,9 +438,11 @@ fn a_summary_with_a_forgotten_source_is_derived_again_without_it() -> Result<(),
     age_observations(&mut store, "src", 31 * 60);
     store.capture_for_account(&a.token, observation_for("trigger", "t-src", "trigger"))?;
     let hits = store.search_for_account(&a.token, "keepmeword", 5, &filter)?;
-    assert_eq!(hits.len(), 1);
-    assert!(!hits[0].content.contains("forgetmeword"));
-    assert_eq!(hits[0].source_event_ids, vec!["src-2".to_owned()]);
+    assert_eq!(hits.len(), 2, "session note and linked handoff");
+    assert!(
+        hits.iter().all(|m| !m.content.contains("forgetmeword")
+            && m.source_event_ids == vec!["src-2".to_owned()])
+    );
     assert_eq!(summaries(&store, "src").len(), 1);
     fs::remove_file(path)?;
     Ok(())

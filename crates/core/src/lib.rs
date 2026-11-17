@@ -9,6 +9,8 @@ mod accounts;
 mod capture;
 mod devices;
 mod distillation;
+mod embeddings;
+mod hybrid;
 mod lifecycle;
 mod memories;
 mod ownership;
@@ -49,7 +51,6 @@ pub use projects::{
 pub use recall::{
     CodeRelationship, ContextPack, RecallFilter, RecallResult, build_context_pack,
     memory_matches_filter, prefer_decision, prefer_newer_contradiction, recall_result,
-    why_changed_priority,
 };
 pub use sessions::{Session, carry_summary_state, derive_session_memory, session_memory_id};
 pub use sharing::{ProjectConflict, ProjectPerson, competing_project_memories};
@@ -59,3 +60,9 @@ pub use transfer::{
     EXPORT_FORMAT, EXPORT_VERSION, ExportBundle, ImportResult, normalize_export_bundle,
 };
 pub use types::{StoreError, WorkContext, now_seconds};
+
+pub use embeddings::{
+    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EMBEDDING_VERSION, MemoryEmbedding,
+    embedding_fingerprint, embedding_text, validate_vector,
+};
+pub use hybrid::{SEMANTIC_CANDIDATES, hybrid_rank};

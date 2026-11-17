@@ -1,3 +1,4 @@
+use crate::hybrid::tokenize;
 use crate::lifecycle::{Lifecycle, MemoryKind, MemoryScope, is_expired};
 use crate::memories::Memory;
 use crate::store::MemoryStore;
@@ -83,65 +84,57 @@ impl MemoryStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
-        let mut results = self.ranked_matches(query, filter)?;
-        prefer_newer_contradiction(&mut results, &self.state.memories);
-        results.truncate(limit);
-        Ok(results)
+        self.search_with_vector(None, query, limit, filter, None)
     }
 
-    /// Score-ranked matches before the contradiction tiebreak and the limit, so an account
-    /// read can drop foreign ids first and break ties only on what it may see.
-    fn ranked_matches(
+    /// Server semantic channel; a missing vector keeps lexical/entity/link retrieval.
+    pub fn search_with_vector(
         &self,
+        token: Option<&str>,
         query: &str,
+        limit: usize,
         filter: &RecallFilter,
+        vector: Option<&[f32]>,
     ) -> Result<Vec<RecallResult>, StoreError> {
-        self.ranked_matches_in(query, filter, &self.state.memories)
-    }
-
-    fn ranked_matches_in(
-        &self,
-        query: &str,
-        filter: &RecallFilter,
-        memories: &[Memory],
-    ) -> Result<Vec<RecallResult>, StoreError> {
-        if query.trim().is_empty() {
-            return Err(StoreError::Validation("query must not be empty".to_owned()));
+        let mut memories = match token {
+            Some(token) => self.memories_for_account(token)?,
+            None => {
+                let hidden = self.live_superseded_targets();
+                self.state
+                    .memories
+                    .iter()
+                    .filter(|m| self.memory_is_recalled(m, &hidden))
+                    .cloned()
+                    .collect()
+            }
+        };
+        memories.retain(|m| memory_matches_filter(m, filter));
+        for m in &mut memories {
+            if m.published_by.is_some() {
+                m.promoted_from = None;
+            }
         }
-
-        let terms = tokenize(query);
-        let superseded = superseded_targets(
-            memories,
-            &self.state.forgotten_ids,
-            &self.memory_owner_map(),
-        );
-        let mut results: Vec<RecallResult> = memories
+        let semantic = self.semantic_scores(&memories, vector)?;
+        let ranked = crate::hybrid_rank(&memories, query, filter, None, semantic)?;
+        let by_id = memories
             .iter()
-            .filter(|memory| self.memory_is_recalled(memory, &superseded))
-            .filter(|memory| memory_matches_filter(memory, filter))
-            .filter_map(|memory| {
-                let score = score_memory(memory, &terms);
-                (score > 0.0).then(|| {
-                    recall_result_with(
-                        memory,
-                        score,
-                        memories,
-                        &self.state.forgotten_ids,
-                        filter,
-                        &superseded,
-                    )
-                })
+            .map(|m| (m.memory_id.as_str(), m))
+            .collect::<HashMap<_, _>>();
+        let mut results = ranked
+            .into_iter()
+            .map(|(id, score)| {
+                recall_result(
+                    by_id[id.as_str()],
+                    score,
+                    &memories,
+                    &self.state.forgotten_ids,
+                    filter,
+                )
             })
-            .collect();
-
-        results.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        });
-        prefer_decision(&mut results, &self.state.memories);
+            .collect::<Vec<_>>();
+        prefer_decision(&mut results, &memories);
+        prefer_newer_contradiction(&mut results, &memories);
+        results.truncate(limit);
         Ok(results)
     }
 
@@ -209,42 +202,7 @@ impl MemoryStore {
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
-        let account = self.authenticate_account(account_token)?;
-        let mut eligible = self
-            .state
-            .memories
-            .iter()
-            .filter(|m| {
-                if m.scope == MemoryScope::Global {
-                    return true;
-                }
-                if let Some(project_id) = m
-                    .project_id
-                    .as_deref()
-                    .filter(|_| m.scope == MemoryScope::Project)
-                {
-                    self.project_owner_id(project_id).is_some()
-                        && (self.project_owner_id(project_id).as_deref()
-                            == Some(account.person_id.as_str())
-                            || self.state.project_members.iter().any(|r| {
-                                r.project_id == project_id
-                                    && r.member_person_id == account.person_id
-                            }))
-                } else {
-                    self.memory_owned_by(&m.memory_id, &account.person_id)
-                }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for m in &mut eligible {
-            if m.published_by.is_some() {
-                m.promoted_from = None;
-            }
-        }
-        let mut results = self.ranked_matches_in(query, filter, &eligible)?;
-        prefer_newer_contradiction(&mut results, &eligible);
-        results.truncate(limit);
-        Ok(results)
+        self.search_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn context_for_account(
@@ -614,16 +572,6 @@ pub(crate) fn live_origin(
         .map(|candidate| candidate.memory_id.clone())
 }
 
-/// Why-changed priority of a memory: whether it carries a decision reason, then its
-/// relationship count. These are the same helpers `recall_result` fills in, so a store can
-/// rank before building results.
-pub fn why_changed_priority(memory: &Memory) -> (bool, usize) {
-    (
-        !memory.fields.reason.is_empty() || extract_decision_reason(&memory.content).is_some(),
-        code_relationships(memory).len(),
-    )
-}
-
 fn extract_decision_reason(content: &str) -> Option<String> {
     let lower = content.to_ascii_lowercase();
     let start = lower
@@ -932,39 +880,6 @@ pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
             })
         }
     }
-}
-
-fn tokenize(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .filter(|term| term.len() >= 2)
-        .map(|term| term.to_ascii_lowercase())
-        .collect()
-}
-
-fn score_memory(memory: &Memory, terms: &[String]) -> f32 {
-    let haystack = format!(
-        "{} {} {} {} {} {} {} {} {}",
-        memory.content,
-        memory.context.repository.as_deref().unwrap_or_default(),
-        memory.context.branch.as_deref().unwrap_or_default(),
-        memory.context.worktree.as_deref().unwrap_or_default(),
-        memory.context.files.join(" "),
-        memory.context.symbols.join(" "),
-        memory.context.commands.join(" "),
-        memory.context.tests.join(" "),
-        memory.context.services.join(" "),
-    )
-    .to_ascii_lowercase();
-
-    let title = memory.fields.title.to_ascii_lowercase();
-    terms
-        .iter()
-        .map(|term| {
-            let count = haystack.matches(term).count() + 3 * title.matches(term).count();
-            count as f32
-        })
-        .sum()
 }
 
 #[cfg(test)]

@@ -61,6 +61,81 @@ available for local administration and compatibility. When a filter is
 supplied, a memory is included only if its scope matches the current context;
 branch and worktree memory never matches an unrelated branch or worktree.
 
+## Hybrid recall (v0.1.4)
+
+`search`, `smart-search`, `context`, `recall` and `why-changed` use the same
+four-channel retrieval pipeline. Authorization, forgotten/expired/superseded
+suppression and context filtering apply before fusion and link expansion.
+Results retain `source: project | personal | global`; relevance never grants
+visibility. Resume/unresolved keep their session continuity behavior.
+
+- **Full text:** PostgreSQL uses its `simple` FTS index and `ts_rank_cd`;
+  title is weight A and content weight B. The file store uses lexical substring
+  counts with title weight 8 and other text weight 1. The existing tokenization
+  differences remain; scores from these stores need not be identical.
+- **Entity:** query terms and requested files/symbols/commands match stored
+  `applies_to`, `evidence`, `tags`, `entities` and code context lists. An exact
+  case-insensitive query or requested entity match scores 4; otherwise each
+  matching query term scores 1. This selects relevance without changing scopes.
+- **Semantic:** normalized 384-dimensional local MiniLM vectors, exact cosine
+  similarity strictly above zero, at most 512 candidates after visibility and
+  context filters. Zero is an inclusion rule, not a calibrated quality claim.
+- **Links:** one hop over explicit memory IDs in `evidence` (either direction)
+  or shared `(author, source_event_id)` pairs (capture IDs are person-scoped). Expand the first 512 fused visible seeds, rank
+  neighbours by summed seed scores and retain at most 512. Newly discovered
+  neighbours never become seeds in the same request. URL similarity is not a
+  link. Hidden neighbours never become candidates or generated contradiction targets.
+
+Each nonempty channel sorts descending by its score then ascending memory ID,
+removes duplicate IDs and contributes `1 / (60 + rank + 1)` with zero-based
+rank. Sum contributions, then multiply by type (`rule`/`decision`: 3,
+other notes including session notes/handoffs: 2, `capture`: 1) and by 2 when
+pinned. Title is the strongest lexical field and appears first, repeated three
+times, in semantic input. These named policy constants are tunable in code;
+changing them requires updated contract/tests. No retention or feedback signal
+is added by this stage. Final equal-score decision/contradiction tiebreaks
+remain; equal raw lexical scores may have distinct fused ranks.
+
+### Local model and background indexing
+
+The server alone runs `fastembed` 7.7.1 with the FP32
+`Qdrant/all-MiniLM-L6-v2-onnx` artifact, revision
+`cb27c1f221563ca44e58ad2a694965db39c8153d`, mean pooling, 256-token inputs,
+one CPU inference thread and batches of at most 8. UTF-8 input is bounded to
+8192 characters before tokenization. The Apache-2.0 model and tokenizer files
+are pinned by SHA-256 in `models/minilm.json`, verified during provisioning
+and again at load. Production images bake them in. Standalone provisioning:
+
+```sh
+python3 scripts/download_embedding_model.py /path/to/minilm
+cairn-server --store /path/to/store.json --embedding-model-dir /path/to/minilm
+```
+
+`CAIRN_EMBEDDING_MODEL_DIR` supplies the directory when the flag is absent.
+There is no runtime model download or external embedding API. `/health` reports
+`semantic_search: enabled` only after model load; missing/untrusted/unloadable
+artifacts leave it `disabled` and lexical/entity/link retrieval remains available.
+A failed or busy query inference also falls back for that request.
+
+A background job starts immediately, then scans every 2 seconds for missing,
+stale-input or stale-model vectors. It embeds at most 8 records per tick,
+outside the file lock and async executor; captures/saves/searches never wait
+for indexing to catch up. Query inference uses a nonblocking model lock.
+Records not yet indexed have no semantic contribution. Failures log no memory
+payload and retry on the next tick. A source fingerprint/model check before
+commit rejects work racing an edit, correction, expiry or forgetting.
+
+PostgreSQL deployments require the `vector` extension; the migration creates
+it and persists `vector(384)` plus model ID/version, dimensions, normalization,
+SHA-256 input fingerprint and creation time. A separate SHA-256 source-revision
+check invalidates a changed database record immediately. The file store
+persists equivalent vectors/metadata and verifies the current input fingerprint
+before use. Both stores restart from persisted vectors; startup backfills
+missing or stale ones. Derived vectors are not trusted client input, exported
+memory or sync events. File job discovery scans local memory; PostgreSQL uses
+a bounded pending-row query. This implementation uses exact vector search;
+no approximate index or recall-quality benchmark is claimed.
+
 ## Context pack response
 
 Context packs preserve source event IDs and now include scope labels. If the
@@ -85,8 +160,8 @@ that 512 window, so it can be shorter than `omitted_count`. When it is, the hint
 says the results are capped and to narrow the query or filter, because a larger
 limit cannot recover the rest. `why-changed` on PostgreSQL ranks every eligible
 match before the 512 cut: decision reason present first, then relationship count,
-then the lexical order of `search` (score, then memory ID). The cut keeps the first
-512 of that order, so a decision that ranks 513th lexically still leads at limit 1.
+then the fused order of `search` (score, then memory ID). The cut keeps the first
+512 of that order, so a decision that ranks 513th by fused rank still leads at limit 1.
 The same ranking runs in the file store. `resume` and `unresolved` are not capped,
 and the file store has no cap.
 
@@ -226,16 +301,14 @@ Among results with equal scores, a memory with `kind` `decision` (a promoted
 project decision or an explicit decision memory) ranks before every other memory in
 `search`, `smart-search`, `context` and `recall`. The order of equal-score,
 equal-kind results is then the contradiction rule above, then memory ID. Scores are
-not changed, so a higher score still ranks first. Both adapters apply it; PostgreSQL
-puts it in the SQL `ORDER BY` (after the rank, before the memory ID), so the 512-row cap
-keeps decisions before other tied rows. `why-changed` keeps its own order (decision
+not changed, so a higher score still ranks first. Both adapters apply it before the PostgreSQL 512-row cap. `why-changed` keeps its own order (decision
 reason, then relationships, then score). Implemented in `prefer_decision` and
-`prefer_newer_contradiction` (`crates/core/src/recall.rs`) and `search_window`
-(`crates/storage/src/lib.rs`).
+`prefer_newer_contradiction` (`crates/core/src/recall.rs`) and `hybrid_matches`
+(`crates/storage/src/embeddings.rs`).
 
 ## Why a change exists
 
-The decision retrieval path combines lexical recall with deterministic evidence
+The decision retrieval path combines hybrid recall with deterministic evidence
 metadata:
 
 | Surface | Path/tool |

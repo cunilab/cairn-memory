@@ -288,13 +288,13 @@ should include the reason they matter and the evidence that supports them.
 Add only questions that remain relevant across sessions. Remove or update them
 when an ADR, specification, or implementation resolves them.
 
-### 2026-11-13 — PostgreSQL context counts all matches and why-changed ranks before the 512 cut
+### 2026-11-17 — PostgreSQL hybrid context counts all matches and why-changed ranks before the 512 cut
 
 - **Type:** decision
 - **Status:** active
-- **Summary:** PostgreSQL keeps a 512-match search window. `context` and `why_changed_context` set `omitted_count` to all eligible matches minus returned rows (`COUNT(*) OVER ()`), and `omitted_memory_ids` stays inside the window. `why_changed_context` ranks every eligible match with `why_changed_priority` (decision, then relationship count, then lexical order) before the cut, so its work grows with the number of matches. Plain `search` stays lexical.
+- **Summary:** PostgreSQL keeps a 512-match search window. Hybrid `context` and `why_changed_context` count all eligible fused matches before the cap, and `omitted_memory_ids` stays inside the window. Why-changed ranks by decision reason, then relationship count, then fused score before the cut; its work grows with the number of matches. Search uses FTS/entity/link/local-vector RRF with type and pinned weights, not raw lexical scores.
 - **Reason:** A cap applied before counting or ranking hid omitted matches and a rank-513 decision.
-- **Evidence:** `crates/storage/src/lib.rs`; `crates/core/src/lib.rs`; `docs/audits/2026-11-13-postgres-search-cap.md`; `crates/storage/tests/postgres.rs` ignored tests `postgres_context_omissions_count_every_eligible_match_past_the_cap` and `postgres_why_changed_orders_like_the_file_store`
+- **Evidence:** `crates/storage/src/embeddings.rs`; `docs/contracts/continuity-v1.md`; `crates/storage/tests/postgres.rs` ignored tests `postgres_context_omissions_count_every_eligible_match_past_the_cap` and `postgres_why_changed_orders_like_the_file_store` (run by `scripts/ci_postgres_tests.sh`).
 
 ### 2026-11-13 — A foreign `supersedes` link is stored inert in the file store
 

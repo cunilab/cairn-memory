@@ -42,34 +42,37 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { os: macos-15, target: aarch64-apple-darwin, ext: "" }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, ext: "" }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, ext: "" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: ".exe" }
+          - { os: macos-15, target: aarch64-apple-darwin, server_target: aarch64-apple-darwin, ext: "" }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, server_target: x86_64-unknown-linux-gnu, ext: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, server_target: aarch64-unknown-linux-gnu, ext: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, server_target: x86_64-pc-windows-msvc, ext: ".exe" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --target ${{ matrix.server_target }}
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         shell: bash
         run: |
-          # Linux builds are static musl binaries, so they run on any distribution; the C
-          # code in ring is compiled with musl-gcc.
+          # Only the CLI is static musl; ONNX Runtime requires glibc on Linux.
           case "${{ matrix.target }}" in
             *-musl) export "CC_$(echo "${{ matrix.target }}" | tr - _)=musl-gcc" ;;
           esac
-          cargo build --release --locked --target ${{ matrix.target }} -p cairn-client -p cairn-server
+          cargo build --release --locked --target ${{ matrix.target }} -p cairn-client
+          cargo build --release --locked --target ${{ matrix.server_target }} -p cairn-server
       - name: Stage raw assets
         shell: bash
         run: |
           mkdir dist
           cp "target/${{ matrix.target }}/release/cairn${{ matrix.ext }}" "dist/cairn-${{ matrix.target }}${{ matrix.ext }}"
-          cp "target/${{ matrix.target }}/release/cairn-server${{ matrix.ext }}" "dist/cairn-server-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.server_target }}/release/cairn-server${{ matrix.ext }}" "dist/cairn-server-${{ matrix.server_target }}${{ matrix.ext }}"
       - name: The staged CLI runs on this runner
         shell: bash
         run: ./dist/cairn-${{ matrix.target }}${{ matrix.ext }} --version
+      - name: The staged server runs on this runner
+        shell: bash
+        run: ./dist/cairn-server-${{ matrix.server_target }}${{ matrix.ext }} --version
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.target }}
@@ -99,7 +102,11 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Linux CLI assets remain static musl binaries. Linux server assets use `*-unknown-linux-gnu` and require a glibc system compatible with Ubuntu 24.04 (glibc 2.39 or newer); Alpine/musl is unsupported. The multi-arch server image uses Debian trixie slim and includes the pinned local MiniLM model. PostgreSQL requires pgvector. Standalone servers must provision the model directory to enable semantic search; without it, lexical/entity/link recall remains available. See the repository's 0.1.4 upgrade notes before upgrading stores.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes
 
   image:
     name: Image ${{ matrix.image }} ${{ matrix.platform }}

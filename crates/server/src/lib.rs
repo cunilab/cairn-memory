@@ -1,6 +1,8 @@
 //! REST compatibility transport for the Layer 1 Cairn core.
 
+mod embeddings;
 pub mod viewer;
+pub use embeddings::LocalEmbeddings;
 
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -62,6 +64,7 @@ impl AuthRateLimiter {
 pub struct AppState {
     store: Arc<Mutex<MemoryStore>>,
     auth_rate_limiter: Arc<AuthRateLimiter>,
+    embeddings: Option<LocalEmbeddings>,
 }
 
 impl AppState {
@@ -69,7 +72,13 @@ impl AppState {
         Ok(Self {
             store: Arc::new(Mutex::new(MemoryStore::open(path)?)),
             auth_rate_limiter: Arc::new(AuthRateLimiter::default()),
+            embeddings: None,
         })
+    }
+
+    pub fn with_embeddings(mut self, model: LocalEmbeddings) -> Self {
+        self.embeddings = Some(model);
+        self
     }
 
     /// Closes every person's idle sessions under the store lock. Failures are logged.
@@ -82,6 +91,7 @@ impl AppState {
 pub struct PostgresAppState {
     store: Arc<PostgresStore>,
     auth_rate_limiter: Arc<AuthRateLimiter>,
+    embeddings: Option<LocalEmbeddings>,
 }
 
 impl PostgresAppState {
@@ -89,6 +99,7 @@ impl PostgresAppState {
         Self {
             store: Arc::new(store),
             auth_rate_limiter: Arc::new(AuthRateLimiter::default()),
+            embeddings: None,
         }
     }
 }
@@ -467,6 +478,7 @@ impl IntoResponse for ApiError {
 }
 
 pub fn app(state: AppState) -> Router {
+    embeddings::spawn_file_jobs(&state);
     Router::new()
         .route("/cairn-memory/health", get(health))
         .route("/cairn-memory/livez", get(livez))
@@ -578,6 +590,16 @@ pub fn app(state: AppState) -> Router {
 /// operations backed by `cairn-storage` until the remaining memory services are
 /// moved behind the same repository boundary.
 pub fn postgres_app(store: PostgresStore) -> Router {
+    postgres_app_with_embeddings(store, None)
+}
+
+pub fn postgres_app_with_embeddings(
+    store: PostgresStore,
+    model: Option<LocalEmbeddings>,
+) -> Router {
+    let mut state = PostgresAppState::new(store);
+    state.embeddings = model;
+    embeddings::spawn_postgres_jobs(&state);
     Router::new()
         .route("/cairn-memory/health", get(postgres_health))
         .route("/cairn-memory/livez", get(livez))
@@ -690,7 +712,7 @@ pub fn postgres_app(store: PostgresStore) -> Router {
         .route("/cairn-memory/sync/pull", post(postgres_sync_pull))
         .route("/cairn-memory/sync/diagnose", get(postgres_sync_diagnose))
         .route("/viewer", get(viewer::page))
-        .with_state(PostgresAppState::new(store))
+        .with_state(state)
 }
 
 async fn postgres_health(
@@ -700,7 +722,11 @@ async fn postgres_health(
         ok: true,
         service: "cairn-server",
         storage: "postgresql-layer-3",
-        semantic_search: "disabled",
+        semantic_search: if state.embeddings.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        },
         bootstrap_required: !state.store.has_accounts().await?,
     }))
 }
@@ -1213,14 +1239,23 @@ async fn postgres_search(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<RecallResult>>, PostgresApiError> {
+    state
+        .store
+        .authenticate_account(postgres_token(&headers)?)
+        .await?;
+    let vector = match &state.embeddings {
+        Some(model) => model.query(&request.query).await,
+        None => None,
+    };
     Ok(Json(
         state
             .store
-            .search(
+            .search_with_vector(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
                 &request.recall_filter(),
+                vector.as_deref(),
             )
             .await?,
     ))
@@ -1231,14 +1266,24 @@ async fn postgres_context(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, PostgresApiError> {
+    state
+        .store
+        .authenticate_account(postgres_token(&headers)?)
+        .await?;
+    let vector = match &state.embeddings {
+        Some(model) => model.query(&request.query).await,
+        None => None,
+    };
     Ok(Json(
         state
             .store
-            .context(
+            .context_with_vector(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
                 &request.recall_filter(),
+                vector.as_deref(),
+                false,
             )
             .await?,
     ))
@@ -1283,14 +1328,24 @@ async fn postgres_why_changed(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, PostgresApiError> {
+    state
+        .store
+        .authenticate_account(postgres_token(&headers)?)
+        .await?;
+    let vector = match &state.embeddings {
+        Some(model) => model.query(&request.query).await,
+        None => None,
+    };
     Ok(Json(
         state
             .store
-            .why_changed_context(
+            .context_with_vector(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
                 &request.recall_filter(),
+                vector.as_deref(),
+                true,
             )
             .await?,
     ))
@@ -1517,7 +1572,11 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         ok: true,
         service: "cairn-server",
         storage: "file-backed-layer-3-prototype",
-        semantic_search: "disabled",
+        semantic_search: if state.embeddings.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        },
         bootstrap_required: !state.store.lock().await.has_accounts(),
     })
 }
@@ -2044,29 +2103,41 @@ async fn end_session(
     }
 }
 
+async fn file_matches(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: &SearchRequest,
+) -> Result<Vec<RecallResult>, ApiError> {
+    // Authenticate before spending CPU on inference and recheck after it.
+    {
+        let store = state.store.lock().await;
+        file_bearer(&store, headers)?;
+    }
+    let vector = match &state.embeddings {
+        Some(model) => model.query(&request.query).await,
+        None => None,
+    };
+    let store = state.store.lock().await;
+    let token = file_bearer(&store, headers)?;
+    store
+        .search_with_vector(
+            token,
+            &request.query,
+            usize::MAX,
+            &request.recall_filter(),
+            vector.as_deref(),
+        )
+        .map_err(account_api_error)
+}
+
 async fn search(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<Vec<RecallResult>>, ApiError> {
-    let store = state.store.lock().await;
-    match file_bearer(&store, &headers)? {
-        Some(token) => Ok(Json(
-            store
-                .search_for_account(
-                    token,
-                    &request.query,
-                    request.limit,
-                    &request.recall_filter(),
-                )
-                .map_err(account_api_error)?,
-        )),
-        None => Ok(Json(store.search_with_filter(
-            &request.query,
-            request.limit,
-            &request.recall_filter(),
-        )?)),
-    }
+    let mut results = file_matches(&state, &headers, &request).await?;
+    results.truncate(request.limit);
+    Ok(Json(results))
 }
 
 async fn why_changed(
@@ -2074,24 +2145,19 @@ async fn why_changed(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
-    let store = state.store.lock().await;
-    match file_bearer(&store, &headers)? {
-        Some(token) => Ok(Json(
-            store
-                .why_changed_for_account(
-                    token,
-                    &request.query,
-                    request.limit,
-                    &request.recall_filter(),
-                )
-                .map_err(account_api_error)?,
-        )),
-        None => Ok(Json(store.why_changed_context(
-            &request.query,
-            request.limit,
-            &request.recall_filter(),
-        )?)),
-    }
+    let mut results = file_matches(&state, &headers, &request).await?;
+    results.sort_by(|a, b| {
+        b.decision_reason
+            .is_some()
+            .cmp(&a.decision_reason.is_some())
+            .then_with(|| b.relationships.len().cmp(&a.relationships.len()))
+            .then_with(|| b.score.total_cmp(&a.score))
+    });
+    Ok(Json(cairn_core::build_context_pack(
+        format!("why changed: {}", request.query),
+        &mut results,
+        request.limit,
+    )))
 }
 
 async fn context(
@@ -2099,24 +2165,12 @@ async fn context(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<ContextPack>, ApiError> {
-    let store = state.store.lock().await;
-    match file_bearer(&store, &headers)? {
-        Some(token) => Ok(Json(
-            store
-                .context_for_account(
-                    token,
-                    &request.query,
-                    request.limit,
-                    &request.recall_filter(),
-                )
-                .map_err(account_api_error)?,
-        )),
-        None => Ok(Json(store.context_with_filter(
-            &request.query,
-            request.limit,
-            &request.recall_filter(),
-        )?)),
-    }
+    let mut results = file_matches(&state, &headers, &request).await?;
+    Ok(Json(cairn_core::build_context_pack(
+        request.query,
+        &mut results,
+        request.limit,
+    )))
 }
 
 async fn resume(
@@ -5903,7 +5957,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(owner_hits.as_array().unwrap().len(), 1);
+        assert_eq!(
+            owner_hits.as_array().unwrap().len(),
+            2,
+            "session note and linked handoff"
+        );
         let (status, owner_miss) = json_request_auth(
             router.clone(),
             "POST",
@@ -5923,7 +5981,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(member_hits.as_array().unwrap().len(), 1);
+        assert_eq!(
+            member_hits.as_array().unwrap().len(),
+            2,
+            "session note and linked handoff"
+        );
         let (status, member_miss) = json_request_auth(
             router.clone(),
             "POST",

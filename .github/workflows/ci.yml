@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg17
         env:
           POSTGRES_USER: cairn
           POSTGRES_PASSWORD: cairn
@@ -58,11 +58,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: python3 scripts/download_embedding_model.py "$RUNNER_TEMP/cairn-minilm"
       # One fresh database per ignored test, created by the script.
       - run: ./scripts/ci_postgres_tests.sh
         env:
           CAIRN_TEST_SERVER_URL: postgres://cairn:cairn@127.0.0.1:5432
           PGCONNECT_TIMEOUT: "10"
+          CAIRN_TEST_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/cairn-minilm
 
   build-other-platforms:
     name: Build on ${{ matrix.os }}
@@ -110,6 +112,7 @@ jobs:
       - run: python3 scripts/smoke_outbox.py
       - run: python3 scripts/smoke_hook_offline.py
       - run: python3 scripts/smoke_hook_auth.py
+      - run: python3 scripts/test_download_embedding_model.py
 
   docs-validation:
     name: Documentation validation

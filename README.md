@@ -45,7 +45,7 @@ Phase 0's product, contract, policy, fixture, and golden-corpus artifacts are pr
 
 ## Install and update
 
-Releases are tags on `main` published as GitHub Releases ([release process](docs/release.md)). Each release holds raw binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static, any Linux distribution), and `x86_64-pc-windows-msvc` (`cairn-<target>[.exe]` for the CLI, `cairn-server-<target>[.exe]` for the server), the hook scripts, and `SHA256SUMS`. Download the `cairn` asset for your platform, check it against `SHA256SUMS`, make it executable, and put it on your `PATH` as `cairn`:
+Releases are tags on `main` published as GitHub Releases ([release process](docs/release.md)). Each release holds raw CLI binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static, any Linux distribution), and `x86_64-pc-windows-msvc`. Server binaries use the same macOS/Windows targets and Linux `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu`: ONNX Runtime requires glibc, so use a system compatible with Ubuntu 24.04 (glibc 2.39 or newer), or the Debian trixie slim server image. Alpine/musl server binaries are unsupported. Assets are named `cairn-<target>[.exe]` and `cairn-server-<target>[.exe]`, with hook scripts and `SHA256SUMS`. Download the `cairn` asset for your platform, check it against `SHA256SUMS`, make it executable, and put it on your `PATH` as `cairn`:
 
 ```bash
 cairn --version
@@ -125,10 +125,29 @@ cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --bind 127.0.0
 
 This mode runs account, trusted-device, authenticated sync, session summary,
 explicit memory, corrections, context retrieval, lifecycle diagnostics,
-export/import, audit history, and keyword search routes from `cairn-storage`.
+export/import, audit history, and hybrid search routes from `cairn-storage`.
 It applies the Layer 3 migrations on startup.
 
-It serves health, readiness, self-hosted account bootstrap/login/logout/current-account, account-authorized device registration, project registration, branch/worktree registration, scoped memory saves, merge confirmation, branch closure, project verification, session lifecycle, observation capture, search, context, resume, unresolved-work, why-changed, forget, smart-search, recall, explicit remember, correction, export/import, and lifecycle diagnostics under `/cairn-memory/`. It currently proves bounded capture, secret redaction, idempotent event capture, lifecycle classification, deterministic session compression, lessons, corrections, retention sweep, evidence-backed session summaries, branch-aware scopes, structured code context, deterministic code relationships, stale and contradiction signals, keyword recall, context packing, forget suppression, export/import, restart persistence, and account/device ownership checks.
+It serves health, readiness, self-hosted account bootstrap/login/logout/current-account, account-authorized device registration, project registration, branch/worktree registration, scoped memory saves, merge confirmation, branch closure, project verification, session lifecycle, observation capture, search, context, resume, unresolved-work, why-changed, forget, smart-search, recall, explicit remember, correction, export/import, and lifecycle diagnostics under `/cairn-memory/`. It currently proves bounded capture, secret redaction, idempotent event capture, lifecycle classification, deterministic session compression, lessons, corrections, retention sweep, evidence-backed session summaries, branch-aware scopes, structured code context, deterministic code relationships, stale and contradiction signals, hybrid recall, context packing, forget suppression, export/import, restart persistence, and account/device ownership checks.
+
+Hybrid recall combines full text, code entities, one-hop evidence links and local
+MiniLM embeddings with reciprocal-rank fusion, type weights and pinned boosts.
+Results keep project/personal/global visibility labels. PostgreSQL requires
+pgvector (`pgvector/pgvector:pg17` in development/CI). Production server images
+include the pinned Apache-2.0 model. For a standalone server, provision once:
+
+```sh
+python3 scripts/download_embedding_model.py /path/to/minilm
+cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --embedding-model-dir /path/to/minilm
+```
+
+The directory can also be set with `CAIRN_EMBEDDING_MODEL_DIR`. The server
+verifies local files and makes no model network calls. Health reports
+`semantic_search: enabled` when loaded; missing or invalid files leave lexical,
+entity and link retrieval available. A bounded background worker backfills and
+refreshes vectors; searches do not wait for indexing. See the
+[retrieval contract](docs/contracts/continuity-v1.md#hybrid-recall-v014) for
+ranking, bounds, fallback and deployment requirements.
 
 The local viewer is available at:
 

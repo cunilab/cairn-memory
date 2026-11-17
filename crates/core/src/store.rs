@@ -28,6 +28,8 @@ pub(crate) struct StoreState {
     #[serde(default)]
     pub(crate) memories: Vec<Memory>,
     #[serde(default)]
+    pub(crate) embeddings: Vec<crate::MemoryEmbedding>,
+    #[serde(default)]
     pub(crate) forgotten_ids: HashSet<String>,
     #[serde(default)]
     pub(crate) devices: Vec<DeviceRecord>,
@@ -70,6 +72,7 @@ impl Default for StoreState {
             sessions: Vec::new(),
             observations: Vec::new(),
             memories: Vec::new(),
+            embeddings: Vec::new(),
             forgotten_ids: HashSet::new(),
             devices: Vec::new(),
             sync_events: Vec::new(),

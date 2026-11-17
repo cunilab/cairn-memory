@@ -17,7 +17,7 @@ capture hygiene. Cairn's current split into project, personal-per-repo and
 personal-global memory, plus an explicit promote step, makes members do manual
 work that the product direction (minimal human interaction) rejects.
 
-Items 0, 1, 5 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
+Items 0, 1, 2, 5 and 7 are implemented on the v0.1.4 branch; the remaining stages are proposed. The scope and record changes supersede the scope, personal-memory and
 promotion parts of [ADR 0013](./0013-shared-project-decisions-and-personal-memory-scopes.md)
 (decisions 1, 2 and 5 there, and the `source: personal | project` labelling in
 decision 7). The rest of ADR 0013 remains. Pre-release rules still apply: no
@@ -128,6 +128,23 @@ defines the bounded grammar.
   must not silently remove other shared knowledge; see the
   [lifecycle contract](../contracts/lifecycle-v1.md#forgetting-shared-knowledge).
 
+### Stage 3 contract decisions (2026-11-17)
+
+The owner approved `fastembed` 7.7.1 with minimal CPU ONNX features and the
+SHA-verified FP32 MiniLM artifact pinned in `models/minilm.json` (Apache-2.0).
+The production image bakes it in; standalone servers load a provisioned directory.
+Runtime model downloads/external embedding APIs are disabled. Model load failure
+preserves lexical/entity/link recall and reports semantic search disabled.
+
+PostgreSQL stores `vector(384)` with model/input provenance; deployments require
+pgvector. The file adapter persists equivalent vectors and metadata. A bounded
+background job performs startup backfill and updates after writes, with optimistic
+fingerprint checks before publishing. Search never initiates a re-embedding job.
+The exact approved channel definitions, RRF/type/pinned constants, 512-candidate
+bounds and fallback behavior are owned by the
+[continuity contract](../contracts/continuity-v1.md#hybrid-recall-v014).
+Resume/unresolved and PostgreSQL omission/why-changed cap semantics remain.
+
 ## Agent instructions and agent-written memories (decided 2026-11-17)
 
 Decision 8.
@@ -166,13 +183,13 @@ checklist items below (pre-release, no data compatibility).
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation and capture hygiene are implemented. No recall-quality benchmark, hybrid retrieval, retention score, feedback or instruction injection is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval and capture hygiene are implemented. No recall-quality benchmark, retention score, feedback or instruction injection is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape) and [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation) checks.
 
 ## Implementation checklist
 
 - [x] 0. Three scopes: scope parameter in MCP/CLI, per-repo personal scope and promote removed, captures in initialized repos go to project memory.
 - [x] 1. Rule-based session-end distillation: session note, handoff, typed notes linked to captures.
-- [ ] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
+- [x] 2. Hybrid recall: full-text, entity, links, local embeddings, RRF, type weights, pinned boost, scope labels.
 - [ ] 3. Bounded, data-fenced session-start brief from the hook.
 - [ ] 4. Retention score with reinforcement; rules/decisions exempt; no auto-delete.
 - [x] 5. Capture hygiene: assistant text opt-in, skip marker file, scrub before truncation.
@@ -198,3 +215,12 @@ session-end paths in both stores; shared HTTP scenarios in
 MCP smokes. [Recorded checks](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation)
 cover idempotence, evidence, project/private visibility, late captures,
 correction, forgetting and distinct derived-ID namespaces.
+
+Stage 3 implementation evidence: `crates/core/src/hybrid.rs` and sibling tests;
+the file and PostgreSQL embedding adapters; `crates/server/src/embeddings.rs`;
+and `crates/server/tests/semantic.rs`, which exercises real local MiniLM
+backfill and all five retrieval routes on both stores. The production image
+uses Debian trixie slim for ONNX's C/C++ runtime requirements. The CLI keeps
+static musl Linux releases; Linux server releases use GNU targets. See
+[release requirements](../release.md#014-upgrade-notes) and the recorded
+[checks and resource measurements](../evidence.md#v014-stage-3--hybrid-recall).

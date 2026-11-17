@@ -167,3 +167,80 @@ Independent worker review was not run in this single-worker dispatch. No LLM,
 new dependency, hybrid recall, retention scoring, feedback or instruction
 injection was added. The release setup smoke still emits its existing 404
 warning for unreleased 0.1.4 hook assets; its local MCP assertions pass.
+
+## v0.1.4 stage 3 — hybrid recall
+
+Verified 2026-11-17 on `v0.1.4`, limited to ADR 0014 item 2 and the necessary
+runtime/release changes. Every shell cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`
+and `CAIRN_OUTBOX`. No live Cairn API was contacted. Database checks used only
+the disposable local `pgvector/pgvector:pg17` container and fresh databases;
+server smokes used temporary loopback stores.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check`, `cargo check --workspace --locked` | Passed |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | Passed |
+| `cargo test --workspace --locked` | 184 passed; 33 database/model tests ignored here and executed separately |
+| `scripts/ci_postgres_tests.sh` | 33 passed, zero failed; includes real MiniLM tests on both stores |
+| Final compiled PostgreSQL hybrid test | Passed again after the migration-ledger regression/fix |
+| `python3 scripts/smoke_hook_auth.py` | 29 passed |
+| `python3 scripts/smoke_hook_offline.py`, `python3 scripts/smoke_outbox.py` | 23 and 32 passed |
+| `python3 scripts/test_download_embedding_model.py` | 2 passed; checks checksum rejection, atomic publication and verified reuse without networking |
+| `scripts/smoke_full_flow.sh`, `scripts/smoke_layer3.sh`, `scripts/smoke_hook.sh`, `scripts/smoke_mcp.sh` | Passed |
+| `python3 scripts/validate_phase0.py` | Passed |
+| `actionlint` on CI/release workflows | Passed, with optional shellcheck/pyflakes integrations disabled |
+| Production image build and runtime | Native `linux/arm64` build passed; real semantic recall passed with `--network none` |
+
+Core and PostgreSQL coverage includes entity/tag lookup, title priority,
+one-hop links, person-scoped source IDs, exact RRF/type/pinned constants,
+vector validation/provenance, persisted vectors, stale-input rejection,
+forgetting and visibility. The existing PostgreSQL 512-window/omission and
+why-changed ordering tests pass with hybrid ranking. The server tests load
+the pinned FP32 model, backfill notes saved before model startup, index later
+saves, recover a query without lexical overlap on search/smart-search/context/
+recall/why-changed, and retain personal/project/global authorization and filters.
+The file job persistence test verifies failed writes remain pending and retry.
+A migration-ledger assertion failed before adding the missing migration entry,
+then passed on a fresh database. The interrupted worker's retained core
+compile-red log predates the embedding APIs; its PostgreSQL test-authoring
+chronology is not reconstructed here.
+
+The first resumed image build exposed missing ONNX C/C++ symbols on bookworm;
+the final image builds/runs on `debian:trixie-slim`. The approved release split
+keeps static musl CLI assets and uses GNU Linux server assets. Both amd64 and
+arm64 image jobs remain configured; amd64 and Windows release builds were not
+executed locally. Initial smoke attempts blocked behind cold concurrent Cargo
+builds and timed out; the recorded passing rerun prebuilt the server first.
+The smoke readiness window was not shortened or changed.
+
+Resource measurements used the final production image and a clean `b9e3fdd`
+production-image build, both native arm64, in a Colima VM with 2 CPUs/4 GiB RAM.
+All three runtime probes used `--network none`, one synthetic note, and 32
+queries; CPU is process ticks divided by queries, with 10 ms tick resolution.
+These measure resource cost, not retrieval quality or production throughput.
+
+| Measurement | Baseline | Hybrid, missing model | Hybrid, loaded model |
+| --- | --- | --- | --- |
+| RSS after queries | 5,936 KiB | 11,748 KiB | 155,064 KiB |
+| CPU per query | about 0.31 ms | about 0.63 ms | about 5.63 ms |
+| Health `semantic_search` | disabled | disabled | enabled |
+
+The model files occupy 91,102,069 bytes. Summed uncompressed image layers grew
+from 135,151,616 to 267,063,296 bytes (128.89 to 254.69 MiB; +125.80 MiB).
+The base layer alone grew from 107,786,240 to 109,563,904 bytes (+1.70 MiB).
+Docker's engine-reported `.Size` values were 37,780,318 and 136,719,363 bytes;
+these are recorded separately from uncompressed layer totals. Loaded-model
+RSS adds about 140 MiB over the same image with no model loaded.
+
+An OSV audit of all 314 registry packages in `Cargo.lock` reports the newly
+introduced `paste` 1.0.15 maintenance advisory `RUSTSEC-2024-0436`, pulled by
+the approved embedding stack. It also reports `libsqlite3-sys` 0.30.1
+(`RUSTSEC-2026-0459`) and `rsa` 0.9.10 (`RUSTSEC-2023-0071`); both already
+existed at `b9e3fdd` and neither appears in the active workspace dependency
+tree. This is an advisory inventory, not a clean security-audit claim.
+
+No web files changed, so web checks/browser inspection were not run. No
+independent helper review was run in this single-worker dispatch. No retention,
+feedback, brief injection, instruction lifecycle, external embedding API or
+recall-quality benchmark was added. Release-hook setup can still emit the
+existing 404 warning for unreleased 0.1.4 assets while the local MCP smoke passes.
