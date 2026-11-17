@@ -86,6 +86,9 @@ configuration is the only credential, and the server scopes every call to its ac
 | `memory_review_dismiss` | `POST /similarity-reviews/dismiss` | Dismiss one open review |
 | `memory_review_contradict` | `POST /similarity-reviews/contradict` | Declare a contradiction from a review |
 | `memory_review_supersede` | `POST /similarity-reviews/supersede` | Supersede one side of a review |
+| `memory_link` | `POST /links` | Add one typed link; edit rights on the source |
+| `memory_unlink` | `POST /links/remove` | Remove one typed link |
+| `memory_graph` | `GET /graph` | Readable memory link graph, with optional scope, project, relation, and cap |
 
 Project tools run the same routes as the web console, with the same
 account scope. Their behavior is owned by the contract named here:

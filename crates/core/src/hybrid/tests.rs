@@ -1,5 +1,5 @@
 use super::*;
-use crate::{LifecycleInput, WorkContext, build_explicit_memory_record};
+use crate::{LifecycleInput, MemoryKind, RecallFilter, WorkContext, build_explicit_memory_record};
 
 #[test]
 fn rrf_weights_pinning_and_one_hop_are_explicit() {
@@ -54,6 +54,55 @@ fn rrf_weights_pinning_and_one_hop_are_explicit() {
     )
     .unwrap();
     assert!(!hits.iter().any(|(id, _)| id == "f"));
+}
+
+#[test]
+fn a_typed_link_hops_once_with_the_same_weight_as_evidence() {
+    let note = |id: &str| {
+        let mut memory = build_explicit_memory_record(
+            "body",
+            vec![],
+            WorkContext::default(),
+            LifecycleInput::default(),
+            MemoryKind::Fact,
+        )
+        .unwrap();
+        memory.memory_id = id.to_owned();
+        memory
+    };
+    let mut seed = note("seed");
+    let mut neighbour = note("neighbour");
+    seed.links.push(crate::MemoryLink {
+        relation: crate::LinkRelation::Causes,
+        target_id: "neighbour".to_owned(),
+    });
+    neighbour.contradicts.push("seed".to_owned());
+    let hits = hybrid_rank(
+        &[seed.clone(), neighbour.clone(), note("alone")],
+        "query",
+        &RecallFilter::default(),
+        Some(vec![("seed".into(), 1.0)]),
+        vec![],
+    )
+    .unwrap();
+    let score = |id| {
+        hits.iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, score)| *score)
+    };
+    assert!((score("seed").unwrap() - 2.0 / 61.0).abs() < 1e-6);
+    assert!((score("neighbour").unwrap() - 2.0 / 61.0).abs() < 1e-6);
+    assert!(score("alone").is_none());
+    seed.links.clear();
+    let shaded = hybrid_rank(
+        &[seed, neighbour],
+        "query",
+        &RecallFilter::default(),
+        Some(vec![("seed".into(), 1.0)]),
+        vec![],
+    )
+    .unwrap();
+    assert!(shaded.iter().all(|(id, _)| id != "neighbour"));
 }
 
 #[test]

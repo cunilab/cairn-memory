@@ -36,6 +36,9 @@ pub struct Memory {
     /// Memories this record declares as contradicted. Only those targets rank lower.
     #[serde(default)]
     pub contradicts: Vec<String>,
+    /// Directed typed links stored on the source memory.
+    #[serde(default)]
+    pub links: Vec<crate::MemoryLink>,
     #[serde(default)]
     pub promoted_from: Option<String>,
     #[serde(default)]
@@ -243,6 +246,7 @@ pub fn capture_memory(observation: &crate::Observation, author: &str) -> Memory 
         unresolved_work: Vec::new(),
         supersedes: None,
         contradicts: Vec::new(),
+        links: Vec::new(),
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,
@@ -557,6 +561,7 @@ impl MemoryStore {
             unresolved_work: Vec::new(),
             supersedes: Some(target.0),
             contradicts: Vec::new(),
+            links: Vec::new(),
             promoted_from: None,
             promotion_reason: None,
             verified_commit: None,
@@ -698,6 +703,7 @@ pub fn build_explicit_memory_record(
         unresolved_work: Vec::new(),
         supersedes: None,
         contradicts: Vec::new(),
+        links: Vec::new(),
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,

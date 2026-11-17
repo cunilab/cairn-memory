@@ -490,3 +490,43 @@ of both were red.
   the eight findings and was not changed or benchmarked separately.
 - Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
   server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.
+
+## v0.1.4 stage 8 — memory link graph
+
+Checked on 2026-11-17. Typed links `relates`, `causes`, `fixes`, and
+`depends_on` are stored on the source memory in both stores. Create and remove
+need read access to both ends, the same scope and project, and edit rights on
+the source. Recall walks those links one hop inside the existing link channel.
+The relation does not change the channel weight. `contradicts` and `supersedes`
+stay on their own fields and are not hops. The graph draws them only when both
+ends are still in the readable recalled set, so a live supersede hides its
+edge. The viewer cap defaults to 120 and may be set from 120 through 500.
+Sigma.js 4.0.6 and graphology 0.26.0 draw `/graph`. There is no code graph.
+
+The new file-store and PostgreSQL tests passed with the implementation. A
+separate red run was not archived.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 227 passed, 0 failed, 56 ignored.
+- `scripts/ci_postgres_tests.sh`: 56 passed, 0 failed, including
+  `postgres_links_permissions_visibility_cap_and_one_hop` and both real-model
+  semantic tests. The pinned MiniLM directory was `/tmp/cairn-stage7-fix-minilm`.
+- `scripts/smoke_hook_auth.py`: 29 passed. `scripts/smoke_hook_offline.py`: 23
+  passed. `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, and
+  `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web `typecheck`, `lint`, and `build` passed, and `scripts/smoke_web.sh` passed.
+- Playwright screenshots, looked at after the node-size fix:
+  `/tmp/cairn-stage8-graph/graph-light-1440.png`,
+  `/tmp/cairn-stage8-graph/graph-dark-1440.png`,
+  `/tmp/cairn-stage8-graph/graph-light-390.png`,
+  `/tmp/cairn-stage8-graph/graph-dark-390.png`.
+  Light and dark both show scope colours and relation edges. At 390px the
+  filters stack and the canvas pans; a couple of labels sit against the edge.
+- Pinned canvas packages, all MIT: `sigma` 4.0.6 (3.8 MB on disk),
+  `graphology` 0.26.0 (2.7 MB), `graphology-layout-forceatlas2` 0.10.1 (104 KB).
+  Sigma also installs `graphology-utils` (136 KB) and `graphology-types` (68 KB).
+- Shells cleared `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. No live
+  server. PostgreSQL was disposable `pgvector/pgvector:pg17` on the Colima socket.

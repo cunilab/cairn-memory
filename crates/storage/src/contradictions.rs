@@ -1,9 +1,10 @@
 use super::*;
 use cairn_core::{
-    EMBEDDING_MODEL, EMBEDDING_VERSION, JobEnd, JobKind, Memory, MemoryScope, ReviewStatus,
-    SIMILARITY_CANDIDATES, SIMILARITY_INTERVAL_SECONDS, SIMILARITY_JOB_KEY, SimilarityBand,
-    SimilarityReview, embedding_fingerprint, ordered_pair, same_scope, similarity_candidates,
-    supersede_allowed,
+    EMBEDDING_MODEL, EMBEDDING_VERSION, GraphFilter, JobEnd, JobKind, LinkRelation, Memory,
+    MemoryGraph, MemoryLink, MemoryScope, ReviewStatus, SIMILARITY_CANDIDATES,
+    SIMILARITY_INTERVAL_SECONDS, SIMILARITY_JOB_KEY, SimilarityBand, SimilarityReview,
+    build_memory_graph, embedding_fingerprint, graph_node_cap, ordered_pair, same_scope,
+    similarity_candidates, supersede_allowed,
 };
 use sqlx::{Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
@@ -582,5 +583,104 @@ impl PostgresStore {
         .await?;
         tx.commit().await?;
         Ok(usize::try_from(kept).unwrap_or(0))
+    }
+
+    pub async fn link_memories(
+        &self,
+        token: &str,
+        source_id: &str,
+        relation: LinkRelation,
+        target_id: &str,
+    ) -> Result<Memory, PostgresError> {
+        self.write_link(token, source_id, relation, target_id, true)
+            .await
+    }
+
+    pub async fn unlink_memories(
+        &self,
+        token: &str,
+        source_id: &str,
+        relation: LinkRelation,
+        target_id: &str,
+    ) -> Result<Memory, PostgresError> {
+        self.write_link(token, source_id, relation, target_id, false)
+            .await
+    }
+
+    async fn write_link(
+        &self,
+        token: &str,
+        source_id: &str,
+        relation: LinkRelation,
+        target_id: &str,
+        add: bool,
+    ) -> Result<Memory, PostgresError> {
+        if source_id == target_id {
+            return Err(PostgresError::Validation(
+                "a memory cannot link to itself".to_owned(),
+            ));
+        }
+        let account = self.authenticate_account(token).await?;
+        let mut tx = self.pool.begin().await?;
+        let (first_id, second_id) = if source_id <= target_id {
+            (source_id, target_id)
+        } else {
+            (target_id, source_id)
+        };
+        let first = lock_readable(&mut tx, &account.person_id, first_id).await?;
+        let second = lock_readable(&mut tx, &account.person_id, second_id).await?;
+        let (mut source, source_person, target) = if first.0.memory_id == source_id {
+            (first.0, first.1, second.0)
+        } else {
+            (second.0, second.1, first.0)
+        };
+        if source.scope != target.scope || source.project_id != target.project_id {
+            return Err(PostgresError::Validation(
+                "link must stay in the same scope and project".to_owned(),
+            ));
+        }
+        let owner = match source.project_id.as_deref() {
+            Some(project_id) => project_owner(&mut tx, project_id).await?,
+            None => None,
+        };
+        may_edit(&account, &source, &source_person, owner.as_deref())?;
+        let link = MemoryLink {
+            relation,
+            target_id: target_id.to_owned(),
+        };
+        let present = source.links.iter().any(|existing| existing == &link);
+        if add && !present {
+            source.links.push(link);
+            source.changed_by = Some(account.person_id.clone());
+            source.changed_at = Some(stamp_text(now_seconds()));
+        } else if !add && present {
+            source.links.retain(|existing| existing != &link);
+            source.changed_by = Some(account.person_id.clone());
+            source.changed_at = Some(stamp_text(now_seconds()));
+        }
+        sqlx::query(
+            "UPDATE cairn_memories
+             SET links = $1, changed_by = $2, changed_at = $3
+             WHERE memory_id = $4",
+        )
+        .bind(Json(&source.links))
+        .bind(&source.changed_by)
+        .bind(&source.changed_at)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(source)
+    }
+
+    pub async fn memory_graph(
+        &self,
+        token: &str,
+        filter: &GraphFilter,
+        cap: Option<usize>,
+    ) -> Result<MemoryGraph, PostgresError> {
+        let cap = graph_node_cap(cap)?;
+        let memories = self.memories(token).await?;
+        Ok(build_memory_graph(&memories, filter, cap))
     }
 }

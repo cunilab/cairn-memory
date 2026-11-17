@@ -4,7 +4,7 @@ mod embeddings;
 pub mod viewer;
 pub use embeddings::LocalEmbeddings;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -12,12 +12,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use cairn_core::{
     ADMIN_ONLY_ERROR, Account, AuditEvent, AuthSessionResult, CaptureResult, ContextPack,
-    DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, ImportResult, JobSnapshot,
-    LifecycleInput, LifecycleSummary, Memory, MemoryStore, ObservationInput, Project,
-    ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent,
-    ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson, ProjectWorktree, RecallFilter,
-    RecallResult, Session, StoreError, SyncDiagnostics, SyncPullResult, SyncPushResult,
-    WEB_ONLY_ERROR, WorkContext, job_label, now_seconds,
+    DEVICE_TOKEN_PREFIX, Device, DeviceRegistration, ExportBundle, GraphFilter, GraphRelation,
+    ImportResult, JobSnapshot, LifecycleInput, LifecycleSummary, LinkRelation, Memory, MemoryGraph,
+    MemoryScope, MemoryStore, ObservationInput, Project, ProjectBranch, ProjectConflict,
+    ProjectEntity, ProjectEntityInput, ProjectFreshnessEvent, ProjectMaintenanceReport,
+    ProjectMergeResult, ProjectPerson, ProjectWorktree, RecallFilter, RecallResult, Session,
+    StoreError, SyncDiagnostics, SyncPullResult, SyncPushResult, WEB_ONLY_ERROR, WorkContext,
+    job_label, now_seconds,
 };
 use cairn_storage::{PostgresError, PostgresStore};
 use serde::{Deserialize, Serialize};
@@ -227,6 +228,38 @@ pub struct SupersedeRequest {
     pub successor_id: String,
     #[serde(rename = "targetId", alias = "target_id")]
     pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LinkRequest {
+    #[serde(rename = "sourceId", alias = "source_id")]
+    pub source_id: String,
+    pub relation: LinkRelation,
+    #[serde(rename = "targetId", alias = "target_id")]
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct GraphQuery {
+    #[serde(default)]
+    scope: Option<MemoryScope>,
+    #[serde(default, rename = "projectId", alias = "project_id")]
+    project_id: Option<String>,
+    #[serde(default)]
+    relation: Option<GraphRelation>,
+    #[serde(default)]
+    cap: Option<usize>,
+}
+
+fn graph_filter(query: &GraphQuery) -> GraphFilter {
+    GraphFilter {
+        scope: query.scope.clone(),
+        project_id: query
+            .project_id
+            .clone()
+            .filter(|project_id| !project_id.is_empty()),
+        relation: query.relation,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -613,6 +646,9 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/feedback", post(feedback))
         .route("/cairn-memory/contradict", post(contradict))
         .route("/cairn-memory/supersede", post(supersede))
+        .route("/cairn-memory/links", post(link_memories))
+        .route("/cairn-memory/links/remove", post(unlink_memories))
+        .route("/cairn-memory/graph", get(memory_graph))
         .route("/cairn-memory/similarity-reviews", get(similarity_reviews))
         .route(
             "/cairn-memory/similarity-reviews/dismiss",
@@ -767,6 +803,9 @@ pub fn postgres_app_with_embeddings(
         .route("/cairn-memory/feedback", post(postgres_feedback))
         .route("/cairn-memory/contradict", post(postgres_contradict))
         .route("/cairn-memory/supersede", post(postgres_supersede))
+        .route("/cairn-memory/links", post(postgres_link_memories))
+        .route("/cairn-memory/links/remove", post(postgres_unlink_memories))
+        .route("/cairn-memory/graph", get(postgres_memory_graph))
         .route(
             "/cairn-memory/similarity-reviews",
             get(postgres_similarity_reviews),
@@ -1525,6 +1564,55 @@ async fn postgres_supersede(
                 &request.successor_id,
                 &request.target_id,
             )
+            .await?,
+    ))
+}
+
+async fn postgres_link_memories(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<LinkRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .link_memories(
+                postgres_token(&headers)?,
+                &request.source_id,
+                request.relation,
+                &request.target_id,
+            )
+            .await?,
+    ))
+}
+
+async fn postgres_unlink_memories(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<LinkRequest>,
+) -> Result<Json<Memory>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .unlink_memories(
+                postgres_token(&headers)?,
+                &request.source_id,
+                request.relation,
+                &request.target_id,
+            )
+            .await?,
+    ))
+}
+
+async fn postgres_memory_graph(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Query(query): Query<GraphQuery>,
+) -> Result<Json<MemoryGraph>, PostgresApiError> {
+    Ok(Json(
+        state
+            .store
+            .memory_graph(postgres_token(&headers)?, &graph_filter(&query), query.cap)
             .await?,
     ))
 }
@@ -2696,6 +2784,57 @@ async fn supersede(
                 &request.successor_id,
                 &request.target_id,
             )
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn link_memories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<LinkRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .link_memories(
+                auth_token(&headers)?,
+                &request.source_id,
+                request.relation,
+                &request.target_id,
+            )
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn unlink_memories(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<LinkRequest>,
+) -> Result<Json<Memory>, ApiError> {
+    let mut store = state.store.lock().await;
+    Ok(Json(
+        store
+            .unlink_memories(
+                auth_token(&headers)?,
+                &request.source_id,
+                request.relation,
+                &request.target_id,
+            )
+            .map_err(account_api_error)?,
+    ))
+}
+
+async fn memory_graph(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GraphQuery>,
+) -> Result<Json<MemoryGraph>, ApiError> {
+    Ok(Json(
+        state
+            .store
+            .lock()
+            .await
+            .graph_for_account(auth_token(&headers)?, &graph_filter(&query), query.cap)
             .map_err(account_api_error)?,
     ))
 }

@@ -655,6 +655,7 @@ fn redacts_human_metadata_before_new_persistence() -> Result<(), StoreError> {
             ],
             supersedes: None,
             contradicts: Vec::new(),
+            links: Vec::new(),
             promoted_from: Some("memory-source-1".to_owned()),
             promotion_reason: Some("because SK-synthetic-example".to_owned()),
             verified_commit: Some("abc1234".to_owned()),

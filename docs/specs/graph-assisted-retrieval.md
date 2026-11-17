@@ -9,6 +9,9 @@ status: superseded
 Current implemented retrieval is owned by [ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md)
 and the [continuity contract](../contracts/continuity-v1.md#hybrid-recall-v014).
 The broader graph design below is retained as a historical proposal.
+v0.1.4 ships only the memory link graph in
+[ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
+The code graph and work graph in this document are not implemented.
 
 | Field | Value |
 | --- | --- |

@@ -90,6 +90,24 @@ const COMMANDS: &[Command] = &[
         &["successorId", "targetId"],
         2,
     ),
+    command(
+        "link",
+        "memory_link",
+        &["sourceId", "relation", "targetId"],
+        3,
+    ),
+    command(
+        "unlink",
+        "memory_unlink",
+        &["sourceId", "relation", "targetId"],
+        3,
+    ),
+    command(
+        "graph",
+        "memory_graph",
+        &["scope", "projectId", "relation", "cap"],
+        0,
+    ),
     command("reviews", "memory_similarity_reviews", &[], 0),
     command("review-dismiss", "memory_review_dismiss", &["reviewId"], 1),
     command(
@@ -166,6 +184,9 @@ fn print_usage() {
   cairn feedback <memory-id> helpful|stale\n\
   cairn contradict <contradicting-id> <contradicted-id>\n\
   cairn supersede <successor-id> <target-id>\n\
+  cairn link <source-id> <relation> <target-id>\n\
+  cairn unlink <source-id> <relation> <target-id>\n\
+  cairn graph [scope] [project-id] [relation] [cap]\n\
   cairn reviews\n\
   cairn review-dismiss <review-id>\n\
   cairn review-contradict <review-id> <contradicted-id>\n\
@@ -516,11 +537,11 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
 }
 
 fn argument_value(key: &str, value: &str) -> Result<Value, Error> {
-    if key == "limit" {
+    if key == "limit" || key == "cap" {
         return value
             .parse::<u64>()
             .map(|limit| json!(limit))
-            .map_err(|_| Error::Input("limit must be a positive integer".to_owned()));
+            .map_err(|_| Error::Input(format!("{key} must be a positive integer")));
     }
     Ok(json!(value))
 }

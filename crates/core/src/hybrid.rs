@@ -67,6 +67,22 @@ pub fn hybrid_rank(
             }
         }
     }
+    let mut typed_out: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut typed_in: HashMap<&str, Vec<&str>> = HashMap::new();
+    for memory in memories {
+        for link in &memory.links {
+            if link.target_id != memory.memory_id && by_id.contains_key(link.target_id.as_str()) {
+                typed_out
+                    .entry(memory.memory_id.as_str())
+                    .or_default()
+                    .push(link.target_id.as_str());
+                typed_in
+                    .entry(link.target_id.as_str())
+                    .or_default()
+                    .push(memory.memory_id.as_str());
+            }
+        }
+    }
     for (id, score) in seeds {
         let Some(seed) = by_id.get(id.as_str()) else {
             continue;
@@ -85,6 +101,12 @@ pub fn hybrid_rank(
                 .filter(|id| by_id.contains_key(id)),
         );
         if let Some(ids) = incoming.get(id.as_str()) {
+            linked.extend(ids.iter().copied());
+        }
+        if let Some(ids) = typed_out.get(id.as_str()) {
+            linked.extend(ids.iter().copied());
+        }
+        if let Some(ids) = typed_in.get(id.as_str()) {
             linked.extend(ids.iter().copied());
         }
         linked.remove(id.as_str());

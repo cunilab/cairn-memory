@@ -135,7 +135,8 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 > **Usable outcome:** Cairn improves retrieval and memory maintenance at scale without weakening ownership or trust boundaries.
 
 - [ ] Add semantic retrieval with a versioned embedding pipeline and exact-search evaluation.
-- [ ] Add bounded graph-assisted retrieval across code, work, and memory graphs.
+- [x] Add a permission-filtered memory link graph with one-hop recall and one canvas (v0.1.4). No code graph.
+- [ ] Add bounded graph-assisted retrieval across code and work graphs.
 - [x] Add durable background jobs with leases, retries, backoff, quarantine, and dead-letter inspection.
 - [ ] Add automatic consolidation, staleness detection, contradiction detection, and promotion suggestions.
 - [ ] Add local or server-side model options while keeping capture and basic recall available during provider failure.

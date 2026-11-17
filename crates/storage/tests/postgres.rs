@@ -5611,3 +5611,250 @@ async fn postgres_overlapping_scan_does_not_reopen_a_declared_pair() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_links_permissions_visibility_cap_and_one_hop() {
+    let (pool, store) = pool_and_store().await;
+    let migrated: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cairn_schema_migrations WHERE version = '0018_memory_links')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(migrated);
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let seed = store
+        .save(&owner.token, stage7_fact("personal", "seedtoken", None))
+        .await
+        .unwrap();
+    let neighbour = store
+        .save(&owner.token, stage7_fact("personal", "othertoken", None))
+        .await
+        .unwrap();
+    let alone = store
+        .save(&owner.token, stage7_fact("personal", "gammatoken", None))
+        .await
+        .unwrap();
+    let foreign = store
+        .save(&member.token, stage7_fact("personal", "foreigntoken", None))
+        .await
+        .unwrap();
+    let hidden = store
+        .link_memories(
+            &member.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown memory"));
+    let global = store
+        .save(&owner.token, stage7_fact("global", "globaltoken", None))
+        .await
+        .unwrap();
+    let crossed = store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &global.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(crossed.to_string().contains("same scope"));
+    store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap();
+    store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap();
+    let stored = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == seed.memory_id)
+        .unwrap();
+    assert_eq!(stored.links.len(), 1);
+    sqlx::query("UPDATE cairn_memories SET links = links || $1::jsonb WHERE memory_id = $2")
+        .bind(serde_json::json!([{
+            "relation": "fixes",
+            "target_id": foreign.memory_id
+        }]))
+        .bind(&seed.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hits = store
+        .search(&owner.token, "seedtoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| hit.memory_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&neighbour.memory_id.as_str()));
+    assert!(!ids.contains(&alone.memory_id.as_str()));
+    assert!(!ids.contains(&foreign.memory_id.as_str()));
+    let graph = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| node.memory_id != foreign.memory_id)
+    );
+    assert!(graph.edges.iter().all(|edge| {
+        edge.source_id != foreign.memory_id && edge.target_id != foreign.memory_id
+    }));
+    store
+        .declare_contradiction(&owner.token, &seed.memory_id, &neighbour.memory_id)
+        .await
+        .unwrap();
+    let drawn = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(120))
+        .await
+        .unwrap();
+    assert!(
+        drawn
+            .edges
+            .iter()
+            .any(|edge| edge.relation == cairn_core::GraphRelation::Contradicts)
+    );
+    store
+        .supersede_memory(&owner.token, &seed.memory_id, &neighbour.memory_id)
+        .await
+        .unwrap();
+    let hidden_graph = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(500))
+        .await
+        .unwrap();
+    assert!(
+        hidden_graph
+            .nodes
+            .iter()
+            .all(|node| node.memory_id != neighbour.memory_id)
+    );
+    assert!(
+        hidden_graph
+            .edges
+            .iter()
+            .all(|edge| edge.target_id != neighbour.memory_id)
+    );
+    assert!(
+        store
+            .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(119))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("120")
+    );
+
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let left = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "left-note",
+        context.clone(),
+    )
+    .await;
+    let right = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "right-note",
+        context,
+    )
+    .await;
+    let refused = store
+        .link_memories(
+            &member.token,
+            &left.memory_id,
+            cairn_core::LinkRelation::Fixes,
+            &right.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("author or project owner"));
+    store
+        .link_memories(
+            &owner.token,
+            &left.memory_id,
+            cairn_core::LinkRelation::Fixes,
+            &right.memory_id,
+        )
+        .await
+        .unwrap();
+
+    let mut hub = String::new();
+    for index in 0..121 {
+        let title = format!("capnode-{index:03}");
+        let memory = store
+            .save(&owner.token, stage7_fact("global", &title, None))
+            .await
+            .unwrap();
+        if index == 0 {
+            hub = memory.memory_id;
+        } else if index < 4 {
+            store
+                .link_memories(
+                    &owner.token,
+                    &hub,
+                    cairn_core::LinkRelation::Relates,
+                    &memory.memory_id,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let capped = store
+        .memory_graph(
+            &owner.token,
+            &cairn_core::GraphFilter {
+                scope: Some(cairn_core::MemoryScope::Global),
+                ..cairn_core::GraphFilter::default()
+            },
+            Some(120),
+        )
+        .await
+        .unwrap();
+    assert!(capped.truncated);
+    assert_eq!(capped.nodes.len(), 120);
+    assert_eq!(capped.node_cap, 120);
+    assert!(capped.nodes.iter().any(|node| node.memory_id == hub));
+}

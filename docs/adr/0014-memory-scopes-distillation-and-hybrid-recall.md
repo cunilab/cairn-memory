@@ -275,6 +275,27 @@ Dismiss requires edit rights on both memories in the pair. Supersede requires
 edit rights on both, because it writes the successor's `supersedes` field.
 It does not call `correct`.
 
+### Stage 8 contract decisions (2026-11-17)
+
+The owner confirmed a memory link graph and one canvas. There is no code graph
+in v0.1.4.
+
+Typed links are `relates`, `causes`, `fixes`, and `depends_on`. Each is stored
+on the source memory in both stores (`links` on the file record, migration
+`0018_memory_links.sql` in PostgreSQL). Create and remove require read access
+to both memories, the same scope and project, and edit rights on the source
+row. `contradicts` and `supersedes` stay on their stage-7 fields. Recall walks
+the new links one hop inside the existing link channel, in either direction,
+with the same 512 caps. The relation does not change the channel weight.
+`contradicts` and `supersedes` are not hops.
+
+The graph shows every memory the viewer can already read, in one canvas, until
+the viewer’s cap. The cap defaults to 120, and the viewer may set it from 120
+through 500. The fewest incident edges are dropped first, then the oldest
+memory, then the id. `truncated` reports that drop. An edge is included only
+when both ends are visible. The console draws that response with Sigma.js and
+graphology. Filters are scope, relation, project, and the cap.
+
 ## Trust and limits
 
 - Project membership is by project ID (ADR 0013), so raw captures, not only
@@ -284,7 +305,7 @@ It does not call `correct`.
   ranking. Edit and delete stay with author and administrator.
 - Rule-based distillation is heuristic and can miss or mistype notes. Local
   embeddings add a model download and CPU cost to the server.
-- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score, feedback, durable embedding and distillation jobs, and declared contradiction handling are implemented. No recall-quality benchmark is claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions), [stage 5](../evidence.md#v014-stage-5--retention-and-feedback), [stage 6](../evidence.md#v014-stage-6--durable-jobs-and-quarantine) and [stage 7](../evidence.md#v014-stage-7--contradiction-handling) checks.
+- Scope, record shape, rule-based distillation, hybrid retrieval, capture hygiene, the retention score, feedback, durable embedding and distillation jobs, declared contradiction handling, and the memory link graph are implemented. No code graph and no recall-quality benchmark are claimed. See the recorded [stage 1](../evidence.md#v014-stage-1--memory-scopes-and-record-shape), [stage 2](../evidence.md#v014-stage-2--capture-hygiene-and-session-distillation), [stage 3](../evidence.md#v014-stage-3--hybrid-recall), [stage 4](../evidence.md#v014-stage-4--session-brief-and-agent-instructions), [stage 5](../evidence.md#v014-stage-5--retention-and-feedback), [stage 6](../evidence.md#v014-stage-6--durable-jobs-and-quarantine), [stage 7](../evidence.md#v014-stage-7--contradiction-handling) and [stage 8](../evidence.md#v014-stage-8--memory-link-graph) checks.
 
 ## Implementation checklist
 
@@ -353,3 +374,10 @@ tests; ranking in `crates/core/src/recall.rs` and
 review storage in both adapters; MCP/CLI tools; and the Memories page review
 list. See the
 [stage 7 check record](../evidence.md#v014-stage-7--contradiction-handling).
+
+Stage 8 implementation evidence: `crates/core/src/links.rs` and sibling tests;
+the one-hop walk in `crates/core/src/hybrid.rs`; migration
+`0018_memory_links.sql` and `crates/storage/src/contradictions.rs`; both HTTP
+adapters; MCP/CLI `memory_link`, `memory_unlink`, and `memory_graph`; and
+`apps/web/app/graph/page.tsx`. See the
+[stage 8 check record](../evidence.md#v014-stage-8--memory-link-graph).

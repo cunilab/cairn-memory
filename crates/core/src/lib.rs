@@ -15,6 +15,7 @@ mod embeddings;
 mod hybrid;
 mod jobs;
 mod lifecycle;
+mod links;
 mod memories;
 mod ownership;
 mod privacy;
@@ -49,6 +50,11 @@ pub use distillation::distill_session_notes;
 pub use lifecycle::{
     Lifecycle, LifecycleInput, LifecycleSummary, MemoryKind, MemoryScope, Retention, Sensitivity,
     sensitivity_including_context,
+};
+pub use links::{
+    GRAPH_NODE_CAP_DEFAULT, GRAPH_NODE_CAP_MAX, GRAPH_NODE_CAP_MIN, GraphEdge, GraphFilter,
+    GraphNode, GraphRelation, LinkRelation, MemoryGraph, MemoryLink, build_memory_graph,
+    graph_node_cap,
 };
 pub use memories::{
     Memory, MemoryFields, MemoryStatus, SaveMemoryInput, build_explicit_memory_record,

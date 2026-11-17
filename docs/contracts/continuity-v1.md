@@ -80,11 +80,14 @@ visibility. Resume/unresolved keep their session continuity behavior.
 - **Semantic:** normalized 384-dimensional local MiniLM vectors, exact cosine
   similarity strictly above zero, at most 512 candidates after visibility and
   context filters. Zero is an inclusion rule, not a calibrated quality claim.
-- **Links:** one hop over explicit memory IDs in `evidence` (either direction)
-  or shared `(author, source_event_id)` pairs (capture IDs are person-scoped). Expand the first 512 fused visible seeds, rank
-  neighbours by summed seed scores and retain at most 512. Newly discovered
-  neighbours never become seeds in the same request. URL similarity is not a
-  link. Hidden neighbours never become candidates or generated contradiction targets.
+- **Links:** one hop over explicit memory IDs in `evidence` (either direction),
+  shared `(author, source_event_id)` pairs (capture IDs are person-scoped), or a
+  typed memory link (`relates`, `causes`, `fixes`, `depends_on`) in either
+  direction. Expand the first 512 fused visible seeds, rank neighbours by
+  summed seed scores and retain at most 512. The relation does not change that
+  weight. Newly discovered neighbours never become seeds in the same request.
+  `contradicts` and `supersedes` are not hops. URL similarity is not a link.
+  Hidden neighbours never become candidates or generated contradiction targets.
 
 Each nonempty channel sorts descending by its score then ascending memory ID,
 removes duplicate IDs and contributes `1 / (60 + rank + 1)` with zero-based
@@ -444,6 +447,39 @@ tools are `memory_contradict`, `memory_supersede`, `memory_similarity_reviews`,
 `memory_review_supersede`. The CLI commands are `contradict`, `supersede`,
 `reviews`, `review-dismiss`, `review-contradict`, and `review-supersede`.
 The console Memories page lists open reviews for the signed-in viewer.
+
+## Memory link graph (v0.1.4)
+
+A caller who can read both memories, and who has edit rights on the source,
+may add or remove one directed link. The relations are `relates`, `causes`,
+`fixes`, and `depends_on`. The link is stored on the source as
+`links: [{relation, target_id}]`. One triple is stored once. A memory cannot
+link to itself. The two memories must share a scope and a project. Personal
+memory is editable by its author, project memory by its author or the current
+project owner, and global memory by its author or an administrator. A target
+the caller cannot read is an unknown memory.
+
+`contradicts` and `supersedes` stay on their own fields and keep the ranking
+and hiding rules above. They are drawn on the graph when both ends are in the
+readable recalled set. A live supersede hides its target, so that edge is
+absent. Evidence ids and shared source events stay in recall and are not
+graph edges.
+
+`GET /cairn-memory/graph` returns `{nodes, edges, truncated, node_cap}`.
+Optional filters are `scope`, `projectId`, and `relation`. `cap` defaults to
+120 and must be from 120 through 500. Nodes are the readable recalled set
+after those filters. A relation filter keeps only the endpoints of matching
+edges. An edge is returned only when both ends are in the node set; a hidden
+id is omitted. Above the cap, nodes with the fewest incident edges are
+dropped first, then the oldest `created_at`, then the memory id. `truncated`
+is true when any node was dropped. Edges among the kept nodes remain.
+
+Create and remove are `POST /cairn-memory/links` and
+`POST /cairn-memory/links/remove`. MCP tools are `memory_link`,
+`memory_unlink`, and `memory_graph`. CLI commands are `link`, `unlink`, and
+`graph`. The console page `/graph` draws this response. Import stores `links`
+with the memory. A stored target that is missing or unreadable does not enter
+recall or the graph.
 
 Import stores `contradicts` with the memory. A link whose target is missing,
 unreadable, or in another scope or project does not change rank.

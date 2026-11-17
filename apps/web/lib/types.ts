@@ -92,6 +92,27 @@ export type ProjectMemory = {
 
 export type PersonalMemory = ProjectMemory;
 
+export type MemoryGraphNode = {
+  memory_id: string;
+  title: string;
+  scope: "project" | "personal" | "global";
+  project_id?: string | null;
+  kind: string;
+};
+
+export type MemoryGraphEdge = {
+  source_id: string;
+  target_id: string;
+  relation: string;
+};
+
+export type MemoryGraph = {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  truncated: boolean;
+  node_cap: number;
+};
+
 export type SimilarityReview = {
   review_id: string;
   left_id: string;

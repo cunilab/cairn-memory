@@ -16,6 +16,7 @@ import {
   SunIcon,
   ListTodoIcon,
   UsersIcon,
+  WaypointsIcon,
 } from "lucide-react";
 import { CairnMark } from "@/components/cairn-logo";
 import { ChangePasswordDialog } from "@/components/change-password-dialog";
@@ -59,6 +60,7 @@ const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 const WORKSPACE = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboardIcon },
   { href: "/memories", label: "Memories", icon: BrainIcon },
+  { href: "/graph", label: "Graph", icon: WaypointsIcon },
   { href: "/projects", label: "Projects", icon: FolderIcon },
   { href: "/devices", label: "Devices", icon: KeyRoundIcon },
 ];

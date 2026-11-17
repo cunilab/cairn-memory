@@ -125,10 +125,14 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
         }
     }
     let path = fill_path(tool.path, &mut body)?;
+    let graph_query = (tool.name == "memory_graph").then(|| query_string(&body));
     if tool.name == "memory_lesson_save" {
         body.entry("kind").or_insert_with(|| json!("gotcha"));
     }
-    let route = format!("/cairn-memory{path}");
+    let route = match graph_query.as_deref() {
+        Some(query) if !query.is_empty() => format!("/cairn-memory{path}?{query}"),
+        _ => format!("/cairn-memory{path}"),
+    };
     let mut result = match tool.method {
         Method::Get => client.get(&route),
         Method::Post => client.post(&route, &Value::Object(body)),
@@ -170,6 +174,41 @@ pub fn fill_path(template: &str, body: &mut Map<String, Value>) -> Result<String
     }
     path.push_str(rest);
     Ok(path)
+}
+
+fn query_string(body: &Map<String, Value>) -> String {
+    let mut pairs = Vec::new();
+    for (key, value) in body {
+        let Some(text) = query_value(value) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        pairs.push(format!(
+            "{}={}",
+            encode_component(key),
+            encode_component(&text)
+        ));
+    }
+    pairs.join("&")
+}
+
+fn query_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        encoded.push_str(&encode_byte(byte));
+    }
+    encoded
 }
 
 fn encode_byte(byte: u8) -> String {
@@ -505,6 +544,61 @@ fn build_tools() -> Vec<Tool> {
                     ("successorId", string_schema()),
                 ],
                 &["reviewId", "successorId"],
+            ),
+        ),
+        spec(
+            "memory_link",
+            "Link two visible memories in the same scope and project. Relations: relates, causes, fixes, depends_on. Requires edit rights on the source memory.",
+            Post,
+            "/links",
+            object_schema(
+                &[
+                    ("sourceId", string_schema()),
+                    (
+                        "relation",
+                        json!({"type":"string","enum":["relates","causes","fixes","depends_on"]}),
+                    ),
+                    ("targetId", string_schema()),
+                ],
+                &["sourceId", "relation", "targetId"],
+            ),
+        ),
+        spec(
+            "memory_unlink",
+            "Remove one typed link. Same visibility and edit rule as memory_link.",
+            Post,
+            "/links/remove",
+            object_schema(
+                &[
+                    ("sourceId", string_schema()),
+                    (
+                        "relation",
+                        json!({"type":"string","enum":["relates","causes","fixes","depends_on"]}),
+                    ),
+                    ("targetId", string_schema()),
+                ],
+                &["sourceId", "relation", "targetId"],
+            ),
+        ),
+        spec(
+            "memory_graph",
+            "Read the memory link graph the caller can see. Optional scope, projectId, relation (relates, causes, fixes, depends_on, contradicts, supersedes) and cap from 120 through 500 (default 120).",
+            Get,
+            "/graph",
+            object_schema(
+                &[
+                    (
+                        "scope",
+                        json!({"type":"string","enum":["project","personal","global"]}),
+                    ),
+                    ("projectId", string_schema()),
+                    (
+                        "relation",
+                        json!({"type":"string","enum":["relates","causes","fixes","depends_on","contradicts","supersedes"]}),
+                    ),
+                    ("cap", json!({"type":"integer","minimum":120,"maximum":500})),
+                ],
+                &[],
             ),
         ),
         spec(

@@ -8,6 +8,7 @@ fn note_from_summary(summary: &Memory) -> Memory {
     let mut note = summary.clone();
     note.contradicts.clear();
     note.supersedes = None;
+    note.links.clear();
     note
 }
 

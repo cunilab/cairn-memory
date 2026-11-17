@@ -48,6 +48,7 @@ const EMBEDDING_MIGRATION: &str = include_str!("../../../migrations/0014_hybrid_
 const RETENTION_MIGRATION: &str = include_str!("../../../migrations/0015_retention_feedback.sql");
 const JOBS_MIGRATION: &str = include_str!("../../../migrations/0016_background_jobs.sql");
 const CONTRADICTION_MIGRATION: &str = include_str!("../../../migrations/0017_contradictions.sql");
+const LINKS_MIGRATION: &str = include_str!("../../../migrations/0018_memory_links.sql");
 const MAX_PULL_EVENTS: i64 = 512;
 /// A session whose newest retained observation is older than this is finished on the next
 /// capture or session start of the same person.
@@ -176,6 +177,7 @@ impl PostgresStore {
         sqlx::raw_sql(CONTRADICTION_MIGRATION)
             .execute(&self.pool)
             .await?;
+        sqlx::raw_sql(LINKS_MIGRATION).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -3475,10 +3477,10 @@ async fn insert_memory(
              lifecycle, kind, scope, project_id, next_steps, unresolved_work,
              supersedes, promoted_from, promotion_reason, verified_commit, created_at,
              published_by, changed_by, changed_at, record, access_count, last_accessed_at,
-             helpful_count, stale_count, feedback, contradicts)
+             helpful_count, stale_count, feedback, contradicts, links)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                   to_timestamp($17::double precision), $18, $19, $20, $21, $22,
-                  to_timestamp($23::double precision), $24, $25, $26, $27)",
+                  to_timestamp($23::double precision), $24, $25, $26, $27, $28)",
     )
     .bind(&memory.memory_id)
     .bind(person_id)
@@ -3517,6 +3519,7 @@ async fn insert_memory(
     .bind(i32::try_from(memory.stale_count).unwrap_or(i32::MAX))
     .bind(Json(&memory.feedback))
     .bind(Json(&memory.contradicts))
+    .bind(Json(&memory.links))
     .execute(&mut **transaction)
     .await?;
     jobs::enqueue_embed_tx(transaction, &memory.memory_id, now_seconds()).await?;
@@ -3847,7 +3850,7 @@ fn memory_select_sql() -> &'static str {
             m.access_count,
             CASE WHEN m.last_accessed_at IS NULL THEN NULL
                  ELSE EXTRACT(EPOCH FROM m.last_accessed_at)::bigint::text END AS last_accessed_at,
-            m.helpful_count, m.stale_count, m.feedback, m.contradicts
+            m.helpful_count, m.stale_count, m.feedback, m.contradicts, m.links
      FROM cairn_memories m"
 }
 
@@ -3901,6 +3904,9 @@ fn memory_from_row(row: &PgRow) -> Result<Memory, PostgresError> {
         unresolved_work: row.try_get::<Json<Vec<String>>, _>("unresolved_work")?.0,
         supersedes: row.try_get("supersedes")?,
         contradicts: row.try_get::<Json<Vec<String>>, _>("contradicts")?.0,
+        links: row
+            .try_get::<Json<Vec<cairn_core::MemoryLink>>, _>("links")?
+            .0,
         promoted_from: row.try_get("promoted_from")?,
         promotion_reason: row.try_get("promotion_reason")?,
         verified_commit: row.try_get("verified_commit")?,

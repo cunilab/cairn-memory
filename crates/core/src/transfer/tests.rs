@@ -633,6 +633,7 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
             unresolved_work: Vec::new(),
             supersedes: None,
             contradicts: Vec::new(),
+            links: Vec::new(),
             promoted_from: None,
             promotion_reason: None,
             verified_commit: None,
