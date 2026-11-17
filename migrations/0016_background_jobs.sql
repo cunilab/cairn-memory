@@ -21,6 +21,14 @@ CREATE INDEX IF NOT EXISTS cairn_jobs_ready
     ON cairn_jobs (kind, not_before)
     WHERE succeeded = false;
 
+CREATE INDEX IF NOT EXISTS cairn_jobs_claimable
+    ON cairn_jobs (kind, not_before, job_id)
+    WHERE succeeded = false AND claim_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS cairn_jobs_running
+    ON cairn_jobs (kind, job_key)
+    WHERE succeeded = false AND claim_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS cairn_job_quarantine (
     job_id text PRIMARY KEY,
     kind text NOT NULL,

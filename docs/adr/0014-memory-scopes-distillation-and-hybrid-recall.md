@@ -229,9 +229,8 @@ counts in both stores: a backup cannot authenticate a voter. The
 The owner approved one durable job table in both stores, plus a separate quarantine
 table, for embedding, session distillation and later jobs. A job is claimed with a
 120-second lease. An expired lease counts as one attempt and then waits. Five
-attempts is the cap. Waits after failures are 30, 60, 120 and 240 seconds. The
-480-second slot in the published schedule is unused because the fifth failure
-quarantines. The worker polls every 2 seconds and embeds at most 8 memories per
+attempts is the cap. Waits after the first four failures are 30, 60, 120 and
+240 seconds. The fifth failure quarantines. The worker polls every 2 seconds and embeds at most 8 memories per
 tick. Succeeded rows are deleted after 24 hours. Quarantine rows stay until an
 admin requeues or discards them.
 

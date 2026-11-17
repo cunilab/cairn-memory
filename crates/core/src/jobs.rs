@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub const JOB_LEASE_SECONDS: u64 = 120;
 pub const JOB_ATTEMPT_CAP: u32 = 5;
-/// Waits after failures 1 through 4. The fifth failure quarantines, so the last value is unused.
-pub const JOB_BACKOFF_SECONDS: [u64; 5] = [30, 60, 120, 240, 480];
+/// Waits after failures 1 through 4. The fifth failure quarantines.
+pub const JOB_BACKOFF_SECONDS: [u64; 4] = [30, 60, 120, 240];
 pub const JOB_POLL_SECONDS: u64 = 2;
 pub const JOB_SUCCEEDED_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 pub const EMBED_BATCH: usize = 8;
@@ -125,13 +125,14 @@ pub fn embed_job_end(message: &str) -> JobEnd {
 }
 
 /// A forgotten or already-current summary is success. IO retries. Other distill errors quarantine.
+/// The session id is the suffix of a validation error, so classification uses the stable prefix.
 pub fn distill_job_end(message: &str) -> JobEnd {
-    if message.contains("forgotten or superseded") {
+    if message.starts_with("validation error: session summary was forgotten or superseded") {
         JobEnd::Succeeded
-    } else if message.contains("database error")
-        || message.contains("storage error")
-        || message.contains("JSON")
-        || message.contains("store format")
+    } else if message.starts_with("database error:")
+        || message.starts_with("storage error:")
+        || message.starts_with("JSON encoding error:")
+        || message.starts_with("store format error:")
     {
         JobEnd::Retry(message.to_owned())
     } else {
@@ -172,7 +173,12 @@ impl JobBook {
         let kind = kind.as_str();
         let same = |job: &BackgroundJob| job.kind == kind && job.key == key && !job.succeeded;
         if !fresh {
-            if self.jobs.iter().any(same) {
+            if self.jobs.iter().any(same)
+                || self
+                    .quarantine
+                    .iter()
+                    .any(|row| row.kind == kind && row.key == key)
+            {
                 return false;
             }
             self.jobs.push(pending_job(kind, key, now));
@@ -228,6 +234,11 @@ impl JobBook {
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
+        indexes.retain(|&index| {
+            let kind = self.jobs[index].kind.clone();
+            let key = self.jobs[index].key.clone();
+            !self.live_key(&kind, &key, now)
+        });
         indexes.sort_by(|&left, &right| {
             self.jobs[left]
                 .not_before
@@ -248,6 +259,9 @@ impl JobBook {
 
     pub fn claim_key(&mut self, kind: JobKind, key: &str, now: u64) -> Option<BackgroundJob> {
         let kind = kind.as_str();
+        if self.live_key(kind, key, now) {
+            return None;
+        }
         let job = self.jobs.iter_mut().find(|job| {
             job.kind == kind
                 && job.key == key
@@ -319,11 +333,26 @@ impl JobBook {
             });
             return Some(true);
         }
+        let successor = self.jobs.iter().any(|other| {
+            other.kind == job.kind
+                && other.key == job.key
+                && !other.succeeded
+                && other.claim_id.is_none()
+        });
+        if successor {
+            return Some(true);
+        }
         job.not_before = now.saturating_add(JOB_BACKOFF_SECONDS[(job.attempts - 1) as usize]);
         job.claim_id = None;
         job.lease_expires_at = None;
         self.jobs.push(job);
         Some(true)
+    }
+
+    fn live_key(&self, kind: &str, key: &str, now: u64) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.kind == kind && job.key == key && live(job, now))
     }
 
     pub fn snapshot(&self, now: u64) -> JobSnapshot {
@@ -427,9 +456,11 @@ impl crate::MemoryStore {
             .map(|memory| memory.memory_id)
             .collect::<Vec<_>>();
         let changed = self.with_jobs(|book| {
-            missing
-                .iter()
-                .any(|memory_id| book.enqueue(JobKind::Embed, memory_id, now, false))
+            let mut changed = false;
+            for memory_id in &missing {
+                changed |= book.enqueue(JobKind::Embed, memory_id, now, false);
+            }
+            changed
         });
         if changed {
             self.persist()?;
@@ -451,9 +482,11 @@ impl crate::MemoryStore {
                 .map(|memory| memory.memory_id)
                 .collect::<Vec<_>>();
             self.with_jobs(|book| {
-                missing
-                    .iter()
-                    .any(|memory_id| book.enqueue(JobKind::Embed, memory_id, now, false))
+                let mut changed = false;
+                for memory_id in &missing {
+                    changed |= book.enqueue(JobKind::Embed, memory_id, now, false);
+                }
+                changed
             })
         } else {
             false

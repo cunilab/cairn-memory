@@ -270,7 +270,7 @@ separate jobs crate.
 | --- | --- |
 | Lease | 120 seconds. Completion is accepted only for the claim that still holds the row. |
 | Attempts | 5. The fifth failure quarantines. |
-| Backoff | 30, 60, 120, 240 seconds after failures 1–4. The 480-second schedule slot is unused. |
+| Backoff | 30, 60, 120, 240 seconds after failures 1–4. The fifth failure quarantines. |
 | Poll | 2 seconds. Embedding claims at most 8 jobs and embeds them as one batch. |
 | Succeeded rows | Deleted 24 hours after they finish. |
 | Quarantine | Kept until an admin requeues or discards the row. |
@@ -284,9 +284,10 @@ length-prefixed `person_id` plus `session_id` for `distill`.
 `POST session/end` and the idle sweep enqueue the distill job, claim it, and
 finish the existing summary function before they return. The poller only runs a
 claim left by a crash or by backoff. Idle close does not reset a job that is
-already active. After quarantine, PostgreSQL clears `pending_since` and the file
-store skips that session until a newer observation arrives, so automatic close
-does not spin. A forgotten or superseded summary completes the job and the
+already active. After quarantine, PostgreSQL clears `pending_since` unless a
+newer observation arrived during that attempt, and the file store skips that
+session until a newer observation arrives, so automatic close does not spin or
+restart the quarantined key. A forgotten or superseded summary completes the job and the
 explicit end still returns its validation error.
 
 Transient failures retry: store IO, JSON encoding, PostgreSQL connection and pool
@@ -299,7 +300,7 @@ already current, is success.
 
 Search never enqueues a job and never waits for one. Startup and each embedding
 poll enqueue missing or stale vectors only when that memory has no active embed
-job. Writes that change embedding text replace a pending embed job. If the model
+job and no quarantine row. Writes that change embedding text replace a pending embed job. If the model
 is not loaded, embed jobs stay pending and are not failed.
 
 Admin web sessions may `GET /cairn-memory/admin/jobs` (pending, running,

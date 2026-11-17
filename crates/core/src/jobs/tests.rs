@@ -85,7 +85,7 @@ fn fifth_failure_quarantines_and_a_permanent_error_does_not_retry() {
     );
     assert_eq!(book.quarantine.len(), 1);
     assert_eq!(book.quarantine[0].attempts, JOB_ATTEMPT_CAP);
-    assert_eq!(JOB_BACKOFF_SECONDS[4], 480);
+    assert_eq!(&JOB_BACKOFF_SECONDS[..], &[30_u64, 60, 120, 240][..]);
 
     let (mut book, claimed) = book_with(JobKind::Embed, "bad", 5);
     assert!(book.settle(
@@ -214,6 +214,204 @@ fn distill_keys_round_trip_and_errors_are_classified() {
         embed_job_end("embedding batch length mismatch"),
         JobEnd::Quarantine(_)
     ));
+    assert!(matches!(
+        distill_job_end("validation error: unknown session: forgotten or superseded"),
+        JobEnd::Quarantine(_)
+    ));
+    assert!(matches!(
+        distill_job_end("validation error: unknown session: database error"),
+        JobEnd::Quarantine(_)
+    ));
+    assert!(matches!(
+        distill_job_end("validation error: unknown session: JSON"),
+        JobEnd::Quarantine(_)
+    ));
+    assert!(matches!(
+        distill_job_end("validation error: unknown session: storage error"),
+        JobEnd::Quarantine(_)
+    ));
+}
+
+#[test]
+fn a_pending_successor_waits_behind_a_live_lease_and_retry_keeps_one_pending_row() {
+    let mut book = JobBook::default();
+    book.enqueue(JobKind::Embed, "key", 100, true);
+    let running = book.claim(JobKind::Embed, 1, 100).remove(0);
+    book.enqueue(JobKind::Embed, "key", 101, true);
+    assert!(book.claim(JobKind::Embed, 1, 101).is_empty());
+    assert!(book.claim_key(JobKind::Embed, "key", 101).is_none());
+    assert_eq!(book.snapshot(101).running, 1);
+    let claim_id = running.claim_id.clone().unwrap();
+    assert!(book.settle(
+        &running.job_id,
+        &claim_id,
+        102,
+        JobEnd::Retry("temporary".into())
+    ));
+    assert_eq!(pending_keys(&book, "key"), 1);
+    let mut book = JobBook::default();
+    book.enqueue(JobKind::Embed, "key", 100, true);
+    let running = book.claim(JobKind::Embed, 1, 100).remove(0);
+    book.enqueue(JobKind::Embed, "key", 101, true);
+    assert!(book.maintain(100 + JOB_LEASE_SECONDS));
+    assert_eq!(pending_keys(&book, "key"), 1);
+    assert!(
+        book.jobs
+            .iter()
+            .all(|job| job.job_id != running.job_id || job.claim_id.is_none())
+    );
+    assert_eq!(book.snapshot(100 + JOB_LEASE_SECONDS).running, 0);
+}
+
+#[test]
+fn reconciliation_enqueues_every_missing_memory_and_skips_quarantine() {
+    let path = temp_store_path("jobs-reconcile");
+    let mut store = MemoryStore::open(&path).unwrap();
+    for index in 0..4 {
+        store
+            .remember(
+                &format!("Useful note {index}"),
+                vec![],
+                WorkContext::default(),
+            )
+            .unwrap();
+    }
+    store.state.jobs.clear();
+    store.persist().unwrap();
+    let now = crate::now_seconds();
+    store.reconcile_embeddings(512, now).unwrap();
+    assert_eq!(store.job_snapshot(now).pending, 4);
+    let _ = std::fs::remove_file(&path);
+
+    let path = temp_store_path("jobs-quarantine-bypass");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let memory = store
+        .remember("Durable private note", vec![], WorkContext::default())
+        .unwrap();
+    let now = crate::now_seconds();
+    let claim = store
+        .poll_jobs(JobKind::Embed, 8, now)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.key == memory.memory_id)
+        .expect("first embed job");
+    assert_eq!(claim.attempts, 0);
+    store
+        .settle_job(
+            &claim.job_id,
+            claim.claim_id.as_deref().unwrap(),
+            now,
+            JobEnd::Quarantine("embedding batch length mismatch".into()),
+        )
+        .unwrap();
+    for _ in 0..2 {
+        let claimed = store.poll_jobs(JobKind::Embed, 8, now).unwrap();
+        assert!(
+            claimed.iter().all(|job| job.key != memory.memory_id),
+            "a quarantined memory must not be enqueued again"
+        );
+    }
+    assert_eq!(store.job_snapshot(now).quarantined, 1);
+    assert_eq!(store.state.job_quarantine[0].attempts, 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn backfill_claims_a_memory_behind_quarantined_rows() {
+    let path = temp_store_path("jobs-starve");
+    let mut store = MemoryStore::open(&path).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..9 {
+        let memory = store
+            .remember(
+                &format!("Useful old note {index}"),
+                vec![],
+                WorkContext::default(),
+            )
+            .unwrap();
+        ids.push(memory.memory_id);
+    }
+    let ninth = ids[8].clone();
+    let first = ids[0].clone();
+    store.state.jobs.clear();
+    store.persist().unwrap();
+    let now = crate::now_seconds();
+    let mut saw_ninth = false;
+    for _ in 0..4 {
+        let claims = store.poll_jobs(JobKind::Embed, 8, now).unwrap();
+        if claims.is_empty() {
+            break;
+        }
+        for claim in claims {
+            if claim.key == ninth {
+                saw_ninth = true;
+            }
+            store
+                .settle_job(
+                    &claim.job_id,
+                    claim.claim_id.as_deref().unwrap(),
+                    now,
+                    JobEnd::Quarantine("bad vector".into()),
+                )
+                .unwrap();
+        }
+    }
+    assert!(
+        saw_ninth,
+        "the ninth missing memory stayed behind quarantined rows"
+    );
+    assert_eq!(
+        store
+            .state
+            .job_quarantine
+            .iter()
+            .filter(|row| row.key == first)
+            .count(),
+        1
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_stale_distill_claim_does_not_commit_a_summary() {
+    let path = temp_store_path("jobs-stale-distill");
+    let mut store = MemoryStore::open(&path).unwrap();
+    store
+        .start_session("session", WorkContext::default())
+        .unwrap();
+    store
+        .capture_observation(observation_for(
+            "session",
+            "event",
+            "Decision: keep useful durable work notes.",
+        ))
+        .unwrap();
+    let now = crate::now_seconds();
+    let fake = BackgroundJob {
+        job_id: "nonexistent-job".into(),
+        kind: "distill".into(),
+        key: distill_key(None, "session"),
+        attempts: 0,
+        not_before: now,
+        claim_id: Some("stale".into()),
+        lease_expires_at: Some(now.saturating_sub(1)),
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+        finished_at: None,
+        succeeded: false,
+    };
+    assert!(store.finish_claimed_distill(fake).is_err());
+    assert!(store.state.memories.is_empty());
+    assert!(store.state.job_quarantine.is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
+fn pending_keys(book: &JobBook, key: &str) -> usize {
+    book.jobs
+        .iter()
+        .filter(|job| job.key == key && !job.succeeded && job.claim_id.is_none())
+        .count()
 }
 
 #[test]

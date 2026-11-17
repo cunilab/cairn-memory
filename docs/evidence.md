@@ -393,3 +393,32 @@ Job behavior was tested on the file store and on PostgreSQL: exclusive claim,
 lease expiry, backoff, permanent and transient errors, supersede, quarantine,
 requeue, discard, and a lost claim. `POST session/end` still returns the summary
 after the notes are stored. Public `/health` is unchanged.
+
+### Stage 6 review fixes (2026-11-17)
+
+The independent review of `c472cf9` was fixed on `v0.1.4` before stage 7.
+Both stores now keep one pending row when a retry or expired lease meets a
+successor, refuse to claim that successor while the lease is live, and skip
+quarantined keys in reconciliation and the idle sweep until an admin requeues
+or a newer observation arrives. A lost distill claim does not commit the
+summary or clear a newer capture's pending mark. PostgreSQL queue changes are
+row updates. The backoff schedule is 30, 60, 120, and 240 seconds across five
+total attempts. The same shell rules applied: cleared Cairn environment
+variables, no live server, disposable `pgvector/pgvector:pg17` on the Colima
+socket, and `CARGO_TARGET_DIR=/tmp/cairn-e2e-20261117-target`.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --workspace`: 213 passed, 0 failed, 47 ignored.
+- `scripts/ci_postgres_tests.sh`: 47 passed, 0 failed, including the new job
+  regressions and both real-model semantic tests. The pinned MiniLM directory
+  was `/tmp/cairn-stage6-fix-minilm`, verified by
+  `scripts/download_embedding_model.py`.
+- `scripts/smoke_hook_auth.py`: 29 passed. `scripts/smoke_hook_offline.py`: 23
+  passed. `scripts/smoke_outbox.py`: 32 passed.
+- `scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, and
+  `scripts/validate_phase0.py`: passed. MCP setup still emits the nonfatal
+  HTTP 404 for unreleased 0.1.4 hook assets.
+- Web files were unchanged, so web checks were not rerun.
+- One enqueue beside retained succeeded rows took 4.1 ms at 100 rows, 4.2 ms
+  at 1,000, and 10.2 ms at 5,000. Those retained row identities did not change.

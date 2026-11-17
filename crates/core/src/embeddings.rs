@@ -107,6 +107,13 @@ impl MemoryStore {
             .iter()
             .filter(|m| self.memory_is_recalled(m, &hidden))
             .filter(|m| !self.state.embeddings.iter().any(|e| e.matches(m)))
+            .filter(|m| {
+                !self
+                    .state
+                    .job_quarantine
+                    .iter()
+                    .any(|row| row.kind == "embed" && row.key == m.memory_id)
+            })
             .take(limit)
             .cloned()
             .collect()

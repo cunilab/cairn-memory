@@ -777,20 +777,20 @@ impl PostgresStore {
         &self,
         person_id: &str,
         session_id: &str,
+        transaction: &mut Transaction<'_, Postgres>,
     ) -> Result<Option<Memory>, PostgresError> {
         if session_id.trim().is_empty() {
             return Err(PostgresError::Validation(
                 "session_id must not be empty".to_owned(),
             ));
         }
-        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             "UPDATE cairn_sessions SET ended_at = COALESCE(ended_at, now())
              WHERE person_id = $1 AND session_id = $2",
         )
         .bind(person_id)
         .bind(session_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         let session_row = sqlx::query(
             "SELECT session_id,
@@ -801,7 +801,7 @@ impl PostgresStore {
         )
         .bind(person_id)
         .bind(session_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction)
         .await?
         .ok_or_else(|| PostgresError::Validation(format!("unknown session: {session_id}")))?;
         let session = session_from_row(&session_row)?;
@@ -820,7 +820,7 @@ impl PostgresStore {
         let observation_rows = sqlx::query(&observation_query)
             .bind(person_id)
             .bind(session_id)
-            .fetch_all(&mut *transaction)
+            .fetch_all(&mut **transaction)
             .await?;
         let mut observations = observation_rows
             .iter()
@@ -829,7 +829,7 @@ impl PostgresStore {
         let existing = sqlx::query(&session_memory_select_sql())
             .bind(person_id)
             .bind(&memory_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction)
             .await?;
         let mut earlier = None;
         if let Some(row) = existing {
@@ -843,11 +843,10 @@ impl PostgresStore {
             ))
             .bind(person_id)
             .bind(&memory_id)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             if hidden {
-                clear_session_pending(&mut transaction, person_id, session_id).await?;
-                transaction.commit().await?;
+                clear_session_pending(transaction, person_id, session_id).await?;
                 return Ok(None);
             }
             let forgotten_source = sqlx::query_scalar::<_, bool>(
@@ -856,15 +855,14 @@ impl PostgresStore {
             )
             .bind(person_id)
             .bind(&memory.source_event_ids)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&mut **transaction)
             .await?;
             if !forgotten_source
                 && !observations
                     .iter()
                     .any(|observation| !memory.source_event_ids.contains(&observation.event_id))
             {
-                clear_session_pending(&mut transaction, person_id, session_id).await?;
-                transaction.commit().await?;
+                clear_session_pending(transaction, person_id, session_id).await?;
                 return Ok(Some(memory));
             }
             // The session id was reused after its summary, or a source was forgotten: derive
@@ -872,7 +870,7 @@ impl PostgresStore {
             sqlx::query("DELETE FROM cairn_memories WHERE person_id = $1 AND memory_id = $2")
                 .bind(person_id)
                 .bind(&memory_id)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
             earlier = Some(memory);
         }
@@ -885,7 +883,7 @@ impl PostgresStore {
         let mut memory =
             derive_session_memory(Some(person_id), session_id, &session.context, &observations)?;
         if let Some(id) = memory.project_id.as_deref() {
-            let member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cairn_projects p WHERE p.project_id = $1 AND (p.person_id = $2 OR EXISTS (SELECT 1 FROM cairn_project_members pm WHERE pm.project_id = p.project_id AND pm.member_person_id = $2)))").bind(id).bind(person_id).fetch_one(&mut *transaction).await?;
+            let member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cairn_projects p WHERE p.project_id = $1 AND (p.person_id = $2 OR EXISTS (SELECT 1 FROM cairn_project_members pm WHERE pm.project_id = p.project_id AND pm.member_person_id = $2)))").bind(id).bind(person_id).fetch_one(&mut **transaction).await?;
             if !member {
                 memory.scope = MemoryScope::Personal;
                 memory.project_id = None;
@@ -900,35 +898,35 @@ impl PostgresStore {
                 "SELECT EXISTS (SELECT 1 FROM cairn_forgotten_items WHERE person_id = $1 AND item_id = $2)
                     OR EXISTS (SELECT 1 FROM cairn_memories m WHERE m.person_id = $1 AND m.memory_id = $2 AND NOT {})",
                 not_superseded_by_live_memory_sql(false)
-            )).bind(person_id).bind(&note.memory_id).fetch_one(&mut *transaction).await?;
+            )).bind(person_id).bind(&note.memory_id).fetch_one(&mut **transaction).await?;
             if hidden {
                 continue;
             }
             if let Some(row) = sqlx::query(&session_memory_select_sql())
                 .bind(person_id)
                 .bind(&note.memory_id)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?
             {
                 carry_summary_state(&memory_from_row(&row)?, &mut note);
                 sqlx::query("DELETE FROM cairn_memories WHERE person_id = $1 AND memory_id = $2")
                     .bind(person_id)
                     .bind(&note.memory_id)
-                    .execute(&mut *transaction)
+                    .execute(&mut **transaction)
                     .await?;
             }
-            insert_memory(&mut transaction, person_id, &note).await?;
+            insert_memory(transaction, person_id, &note).await?;
         }
-        insert_memory(&mut transaction, person_id, &memory).await?;
-        clear_session_pending(&mut transaction, person_id, session_id).await?;
-        transaction.commit().await?;
+        insert_memory(transaction, person_id, &memory).await?;
+        clear_session_pending(transaction, person_id, session_id).await?;
         Ok(Some(memory))
     }
 
     /// Finishes this person's sessions that have been pending (a capture the summary may not
     /// cover) for longer than `IDLE_SESSION_SECONDS`, at most `MAX_SWEEP_SESSIONS` per call.
     /// Reads only the partial pending index. A session that already has a distill job is left
-    /// for that job. Quarantine clears the pending mark so the sweep does not spin. Failures
+    /// for that job. Quarantine clears the pending mark when that attempt saw no newer
+    /// observation, so the sweep does not spin. Failures
     /// are logged; the capture or session start that called this has already succeeded.
     async fn finish_idle_sessions(&self, person_id: &str) {
         let sessions = sqlx::query_scalar::<_, String>(

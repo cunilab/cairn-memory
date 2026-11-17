@@ -11,7 +11,12 @@ impl PostgresStore {
     pub async fn embedding_jobs(&self, limit: usize) -> Result<Vec<Memory>, PostgresError> {
         let sql = format!("{} LEFT JOIN cairn_memory_embeddings e ON e.memory_id=m.memory_id
             WHERE {} AND {} AND (e.model_id IS DISTINCT FROM $1 OR e.model_version IS DISTINCT FROM $2
-                OR e.source_revision IS DISTINCT FROM {}) ORDER BY m.created_at,m.memory_id LIMIT $3",
+                OR e.source_revision IS DISTINCT FROM {})
+                AND NOT EXISTS (
+                    SELECT 1 FROM cairn_job_quarantine q
+                    WHERE q.kind = 'embed' AND q.job_key = m.memory_id
+                )
+            ORDER BY m.created_at,m.memory_id LIMIT $3",
             memory_select_sql(),live_memory_sql(),not_superseded_by_live_memory_sql(false),SOURCE_REVISION);
         let rows =
             sqlx::query(&sql)

@@ -244,6 +244,17 @@ impl MemoryStore {
     }
 
     pub fn finish_claimed_distill(&mut self, claim: BackgroundJob) -> Result<Memory, StoreError> {
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
+        let owns = self.state.jobs.iter().any(|job| {
+            job.job_id == claim.job_id
+                && job.claim_id.as_deref() == Some(claim_id.as_str())
+                && !job.succeeded
+        });
+        if !owns {
+            return Err(StoreError::Conflict(
+                "distill claim is no longer held".to_owned(),
+            ));
+        }
         let Some((person_id, session_id)) = parse_distill_key(&claim.key) else {
             let now = now_seconds();
             let claim_id = claim.claim_id.unwrap_or_default();

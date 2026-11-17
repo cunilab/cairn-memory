@@ -165,8 +165,8 @@ verifies local files and makes no model network calls. Health reports
 `semantic_search: enabled` when loaded; missing or invalid files leave lexical,
 entity and link retrieval available. Embedding and session distillation share a
 durable job table. The worker polls every 2 seconds, claims a job for 120
-seconds, and retries a transient failure at most 5 times (waits of 30, 60, 120
-and 240 seconds). A crashed worker's lease can be reclaimed. Jobs that will not
+seconds, and allows five attempts. A transient failure waits 30, 60, 120, then
+240 seconds; the fifth failure quarantines. A crashed worker's lease can be reclaimed. Jobs that will not
 succeed sit in quarantine until an admin requeues or discards them on the Jobs
 page. Succeeded jobs are removed after 24 hours. Searches do not wait for
 indexing. Operators with an admin web session can read pending, running and

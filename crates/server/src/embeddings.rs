@@ -128,7 +128,7 @@ async fn run_file_tick(state: &AppState, model: Option<&LocalEmbeddings>) {
             Ok(claims) => claims,
             Err(error) => {
                 eprintln!("file distill poll failed: {error}");
-                return;
+                Vec::new()
             }
         };
         for claim in distill {
@@ -227,7 +227,7 @@ async fn run_postgres_tick(state: &PostgresAppState, model: Option<&LocalEmbeddi
         Ok(claims) => claims,
         Err(error) => {
             eprintln!("PostgreSQL distill poll failed: {error}");
-            return;
+            Vec::new()
         }
     };
     for claim in distill {

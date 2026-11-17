@@ -4245,3 +4245,590 @@ async fn postgres_import_discards_foreign_votes_and_untrusted_counts() {
     );
     pool.close().await;
 }
+
+fn review_note(session_id: &str, event_id: &str) -> ObservationInput {
+    ObservationInput {
+        event_id: event_id.to_owned(),
+        session_id: session_id.to_owned(),
+        content: "Decision: retain this capture for the summary.".to_owned(),
+        role: "assistant".to_owned(),
+        source: "test".to_owned(),
+        importance: Some("high".to_owned()),
+        lifecycle: Default::default(),
+        context: WorkContext::default(),
+    }
+}
+
+async fn open_pool() -> PgPool {
+    PgPool::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_retry_with_a_pending_successor_keeps_one_row_and_the_tick_continues() {
+    let (_pool, store) = pool_and_store().await;
+    let pool = open_pool().await;
+    let now = 1_700_000_000_u64;
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "duplicate-key", now, true)
+        .await
+        .unwrap();
+    let _claimed = store
+        .poll_jobs(cairn_core::JobKind::Embed, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "duplicate-key", now + 1, true)
+        .await
+        .unwrap();
+    store
+        .poll_jobs(
+            cairn_core::JobKind::Distill,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS,
+        )
+        .await
+        .expect("one expired key must not fail the other kind");
+    assert_eq!(
+        store
+            .job_snapshot(now + cairn_core::JOB_LEASE_SECONDS)
+            .await
+            .unwrap()
+            .pending,
+        1
+    );
+    let retried = store
+        .poll_jobs(
+            cairn_core::JobKind::Embed,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].key, "duplicate-key");
+
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "retry-key", now, true)
+        .await
+        .unwrap();
+    let running = store
+        .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|job| job.key == "retry-key")
+        .unwrap();
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "retry-key", now + 1, true)
+        .await
+        .unwrap();
+    let blocked = store
+        .poll_jobs(cairn_core::JobKind::Embed, 8, now + 1)
+        .await
+        .unwrap();
+    assert!(
+        blocked.iter().all(|job| job.key != "retry-key"),
+        "a pending successor was claimed during a live lease"
+    );
+    store
+        .settle_job(
+            &running.job_id,
+            running.claim_id.as_deref().unwrap(),
+            now + 2,
+            cairn_core::JobEnd::Retry("temporary".into()),
+        )
+        .await
+        .unwrap();
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs
+         WHERE job_key = 'retry-key' AND succeeded = false AND claim_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_quarantine_does_not_reset_attempts_or_starve_backfill() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("jobs-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    let mut ids = Vec::new();
+    for index in 0..9 {
+        let memory = store
+            .remember_with_kind(
+                &owner.token,
+                &format!("Useful old note {index}"),
+                vec![],
+                WorkContext::default(),
+                Default::default(),
+                cairn_core::MemoryKind::Explicit,
+            )
+            .await
+            .unwrap();
+        ids.push(memory.memory_id);
+    }
+    sqlx::query("DELETE FROM cairn_jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.reconcile_embeddings(512, now).await.unwrap();
+    assert_eq!(store.job_snapshot(now).await.unwrap().pending, 9);
+    let mut claimed = Vec::new();
+    for _ in 0..3 {
+        let batch = store
+            .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+            .await
+            .unwrap();
+        if batch.is_empty() {
+            break;
+        }
+        for claim in batch {
+            claimed.push(claim.key.clone());
+            store
+                .settle_job(
+                    &claim.job_id,
+                    claim.claim_id.as_deref().unwrap(),
+                    now,
+                    cairn_core::JobEnd::Quarantine("embedding batch length mismatch".into()),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    claimed.sort();
+    claimed.dedup();
+    assert_eq!(claimed.len(), 9);
+    assert_eq!(store.job_snapshot(now).await.unwrap().quarantined, 9);
+    assert!(
+        store
+            .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.job_snapshot(now).await.unwrap().quarantined, 9);
+    let first = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM cairn_job_quarantine WHERE job_key = $1",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_expired_distill_quarantine_is_not_restarted_by_the_idle_sweep() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("sweep-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "sweep-device",
+            &owner.account.person_id,
+            None,
+            "Sweep device",
+        )
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    store
+        .start_session(&owner.token, "crash-cap", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(&device.token, review_note("crash-cap", "cap-event"))
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "crash-cap");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let mut tick = now;
+    for attempt in 0..5 {
+        let claimed = store
+            .poll_jobs(cairn_core::JobKind::Distill, 8, tick)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "attempt {attempt}");
+        assert_eq!(claimed[0].attempts, attempt);
+        tick += cairn_core::JOB_LEASE_SECONDS;
+        assert!(
+            store
+                .poll_jobs(cairn_core::JobKind::Distill, 8, tick)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        if attempt < 4 {
+            tick += cairn_core::JOB_BACKOFF_SECONDS[attempt as usize];
+        }
+    }
+    assert_eq!(store.job_snapshot(tick).await.unwrap().quarantined, 1);
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'crash-cap'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.sweep_idle_sessions().await;
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = true",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(succeeded, 0);
+    assert_eq!(store.job_snapshot(tick).await.unwrap().quarantined, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("race-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "race-device",
+            &owner.account.person_id,
+            None,
+            "Race device",
+        )
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    store
+        .start_session(&owner.token, "pending-race", WorkContext::default())
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "pending-race");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Distill, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE cairn_job_quarantine IN EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let worker = store.clone();
+    let task = tokio::spawn(async move { worker.execute_claimed_distill(&claim).await });
+    let wait = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid <> pg_backend_pid()
+                       AND wait_event_type = 'Lock'
+                       AND query ILIKE '%cairn_job_quarantine%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), wait)
+        .await
+        .expect("distill settlement did not wait on the quarantine lock");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    store
+        .sync_push(&device.token, review_note("pending-race", "racing-capture"))
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+    let error = task.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("no retained observations"));
+    let pending: bool = sqlx::query_scalar(
+        "SELECT pending_since IS NOT NULL FROM cairn_sessions WHERE session_id = 'pending-race'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let observations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_observations WHERE session_id = 'pending-race'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(pending);
+    assert_eq!(observations, 1);
+    assert_eq!(summaries, 0);
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'pending-race'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.sweep_idle_sessions().await;
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        summaries >= 1,
+        "idle sweep did not summarize the newer capture"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_lost_distill_claim_does_not_commit_side_effects() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("stale-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "stale-device",
+            &owner.account.person_id,
+            None,
+            "Stale device",
+        )
+        .await
+        .unwrap();
+    let now = 1_700_000_000_u64;
+    store
+        .start_session(&owner.token, "real-stale", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(&device.token, review_note("real-stale", "real-event"))
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "real-stale");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let old = store
+        .poll_jobs(cairn_core::JobKind::Distill, 8, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(
+        store
+            .poll_jobs(
+                cairn_core::JobKind::Distill,
+                8,
+                now + cairn_core::JOB_LEASE_SECONDS
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = store
+        .poll_jobs(
+            cairn_core::JobKind::Distill,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS + cairn_core::JOB_BACKOFF_SECONDS[0],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_ne!(old.claim_id, replacement.claim_id);
+    assert!(store.execute_claimed_distill(&old).await.is_err());
+    assert_eq!(
+        store
+            .job_snapshot(now + cairn_core::JOB_LEASE_SECONDS + cairn_core::JOB_BACKOFF_SECONDS[0])
+            .await
+            .unwrap()
+            .running,
+        1
+    );
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'real-stale'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(summaries, 0);
+
+    store
+        .start_session(&owner.token, "empty-stale", WorkContext::default())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_sessions SET pending_since = now() WHERE session_id = 'empty-stale'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fake = cairn_core::BackgroundJob {
+        job_id: "nonexistent-job".into(),
+        kind: "distill".into(),
+        key: cairn_core::distill_key(Some(&owner.account.person_id), "empty-stale"),
+        attempts: 0,
+        not_before: now,
+        claim_id: Some("stale".into()),
+        lease_expires_at: Some(now.saturating_sub(1)),
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+        finished_at: None,
+        succeeded: false,
+    };
+    assert!(store.execute_claimed_distill(&fake).await.is_err());
+    let cleared: bool = sqlx::query_scalar(
+        "SELECT pending_since IS NULL FROM cairn_sessions WHERE session_id = 'empty-stale'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!cleared);
+    assert!(
+        store
+            .job_snapshot(now)
+            .await
+            .unwrap()
+            .quarantine
+            .iter()
+            .all(|row| row.key != fake.key || row.job_id != fake.job_id)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_session_id_text_does_not_reclassify_a_distill_failure() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("name-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    assert!(
+        store
+            .end_session(&owner.token, "unknown forgotten or superseded")
+            .await
+            .is_err()
+    );
+    let snapshot = store.job_snapshot(now).await.unwrap();
+    assert!(
+        snapshot
+            .quarantine
+            .iter()
+            .any(|row| row.last_error.contains("unknown session"))
+    );
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = true",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(succeeded, 0);
+    sqlx::query("TRUNCATE cairn_jobs, cairn_job_quarantine")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .end_session(&owner.token, "database error")
+            .await
+            .is_err()
+    );
+    let snapshot = store.job_snapshot(now).await.unwrap();
+    assert!(
+        snapshot
+            .quarantine
+            .iter()
+            .any(|row| row.last_error.contains("unknown session"))
+    );
+    assert!(snapshot.pending == 0 || snapshot.quarantine.iter().any(|row| row.attempts == 1));
+    let waiting: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = false",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waiting, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_enqueue_does_not_rewrite_retained_jobs() {
+    let (pool, store) = pool_and_store().await;
+    let indexes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_indexes
+         WHERE indexname IN ('cairn_jobs_claimable', 'cairn_jobs_running')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(indexes, 2);
+    let now = cairn_core::now_seconds();
+    for retained in [100_i64, 1_000, 5_000] {
+        sqlx::query("TRUNCATE cairn_jobs, cairn_job_quarantine")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO cairn_jobs
+                (job_id, kind, job_key, attempts, not_before, created_at, updated_at, succeeded, finished_at)
+             SELECT 'bench-' || g, 'embed', 'bench-' || g, 0, $1, $1, $1, true, $1
+             FROM generate_series(1, $2) AS g",
+        )
+        .bind(now as i64)
+        .bind(retained)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before: Vec<(String, String)> =
+            sqlx::query_as("SELECT ctid::text, job_id FROM cairn_jobs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            store
+                .enqueue_job(cairn_core::JobKind::Embed, "benchmark-new", now, true)
+                .await
+                .unwrap()
+        );
+        let elapsed = started.elapsed();
+        let after: Vec<(String, String)> =
+            sqlx::query_as("SELECT ctid::text, job_id FROM cairn_jobs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            before.iter().all(|row| after.contains(row)),
+            "enqueue rewrote retained rows at {retained}"
+        );
+        assert_eq!(after.len(), before.len() + 1);
+        eprintln!("enqueue with {retained} retained rows: {elapsed:?}");
+    }
+}
