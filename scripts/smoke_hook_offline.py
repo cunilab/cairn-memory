@@ -332,7 +332,19 @@ class OfflineHookTests(unittest.TestCase):
             result = run_hook("http://127.0.0.1:9", payload, path, CAIRN_DEVICE_TOKEN=DEVICE)
             self.assertEqual(result.returncode, 0, result.stderr)
             queued = json.loads(path.read_text(encoding="utf-8"))["events"][0]["payload"]
-            self.assertEqual(queued["context"], {"repository": "example.test/acme/widget-svc", "branch": "main"})
+            # Same rule as git_context: wt- plus the first 16 hex digits of
+            # SHA-256 over the canonical checkout root. Computed here, not by
+            # calling git_context, so the queue must have saved that id.
+            canonical = os.path.realpath(repo)
+            worktree = "wt-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+            self.assertEqual(
+                queued["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "main",
+                    "worktree": worktree,
+                },
+            )
 
     def test_timeout_after_store_replays_as_one_duplicate(self):
         stub = Stub(mode="stall")

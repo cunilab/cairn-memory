@@ -89,6 +89,12 @@ def make_repo(parent, name, remote=None, branch="feature/x"):
     return path
 
 
+def derived_worktree(checkout):
+    """Same id as git_context, computed here so the assertion is not that function."""
+    canonical = os.path.realpath(checkout)
+    return "wt-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -393,7 +399,14 @@ class StubHookTests(unittest.TestCase):
             repo = make_repo(tmp, "checkout-dir", "https://user:pw-secret@example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
             body = self._context_for(repo / "src")
-            self.assertEqual(body["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
+            self.assertEqual(
+                body["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "worktree": derived_worktree(repo),
+                },
+            )
             self.assertNotIn(tmp, json.dumps(body))
             self.assertNotIn("pw-secret", json.dumps(body))
             # No remote: fall back to the top-level directory name.
@@ -415,21 +428,38 @@ class StubHookTests(unittest.TestCase):
             explicit = dict(plain, cwd=str(repo), context={"repository": "mine", "commands": ["make"]})
             self.server.captured = []
             self.assertEqual(run_hook(self.url, explicit).returncode, 0)
-            self.assertEqual(json.loads(self.server.captured[0]["body"])["context"], {"repository": "mine", "commands": ["make"]})
+            worktree = derived_worktree(repo)
+            self.assertEqual(
+                json.loads(self.server.captured[0]["body"])["context"],
+                {"repository": "mine", "commands": ["make"], "worktree": worktree},
+            )
             # A context without a repository is completed from cwd.
             partial = dict(plain, cwd=str(repo), context={"commands": ["make"]})
             self.server.captured = []
             self.assertEqual(run_hook(self.url, partial).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "commands": ["make"]},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "commands": ["make"],
+                    "worktree": worktree,
+                },
             )
 
     def test_project_file_at_the_git_top_level_sends_the_project_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
+            worktree = derived_worktree(repo)
+            self.assertEqual(
+                self._context_for(repo)["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "worktree": worktree,
+                },
+            )
             (repo / ".cairn").mkdir()
             (repo / ".cairn" / "project.json").write_text(
                 json.dumps({"project_id": "project-abc", "repository": "example.test/acme/widget-svc"}), encoding="utf-8"
@@ -437,7 +467,12 @@ class StubHookTests(unittest.TestCase):
             # Read from a subdirectory: the file lives at the git top level.
             self.assertEqual(
                 self._context_for(repo / "src")["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "project_id": "project-abc",
+                    "worktree": worktree,
+                },
             )
             # v0.1.4 adds a display name; capture still uses only the stable id.
             (repo / ".cairn" / "project.json").write_text(
@@ -445,7 +480,12 @@ class StubHookTests(unittest.TestCase):
             )
             self.assertEqual(
                 self._context_for(repo / "src")["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "project_id": "project-abc",
+                    "worktree": worktree,
+                },
             )
             # An explicit project_id (and repository) in the input is kept.
             explicit = {
@@ -459,7 +499,7 @@ class StubHookTests(unittest.TestCase):
             self.assertEqual(run_hook(self.url, explicit).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "mine", "project_id": "project-mine"},
+                {"repository": "mine", "project_id": "project-mine", "worktree": worktree},
             )
             # An explicit repository still picks up the file's id.
             partial = dict(explicit, context={"repository": "mine"})
@@ -467,7 +507,7 @@ class StubHookTests(unittest.TestCase):
             self.assertEqual(run_hook(self.url, partial).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "mine", "project_id": "project-abc"},
+                {"repository": "mine", "project_id": "project-abc", "worktree": worktree},
             )
             # Unreadable or empty files send no id and never fail the hook.
             for body in ("not json", "{}", '{"project_id": ""}', '{"project_id": 7}', "[]"):
@@ -487,7 +527,13 @@ class StubHookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc"})
+            self.assertEqual(
+                self._context_for(repo)["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "worktree": derived_worktree(repo),
+                },
+            )
 
     def test_spaced_token_rejects_before_post(self):
         bad = "sk-not-a-header token"
