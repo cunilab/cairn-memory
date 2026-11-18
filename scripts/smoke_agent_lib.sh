@@ -56,7 +56,7 @@ create_agent() {
     -H 'Content-Type: application/json' -H "Authorization: Bearer $session" \
     -d "{\"name\":\"$1\"}" | json_field '["token"]')"
   printf '%s' "$session" >"$smoke_dir/$1.session"
-  XDG_CONFIG_HOME="$smoke_dir/$1" "$bin_dir/cairn" setup "$base" <<<"$device" >/dev/null
+  printf '%s\n' "$device" | XDG_CONFIG_HOME="$smoke_dir/$1" "$bin_dir/cairn" setup "$base" >/dev/null
   printf '%s' "$device" >"$smoke_dir/$1.device"
 }
 

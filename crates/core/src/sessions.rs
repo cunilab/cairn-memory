@@ -562,10 +562,7 @@ pub fn session_memory_id(person_id: Option<&str>, session_id: &str) -> String {
 }
 
 pub(crate) fn keeps_expired_source(memory: &Memory) -> bool {
-    if memory.lifecycle.retention != Retention::Durable || is_expired(&memory.lifecycle) {
-        return false;
-    }
-    true
+    memory.lifecycle.retention == Retention::Durable && !is_expired(&memory.lifecycle)
 }
 
 pub fn derive_session_memory(
