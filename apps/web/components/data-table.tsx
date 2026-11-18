@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { Suspense, useState, type ReactNode } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -48,7 +48,48 @@ type DataTableProps<T> = {
 };
 
 /** Sortable, filterable, paged table (shadcn data-table pattern on TanStack Table). */
-export function DataTable<T>({
+export function DataTable<T>(props: DataTableProps<T>) {
+  // TanStack Table calls Date.now() while building rows in development. That blocks
+  // Cache Components prerender unless the table is under Suspense.
+  return (
+    <Suspense
+      fallback={
+        <DataTablePending
+          label={props.label}
+          filterPlaceholder={props.filterPlaceholder}
+          empty={props.empty}
+        />
+      }
+    >
+      <DataTableReady {...props} />
+    </Suspense>
+  );
+}
+
+function DataTablePending({
+  label,
+  filterPlaceholder,
+  empty,
+}: Pick<DataTableProps<unknown>, "label" | "filterPlaceholder" | "empty">) {
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <InputGroup className="w-full sm:max-w-xs">
+        <InputGroupAddon>
+          <SearchIcon />
+        </InputGroupAddon>
+        <InputGroupInput
+          type="search"
+          aria-label={`Filter ${label}`}
+          placeholder={filterPlaceholder}
+          disabled
+        />
+      </InputGroup>
+      <div className="min-w-0 overflow-hidden rounded-lg border bg-card">{empty}</div>
+    </div>
+  );
+}
+
+function DataTableReady<T>({
   columns,
   data,
   label,
