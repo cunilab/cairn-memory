@@ -1,8 +1,11 @@
 //! `cairn`: the agent CLI. Every command is one REST call authenticated with the device token
-//! that `cairn setup` stored (or `CAIRN_URL` / `CAIRN_DEVICE_TOKEN`). Humans use the web console.
+//! in the selected config file. Humans use the web console.
 
 use cairn_client::tools::{self, Tool};
-use cairn_client::{Client, Config, Error, config_path, mcp, project, update, write_private};
+use cairn_client::{
+    Client, Config, Error, mcp, project, selected_config_path, update, warn_ignored_legacy_config,
+    write_private,
+};
 use serde_json::{Map, Value, json};
 use std::env;
 use std::fs;
@@ -173,8 +176,8 @@ fn print_usage() {
   cairn start <session-id> [repository] [branch] [worktree] [commit]\n\
   cairn capture <session-id> <event-id> <content> [role] [source]\n\
   cairn end <session-id>\n\
-  cairn search <query> [limit] [repository] [branch] [worktree] [commit]\n\
-  cairn context <query> [limit] [repository] [branch] [worktree] [commit]\n\
+  cairn search <query> [limit] [repository] [branch] [worktree] [commit] [--include-captures]\n\
+  cairn context <query> [limit] [repository] [branch] [worktree] [commit] [--include-captures]\n\
   cairn why-changed <query> [limit] [repository] [branch] [worktree] [commit]\n\
   cairn resume [limit] [repository] [branch] [worktree] [commit]\n\
   cairn unresolved [limit] [repository] [branch] [worktree] [commit]\n\
@@ -232,6 +235,11 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             || (index == 1 && args[0] == "init" && value == "--rename")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
+        if value == "--include-captures"
+            && matches!(args.first().map(String::as_str), Some("search" | "context"))
+        {
+            continue;
+        }
         if value.starts_with('-') && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -311,8 +319,9 @@ fn setup(args: &[String]) -> Result<(), Error> {
         );
         return Ok(());
     }
+    warn_ignored_legacy_config();
     let config = Config::new(url, &read_token()?)?;
-    let path = config_path()?;
+    let path = selected_config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
     if let Some(agent) = agent {
@@ -495,6 +504,13 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
             .cloned()
             .ok_or_else(|| Error::Input("memory record must be a JSON object".to_owned()));
     }
+    let include_captures = matches!(command.name, "search" | "context")
+        && args.iter().any(|arg| arg == "--include-captures");
+    let args = args
+        .iter()
+        .filter(|arg| *arg != "--include-captures")
+        .cloned()
+        .collect::<Vec<_>>();
     let present = |index: usize| args.get(index).filter(|value| !value.is_empty());
     let mut arguments = Map::new();
     for (index, key) in command.args.iter().enumerate() {
@@ -522,6 +538,9 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
         if !context.is_empty() {
             arguments.insert("context".to_owned(), Value::Object(context));
         }
+    }
+    if include_captures {
+        arguments.insert("includeCaptures".to_owned(), json!(true));
     }
     if command.name == "import" {
         let input = arguments

@@ -52,6 +52,7 @@ fn command(config_home: &Path) -> Command {
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("CAIRN_URL")
         .env_remove("CAIRN_DEVICE_TOKEN")
+        .env_remove("CAIRN_CONFIG")
         .env("CAIRN_NO_UPDATE_CHECK", "1")
         // `setup` fetches the hook scripts; keep tests off the network (refused at once).
         .env("CAIRN_UPDATE_URL", "http://127.0.0.1:1/releases/latest");
@@ -490,15 +491,34 @@ fn scenario(url: &str, label: &str) {
     let ended = mcp.tool("memory_session_end", json!({"sessionId": "mcp-session"}));
     assert_eq!(ended["isError"], false);
     let recalled = mcp.tool("memory_recall", json!({"query": "proxied observation"}));
+    assert!(recalled["structuredContent"]["results"].is_array());
     assert!(
-        recalled["content"][0]["text"]
+        recalled["structuredContent"]["results"][0]["kind"]
             .as_str()
-            .unwrap()
-            .contains("proxied observation")
+            .is_some()
+    );
+    let expanded = mcp.tool(
+        "memory_recall",
+        json!({"query": "proxied observation", "expanded": true}),
+    );
+    let expanded_text = expanded["content"][0]["text"].as_str().unwrap();
+    assert!(
+        expanded_text.contains("proxied observation"),
+        "{expanded_text}"
+    );
+    assert!(
+        expanded["structuredContent"]["results"][0]
+            .get("lifecycle")
+            .is_none()
+    );
+    assert!(
+        expanded["structuredContent"]["results"][0]
+            .get("content")
+            .is_none()
     );
     let listed = mcp.tool("memory_project_list", json!({}));
     assert_eq!(
-        listed["structuredContent"][0]["project_id"],
+        listed["structuredContent"]["projects"][0]["project_id"],
         project_id.as_str()
     );
     let missing = mcp.tool("memory_save", json!({"scope":"project"}));
@@ -535,10 +555,27 @@ fn scenario(url: &str, label: &str) {
         .unwrap();
     let locked = agent.run(&["project-list"]);
     assert!(!locked.status.success());
+    let config = agent.home.join("cairn").join("config.json");
     let stderr = String::from_utf8_lossy(&locked.stderr);
     assert!(
-        stderr.contains("HTTP 401") && !stderr.contains(&owner_token),
+        stderr.contains("HTTP 401")
+            && stderr.contains(&config.display().to_string())
+            && stderr.contains("cairn setup <server-url>")
+            && !stderr.contains(&owner_token)
+            && !stderr.contains(&agent.token),
         "{stderr}"
+    );
+    let mut mcp = agent.mcp();
+    let failed = mcp.tool("memory_project_list", json!({}));
+    let text = failed.to_string();
+    assert_eq!(failed["isError"], true, "{text}");
+    assert!(
+        text.contains("HTTP 401")
+            && text.contains(&config.display().to_string())
+            && text.contains("cairn setup <server-url>")
+            && !text.contains(&owner_token)
+            && !text.contains(&agent.token),
+        "{text}"
     );
 }
 
@@ -561,7 +598,7 @@ fn agent_flow_on_the_postgres_server() {
 }
 
 #[test]
-fn setup_refuses_plain_http_off_loopback_and_environment_overrides_the_file() {
+fn setup_refuses_plain_http_off_loopback_and_legacy_env_is_not_configuration() {
     let home = temp_dir("setup-refusal");
     let output = with_stdin(
         command(&home).args(["setup", "http://cairn.example.test"]),
@@ -571,22 +608,32 @@ fn setup_refuses_plain_http_off_loopback_and_environment_overrides_the_file() {
     assert!(!home.join("cairn").join("config.json").exists());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("cdt_secret_value"));
 
-    // No config file at all: the environment alone is enough, and is used.
-    let path = temp_dir("env-only").join("store.json");
-    let url = serve(move || async move { app(AppState::open(path).unwrap()) });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let output = command(&home)
         .env("CAIRN_URL", &url)
         .env("CAIRN_DEVICE_TOKEN", "cdt_wrong_value")
         .arg("project-list")
         .output()
         .unwrap();
-    // The server has no accounts yet, so the bearer is optional there; the call must at least
-    // reach the configured server rather than fail on missing configuration.
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("not configured"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("not configured"), "{stderr}");
+    assert!(
+        stderr.contains("ignoring CAIRN_URL and CAIRN_DEVICE_TOKEN"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cdt_wrong_value"), "{stderr}");
+    assert!(!stderr.contains(&url), "{stderr}");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
-fn setup_takes_no_token_argument_and_one_environment_variable_is_an_error() {
+fn setup_takes_no_token_argument_and_one_legacy_variable_is_not_configuration() {
     let home = temp_dir("setup-argv");
     let output = with_stdin(
         command(&home).args(["setup", "https://cairn.example.test", "cdt_in_argv"]),
@@ -606,12 +653,228 @@ fn setup_takes_no_token_argument_and_one_environment_variable_is_an_error() {
         .arg("project-list")
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
+    assert!(stderr.contains("ignoring CAIRN_URL"), "{stderr}");
+    assert!(stderr.contains("not configured"), "{stderr}");
+    assert!(!stderr.contains("https://other.example.test"), "{stderr}");
+    assert!(!stderr.contains("set both"), "{stderr}");
+
+    for (name, value) in [("CAIRN_URL", ""), ("CAIRN_DEVICE_TOKEN", "   ")] {
+        let output = command(&home)
+            .env(name, value)
+            .arg("project-list")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{name}: {stderr}");
+        assert!(
+            stderr.contains(&format!("ignoring {name}")),
+            "{name}: {stderr}"
+        );
+        assert!(stderr.contains("not configured"), "{name}: {stderr}");
+        assert!(
+            !stderr.contains("https://other.example.test"),
+            "{name}: {stderr}"
+        );
+    }
+}
+
+/// Accepts a few HTTP requests and answers each with `response`.
+fn serve_bytes(response: String) -> (String, mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for _ in 0..8 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (url, receiver)
+}
+
+#[test]
+fn selected_config_file_wins_over_legacy_env_for_cli_and_mcp() {
+    use std::net::TcpListener;
+    use std::time::Duration;
+    let file_token = "cdt_file_token_value";
+    let env_token = "cdt_env_token_value";
+    let default_token = "cdt_default_token_value";
+    let (url, seen) = serve_bytes("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n[]".to_owned());
+    let wrong = TcpListener::bind("127.0.0.1:0").unwrap();
+    let wrong_url = format!("http://{}", wrong.local_addr().unwrap());
+    drop(wrong);
+    let home = temp_dir("selected-config");
+    let picked = home.join("picked.json");
+    std::fs::write(
+        &picked,
+        json!({"url": &url, "token": file_token}).to_string(),
+    )
+    .unwrap();
+    let default_dir = home.join("cairn");
+    std::fs::create_dir_all(&default_dir).unwrap();
+    std::fs::write(
+        default_dir.join("config.json"),
+        json!({"url": &wrong_url, "token": default_token}).to_string(),
+    )
+    .unwrap();
+
+    let setup = with_stdin(
+        command(&home)
+            .env("CAIRN_CONFIG", &picked)
+            .args(["setup", "https://cairn.example.test"]),
+        "cdt_setup_token_value",
+    );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("set both CAIRN_URL"),
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let stored = std::fs::read_to_string(&picked).unwrap();
+    assert!(stored.contains("https://cairn.example.test"), "{stored}");
+    assert!(!stored.contains(file_token));
+    assert!(!String::from_utf8_lossy(&setup.stdout).contains("cdt_setup_token_value"));
+    assert!(!String::from_utf8_lossy(&setup.stderr).contains("cdt_setup_token_value"));
+    std::fs::write(
+        &picked,
+        json!({"url": &url, "token": file_token}).to_string(),
+    )
+    .unwrap();
+
+    for (label, url_env, token_env) in [
+        ("both", Some(wrong_url.as_str()), Some(env_token)),
+        ("url-only", Some(wrong_url.as_str()), None),
+        ("token-only", None, Some(env_token)),
+    ] {
+        let mut run = command(&home);
+        run.env("CAIRN_CONFIG", &picked).arg("project-list");
+        match url_env {
+            Some(value) => {
+                run.env("CAIRN_URL", value);
+            }
+            None => {
+                run.env_remove("CAIRN_URL");
+            }
+        }
+        match token_env {
+            Some(value) => {
+                run.env("CAIRN_DEVICE_TOKEN", value);
+            }
+            None => {
+                run.env_remove("CAIRN_DEVICE_TOKEN");
+            }
+        }
+        let output = run.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{label}: {stderr}");
+        assert!(stderr.contains("ignoring"), "{label}: {stderr}");
+        assert!(!stderr.contains(file_token), "{label}");
+        assert!(!stderr.contains(env_token), "{label}");
+        assert!(!stderr.contains(default_token), "{label}");
+        assert!(!stderr.contains(&wrong_url), "{label}: {stderr}");
+        let head = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            head.contains(&format!("Bearer {file_token}")),
+            "{label}: {head}"
+        );
+    }
+
+    let default_only = command(&home).arg("project-list").output().unwrap();
+    let stderr = String::from_utf8_lossy(&default_only.stderr);
+    assert!(
+        !default_only.status.success(),
+        "the decoy default URL is not a server: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ignoring"),
+        "no legacy variable is set: {stderr}"
+    );
+    std::fs::write(
+        default_dir.join("config.json"),
+        json!({"url": &url, "token": default_token}).to_string(),
+    )
+    .unwrap();
+    let output = command(&home).arg("project-list").output().unwrap();
+    assert!(
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let head = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(head.contains(&format!("Bearer {default_token}")), "{head}");
+
+    let body = format!(r#"{{"error":"rejected {file_token}"}}"#);
+    let (denied_url, _) = serve_bytes(format!(
+        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    std::fs::write(
+        &picked,
+        json!({"url": denied_url, "token": file_token}).to_string(),
+    )
+    .unwrap();
+    let mut child = command(&home)
+        .env("CAIRN_CONFIG", &picked)
+        .env("CAIRN_URL", &wrong_url)
+        .env("CAIRN_DEVICE_TOKEN", env_token)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let write = |stdin: &mut ChildStdin, line: &str| {
+        writeln!(stdin, "{line}").unwrap();
+    };
+    write(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+    );
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let initialize: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(initialize["id"], 1, "{line}");
+    write(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
+    write(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_project_list","arguments":{}}}"#,
+    );
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let reply: Value = serde_json::from_str(line.trim()).unwrap();
+    let text = reply.to_string();
+    assert_eq!(reply["id"], 2, "{text}");
+    assert_eq!(reply["result"]["isError"], true, "{text}");
+    assert!(text.contains("HTTP 401"), "{text}");
+    assert!(text.contains(&picked.display().to_string()), "{text}");
+    assert!(text.contains("cairn setup <server-url>"), "{text}");
+    assert!(!text.contains(file_token), "{text}");
+    assert!(!text.contains(env_token), "{text}");
+    assert!(!line.contains('\n') || line.ends_with('\n'));
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ignoring CAIRN_URL and CAIRN_DEVICE_TOKEN"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("jsonrpc"), "{stderr}");
+    assert!(!stderr.contains(file_token), "{stderr}");
+    assert!(!stderr.contains(env_token), "{stderr}");
+    assert!(!stderr.contains(&wrong_url), "{stderr}");
 }
 
 #[cfg(unix)]
@@ -681,12 +944,14 @@ fn a_loopback_token_never_goes_through_an_environment_proxy() {
     ] {
         run.env(name, &proxy_url);
     }
-    let output = run
-        .env("CAIRN_URL", &url)
-        .env("CAIRN_DEVICE_TOKEN", "cdt_proxy_probe")
-        .arg("project-list")
-        .output()
-        .unwrap();
+    let config_dir = home.join("cairn");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.json"),
+        json!({"url": &url, "token": "cdt_proxy_probe"}).to_string(),
+    )
+    .unwrap();
+    let output = run.arg("project-list").output().unwrap();
     assert!(
         output.status.success(),
         "{}",

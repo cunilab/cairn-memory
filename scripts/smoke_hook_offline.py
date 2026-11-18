@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Device-only offline hook enqueue. Loopback stubs and temp files only.
 
-No live API, database, or repository store. Tokens stay in the environment,
-not on a command line.
+No live API, database, or repository store. The device credential stays in a
+temporary config file, not on the command line.
 """
 
 from __future__ import annotations
@@ -78,9 +78,9 @@ def rich_payload(event_id=None):
 
 def run_hook(url, payload, spool, timeout=20, **env):
     child = os.environ.copy()
-    for name in ("CAIRN_ACCOUNT_TOKEN", "CAIRN_DEVICE_TOKEN", "CAIRN_OUTBOX"):
+    for name in ("CAIRN_ACCOUNT_TOKEN", "CAIRN_DEVICE_TOKEN", "CAIRN_OUTBOX", "CAIRN_URL", "CAIRN_CONFIG"):
         child.pop(name, None)
-    child["CAIRN_URL"] = url
+    token = env.pop("CAIRN_DEVICE_TOKEN", None)
     if spool is not None:
         child["CAIRN_OUTBOX"] = str(spool)
     for key, value in env.items():
@@ -88,19 +88,26 @@ def run_hook(url, payload, spool, timeout=20, **env):
             child.pop(key, None)
         else:
             child[key] = value
-    if not isinstance(payload, str):
-        payload = json.dumps(payload)
-    started = time.monotonic()
-    result = subprocess.run(
-        [sys.executable, str(HOOK)],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=child,
-        cwd=ROOT,
-        timeout=timeout,
-        check=False,
-    )
+    command = [sys.executable, str(HOOK)]
+    with tempfile.TemporaryDirectory() as directory:
+        child["XDG_CONFIG_HOME"] = directory
+        if isinstance(token, str) and token.strip():
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"url": url, "token": token}), encoding="utf-8")
+            command.extend(["--config", str(config)])
+        if not isinstance(payload, str):
+            payload = json.dumps(payload)
+        started = time.monotonic()
+        result = subprocess.run(
+            command,
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=child,
+            cwd=ROOT,
+            timeout=timeout,
+            check=False,
+        )
     result.elapsed = time.monotonic() - started
     return result
 
@@ -482,7 +489,7 @@ class OfflineHookTests(unittest.TestCase):
                 )
                 for result in (anonymous, account):
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("CAIRN_DEVICE_TOKEN is required", result.stderr)
+                    self.assertIn("cairn setup", result.stderr)
                     self.assertNotIn(QUEUED, result.stderr)
                     self.assert_hidden(result.stdout + result.stderr, DEVICE, ACCOUNT, SECRET, PEM)
                     self.assert_no_argv_token(result)
@@ -681,18 +688,27 @@ class OfflineHookTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "queue.json"
                 processes = []
+                config = Path(directory) / "config.json"
+                config.write_text(
+                    json.dumps({"url": stub.url, "token": DEVICE}), encoding="utf-8"
+                )
                 for event_id in ("concurrent-a", "concurrent-b"):
                     child_env = os.environ.copy()
-                    for name in ("CAIRN_ACCOUNT_TOKEN", "CAIRN_DEVICE_TOKEN", "CAIRN_OUTBOX"):
+                    for name in (
+                        "CAIRN_ACCOUNT_TOKEN",
+                        "CAIRN_DEVICE_TOKEN",
+                        "CAIRN_OUTBOX",
+                        "CAIRN_URL",
+                        "CAIRN_CONFIG",
+                    ):
                         child_env.pop(name, None)
-                    child_env["CAIRN_URL"] = stub.url
                     child_env["CAIRN_OUTBOX"] = str(path)
-                    child_env["CAIRN_DEVICE_TOKEN"] = DEVICE
+                    child_env["XDG_CONFIG_HOME"] = directory
                     processes.append(
                         (
                             event_id,
                             subprocess.Popen(
-                                [sys.executable, str(HOOK)],
+                                [sys.executable, str(HOOK), "--config", str(config)],
                                 stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,

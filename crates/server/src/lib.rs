@@ -161,13 +161,19 @@ pub struct SearchRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub context: Option<WorkContext>,
+    /// Raw captures stay out of agent search, recall, context, and why-changed
+    /// until the caller sets this. Web list, get, export, and graph do not use it.
+    #[serde(default, rename = "includeCaptures", alias = "include_captures")]
+    pub include_captures: bool,
 }
 
 impl SearchRequest {
-    fn recall_filter(&self) -> RecallFilter {
+    fn recall_filter(&self, relevance_floor: bool) -> RecallFilter {
         RecallFilter {
             session_id: self.session_id.clone(),
             context: self.context.clone(),
+            include_captures: self.include_captures,
+            relevance_floor,
         }
     }
 }
@@ -187,6 +193,10 @@ impl ContinuityRequest {
         RecallFilter {
             session_id: self.session_id.clone(),
             context: self.context.clone(),
+            // Continuity lists session summaries, not raw captures, and does not
+            // apply the search floor.
+            include_captures: true,
+            relevance_floor: false,
         }
     }
 }
@@ -630,6 +640,7 @@ pub fn app(state: AppState) -> Router {
         .route("/cairn-memory/session/start", post(start_session))
         .route("/cairn-memory/observe", post(capture_observation))
         .route("/cairn-memory/session/end", post(end_session))
+        .route("/cairn-memory/session/checkpoint", post(checkpoint_session))
         .route("/cairn-memory/search", post(search))
         .route("/cairn-memory/smart-search", post(search))
         .route("/cairn-memory/why-changed", post(why_changed))
@@ -789,6 +800,10 @@ pub fn postgres_app_with_embeddings(
         .route("/cairn-memory/session/start", post(postgres_start_session))
         .route("/cairn-memory/observe", post(postgres_capture_observation))
         .route("/cairn-memory/session/end", post(postgres_end_session))
+        .route(
+            "/cairn-memory/session/checkpoint",
+            post(postgres_checkpoint_session),
+        )
         .route("/cairn-memory/search", post(postgres_search))
         .route("/cairn-memory/smart-search", post(postgres_search))
         .route("/cairn-memory/context", post(postgres_context))
@@ -1361,6 +1376,18 @@ async fn postgres_end_session(
     ))
 }
 
+async fn postgres_checkpoint_session(
+    State(state): State<PostgresAppState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionEndRequest>,
+) -> Result<Json<serde_json::Value>, PostgresApiError> {
+    let status = state
+        .store
+        .checkpoint_session(postgres_token(&headers)?, &request.session_id)
+        .await?;
+    Ok(Json(serde_json::json!({"status": status})))
+}
+
 async fn postgres_search(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
@@ -1381,7 +1408,7 @@ async fn postgres_search(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(true),
                 vector.as_deref(),
             )
             .await?,
@@ -1408,7 +1435,7 @@ async fn postgres_context(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(true),
                 vector.as_deref(),
                 false,
             )
@@ -1481,7 +1508,7 @@ async fn postgres_why_changed(
                 postgres_token(&headers)?,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(false),
                 vector.as_deref(),
                 true,
             )
@@ -2506,6 +2533,21 @@ async fn capture_observation(
     }
 }
 
+async fn checkpoint_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SessionEndRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = state.store.lock().await;
+    let status = match file_bearer(&store, &headers)? {
+        Some(token) => store
+            .checkpoint_session_for_account(token, &request.session_id)
+            .map_err(account_api_error)?,
+        None => store.checkpoint_session(&request.session_id)?,
+    };
+    Ok(Json(serde_json::json!({"status": status})))
+}
+
 async fn end_session(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2552,7 +2594,7 @@ async fn search(
                 token,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(true),
                 vector.as_deref(),
             )
             .map_err(account_api_error)?,
@@ -2573,7 +2615,7 @@ async fn why_changed(
                 token,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(false),
                 vector.as_deref(),
             )
             .map_err(account_api_error)?,
@@ -2594,7 +2636,7 @@ async fn context(
                 token,
                 &request.query,
                 request.limit,
-                &request.recall_filter(),
+                &request.recall_filter(true),
                 vector.as_deref(),
             )
             .map_err(account_api_error)?,
@@ -4818,7 +4860,7 @@ mod tests {
             router.clone(),
             "POST",
             "/cairn-memory/context",
-            serde_json::json!({"query": "authentication test", "limit": 5}),
+            serde_json::json!({"query": "authentication passed", "limit": 5}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -4841,7 +4883,7 @@ mod tests {
             app(AppState::open(&path).unwrap()),
             "POST",
             "/cairn-memory/context",
-            serde_json::json!({"query": "authentication test", "limit": 5}),
+            serde_json::json!({"query": "authentication passed", "limit": 5}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5300,7 +5342,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(imported["imported_memories"], 2);
+        assert_eq!(imported["imported_memories"], 1);
         assert_eq!(imported["imported_forgotten_ids"], 1);
 
         let (status, results) = json_request(
@@ -6629,21 +6671,21 @@ mod tests {
             router.clone(),
             "POST",
             "/cairn-memory/search",
-            serde_json::json!({"query": "owneronlymarker", "limit": 10}),
+            serde_json::json!({"query": "owneronlymarker deterministically", "limit": 10}),
             owner_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             owner_hits.as_array().unwrap().len(),
-            2,
-            "session note and linked handoff"
+            1,
+            "session note; an empty handoff is not stored"
         );
         let (status, owner_miss) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/search",
-            serde_json::json!({"query": "memberonlymarker", "limit": 10}),
+            serde_json::json!({"query": "memberonlymarker deterministically", "limit": 10}),
             owner_token,
         )
         .await;
@@ -6653,21 +6695,21 @@ mod tests {
             router.clone(),
             "POST",
             "/cairn-memory/search",
-            serde_json::json!({"query": "memberonlymarker", "limit": 10}),
+            serde_json::json!({"query": "memberonlymarker deterministically", "limit": 10}),
             member_token,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             member_hits.as_array().unwrap().len(),
-            2,
-            "session note and linked handoff"
+            1,
+            "session note; an empty handoff is not stored"
         );
         let (status, member_miss) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/search",
-            serde_json::json!({"query": "owneronlymarker", "limit": 10}),
+            serde_json::json!({"query": "owneronlymarker deterministically", "limit": 10}),
             member_token,
         )
         .await;

@@ -89,7 +89,7 @@ OpenCode V2 gets a marked global `AGENTS.md` block and MCP registration, using i
 native CLI to preserve JSONC comments; this adapter has no automatic hook brief or
 Stop request. [Capabilities, official references and limits](docs/contracts/hook-v1.md#agent-instructions-and-setup-v014).
 
-`setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`) with mode `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace it, and setting only one is an error. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
+`setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in the selected config file with mode `0600`. `CAIRN_CONFIG` selects that file; otherwise it is `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`). `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored, with one stderr warning that does not print their values. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 
 To work together, run `cairn init "Project name"` in a fresh checkout and commit
 `.cairn/project.json`. It contains `project_id`, the normalized `host/org/repo`
@@ -204,7 +204,7 @@ printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"too
   | python3 scripts/cairn_hook.py
 ```
 
-The adapter needs `CAIRN_DEVICE_TOKEN` (a device token from the web console) and posts `sync/push` to `CAIRN_URL` (default `http://127.0.0.1:3111`, an optional path prefix such as `https://host/agent` is kept); Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery. A reused event id with different content is a `409`.
+The adapter reads the server URL and device token from the selected config file. An unmanaged hook uses `--config`, else `CAIRN_CONFIG`, else the default file. An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise its setup-time `--config`. It posts `sync/push` there. An optional path prefix such as `https://host/agent` is kept. Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery. A reused event id with different content is a `409`.
 
 Assistant text is skipped by default; opt in with `CAIRN_CAPTURE_ASSISTANT=1`.
 Place a regular `.cairnignore` file in a folder to skip it and its descendants.

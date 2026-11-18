@@ -1,4 +1,4 @@
-use cairn_core::{ObservationInput, RecallFilter, WorkContext};
+use cairn_core::{CheckpointStatus, ObservationInput, RecallFilter, WorkContext};
 use cairn_storage::{PostgresError, PostgresStore};
 use sqlx::PgPool;
 
@@ -4601,8 +4601,8 @@ async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
             .await
             .unwrap();
     assert_eq!(
-        summaries, 3,
-        "one Decision capture derives the summary, the handoff, and that note"
+        summaries, 2,
+        "a Decision capture with no next step derives the summary and that note, not a handoff"
     );
 }
 
@@ -6194,5 +6194,341 @@ async fn postgres_similarity_cutoff_uses_the_same_byte_order_as_the_file_store()
     assert_eq!(
         postgres_pairs, file_pairs,
         "the same ids and vectors must review the same pair"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_capture_recall_quality_matches_the_file_floor() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL")
+        .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
+    let store = PostgresStore::connect(&url)
+        .await
+        .expect("connect and migrate PostgreSQL");
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .expect("bootstrap");
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .expect("project");
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "project",
+                "kind": "rule",
+                "title": "Person-scoped sync events",
+                "summary": "Always use cairnfloorrule ownership checks inside one person.",
+                "reason": "A global lookup leaked another person's event.",
+                "rule": "cairnfloorrule keeps sync_event_id collisions inside the authenticated person.",
+                "context": {"project_id": project.project_id}
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("rule");
+    let device = store
+        .register_device(
+            &owner.token,
+            "quality-device",
+            &owner.account.person_id,
+            None,
+            "test",
+        )
+        .await
+        .expect("device");
+    store
+        .sync_push(
+            &device.token,
+            ObservationInput {
+                event_id: "evt-raw".to_owned(),
+                session_id: "quality".to_owned(),
+                content:
+                    "Read {\"path\":\"cairnfloorrule.rs\",\"note\":\"do not use cairnfloorrule for ownership checks\"}"
+                        .to_owned(),
+                role: "tool".to_owned(),
+                source: "PostToolUse".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: context.clone(),
+            },
+        )
+        .await
+        .expect("capture");
+    let hidden = RecallFilter {
+        context: Some(context.clone()),
+        include_captures: false,
+        relevance_floor: true,
+        ..RecallFilter::default()
+    };
+    let hits = store
+        .search(&owner.token, "cairnfloorrule", 10, &hidden)
+        .await
+        .expect("search");
+    assert!(
+        hits.iter()
+            .any(|hit| hit.kind == cairn_core::MemoryKind::Rule)
+    );
+    assert!(
+        hits.iter()
+            .all(|hit| hit.kind != cairn_core::MemoryKind::Capture)
+    );
+    assert!(hits.iter().all(|hit| hit.contradiction_ids.is_empty()));
+    let mut opted = hidden.clone();
+    opted.include_captures = true;
+    let with_capture = store
+        .search(&owner.token, "cairnfloorrule", 10, &opted)
+        .await
+        .expect("opt-in search");
+    assert!(
+        with_capture
+            .iter()
+            .any(|hit| hit.kind == cairn_core::MemoryKind::Capture)
+    );
+    assert!(
+        store
+            .search(&owner.token, "menu", 10, &hidden)
+            .await
+            .expect("weak search")
+            .is_empty()
+    );
+    store
+        .start_session(&owner.token, "svc-notes", context.clone())
+        .await
+        .expect("config session");
+    store
+        .sync_push(
+            &device.token,
+            ObservationInput {
+                event_id: "evt-config".to_owned(),
+                session_id: "svc-notes".to_owned(),
+                content: "Copied the service config into the notes.".to_owned(),
+                role: "assistant".to_owned(),
+                source: "user".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: context.clone(),
+            },
+        )
+        .await
+        .expect("config note");
+    let config_summary = store
+        .end_session(&owner.token, "svc-notes")
+        .await
+        .expect("config summary");
+    store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "project",
+                "kind": "rule",
+                "title": "Reload procedure",
+                "summary": "config reload waits for the process.",
+                "reason": "A short generated summary must not win on one ordinary word.",
+                "rule": "config reload uses the published command.",
+                "context": {"project_id": project.project_id}
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("reload rule");
+    let config_hits = store
+        .search(&owner.token, "config reload", 10, &hidden)
+        .await
+        .expect("config search");
+    assert!(
+        config_hits
+            .iter()
+            .any(|hit| hit.kind == cairn_core::MemoryKind::Rule)
+    );
+    assert!(
+        config_hits
+            .iter()
+            .all(|hit| hit.memory_id != config_summary.memory_id)
+    );
+    let resumed = store
+        .resume_context(&owner.token, 10, &hidden)
+        .await
+        .expect("resume");
+    assert!(
+        resumed
+            .results
+            .iter()
+            .any(|hit| hit.memory_id == config_summary.memory_id)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_checkpoint_is_personal_to_the_worktree() {
+    let database_url = std::env::var("CAIRN_TEST_DATABASE_URL").expect("CAIRN_TEST_DATABASE_URL");
+    let store = PostgresStore::connect(&database_url)
+        .await
+        .expect("connect");
+    let owner = store
+        .bootstrap_account("ckpt-owner@example.test", "correct horse battery staple")
+        .await
+        .expect("owner");
+    let other = store
+        .register_account_as_admin(
+            &owner.token,
+            "ckpt-other@example.test",
+            "correct horse battery staple",
+        )
+        .await
+        .expect("other");
+    let (project, _) = store
+        .init_project(&owner.token, "local:cairn", Some("cairn"))
+        .await
+        .expect("project");
+    store
+        .join_project(&other.token, &project.project_id)
+        .await
+        .expect("join");
+    let agent_a = store
+        .register_device(
+            &owner.token,
+            "ckpt-dev-a",
+            &owner.account.person_id,
+            Some("agent-a"),
+            "A",
+        )
+        .await
+        .expect("device a");
+    let agent_b = store
+        .register_device(
+            &owner.token,
+            "ckpt-dev-b",
+            &owner.account.person_id,
+            Some("agent-b"),
+            "B",
+        )
+        .await
+        .expect("device b");
+    let work = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        repository: Some("local:cairn".into()),
+        branch: Some("feature".into()),
+        worktree: Some("wt-a".into()),
+        ..WorkContext::default()
+    };
+    store
+        .start_session(&agent_a.token, "sess-cross", work.clone())
+        .await
+        .expect("start");
+    store
+        .sync_push(
+            &agent_a.token,
+            ObservationInput {
+                event_id: "evt-cross".into(),
+                session_id: "sess-cross".into(),
+                content: "The next step is to keep the handoff. The issue is not yet verified."
+                    .into(),
+                role: "assistant".into(),
+                source: "PostToolUse".into(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: work.clone(),
+            },
+        )
+        .await
+        .expect("push");
+    store
+        .start_session(&agent_a.token, "sess-empty", work.clone())
+        .await
+        .expect("empty start");
+    assert_eq!(
+        store
+            .checkpoint_session(&agent_a.token, "sess-empty")
+            .await
+            .expect("empty"),
+        CheckpointStatus::Empty
+    );
+    assert_eq!(
+        store
+            .checkpoint_session(&agent_a.token, "sess-cross")
+            .await
+            .expect("stored"),
+        CheckpointStatus::Stored
+    );
+    store
+        .sync_push(
+            &agent_a.token,
+            ObservationInput {
+                event_id: "evt-cross-2".into(),
+                session_id: "sess-cross".into(),
+                content: "The next step is to record the second observation.".into(),
+                role: "assistant".into(),
+                source: "PostToolUse".into(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: work.clone(),
+            },
+        )
+        .await
+        .expect("second push");
+    assert_eq!(
+        store
+            .checkpoint_session(&agent_a.token, "sess-cross")
+            .await
+            .expect("refresh"),
+        CheckpointStatus::Stored
+    );
+    assert_eq!(
+        store
+            .checkpoint_session(&agent_a.token, "sess-cross")
+            .await
+            .expect("same"),
+        CheckpointStatus::Unchanged
+    );
+    let filter = RecallFilter {
+        context: Some(work.clone()),
+        ..RecallFilter::default()
+    };
+    let resumed = store
+        .resume_context(&agent_b.token, 5, &filter)
+        .await
+        .expect("resume");
+    assert_eq!(resumed.results.len(), 1);
+    assert!(
+        resumed.results[0]
+            .next_steps
+            .iter()
+            .any(|step| step.contains("second observation"))
+    );
+    let owner_notes = store.memories(&agent_b.token).await.expect("notes");
+    let brief = cairn_core::session_brief(&owner_notes, &work);
+    assert!(brief.contains("sess-cross"), "{brief}");
+    let mut other_tree = work.clone();
+    other_tree.worktree = Some("wt-b".into());
+    let other_checkout = cairn_core::session_brief(&owner_notes, &other_tree);
+    assert!(!other_checkout.contains("sess-cross"), "{other_checkout}");
+    let stranger = store.memories(&other.token).await.expect("stranger");
+    let stranger_brief = cairn_core::session_brief(&stranger, &work);
+    assert!(!stranger_brief.contains("sess-cross"), "{stranger_brief}");
+    assert!(
+        store
+            .resume_context(&other.token, 5, &filter)
+            .await
+            .expect("other resume")
+            .results
+            .is_empty()
+    );
+    store
+        .end_session(&agent_a.token, "sess-cross")
+        .await
+        .expect("end");
+    assert_eq!(
+        store
+            .checkpoint_session(&agent_a.token, "sess-cross")
+            .await
+            .expect("closed"),
+        CheckpointStatus::Unchanged
     );
 }

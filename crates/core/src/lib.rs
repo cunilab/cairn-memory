@@ -68,9 +68,12 @@ pub use projects::{
 };
 pub use recall::{
     CodeRelationship, ContextPack, RecallFilter, RecallResult, build_context_pack,
-    memory_matches_filter, prefer_decision, prefer_newer_contradiction, recall_result,
+    memory_matches_filter, passes_relevance_floor, prefer_decision, prefer_newer_contradiction,
+    recall_result,
 };
-pub use sessions::{Session, carry_summary_state, derive_session_memory, session_memory_id};
+pub use sessions::{
+    CheckpointStatus, Session, carry_summary_state, derive_session_memory, session_memory_id,
+};
 pub use sharing::{ProjectConflict, ProjectPerson, competing_project_memories};
 pub use store::MemoryStore;
 pub use sync::{SyncDeletion, SyncDiagnostics, SyncEvent, SyncPullResult, SyncPushResult};

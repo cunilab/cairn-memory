@@ -217,7 +217,11 @@ fn account_sessions_isolate_context_for_one_public_id() -> Result<(), StoreError
 
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
+    assert_eq!(
+        owner_hits.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert_eq!(
         owner_hits[0].context.branch.as_deref(),
         Some("owner-branch")
@@ -415,7 +419,11 @@ fn two_accounts_keep_distinct_session_summaries_for_one_session_id() -> Result<(
     assert!(!owner_summary.content.contains("memberfact"));
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
+    assert_eq!(
+        owner_hits.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert!(
         owner_hits
             .iter()
@@ -830,7 +838,11 @@ fn failed_account_capture_persist_leaves_no_unowned_observation() -> Result<(), 
     assert!(!reopened.observation_owned_by("retry-event", &member.account.person_id));
     let hits =
         reopened.search_for_account(&owner.token, "retrybetafact", 5, &RecallFilter::default())?;
-    assert_eq!(hits.len(), 2, "session note and linked handoff");
+    assert_eq!(
+        hits.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert!(hits.iter().any(|m| m.content.contains("retrybetafact")));
     assert!(
         hits.iter()

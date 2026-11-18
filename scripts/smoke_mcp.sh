@@ -54,6 +54,10 @@ try:
         },
     )
     assert initialized["result"]["protocolVersion"] == "2025-06-18"
+    assert initialized["result"]["serverInfo"]["name"] == "cairn-memory"
+    assert initialized["result"]["serverInfo"]["title"] == "Cairn"
+    instructions = initialized["result"]["instructions"]
+    assert "cairn-memory" in instructions and "memory_save" in instructions
 
     process.stdin.write(
         json.dumps(
@@ -79,10 +83,17 @@ try:
         response = call(20 + index, "tools/call", {"name":"memory_save", "arguments":missing})
         assert response["result"]["isError"] is True
         assert field in response["result"]["content"][0]["text"]
-    saved = call(24, "tools/call", {"name":"memory_save", "arguments":record})["result"]["structuredContent"]
-    loaded = call(25, "tools/call", {"name":"memory_get", "arguments":{"memoryId":saved["memory_id"]}})["result"]["structuredContent"]
+    saved_result = call(24, "tools/call", {"name":"memory_save", "arguments":record})["result"]
+    saved = saved_result["structuredContent"]
+    assert set(saved) == {"memory_id", "kind", "scope", "status"}
+    assert saved["kind"] == "procedure" and saved["scope"] == "global" and saved["status"] == "active"
+    assert saved_result["content"][0]["text"] == json.dumps(saved, separators=(",", ":"))
+    loaded_result = call(25, "tools/call", {"name":"memory_get", "arguments":{"memoryId":saved["memory_id"]}})["result"]
+    loaded = loaded_result["structuredContent"]
     for field, value in record.items():
         assert loaded[field] == value, (field, loaded)
+    assert loaded["content"] and "lifecycle" in loaded
+    assert "\n" not in loaded_result["content"][0]["text"]
 
     call(
         3,
@@ -140,10 +151,27 @@ try:
             "arguments": {"query": "MCP smoke", "limit": 5, "context": {"repository": "cairn-demo"}},
         },
     )
-    assert {m["memory_id"] for m in recalled["result"]["structuredContent"]["results"]} == {
+    recalled_rows = recalled["result"]["structuredContent"]["results"]
+    assert {m["memory_id"] for m in recalled_rows} == {
         ended["result"]["structuredContent"]["memory_id"],
-        "handoff-" + ended["result"]["structuredContent"]["memory_id"],
     }
+    session_card = next(m for m in recalled_rows if m["memory_id"] == ended["result"]["structuredContent"]["memory_id"])
+    assert set(session_card) == {"memory_id", "kind", "scope", "title", "summary", "score"}
+    assert session_card["kind"] == "session_summary"
+    assert "\n" not in recalled["result"]["content"][0]["text"]
+    expanded = call(
+        16,
+        "tools/call",
+        {
+            "name": "memory_recall",
+            "arguments": {"query": "MCP smoke", "limit": 5, "expanded": True, "context": {"repository": "cairn-demo"}},
+        },
+    )
+    expanded_row = next(m for m in expanded["result"]["structuredContent"]["results"]
+                        if m["memory_id"] == ended["result"]["structuredContent"]["memory_id"])
+    assert "lifecycle" not in expanded_row and "content" not in expanded_row and "source_event_ids" not in expanded_row
+    assert "stdio protocol" in expanded_row["details"]
+    assert expanded["result"]["structuredContent"]["omitted_count"] == recalled["result"]["structuredContent"]["omitted_count"]
 
     why_changed = call(
         7,
@@ -160,6 +188,20 @@ try:
         relationship["relation"] == "memory_touches_file"
         for relationship in why_result["relationships"]
     )
+
+    listed = call(17, "tools/call", {"name": "memory_list", "arguments": {}})
+    assert isinstance(listed["result"]["structuredContent"]["memories"], list)
+    assert listed["result"]["structuredContent"]["memories"]
+    graph = call(18, "tools/call", {"name": "memory_graph", "arguments": {}})
+    graph_body = graph["result"]["structuredContent"]
+    assert isinstance(graph_body["nodes"], list) and isinstance(graph_body["edges"], list)
+    assert graph_body["truncated"] is False and graph_body["node_cap"] >= 120
+    graph_text = graph["result"]["content"][0]["text"]
+    assert "nodes[" in graph_text and "\t" in graph_text and "truncated: false" in graph_text
+    reviews = call(19, "tools/call", {"name": "memory_similarity_reviews", "arguments": {}})
+    assert isinstance(reviews["result"]["structuredContent"]["reviews"], list)
+    review_text = reviews["result"]["content"][0]["text"]
+    assert review_text == "reviews: []" or review_text.startswith("reviews[")
 
     forgotten = call(
         8,

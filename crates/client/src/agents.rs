@@ -1,4 +1,4 @@
-use crate::{Error, config_path};
+use crate::{Error, selected_config_path};
 use serde_json::json;
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -9,7 +9,8 @@ pub const AGENTS: [&str; 3] = ["claude", "codex", "opencode"];
 /// Python supplies portable private file replacement and delegates MCP config to agent CLIs.
 pub fn configure(agent: &str, remove: bool) -> Result<String, Error> {
     let exe = std::env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
-    let config = std::path::absolute(config_path()?).map_err(|e| Error::Config(e.to_string()))?;
+    let config =
+        std::path::absolute(selected_config_path()?).map_err(|e| Error::Config(e.to_string()))?;
     let spec = json!({"agent":agent, "remove":remove, "config":config, "exe":exe, "instructions":INSTRUCTIONS});
     let mut child = Command::new("python3")
         .args(["-c", include_str!("../../../scripts/cairn_setup.py")])

@@ -88,17 +88,17 @@ async fn wait_match(router: &Router, token: &str, id: &str) {
     loop {
         let hits = request(
             router,
-            "search",
+            "why-changed",
             Some(json!({"query":"automobile repairs","limit":100})),
             Some(token),
         )
         .await;
-        if hits
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["memory_id"] == id)
-        {
+        let rows = if hits.is_array() {
+            hits.as_array().unwrap()
+        } else {
+            hits["results"].as_array().unwrap()
+        };
+        if rows.iter().any(|r| r["memory_id"] == id) {
             return;
         }
         assert!(
@@ -114,39 +114,49 @@ async fn verify(router: &Router, token: &str, other: &str, id: &str) {
         "enabled"
     );
     wait_match(router, token, id).await;
-    for route in ["search", "smart-search", "context", "recall", "why-changed"] {
-        let rows = request(
-            router,
-            route,
-            Some(json!({"query":"automobile repairs","limit":100})),
-            Some(token),
-        )
-        .await;
-        let hits = if rows.is_array() {
-            rows.as_array().unwrap()
-        } else {
-            rows["results"].as_array().unwrap()
-        };
-        assert_eq!(hits.len(), 1, "{route}: {rows}");
-        assert_eq!(hits[0]["memory_id"], id);
-        assert_eq!(hits[0]["source"], "personal");
-        let rows = request(
-            router,
-            route,
-            Some(json!({"query":"automobile repairs","limit":100})),
-            Some(other),
-        )
-        .await;
-        let hits = if rows.is_array() {
-            rows.as_array().unwrap()
-        } else {
-            rows["results"].as_array().unwrap()
-        };
-        assert!(
-            hits.iter().all(|r| r["memory_id"] != id),
-            "{route}: foreign memory"
-        );
+    // A vector-only query does not pass the agent relevance floor. why-changed does not use it.
+    for route in ["search", "smart-search", "context", "recall"] {
+        for person in [token, other] {
+            let rows = request(
+                router,
+                route,
+                Some(json!({"query":"automobile repairs","limit":100})),
+                Some(person),
+            )
+            .await;
+            let hits = if rows.is_array() {
+                rows.as_array().unwrap()
+            } else {
+                rows["results"].as_array().unwrap()
+            };
+            assert!(hits.iter().all(|r| r["memory_id"] != id), "{route}: {rows}");
+        }
     }
+    let rows = request(
+        router,
+        "why-changed",
+        Some(json!({"query":"automobile repairs","limit":100})),
+        Some(token),
+    )
+    .await;
+    let hits = rows["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{rows}");
+    assert_eq!(hits[0]["memory_id"], id);
+    assert_eq!(hits[0]["source"], "personal");
+    let rows = request(
+        router,
+        "why-changed",
+        Some(json!({"query":"automobile repairs","limit":100})),
+        Some(other),
+    )
+    .await;
+    assert!(
+        rows["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["memory_id"] != id)
+    );
     let project = request(
         router,
         "projects/init",
@@ -188,16 +198,31 @@ async fn verify(router: &Router, token: &str, other: &str, id: &str) {
     .await;
     let hits = request(
         router,
+        "why-changed",
+        Some(json!({"query":"automobile repairs","limit":100})),
+        Some(other),
+    )
+    .await;
+    assert!(
+        hits["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["memory_id"] == note_id && r["source"] == "project")
+    );
+    let hidden = request(
+        router,
         "search",
         Some(json!({"query":"automobile repairs","limit":100})),
         Some(other),
     )
     .await;
     assert!(
-        hits.as_array()
+        hidden
+            .as_array()
             .unwrap()
             .iter()
-            .any(|r| r["memory_id"] == note_id && r["source"] == "project")
+            .all(|r| r["memory_id"] != note_id)
     );
     let next=request(router,"remember",Some(json!({"scope":"global","kind":"rule","title":"Motor servicing","summary":"Replace worn components","reason":"Durable transport"})),Some(token)).await;
     wait_match(router, other, next["memory_id"].as_str().unwrap()).await;

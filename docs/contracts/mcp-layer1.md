@@ -19,12 +19,15 @@ the upstream full tool registry. The credential model is in
 - Command: `cairn mcp` (the `cairn-server mcp --store` command no longer exists)
 - Configuration: `cairn setup <server-url>` reads the device token from stdin (typed without
   echo on a terminal, one line when piped) so it never appears in the process list or shell
-  history, and writes `$XDG_CONFIG_HOME/cairn/config.json` (else
-  `~/.config/cairn/config.json`, else `%APPDATA%`) with mode `0600`, through a fresh temporary
-  file and a rename; a config directory it creates gets mode `0700`. `CAIRN_URL` and
-  `CAIRN_DEVICE_TOKEN` together replace the file. Setting only one of them is an error, so a
-  stored token is never sent to another server. Missing configuration is an error that names
-  `cairn setup`.
+  history, and writes the selected config file with mode `0600`, through a fresh temporary
+  file and a rename; a config directory it creates gets mode `0700`. The selected file is
+  `CAIRN_CONFIG` when that variable is non-empty after trimming, otherwise
+  `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`).
+  That file's `url` and `token` are the only server URL and device credential for the CLI
+  and stdio MCP. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are not configuration. If either
+  name is present, including an empty or whitespace-only value, it is ignored and one
+  stderr line names the variable without its value. Missing
+  configuration is an error that names the selected file and `cairn setup`.
 - Server URL: `https`, or `http` only for a loopback host (`localhost`, `127.0.0.0/8`,
   `::1`). Plain `http` to any other host is refused at setup and at load. A URL may not
   carry credentials, a query, or a fragment. It may carry a path prefix (a trailing slash is
@@ -32,7 +35,11 @@ the upstream full tool registry. The credential model is in
   every request goes to `<url>/cairn-memory/...`.
 - The client never follows a redirect, so the token cannot leave the configured origin, and
   never prints the token. Errors show the server's own message, for example
-  `HTTP 403: web console session required; device tokens cannot do this`.
+  `HTTP 403: web console session required; device tokens cannot do this`. A genuine HTTP 401
+  names the selected config file and says to run `cairn setup <server-url>` with
+  `CAIRN_CONFIG` set to that file. The credential is removed from the response text
+  before the 300-character clip. The 401 stays inside
+  the CLI's stderr line or the MCP tool result; it does not add a second stdout record.
 - TLS is rustls through the `ureq` crate (no OpenSSL, no async runtime in the client). It
   verifies certificates with the operating system's trust store, so a server behind a
   private CA works once that CA is trusted by the system.
@@ -116,6 +123,80 @@ server `4xx`, is returned as a tool result with `isError: true` and the server's
 malformed JSON-RPC requests and unknown tools or protocol methods use JSON-RPC errors. A tool
 checks its required arguments before the request.
 
+## Agent-facing results (v0.1.5)
+
+`structuredContent` is always a JSON object. A tool whose REST body is an array
+is wrapped, including when the array is empty:
+
+| Tool | Object key |
+| --- | --- |
+| `memory_list`, `memory_project_memories` | `memories` |
+| `memory_project_list` | `projects` |
+| `memory_project_members` | `members` |
+| `memory_project_freshness` | `freshness` |
+| `memory_similarity_reviews` | `reviews` |
+| `memory_search`, `memory_smart_search` | `results` |
+
+`initialize.serverInfo` is `name: cairn-memory`, `title: Cairn`. The shared
+instruction text says these are Cairn tools. Protocol names stay as in the
+table above, including `memory_save` and `memory_get`. OpenCode names a tool
+`<server>_<tool>` ([Names](https://opencode.ai/docs/mcp-servers/#names)); Cairn's
+server key is `cairn`, so the host calls `cairn_memory_save`. Renaming the
+protocol tools is not required. The MCP schema requires `structuredContent` to
+be an object ([SEP-2106](https://modelcontextprotocol.io/seps/2106-json-schema-2020-12)).
+
+`memory_save` and `memory_lesson_save` return this receipt on both channels.
+The text is compact JSON of the same object. Errors stay errors.
+
+```json
+{"memory_id":"mem-1","kind":"gotcha","scope":"personal","status":"active"}
+```
+
+`memory_get` returns the stored record, including content, provenance, and
+lifecycle, with empty fields left in place. `memory_export` is the same lossless
+bundle the REST route returns. Both use compact JSON text. The CLI still prints
+pretty server JSON for every command, including save, search, and export.
+
+`memory_search`, `memory_smart_search`, `memory_recall`, `memory_context`, and
+`memory_reflect` default to short cards on both channels. A search array becomes
+`{"results":[...]}`. A context pack keeps `query`, `results`, `omitted_count`,
+`omitted_memory_ids`, and `recovery_hint` (null when there is no hint). Reflect
+still adds `mode` and `note` and still drops the two omission fields it already
+dropped. On a default card, `title` is at most 120 UTF-8 bytes and `summary` at
+most 240. A longer value is cut on a character boundary and ends with `…`, and
+that mark counts toward the cap. `expanded`, `memory_get`, REST, and the CLI
+keep the stored text.
+
+```json
+{"results":[{"memory_id":"mem-1","kind":"gotcha","scope":"project","title":"Hook auth","summary":"401 names the config file.","score":0.5}]}
+```
+
+`expanded: true` is the only wider option. It is removed before the REST call.
+Each hit then keeps useful recall fields: the card, `project_id`, `status`,
+`pinned`, `importance`, `reason`, `details`, typed fields, `evidence`,
+relationships, and the stale and contradiction signals. It omits `lifecycle`,
+`source_event_ids`, the scope-copied `source`, and `content`. An empty array or
+empty object on that hit is omitted (`applies_to`, `tags`, `entities`,
+`alternatives`, `steps`, and the other optional lists). False, zero, and a
+non-empty collection stay. Required empty collections stay elsewhere: `results`,
+`omitted_memory_ids`, and graph `nodes` and `edges`. `memory_why_changed`,
+`memory_resume`, and `memory_unresolved` keep full hits, including an empty
+relationship list. Authorization is unchanged. Search and context also apply
+the capture filter and relevance floor in
+[CM-CONTRACT-006](continuity-v1.md#capture-eligibility-v015).
+
+Other MCP objects use compact JSON and omit nulls and empty strings on both
+channels. They keep false, zero, empty arrays and objects, `status`, and flags
+such as `truncated`, `accepted`, and `duplicate`.
+
+`memory_graph` and `memory_similarity_reviews` keep JSON `structuredContent`,
+with those empty values omitted. Their text is tab-delimited TOON
+([spec 4.4](https://github.com/toon-format/spec/blob/main/SPEC.md)). Null
+`project_id` and other null columns stay in that text so the table stays
+rectangular. An empty review list is `reviews: []`. This encoder is only those
+two shapes. `scripts/cairn_instructions.txt` and the session brief are unchanged
+apart from the Cairn name sentence.
+
 Capture and explicit-save tools accept the nested Layer 1 `lifecycle` object
 defined in [CM-CONTRACT-004](lifecycle-v1.md).
 
@@ -123,7 +204,7 @@ defined in [CM-CONTRACT-004](lifecycle-v1.md).
 
 The flat common and per-type fields, visibility and authority rules are defined in [the scope contract](project-layer4.md#memory-scopes-and-record). MCP `memory_save` and `memory_lesson_save` expose every field and require `scope`, `title`, `summary`, `reason`. The lesson alias defaults `kind` to `gotcha`; an explicit kind is preserved. Project saves in an initialized checkout fill `context.project_id` from its committed file when absent. Scope is always explicit.
 
-CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same fields, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. CLI and MCP print the server's fields without stripping them.
+CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same fields, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. The CLI prints the server's fields. MCP shapes are in [Agent-facing results](#agent-facing-results-v015).
 
 ```sh
 cairn save '{"scope":"personal","kind":"preference","title":"Concise replies","summary":"Answer in one paragraph.","reason":"Reduce reading time.","preference":"concise","example":"one paragraph"}'
@@ -138,9 +219,12 @@ All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v01
 ## Layer 2 context filters
 
 The query tools `memory_recall`, `memory_context`, `memory_reflect`,
-`memory_smart_search`, and `memory_search` accept optional `sessionId` and
-`context` arguments. Their scope behavior is defined in
-[CM-CONTRACT-006](continuity-v1.md).
+`memory_smart_search`, and `memory_search` accept optional `sessionId`,
+`context`, and `includeCaptures` arguments. `includeCaptures` defaults to false.
+`memory_why_changed` accepts it too. Resume and unresolved do not. Scope
+behavior, capture eligibility, and the relevance floor are defined in
+[CM-CONTRACT-006](continuity-v1.md). CLI `cairn search` and `cairn context`
+take `--include-captures` for the same opt-in.
 
 ## Deliberate limitations
 

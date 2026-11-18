@@ -4,7 +4,7 @@
 
 use crate::{
     Error, MAX_RESPONSE_BYTES, config_path, create_private_dir, is_loopback, normalize_url,
-    write_private,
+    selected_config_path, write_private,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -289,7 +289,9 @@ fn download_hooks(
 }
 
 fn hook_dir() -> Result<PathBuf, Error> {
-    let path = config_path()?;
+    // Same selected file as `cairn setup`. A later CAIRN_CONFIG changes the
+    // credential the hook reads, not this installer-owned script directory.
+    let path = selected_config_path()?;
     Ok(path.with_file_name("hook"))
 }
 
@@ -1130,6 +1132,35 @@ mod tests {
             None
         );
         assert_eq!(calls.get(), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundled_hooks_follow_the_selected_config_parent() {
+        let dir = temp_dir("hooks-parent");
+        let config = dir.join("alt").join("cairn.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("CAIRN_CONFIG") }
+            }
+        }
+        let _restore = Restore;
+        unsafe { std::env::set_var("CAIRN_CONFIG", &config) }
+        let message = install_bundled_hooks().unwrap();
+        let hooks = dir.join("alt").join("hook");
+        assert!(message.contains(&hooks.display().to_string()), "{message}");
+        assert!(hooks.join("cairn_hook.py").is_file());
+        assert!(hooks.join("cairn_outbox.py").is_file());
+        let authored = hooks.join("cairn_hook.py");
+        fs::write(&authored, b"local edit").unwrap();
+        // A second install keeps the authored bytes beside the replacement.
+        install_bundled_hooks().unwrap();
+        assert_eq!(
+            fs::read(hooks.join("cairn_hook.py.bak")).unwrap(),
+            b"local edit"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

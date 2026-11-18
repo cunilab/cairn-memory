@@ -12,39 +12,51 @@ storage or lifecycle rules.
 
 ## Invocation
 
+The hook reads the server URL and device credential from one JSON file.
+An unmanaged invocation uses `--config <path>`, then `CAIRN_CONFIG` when that
+variable is non-empty after trimming, then `$XDG_CONFIG_HOME/cairn/config.json`,
+else `$HOME/.config/cairn/config.json`, else `%APPDATA%/cairn/config.json`.
+`cairn setup` writes the selected file. An installed command also passes
+`--cairn-managed` and the setup-time `--config` path. A non-empty `CAIRN_CONFIG`
+then selects the runtime file, and the setup-time path is the fallback.
+A manual `--config` without `--cairn-managed` still wins over `CAIRN_CONFIG`.
+
+`CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are not configuration. If either name is
+present in the environment, including an empty or whitespace-only value, the
+hook ignores it and writes one stderr line that names the variable and not its
+value. Stdout stays the hook protocol.
+
 ```bash
 printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"tool","source":"PostToolUse"}' \
-  | CAIRN_DEVICE_TOKEN='<device-token>' CAIRN_URL=http://127.0.0.1:3111 python3 scripts/cairn_hook.py
+  | CAIRN_CONFIG=/path/to/config.json python3 scripts/cairn_hook.py
 ```
 
-`CAIRN_URL` defaults to `http://127.0.0.1:3111`. It must use `https`, or
-`http` only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), the same
-rule as the `cairn` CLI. Userinfo, a query, a fragment, or another scheme is
-refused. A path is allowed as a base for a reverse proxy mount, for example
-`CAIRN_URL=https://cairn.example.test/agent`; the hook posts to
-`<base>/cairn-memory/sync/push`. Otherwise the hook exits before it reads stdin and before it connects,
-with a fixed message that does not include the URL, so the device token never
-travels over plain http beyond the host. Plain-http loopback requests ignore
-`HTTP_PROXY`. Without a queue binding, the adapter then only strips trailing
-slashes from the URL and keeps a path. `normalize_origin` (which also refuses a
-path) applies only when `CAIRN_OUTBOX` is set. If `eventId` is absent, the
-adapter derives a stable fingerprint from the session, source, and content so
-retries remain idempotent. If `sessionId` is absent, `CAIRN_SESSION_ID` is
-required.
+The file's `url` must use `https`, or `http` only for a loopback host
+(`localhost`, `127.0.0.0/8`, `::1`), the same rule as the `cairn` CLI.
+Userinfo, a query, a fragment, or another scheme is refused. A path is allowed
+as a base for a reverse proxy mount, for example
+`https://cairn.example.test/agent`; the hook posts to
+`<base>/cairn-memory/sync/push`. Otherwise the hook exits before it reads stdin
+and before it connects, with a fixed message that does not include the URL, so
+the device credential never travels over plain http beyond the host.
+Plain-http loopback requests ignore `HTTP_PROXY`. Without a queue binding, the
+adapter then only strips trailing slashes from the URL and keeps a path.
+`normalize_origin` (which also refuses a path) applies only when `CAIRN_OUTBOX`
+is set. If `eventId` is absent, the adapter derives a stable fingerprint from
+the session, source, and content so retries remain idempotent. If `sessionId`
+is absent, `CAIRN_SESSION_ID` is required.
 
-`CAIRN_DEVICE_TOKEN` is required. The value is the raw token, not a `Bearer`
-prefix, and it is an environment variable rather than a command argument.
-Create the device in the web console (Devices page); the token is shown once.
-Without it the hook exits before it reads stdin and posts nothing. The hook
-no longer reads `CAIRN_ACCOUNT_TOKEN`: a value there is ignored and never sent.
+The file's `token` is the raw device credential, not a `Bearer` prefix, and it
+is not a command argument. Create the device in the web console (Devices page);
+the token is shown once. A missing or empty credential exits before stdin is
+read and posts nothing. The hook does not read `CAIRN_ACCOUNT_TOKEN`.
 
 ```bash
-CAIRN_DEVICE_TOKEN='<device-token>' CAIRN_URL=http://127.0.0.1:3111 \
-  python3 scripts/cairn_hook.py
+CAIRN_CONFIG=/path/to/config.json python3 scripts/cairn_hook.py
 
 # Opt-in device queue. Unset CAIRN_OUTBOX keeps the one-shot delivery above.
 CAIRN_OUTBOX=/path/to/device-queue.json \
-  CAIRN_DEVICE_TOKEN='<device-token>' CAIRN_URL=http://127.0.0.1:3111 \
+  CAIRN_CONFIG=/path/to/config.json \
   python3 scripts/cairn_hook.py
 ```
 
@@ -80,6 +92,20 @@ request and do not create or touch an outbox. Set
 `CAIRN_CAPTURE_ASSISTANT=1` on the hook process to opt in. Other values keep
 the default. Explicit CLI/MCP saves and captures remain agent-directed.
 
+A recognized read-only tool call is skipped before delivery and before the
+outbox, with the same effect as a marker: no request and no queue write.
+Named read tools (`Read`, `read_file`, `Grep`, `Glob`, `LS`, `WebFetch`,
+`WebSearch`, `NotebookRead`, `list_dir`) are read-only. A shell tool (`Bash`,
+`bash`, `shell`, `Shell`, `exec`) is read-only only when structured `command`
+or `cmd` is one simple program from the hook's fixed list, or `git` plus a
+read-only subcommand, with no quotes, pipes, redirects, substitutions, or
+command separators. A dash option is read-only only when that command's
+allowlist names it (`ls` and `date` have none; `git status --short` and
+`rg -n` are named). `rg --pre`, `git diff --ext-diff`, and `date -s` stay
+captured. Ambiguous and mutating commands are captured. Nested
+`payload.tool_name` uses the same tool envelope and 2048-byte cap as a
+top-level tool name.
+
 A regular file named `.cairnignore` skips hook capture for that folder and its
 descendants. Lookup starts at the resolved payload `cwd` (top level, then
 nested payload), or the process working directory if absent. Within Git it
@@ -88,8 +114,10 @@ outside Git it checks through the filesystem root. A marker directory does
 not count. A skip performs no network or outbox/lock writes. Existing queued
 events are not purged. Credential and URL validation still run before stdin.
 
-Secret scrubbing runs on the complete content before either the 16000-character
-tool cut or the 64-KiB content cut, and before event fingerprinting. The outbox
+Secret scrubbing runs on the complete content before the tool excerpt is
+clipped to 2048 UTF-8 bytes, or before the 64 KiB content cut, and before event
+fingerprinting. The clip keeps a character boundary and ends a shortened tool
+excerpt with `[truncated]`. The outbox
 and server also retain their redaction boundaries. A generated fingerprint
 uses the scrubbed, bounded content, so captures differing only in scrubbed
 secret values can coalesce. Explicit event IDs are unchanged. Redaction is
@@ -108,7 +136,7 @@ these fields directly, so a settings entry needs no wrapper script. Setup is in
 | `hook_event_name` | `source` | First choice for `source` (before `source`, `hook`, `type`), so a `SessionStart` input with `source: "startup"` is still recorded as `SessionStart`. |
 | `prompt` (`UserPromptSubmit`) | `content` | After `content`, `text`, `message`. |
 | `last_assistant_message` (`Stop`) | `content` | After `prompt`, only with assistant capture opted in. |
-| `tool_name`, `tool_input`, `tool_response` (`PostToolUse`) | `content` | With no field above: `<tool_name> {"tool_input":...,"tool_response":...}` as compact sorted JSON, cut to 16000 characters. |
+| `tool_name`, `tool_input`, `tool_response` (`PostToolUse`) | `content` | With no field above: `<tool_name> {"tool_input":...,"tool_response":...}` as compact sorted JSON. After scrubbing, tool text is clipped to 2048 UTF-8 bytes. |
 | other events, e.g. `SessionStart`, `SessionEnd` | `content` | Whole input object as compact sorted JSON (the fallback above). |
 | `hook_event_name` | `role` | `UserPromptSubmit` is `user`, `Stop` is `assistant`, anything else is `tool`. An explicit `role` wins. |
 
@@ -121,6 +149,7 @@ each; any failure leaves that part empty):
 | --- | --- |
 | `repository` | SSH/HTTPS origin normalized to `host/org/repo`, host lowercase and `.git` stripped; without a network remote use `local:<top-level directory>`. Credentials are never part of the locator. |
 | `branch` | `rev-parse --abbrev-ref HEAD`; a detached HEAD sends none. |
+| `worktree` | `wt-` and 16 hex characters of the SHA-256 of the canonical checkout root, including a main clone. An explicit value is kept. A handoff with no worktree matches only a request that also omits it. |
 
 `cwd` that is missing, not a repository, or a machine without `git` leaves
 `context` empty as before. Derived values fill only what the payload lacks: an
@@ -159,7 +188,7 @@ start a background process, a thread, or a second POST of its own event. With `C
 unset, a failed delivery is still dropped.
 
 `CAIRN_OUTBOX` is an opt-in setting. The hook validates
-`normalize_origin(CAIRN_URL)` before it reads stdin and before it connects.
+`normalize_origin` of the selected file's `url` before it reads stdin and before it connects.
 A `%` in the hostname, userinfo, a query, a fragment, or a path that holds an empty, dot, `%`, or `cairn-memory` segment is rejected
 with the fixed origin message, and plain http to a non-loopback host with the
 loopback message. That message does not include the URL. The
@@ -181,17 +210,21 @@ same event id, and exits 0 only after that save or when that id is already in
 this bound file. Stderr is `Cairn hook queued for replay`. It does not
 include the token, the fingerprint, the raw content, or the URL.
 
-HTTP 401, other 4xx, and every 3xx are not queued. A 2xx is not queued. The
+HTTP 401, other 4xx, and every 3xx are not queued. A 401 names the selected
+config file on stderr and says to run `cairn setup <server-url>` with
+`CAIRN_CONFIG` set to that file. The credential is not printed. A generic hook
+writes no stdout body. An agent hook keeps instruction JSON it already wrote.
+A 2xx is not queued. The
 hook does not purge. Invalid input and invalid configuration are not queued.
 Explicit replay remains
-[`scripts/cairn_outbox.py`](../../scripts/cairn_outbox.py) and does not read
-`CAIRN_DEVICE_TOKEN`; the hook's pass takes the token from its own
-environment. A matching 401 purges only inside that explicit replay,
+[`scripts/cairn_outbox.py`](../../scripts/cairn_outbox.py) and does not read the
+config file or `CAIRN_DEVICE_TOKEN`; the hook's pass takes the device
+credential from the selected config file. A matching 401 purges only inside that explicit replay,
 after the version 2 origin, route, and fingerprint matched.
 
 ## Opportunistic replay
 
-With `CAIRN_OUTBOX` and `CAIRN_DEVICE_TOKEN`, after the hook's own event
+With `CAIRN_OUTBOX` and the selected file's device credential, after the hook's own event
 returns 2xx the hook takes the queue lock without waiting and, if it gets it,
 replays the oldest pending events for the same origin and device. At most 20
 events and a 2 second wall-clock budget: each request timeout is the budget
@@ -233,12 +266,12 @@ scalars, are not redacted. Older spool files are not rewritten.
 
 | Configuration | Request | Authorization |
 | --- | --- | --- |
-| `CAIRN_DEVICE_TOKEN` set | `POST /cairn-memory/sync/push` | That device token. File device sync and PostgreSQL capture. |
-| Unset, blank, or a token that is not one header token | No request | Configuration error. The process exits before it reads stdin. |
+| Selected file has a `url` and a header-safe `token` | `POST /cairn-memory/sync/push` | That device credential. File device sync and PostgreSQL capture. |
+| Missing file, empty credential, or a token that is not one header token | No request | Configuration error. The process exits before it reads stdin. |
 
-A blank value is unset. The process does not print the token, put it in the
-URL, or store it in the payload. It does not infer a server or try another
-route after a 401. A revoked token is a `401` and nothing is queued.
+The process does not print the credential, put it in the URL, or store it in
+the payload. It does not infer a server or try another route after a 401. A
+revoked credential is a `401` and nothing is queued.
 
 Cairn still performs lifecycle classification, retention, persistence, and
 validation. The hook runs `cairn_outbox.normalize` before the request. That
@@ -295,7 +328,7 @@ installed CLI. Native MCP commands have a 20-second timeout.
 | --- | --- | --- |
 | Claude Code | User `settings.json` hooks and user `~/.claude.json` MCP registration. `CLAUDE_CONFIG_DIR` selects the custom directory. | [Hook locations](https://code.claude.com/docs/en/hooks#hook-locations), [settings locations](https://code.claude.com/docs/en/settings#find-or-create-your-settings-files), [config directory override](https://code.claude.com/docs/en/claude-directory), [MCP user scope](https://code.claude.com/docs/en/mcp#user-scope). |
 | Codex | `$CODEX_HOME/hooks.json` (default `~/.codex`); native `codex mcp list --json`, `add`, `remove` merge its TOML config. | [Hook discovery](https://learn.chatgpt.com/docs/hooks#where-codex-looks-for-hooks), [MCP CLI configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#configure-with-the-cli). Review/trust through `/hooks` is required by [Codex hook trust](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks); setup does not bypass it. |
-| OpenCode V2 | Native `opencode mcp add --global` updates `opencode.json` or `opencode.jsonc`; compact instructions in a marked global `$XDG_CONFIG_HOME/opencode/AGENTS.md` block (default `~/.config`). | [MCP setup/local environment](https://opencode.ai/docs/mcp-servers/#setup), [V2 config](https://opencode.ai/docs/mcp-servers/#config), [instruction scope/order](https://opencode.ai/docs/instructions/#scope). |
+| OpenCode V2 | Native `opencode mcp add --global` updates `opencode.json` or `opencode.jsonc`; compact instructions in a marked global `$XDG_CONFIG_HOME/opencode/AGENTS.md` block (default `~/.config`); autoloaded directory `$XDG_CONFIG_HOME/opencode/plugins/cairn/index.js`. A configured path to one file is not used. | [MCP setup](https://opencode.ai/docs/mcp-servers/#setup), [plugin discovery](https://opencode.ai/docs/plugins/#discover), [local paths are directories](https://opencode.ai/docs/plugins/#configure). |
 
 OpenCode's documented [management interface](https://opencode.ai/docs/mcp-servers/#management)
 has no MCP remove command. Cairn reads JSONC spans to check ownership and delete
@@ -317,13 +350,14 @@ inventories. Cairn does not claim a minimum client release for these capabilitie
 | --- | --- | --- |
 | Claude Code | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd` exist in the [hook lifecycle](https://code.claude.com/docs/en/hooks#hook-lifecycle). Start and post-tool JSON `hookSpecificOutput.additionalContext` reaches the model ([context delivery](https://code.claude.com/docs/en/hooks#add-context-for-claude)). | `Stop` can continue with `decision: "block"` and `reason`; `stop_hook_active` guards recursion ([Stop control](https://code.claude.com/docs/en/hooks#stop-decision-control)). `SessionEnd` has no decision control ([decision control](https://code.claude.com/docs/en/hooks#decision-control)). |
 | Codex | Same five events are documented. [SessionStart](https://learn.chatgpt.com/docs/hooks#sessionstart) and [PostToolUse](https://learn.chatgpt.com/docs/hooks#posttooluse) accept additional context. Shell/unified exec is `Bash`; patches are `apply_patch` with Edit/Write aliases ([tool coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage)). | [Stop](https://learn.chatgpt.com/docs/hooks#stop) accepts blocking-decision continuation and exposes `stop_hook_active`. [SessionEnd](https://learn.chatgpt.com/docs/hooks#sessionend) is advisory and cannot keep a thread open. |
-| OpenCode V2 | Plugin hooks exist: session `prompt`, `context`, `compaction`, `generate`, `title`, model/retry/fork hooks, and tool `execute.before` / `execute.after`. Context hooks can modify outgoing instructions/messages ([server plugin hooks](https://opencode.ai/docs/build/plugins/server#hooks)). | Cairn installs no plugin and uses no shell Stop continuation protocol for OpenCode. Instruction-file fallback asks the agent to recall/save appropriately. This is an adapter limit, not a claim that OpenCode lacks hooks; no automatic brief, first-work injection or guarded Stop is claimed for this adapter. |
+| OpenCode V2 | `ctx.session.hook("prompt")`, `"context"`, and `"compaction"`, plus `ctx.tool.hook("execute.after")` ([server hooks](https://opencode.ai/docs/build/plugins/server#hooks)). Tool ids are lower case (`edit`, `write`, `read`, `bash`). | Cairn autoloads `plugins/cairn/index.js` and calls the installer-owned `cairn_hook.py`. `prompt` is `UserPromptSubmit`. `execute.after` queues bounded context for the next `context` event of that session only. The first `context` event also sends the brief. Compaction checkpoints, then sends a fresh brief. A finished turn checkpoints on `session.execution.succeeded` (OpenCode 2.1.4 does not emit `session.idle`); `session.idle` and idle `session.status` still checkpoint where a host emits them. The script path is fixed at setup; `CAIRN_CONFIG` selects only the credential file. Unknown session directories are skipped. The `AGENTS.md` block remains when `session.hook` is absent. |
 
 ### Hook output and work tracking
 
 Configured Claude/Codex commands call `cairn_hook.py --agent <agent> --config
-<private-config-path> --cairn-managed`. They load that config when both credential
-environment variables are absent; partial overrides still fail closed. Generic
+<private-config-path> --cairn-managed`. A non-empty `CAIRN_CONFIG` selects the
+runtime file; otherwise `<private-config-path>` is the fallback. A manual
+`--config` without `--cairn-managed` still wins. Generic
 invocation without `--agent` retains its capture JSON response. Agent mode warns about a failed capture and exits successfully so the host
 retains any emitted instructions (only a queued/acknowledged capture is saved).
 Generic capture still exits nonzero on an unretained failure. Agent mode keeps
@@ -336,15 +370,32 @@ being injected. Existing capture/outbox behavior remains bounded and device-only
   `POST /cairn-memory/session/brief`, never searches separately from each hook.
   An unavailable/oversized response leaves the short note and a fixed warning.
 - **First real work:** the first `PostToolUse` for `Bash`, `Edit`, `Write`,
-  `MultiEdit` or `apply_patch` sends the compact instructions exactly once in
-  retained session state. Reads/searches do not count. Command failures still
-  count as commands when the host emits PostToolUse. Resume keeps the once flag.
-- **Stop:** after new real work since the last ask, returns `decision: "block"`
-  and a request to save worthwhile knowledge, with the compact field/scope
-  instructions. A Stop with `stop_hook_active` suppresses the request and clears
-  continuation work; saving cannot create an endless Stop loop. With no new
-  work there is no request. This per-turn Stop is the last point where the agent
-  can act; it is not the later process/session termination event.
+  `MultiEdit`, `apply_patch`, or the OpenCode ids `edit` and `write`, sends the compact instructions exactly once in
+  retained session state, unless the existing read-only classifier recognizes
+  the call. A recognized read-only shell command does not count. Command
+  failures still count as commands when the host emits PostToolUse. Resume
+  keeps the once flag.
+- **Touched file:** the first structured `file_path`, `filePath`, or `path` on
+  `Edit`, `Write`, `MultiEdit`, or `apply_patch` is normalized to a path inside
+  the git top level. The hook posts one `POST /cairn-memory/context` with that
+  path, limit 3, and the session context. It injects titles and summaries only,
+  at most 512 UTF-8 bytes, and does not repeat that path. Reads, searches, and
+  shell commands do not start this search. A failed request does not mark the
+  path. The file body is not read or sent.
+- **Stop:** after meaningful work since the last successful checkpoint, posts
+  `POST /cairn-memory/session/checkpoint` and prints no `decision`. No new work
+  sends nothing. A transport failure or non-success status leaves the dirty
+  flag set and writes a fixed stderr line; the next Stop retries. Success
+  (`stored`, `unchanged`, or `empty`) clears the flag. This is not a
+  continuation request. `stop_hook_active` does not by itself clear the flag.
+- **Compaction:** Claude Code and Codex deliver the post-compaction brief by
+  running `SessionStart` with `source` `compact`. The installed SessionStart
+  hook has no matcher, so that source uses the same brief request. `PreCompact`
+  is before compaction and is not installed. Codex 0.170.0 documents `compact`
+  on SessionStart ([hooks](https://developers.openai.com/codex/hooks)). Claude
+  Code documents the same matcher ([SessionStart](https://code.claude.com/docs/en/hooks)).
+  OpenCode uses the plugin above; the instruction file is the fallback when
+  that host does not load it.
 - **SessionEnd:** best-effort explicit rule-based distillation for a session that
   did work, then removes its delivery flags. It never asks an agent to continue.
   An unavailable close leaves ordinary idle distillation as fallback.
@@ -357,8 +408,9 @@ reasons; no server-side LLM is invoked.
 
 Byte bounds are UTF-8 bytes, a conservative token ceiling without a tokenizer:
 `START_NOTE_MAX_BYTES=256`, `INSTRUCTIONS_MAX_BYTES=2048`,
-`END_ASK_MAX_BYTES=2304`, plus `BRIEF_MAX_BYTES=4096`. The short-note budget includes its separating newline. Start output is at most
-4352 bytes of context; the short note itself is one line. JSON transport escaping
+`TOPIC_MAX_BYTES=512`, plus `BRIEF_MAX_BYTES=4096`. The short-note budget includes its separating newline. Start output is at most
+4352 bytes of context; the short note itself is one line. Stop no longer returns
+a continuation request. JSON transport escaping
 is outside these model-visible text bounds. Instruction overflow fails rather
 than silently dropping fields. Server brief selection and fencing are owned by
 [the continuity contract](continuity-v1.md#session-start-brief-v014).

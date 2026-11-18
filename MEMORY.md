@@ -341,10 +341,18 @@ when an ADR, specification, or implementation resolves them.
 ### 2026-11-16 — Smoke scripts must not inherit CAIRN_URL and CAIRN_DEVICE_TOKEN
 
 - **Type:** lesson
+- **Status:** superseded
+- **Summary:** Superseded 2026-11-18. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` no longer override the config file. Smokes still unset them, and must also unset `CAIRN_CONFIG`, because that variable selects the credential file.
+- **Reason:** The old override sent smoke writes to a live server. The replacement rule is the 2026-11-18 entry.
+- **Evidence:** `scripts/smoke_agent_lib.sh`; `crates/client/src/lib.rs`
+
+### 2026-11-18 — Selected config file is the only client and hook credential
+
+- **Type:** decision
 - **Status:** active
-- **Summary:** `cairn` lets `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` override its config, so a shell that has them set for a real server sends the CLI and MCP smoke scripts' writes there. `scripts/smoke_agent_lib.sh` now unsets them (and `CAIRN_OUTBOX`); run other ad hoc `cairn` checks with `env -u CAIRN_URL -u CAIRN_DEVICE_TOKEN -u CAIRN_OUTBOX`.
-- **Reason:** Smoke runs wrote test sessions and decisions to a live server before the cause was noticed.
-- **Evidence:** `scripts/smoke_agent_lib.sh`; `crates/client/src/lib.rs` (environment override)
+- **Summary:** CLI, stdio MCP, and `scripts/cairn_hook.py` read the server URL and device credential from one JSON file. An unmanaged hook uses `--config`, then non-empty `CAIRN_CONFIG`, then `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`). An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise the setup-time `--config`. `cairn setup <server-url>` still takes the token on stdin and writes the selected file. A present `CAIRN_URL` or `CAIRN_DEVICE_TOKEN`, including an empty export, is ignored with one stderr warning and no value. A real HTTP 401 names the file and says to set `CAIRN_CONFIG` to it before `cairn setup <server-url>`. The credential is redacted before a 401 body is clipped. Server environment and outbox replay arguments are unchanged. v0.1.5 adds no server LLM.
+- **Reason:** A stale env pair was overriding `config.json` and failing as a silent HTTP 401.
+- **Evidence:** `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`; `crates/client/src/lib.rs`; `scripts/cairn_hook.py`; `cargo test -p cairn-client --lib`; `cargo test -p cairn-client --test agent_flow`; `python3 scripts/smoke_hook_auth.py`; `python3 scripts/test_agent_hooks.py`; `./scripts/smoke_mcp.sh`; `./scripts/smoke_full_flow.sh`
 
 ## Entry template
 

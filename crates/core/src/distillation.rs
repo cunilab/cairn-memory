@@ -30,8 +30,16 @@ pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> 
         summary.unresolved_work.join("\n")
     );
     handoff.fields.details = Some(handoff.content.clone());
-    let mut notes = vec![handoff];
+    // An empty handoff has no next step and no unresolved item. The session
+    // summary is still returned by session close.
+    let mut notes = Vec::new();
+    if !summary.next_steps.is_empty() || !summary.unresolved_work.is_empty() {
+        notes.push(handoff);
+    }
     'sources: for observation in observations {
+        if crate::sessions::observation_is_tool_payload(observation) {
+            continue;
+        }
         let mut current: Option<Memory> = None;
         for (line_number, line) in observation.content.lines().enumerate() {
             let Some((label, value)) = line.trim().split_once(':') else {
@@ -54,7 +62,7 @@ pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> 
                 if let Some(note) = current.take() {
                     notes.push(note);
                 }
-                if notes.len() > MAX_TYPED_NOTES {
+                if typed_note_count(&notes) >= MAX_TYPED_NOTES {
                     break 'sources;
                 }
                 if value.is_empty() {
@@ -101,7 +109,7 @@ pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> 
         if let Some(note) = current {
             notes.push(note);
         }
-        if notes.len() > MAX_TYPED_NOTES {
+        if typed_note_count(&notes) >= MAX_TYPED_NOTES {
             break;
         }
     }
@@ -109,6 +117,13 @@ pub fn distill_session_notes(summary: &Memory, observations: &[Observation]) -> 
         redact_memory_metadata(note);
     }
     notes
+}
+
+fn typed_note_count(notes: &[Memory]) -> usize {
+    notes
+        .iter()
+        .filter(|note| note.kind != MemoryKind::Handoff)
+        .count()
 }
 
 fn explicit_field(fields: &mut MemoryFields, kind: &MemoryKind, label: &str, value: &str) -> bool {
