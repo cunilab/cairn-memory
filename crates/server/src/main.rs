@@ -14,6 +14,10 @@ const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("cairn-server {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let bind = option_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:3111".to_owned());
     let address: SocketAddr = bind.parse().unwrap_or_else(|error| {
         eprintln!("invalid --bind value {bind}: {error}");
