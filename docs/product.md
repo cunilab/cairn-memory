@@ -92,7 +92,7 @@ This creates three explicit boundaries:
 - Repository, branch, worktree, file, symbol, command, test, and commit context.
 - Cross-device synchronization with offline capture, idempotency, cursors, and conflict handling.
 - Cross-person collaboration through shared memory, handoffs, decisions, and project context.
-- Keyword, semantic, and later graph-assisted retrieval.
+- Keyword and semantic retrieval, plus a permission-filtered memory link graph. Code and work graphs remain later.
 - REST and MCP interfaces for agent integrations.
 - Local persistence, export/import, privacy filtering, audit trails, retention, and recovery.
 - A lightweight Next.js viewer for search, sessions, memory trails, exceptions, sync health, and governance controls.

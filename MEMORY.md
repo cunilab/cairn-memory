@@ -26,6 +26,24 @@ replacement for the project documentation.
   requiring the complete platform.
 - **Evidence:** `README.md`; `docs/product.md`; `docs/roadmap.md`
 
+### Acceptance smokes are four scripts
+
+- **Type:** workflow rule
+- **Status:** active
+- **Date:** 2026-11-18
+- **Summary:** The current acceptance smokes are `scripts/smoke_full_flow.sh`,
+  `scripts/smoke_mcp.sh`, `scripts/smoke_web.sh`, and `scripts/smoke_postgres.sh`.
+  They run in the `Acceptance smokes` CI job without an embedding model.
+  Older entries that name `smoke_layer1.sh`, `smoke_layer3.sh`,
+  `smoke_layer4_cli.sh`, `smoke_layer5_cli.sh`, `smoke_rest.sh`, `smoke_hook.sh`,
+  `smoke_export.sh`, `smoke_viewer.sh`, `measure_layer2.py`, or
+  `check_detail_actions.mjs` record the command that ran that day.
+- **Reason:** ADR 0014 removed promotion and collapsed scopes to project,
+  personal, and global. The coverage map is in `docs/evidence.md`.
+- **Evidence:** `docs/evidence.md` ("Script consolidation (2026-11-18)");
+  `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`;
+  `.github/workflows/ci.yml`
+
 ### Documentation is evidence-driven
 
 - **Type:** workflow rule
@@ -65,7 +83,7 @@ replacement for the project documentation.
 
 - **Type:** decision
 - **Status:** active
-- **Summary:** `cairn init` creates the owner's project and writes `.cairn/project.json` (`project_id`, `repository`). The hook and `cairn capture` send it as `context.project_id`; a capture or sync push that names another person's project makes the capturer a member (idempotent, owner audit `project_member_joined`, no private duplicate project). Invite, team member add and member removal routes, commands and tools are gone; a team lists the project members; shares stay explicit.
+- **Summary:** `cairn init` creates the owner's project and writes `.cairn/project.json` (`project_id`, `repository`, `name` as of 0.1.4 on 2026-11-17; readers also accept older files without `name`). The hook and `cairn capture` send it as `context.project_id`; a capture or sync push that names another person's project makes the capturer a member (idempotent, owner audit `project_member_joined`, no private duplicate project). Invite, team member add and member removal routes, commands and tools are gone; a team lists the project members; shares stay explicit.
 - **Reason:** Automation-first: the repository already is the team's shared place, and invite and removal were human-only steps. Members cannot be removed, so the device-token merge gate cannot be reopened.
 - **Evidence:** `docs/adr/0011-explicit-project-memory-share.md` (2026-11-16 amendment); `docs/contracts/project-layer4.md`; `crates/core/src/lib.rs` (`join_context_project`); `cargo test --workspace`
 
@@ -76,6 +94,14 @@ replacement for the project documentation.
 - **Summary:** The Cairn server is the canonical source of truth for accepted memory; PostgreSQL (`cairn-server --database-url`, `cairn-storage`) is its canonical database and the cross-device sync path. A local spool, outbox or cache is only a bounded delivery bridge, never a second canonical store. The standalone file backend (`--store`) is Layer 1/2 compatibility and development, not the intended cross-device architecture, and no managed Cairn cloud exists: the server is self-hosted. Implemented bridge today (distinct from the intent): an opt-in, device-token-only, bounded (256) outbox with manual replay that removes entries only after server acknowledgement. Account-token and anonymous capture cannot queue offline. There is no replay worker and no local read cache.
 - **Reason:** One permissioned source of truth serves many people, agents and devices; a client-local canonical store would need conflict-prone sync between canonical stores. The user corrected an earlier reading that treated local and remote as equally canonical.
 - **Evidence:** `docs/adr/0003-server-authoritative-postgres.md` (decisions 1, 2 and 6); `docs/product.md` (server authoritative, edge tolerant); `docs/architecture.md`; `docs/contracts/sync-layer3.md` (local outbox); `docs/contracts/hook-v1.md`; `scripts/cairn_hook.py`; `scripts/cairn_outbox.py`; `crates/server/src/main.rs`; `crates/storage/tests/postgres.rs`; `scripts/smoke_postgres.sh`
+
+### 2026-11-17 — v0.1.4 scope changes require fresh stores
+
+- **Type:** runtime constraint
+- **Status:** active
+- **Summary:** ADR 0014 items 0 and 7 use only project, personal behaviour and server-wide global memory. Older private `global` rows cannot be reinterpreted safely; reset pre-release databases and file stores before using this build. The base PostgreSQL migration and scope enum intentionally provide no legacy upgrade path.
+- **Reason:** Adding the new record column alone would expose old private global notes to every server user.
+- **Evidence:** `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`; `migrations/0001_layer3_personal_memory.sql`; `docs/evidence.md` (stage 1 checks).
 
 ## Lessons and recurring corrections
 
@@ -213,8 +239,9 @@ should include the reason they matter and the evidence that supports them.
 ### 2026-11-03 — Explicit project promotion is the first Layer 4 slice
 
 - **Type:** decision
-- **Status:** active
+- **Status:** superseded
 - **Summary:** Project registration and `POST /cairn-memory/promote` create an explicit project-scoped decision while preserving source evidence and a redacted reason; branch/worktree/commit context is cleared, secret/forgotten/expired/repository-mismatched sources fail closed, repeated promotion is idempotent, and explicit merge/close transitions resolve registered branches and worktrees.
+- **Superseded by:** ADR 0014 items 0 and 7 (2026-11-17): direct project captures and explicit project/personal/global saves; no promotion step.
 - **Reason:** Project memory must not broaden automatically from branch relevance; the owner must authorize the scope transition and be able to inspect why it happened.
 - **Evidence:** `docs/adr/0009-explicit-project-promotion.md`; `docs/contracts/project-layer4.md`; `crates/core/src/lib.rs`; `crates/storage/src/lib.rs`; `migrations/0003_layer4_projects.sql`; `migrations/0004_layer4_freshness.sql`; `migrations/0005_layer4_project_entities.sql`; `migrations/0006_layer4_branch_resolution.sql`; project promotion/freshness/entity/merge tests
 
@@ -279,13 +306,13 @@ should include the reason they matter and the evidence that supports them.
 Add only questions that remain relevant across sessions. Remove or update them
 when an ADR, specification, or implementation resolves them.
 
-### 2026-11-13 — PostgreSQL context counts all matches and why-changed ranks before the 512 cut
+### 2026-11-17 — PostgreSQL hybrid context counts all matches and why-changed ranks before the 512 cut
 
 - **Type:** decision
 - **Status:** active
-- **Summary:** PostgreSQL keeps a 512-match search window. `context` and `why_changed_context` set `omitted_count` to all eligible matches minus returned rows (`COUNT(*) OVER ()`), and `omitted_memory_ids` stays inside the window. `why_changed_context` ranks every eligible match with `why_changed_priority` (decision, then relationship count, then lexical order) before the cut, so its work grows with the number of matches. Plain `search` stays lexical.
+- **Summary:** PostgreSQL keeps a 512-match search window. Hybrid `context` and `why_changed_context` count all eligible fused matches before the cap, and `omitted_memory_ids` stays inside the window. Why-changed ranks by decision reason, then relationship count, then fused score before the cut; its work grows with the number of matches. Search uses FTS/entity/link/local-vector RRF with type and pinned weights, not raw lexical scores.
 - **Reason:** A cap applied before counting or ranking hid omitted matches and a rank-513 decision.
-- **Evidence:** `crates/storage/src/lib.rs`; `crates/core/src/lib.rs`; `docs/audits/2026-11-13-postgres-search-cap.md`; `crates/storage/tests/postgres.rs` ignored tests `postgres_context_omissions_count_every_eligible_match_past_the_cap` and `postgres_why_changed_orders_like_the_file_store`
+- **Evidence:** `crates/storage/src/embeddings.rs`; `docs/contracts/continuity-v1.md`; `crates/storage/tests/postgres.rs` ignored tests `postgres_context_omissions_count_every_eligible_match_past_the_cap` and `postgres_why_changed_orders_like_the_file_store` (run by `scripts/ci_postgres_tests.sh`).
 
 ### 2026-11-13 — A foreign `supersedes` link is stored inert in the file store
 

@@ -70,7 +70,7 @@ impl MemoryStore {
         let account = self.authenticate_account(token)?;
         let mut result = self.sync_push_inner(token, input)?;
         result.project_attachment =
-            Some(self.attach_context(&account.person_id, &result.observation.context));
+            Some(self.attach_capture(&account.person_id, &mut result.observation));
         Ok(result)
     }
 

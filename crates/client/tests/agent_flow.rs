@@ -52,6 +52,7 @@ fn command(config_home: &Path) -> Command {
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("CAIRN_URL")
         .env_remove("CAIRN_DEVICE_TOKEN")
+        .env("CAIRN_NO_UPDATE_CHECK", "1")
         // `setup` fetches the hook scripts; keep tests off the network (refused at once).
         .env("CAIRN_UPDATE_URL", "http://127.0.0.1:1/releases/latest");
     command
@@ -263,7 +264,6 @@ fn scenario(url: &str, label: &str) {
         ended["context"]["repository"],
         "example.test/acme/cairn-demo"
     );
-    let memory_id = ended["memory_id"].as_str().unwrap();
     let context = agent.json(&[
         "context",
         "cache decision",
@@ -271,16 +271,11 @@ fn scenario(url: &str, label: &str) {
         "example.test/acme/cairn-demo",
     ]);
     assert!(context.to_string().contains("cache decision"));
-    let lesson = agent.json(&["lesson", "Keep device tokens out of logs."]);
-    assert_eq!(lesson["kind"], "lesson");
+    let lesson = agent.json(&["lesson", r#"{"scope":"personal","title":"Credential handling","summary":"Keep device tokens out of logs.","reason":"Avoid exposure","kind":"gotcha","fix":"redact"}"#]);
+    assert_eq!(lesson["kind"], "gotcha");
 
-    // Promote, share with another account's agent, revoke.
-    let promoted = agent.json(&[
-        "promote",
-        &project_id,
-        memory_id,
-        "Confirmed by the agent flow test",
-    ]);
+    let record = json!({"scope":"project","kind":"decision","title":"repository cache decision","summary":"Ready for the project","reason":"Agent flow verification","context":{"project_id":project_id,"repository":"example.test/acme/cairn-demo"}}).to_string();
+    let promoted = agent.json(&["save", &record]);
     assert_eq!(promoted["scope"], "project");
     let promoted_id = promoted["memory_id"].as_str().unwrap().to_owned();
     // Membership comes from the committed project file: the owner runs `cairn init` in the
@@ -317,12 +312,74 @@ fn scenario(url: &str, label: &str) {
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
         written,
-        json!({"project_id": project_id, "repository": "example.test/acme/cairn-demo"})
+        json!({"project_id": project_id, "repository": "example.test/acme/cairn-demo", "name": "Cairn Demo"})
     );
     assert!(
         agent.run_in(&checkout, &["init"]).status.success(),
         "init repeats"
     );
+    let conflict = agent.run_in(&checkout, &["init", "Different name"]);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("--rename"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+        written
+    );
+
+    // Legacy files acquire the server's name; readers still accept the old shape.
+    let mut legacy = written.clone();
+    legacy.as_object_mut().unwrap().remove("name");
+    std::fs::write(&file, legacy.to_string()).unwrap();
+    assert!(agent.run_in(&checkout, &["init"]).status.success());
+    assert_eq!(
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+        written
+    );
+
+    // A changed server name is explicit, and a stale checkout must ask for repair.
+    let rename_path = format!("/cairn-memory/projects/{project_id}/rename");
+    owner_web
+        .post(&rename_path, &json!({"name": "Renamed remotely"}))
+        .unwrap();
+    let stale = agent.run_in(&checkout, &["init"]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("--rename"));
+    assert!(
+        agent
+            .run_in(&checkout, &["init", "--rename", "Cairn Demo"])
+            .status
+            .success()
+    );
+    assert_eq!(agent.json(&["project-list"])[0]["name"], "Cairn Demo");
+    assert!(
+        owner_web
+            .get("/cairn-memory/auth/audit")
+            .unwrap()
+            .to_string()
+            .contains("project_renamed")
+    );
+
+    let fresh = temp_dir(&format!("{label}-fresh-name"));
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&fresh)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        agent
+            .run_in(&fresh, &["init", "Fresh name"])
+            .status
+            .success()
+    );
+    let fresh_file: Value =
+        serde_json::from_slice(&std::fs::read(fresh.join(".cairn/project.json")).unwrap()).unwrap();
+    assert_eq!(fresh_file["name"], "Fresh name");
+    assert!(fresh_file["project_id"].is_string());
+
     std::fs::write(
         &file,
         r#"{"project_id": "project-other", "repository": "example.test/acme/cairn-demo"}"#,
@@ -338,6 +395,10 @@ fn scenario(url: &str, label: &str) {
     );
     std::fs::write(&file, serde_json::to_string(&written).unwrap()).unwrap();
     assert_eq!(teammate.json(&["project-list"]), json!([]));
+    let refused = teammate.run_in(&checkout, &["init", "--rename", "Outsider rename"]);
+    assert!(!refused.status.success());
+    assert_eq!(agent.json(&["project-list"])[0]["name"], "Cairn Demo");
+
     let joined = teammate.run_in(
         &checkout,
         &[
@@ -356,6 +417,13 @@ fn scenario(url: &str, label: &str) {
         teammate.json(&["project-list"])[0]["project_id"],
         project_id.as_str()
     );
+
+    let refused = teammate.run_in(&checkout, &["init", "--rename", "Member rename"]);
+    assert!(!refused.status.success());
+    assert_eq!(
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap(),
+        written
+    );
     let shared = teammate.json(&["project-memories", &project_id]);
     let ids: Vec<_> = shared
         .as_array()
@@ -363,7 +431,7 @@ fn scenario(url: &str, label: &str) {
         .iter()
         .map(|memory| memory["memory_id"].clone())
         .collect();
-    assert_eq!(ids, [json!(promoted_id)]);
+    assert!(ids.contains(&json!(promoted_id)));
     assert!(!shared.to_string().contains(&private_id));
     assert_eq!(
         agent
@@ -371,7 +439,7 @@ fn scenario(url: &str, label: &str) {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
     );
 
     // The member's device cannot act as the owner.
@@ -433,7 +501,7 @@ fn scenario(url: &str, label: &str) {
         listed["structuredContent"][0]["project_id"],
         project_id.as_str()
     );
-    let missing = mcp.tool("memory_promote", json!({"projectId": project_id}));
+    let missing = mcp.tool("memory_save", json!({"scope":"project"}));
     assert_eq!(missing["isError"], true);
     assert!(!listed.to_string().contains(&owner_token));
     drop(mcp);
@@ -630,4 +698,181 @@ fn a_loopback_token_never_goes_through_an_environment_proxy() {
         std::io::ErrorKind::WouldBlock,
         "the proxy must not see the request"
     );
+}
+
+#[test]
+fn help_and_flag_errors_never_make_a_request() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let home = temp_dir("help-no-request");
+    let checkout = temp_dir("help-checkout");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let commands = [
+        "init",
+        "setup",
+        "mcp",
+        "update",
+        "version",
+        "start",
+        "capture",
+        "end",
+        "search",
+        "context",
+        "why-changed",
+        "resume",
+        "unresolved",
+        "forget",
+        "lesson",
+        "correct",
+        "project-register",
+        "project-list",
+        "save",
+        "memories",
+        "memory",
+        "project-members",
+        "project-verify",
+        "project-memories",
+        "project-freshness",
+        "delete-memory",
+        "export",
+        "import",
+    ];
+    let invoke = |args: &[&str]| {
+        command(&home)
+            .current_dir(&checkout)
+            .env("CAIRN_URL", &url)
+            .env("CAIRN_DEVICE_TOKEN", "cdt_no_request")
+            .env("CAIRN_UPDATE_URL", format!("{url}/latest"))
+            .stdin(Stdio::null())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for args in [vec!["--help"], vec!["-h"], vec!["help", "init"]] {
+        let output = invoke(&args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    }
+    for name in commands {
+        for flag in ["--help", "-h"] {
+            let output = invoke(&[name, flag]);
+            assert!(
+                output.status.success(),
+                "{name} {flag}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+        }
+        let output = invoke(&[name, "--bogus"]);
+        assert!(!output.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unexpected option"),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for args in [
+        vec!["init", "--rename", "--bogus"],
+        vec!["project-register", "repo", "--bogus"],
+        vec!["capture", "s", "e", "--bogus"],
+    ] {
+        let output = invoke(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected option"));
+    }
+    std::fs::create_dir(checkout.join(".cairn")).unwrap();
+    let file = checkout.join(".cairn/project.json");
+    let original = r#"{"project_id":"project-local","repository":"repo","name":"Recorded"}"#;
+    std::fs::write(&file, original).unwrap();
+    let output = invoke(&["init", "Different"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--rename"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_setup_is_idempotent_removable_and_preserves_unrelated_config() {
+    for agent in ["claude", "codex", "opencode"] {
+        let home = temp_dir(&format!("agent-setup-{agent}"));
+        let config_home = home.join(".config");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["codex", "opencode"] {
+            let path = bin.join(name);
+            std::fs::write(&path, include_bytes!("fixtures/native_mcp.py")).unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let run = |remove: bool| {
+            let mut cmd = command(&config_home);
+            cmd.env("HOME", &home)
+                .env("PATH", &path)
+                .env("USERPROFILE", &home)
+                .env_remove("CODEX_HOME")
+                .env_remove("CLAUDE_CONFIG_DIR");
+            cmd.args(["setup", "https://unused.example.test", "--agent", agent]);
+            if remove {
+                cmd.arg("--remove");
+            }
+            let output = with_stdin(&mut cmd, "test-device");
+            assert!(
+                output.status.success(),
+                "{agent}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(false);
+        let files = match agent {
+            "claude" => vec![
+                home.join(".claude/settings.json"),
+                home.join(".claude.json"),
+            ],
+            "codex" => vec![
+                home.join(".codex/hooks.json"),
+                home.join(".codex/config.toml"),
+            ],
+            _ => vec![
+                config_home.join("opencode/AGENTS.md"),
+                config_home.join("opencode/opencode.json"),
+            ],
+        };
+        let first: Vec<_> = files.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        run(false);
+        for (file, expected) in files.iter().zip(&first) {
+            assert_eq!(&std::fs::read(file).unwrap(), expected);
+        }
+        run(true);
+        run(true);
+        for file in files {
+            let text = std::fs::read_to_string(file).unwrap();
+            assert!(!text.contains("--cairn-managed"));
+            assert!(!text.contains("CAIRN_SETUP_MANAGED"));
+            assert!(!text.contains("<!-- cairn:begin -->"));
+        }
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

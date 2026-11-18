@@ -1,10 +1,13 @@
 ---
 id: CM-AUDIT-011
 title: "PostgreSQL search cap — 2026-11-13"
-status: draft
+status: superseded
 ---
 
 # PostgreSQL search cap — 2026-11-13
+
+Current ranking and cap behavior are owned by the
+[hybrid recall contract](../contracts/continuity-v1.md#hybrid-recall-v014).
 
 PostgreSQL `search` never returns more than 512 rows. This note checks whether that bound is a safe, honest limit or a hidden truncation in context, why-changed, resume, and unresolved. Read-only audit: no application, dependency, schema, or lock change. It does not review ranking, embeddings, lifecycle, or share grants.
 

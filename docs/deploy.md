@@ -12,7 +12,7 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 
 | Service | Image or source | Notes |
 | --- | --- | --- |
-| PostgreSQL | a Dokploy PostgreSQL 16 service | The only place Cairn keeps data. Back it up; the containers hold nothing else. |
+| PostgreSQL | PostgreSQL with pgvector (`pgvector/pgvector:pg17` in development/CI) | The canonical store; back it up. The migration needs permission to create the `vector` extension, or an operator must install it first. |
 | `cairn-server` | `ghcr.io/cunilab/cairn-memory-server:vX.Y.Z` | Listens on `0.0.0.0:3111`. Applies its migrations on startup. |
 | `cairn-web` | `ghcr.io/cunilab/cairn-memory-web:vX.Y.Z` | Next.js console, listens on port `3000`. |
 
@@ -20,13 +20,20 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 
 ## Environment
 
-`cairn-server` (the only variable it reads):
+`cairn-server`:
 
 | Variable | Value |
 | --- | --- |
 | `CAIRN_DATABASE_URL` | `postgres://<user>:<password>@<postgres-service>:5432/<database>` |
+| `CAIRN_EMBEDDING_MODEL_DIR` | `/opt/cairn/models/minilm` by default in the image; a provisioned directory for standalone servers |
 
 Without it the server falls back to the JSON file store and needs `--store`; the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
+
+The production server image uses Debian trixie slim for the CPU ONNX runtime,
+includes the pinned MiniLM model, and targets `linux/amd64` and `linux/arm64`.
+It makes no model downloads at runtime. Missing or invalid model files leave
+`semantic_search: disabled` in health with lexical/entity/link recall available;
+see [hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014).
 
 `cairn-web`:
 

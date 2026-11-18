@@ -1,6 +1,6 @@
 use crate::capture::ObservationInput;
 use crate::lifecycle::{LifecycleInput, MemoryKind, MemoryScope};
-use crate::recall::{ContextPack, RecallFilter, recall_result, why_changed_priority};
+use crate::recall::{ContextPack, RecallFilter};
 use crate::store::MemoryStore;
 use crate::test_support::{
     context, empty_capture, observation_for, remember_owned, temp_store_path,
@@ -8,30 +8,6 @@ use crate::test_support::{
 use crate::types::{StoreError, WorkContext, now_seconds};
 use std::collections::HashSet;
 use std::fs;
-
-#[test]
-fn why_changed_priority_matches_the_recall_result_fields() -> Result<(), StoreError> {
-    let path = temp_store_path("why-priority");
-    let mut store = MemoryStore::open(&path)?;
-    let context = WorkContext {
-        files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
-        symbols: vec!["A::run".to_owned()],
-        ..WorkContext::default()
-    };
-    let with_reason = store.remember("Chose A because it is faster.", Vec::new(), context)?;
-    let plain = store.remember("Plain note", Vec::new(), WorkContext::default())?;
-    for memory in [&with_reason, &plain] {
-        let result = recall_result(memory, 1.0, &[], &HashSet::new(), &RecallFilter::default());
-        assert_eq!(
-            why_changed_priority(memory),
-            (result.decision_reason.is_some(), result.relationships.len())
-        );
-    }
-    assert_eq!(why_changed_priority(&plain), (false, 0));
-    assert!(why_changed_priority(&with_reason).0 && why_changed_priority(&with_reason).1 > 0);
-    let _ = fs::remove_file(path);
-    Ok(())
-}
 
 #[test]
 fn why_changed_reports_reason_relationships_staleness_and_contradictions() -> Result<(), StoreError>
@@ -161,7 +137,7 @@ fn account_search_limits_owned_matches_and_hides_foreign_contradiction_ids()
     let limit_one = store.search_for_account(&owner.token, "ranktoken", 1, &filter)?;
     assert_eq!(limit_one.len(), 1);
     assert_eq!(limit_one[0].memory_id, owned_early.memory_id);
-    assert_eq!(limit_one[0].score, 1.0);
+    assert!((limit_one[0].score - 2.0 / 61.0).abs() < 1e-7);
     assert!(!limit_one[0].content.contains("foreignmarker"));
     assert!(!limit_one[0].content.contains("unownedmarker"));
 
@@ -357,8 +333,8 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     )?;
     let owner_handoff = store.end_session_for_account(&owner.token, "handoff-topic")?;
     let member_handoff = store.end_session_for_account(&member.token, "handoff-topic")?;
-    assert_eq!(owner_handoff.scope, MemoryScope::Session);
-    assert_eq!(member_handoff.scope, MemoryScope::Session);
+    assert_eq!(owner_handoff.scope, MemoryScope::Personal);
+    assert_eq!(member_handoff.scope, MemoryScope::Personal);
     assert_eq!(owner_handoff.session_id, member_handoff.session_id);
 
     store.start_session_for_account(&owner.token, "branch-neg", branch.clone())?;
@@ -391,8 +367,8 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     let owner_neg = store.end_session_for_account(&owner.token, "branch-neg")?;
     let owner_pos = store.end_session_for_account(&owner.token, "branch-pos")?;
     let member_branch = store.end_session_for_account(&member.token, "branch-neg")?;
-    assert_eq!(owner_neg.scope, MemoryScope::Branch);
-    assert_eq!(owner_pos.scope, MemoryScope::Branch);
+    assert_eq!(owner_neg.scope, MemoryScope::Personal);
+    assert_eq!(owner_pos.scope, MemoryScope::Personal);
 
     let hides_foreign = |pack: &ContextPack| {
         let json = serde_json::to_string(pack).expect("pack json");
@@ -424,9 +400,21 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
         .find(|result| result.memory_id == owner_neg.memory_id)
         .unwrap();
     assert!(pos.contradictory);
-    assert_eq!(pos.contradiction_ids, vec![owner_neg.memory_id.clone()]);
+    assert_eq!(
+        pos.contradiction_ids,
+        vec![
+            format!("handoff-{}", owner_neg.memory_id),
+            owner_neg.memory_id.clone()
+        ]
+    );
     assert!(neg.contradictory);
-    assert_eq!(neg.contradiction_ids, vec![owner_pos.memory_id.clone()]);
+    assert_eq!(
+        neg.contradiction_ids,
+        vec![
+            format!("handoff-{}", owner_pos.memory_id),
+            owner_pos.memory_id.clone()
+        ]
+    );
     hides_foreign(&resume);
 
     let packed = store.resume_for_account(&owner.token, 1, &filter)?;
@@ -434,7 +422,10 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     assert_eq!(packed.results[0].memory_id, owner_pos.memory_id);
     assert_eq!(
         packed.results[0].contradiction_ids,
-        vec![owner_neg.memory_id.clone()]
+        vec![
+            format!("handoff-{}", owner_neg.memory_id),
+            owner_neg.memory_id.clone()
+        ]
     );
     assert_eq!(
         packed.omitted_memory_ids,
@@ -471,7 +462,10 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     assert!(unresolved_neg.contradictory);
     assert_eq!(
         unresolved_neg.contradiction_ids,
-        vec![owner_pos.memory_id.clone()]
+        vec![
+            format!("handoff-{}", owner_pos.memory_id),
+            owner_pos.memory_id.clone()
+        ]
     );
     hides_foreign(&unresolved);
     let unresolved_zero = store.unresolved_for_account(&owner.token, 0, &filter)?;
@@ -479,16 +473,16 @@ fn account_resume_and_unresolved_hide_foreign_contradiction_ids() -> Result<(), 
     hides_foreign(&unresolved_zero);
 
     let hits = store.search_for_account(&owner.token, "quotadelta", 5, &filter)?;
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].memory_id, owner_handoff.memory_id);
+    assert_eq!(hits.len(), 2, "session note and separate handoff");
+    assert!(hits.iter().any(|m| m.memory_id == owner_handoff.memory_id));
     assert!(!hits[0].contradictory);
     assert!(hits[0].contradiction_ids.is_empty());
     let context = store.context_for_account(&owner.token, "quotadelta", 1, &filter)?;
-    assert_eq!(context.results[0].memory_id, owner_handoff.memory_id);
+    assert_eq!(context.results[0].memory_id, hits[0].memory_id);
     assert!(context.results[0].contradiction_ids.is_empty());
     hides_foreign(&context);
     let why = store.why_changed_for_account(&owner.token, "quotadelta", 1, &filter)?;
-    assert_eq!(why.results[0].memory_id, owner_handoff.memory_id);
+    assert!(hits.iter().any(|m| m.memory_id == why.results[0].memory_id));
     assert!(why.results[0].contradiction_ids.is_empty());
     hides_foreign(&why);
 
@@ -536,7 +530,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
             MemoryKind::Explicit,
         )
     };
-    let quiet = |store: &MemoryStore, query: &str| -> Result<(), StoreError> {
+    let quiet = |store: &mut MemoryStore, query: &str| -> Result<(), StoreError> {
         for results in [
             store.search_for_account(&owner.token, query, 5, &filter)?,
             store
@@ -546,9 +540,18 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
                 .why_changed_for_account(&owner.token, query, 5, &filter)?
                 .results,
         ] {
-            assert_eq!(results.len(), 1, "{query}");
-            assert!(!results[0].contradictory, "{query}");
-            assert!(results[0].contradiction_ids.is_empty(), "{query}");
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|m| !m.memory_id.starts_with("handoff-"))
+                    .count(),
+                1,
+                "{query}"
+            );
+            for result in results {
+                assert!(!result.contradictory, "{query}");
+                assert!(result.contradiction_ids.is_empty(), "{query}");
+            }
         }
         Ok(())
     };
@@ -703,7 +706,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
         MemoryKind::Explicit,
     )?;
     assert!(!store.state.forgotten_ids.contains(&expired.memory_id));
-    quiet(&store, "expquota")?;
+    quiet(&mut store, "expquota")?;
     let unscoped_expired = store.search_with_filter("expquota", 5, &filter)?;
     assert_eq!(unscoped_expired.len(), 1);
     assert_eq!(unscoped_expired[0].memory_id, current.memory_id);
@@ -743,12 +746,15 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
         .unwrap();
     assert_eq!(
         live_row.contradiction_ids,
-        vec![dead_summary.memory_id.clone()]
+        vec![
+            format!("handoff-{}", dead_summary.memory_id),
+            dead_summary.memory_id.clone()
+        ]
     );
     store.forget_for_account(&owner.token, "sum-dead-event")?;
     assert!(store.state.forgotten_ids.contains("sum-dead-event"));
     assert!(!store.state.forgotten_ids.contains(&dead_summary.memory_id));
-    quiet(&store, "sumquota")?;
+    quiet(&mut store, "sumquota")?;
     assert!(
         !store.search_for_account(&owner.token, "sumquota", 5, &filter)?[0]
             .content
@@ -774,7 +780,7 @@ fn contradiction_targets_follow_recall_eligibility() -> Result<(), StoreError> {
     let kept = owned(&mut store, "idquota beacon does apply", branch.clone())?;
     let forgotten = owned(&mut store, "idquota beacon does not apply", branch.clone())?;
     store.forget_for_account(&owner.token, &forgotten.memory_id)?;
-    quiet(&store, "idquota")?;
+    quiet(&mut store, "idquota")?;
     assert_eq!(
         store.search_for_account(&owner.token, "idquota", 5, &filter)?[0].memory_id,
         kept.memory_id
@@ -891,9 +897,9 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
         WorkContext::default(),
     )?;
 
-    assert_eq!(project.scope, MemoryScope::Project);
-    assert_eq!(branch.scope, MemoryScope::Worktree);
-    assert_eq!(global.scope, MemoryScope::Global);
+    assert_eq!(project.scope, MemoryScope::Personal);
+    assert_eq!(branch.scope, MemoryScope::Personal);
+    assert_eq!(global.scope, MemoryScope::Personal);
 
     let main_filter = RecallFilter {
         session_id: None,
@@ -906,7 +912,7 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
         .collect();
     assert!(main_ids.contains(project.memory_id.as_str()));
     assert!(main_ids.contains(global.memory_id.as_str()));
-    assert!(!main_ids.contains(branch.memory_id.as_str()));
+    assert!(main_ids.contains(branch.memory_id.as_str()));
 
     let branch_filter = RecallFilter {
         session_id: None,
@@ -960,10 +966,19 @@ fn contradicting_equal_scores_rank_the_newer_memory_first() -> Result<(), StoreE
                 .memory_id,
         );
     }
-    let ranked = |store: &MemoryStore| -> Result<Vec<String>, StoreError> {
-        let hits = store.search_for_account(&owner.token, "gammaquota", 5, &filter)?;
+    let ranked = |store: &mut MemoryStore| -> Result<Vec<String>, StoreError> {
+        let mut hits = store.search_for_account(&owner.token, "gammaquota", 5, &filter)?;
+        // RRF assigns distinct ranks; exercise the final equal-score tiebreak explicitly.
+        for hit in &mut hits {
+            hit.score = 1.0;
+        }
+        crate::prefer_newer_contradiction(&mut hits, &store.state.memories);
         assert!(hits.iter().all(|hit| hit.contradictory));
-        let unscoped = store.search_with_filter("gammaquota", 5, &filter)?;
+        let mut unscoped = store.search_with_filter("gammaquota", 5, &filter)?;
+        for hit in &mut unscoped {
+            hit.score = 1.0;
+        }
+        crate::prefer_newer_contradiction(&mut unscoped, &store.state.memories);
         assert_eq!(
             hits.iter().map(|hit| &hit.memory_id).collect::<Vec<_>>(),
             unscoped
@@ -983,7 +998,7 @@ fn contradicting_equal_scores_rank_the_newer_memory_first() -> Result<(), StoreE
             }
             .to_owned();
         }
-        let order = ranked(&store)?;
+        let order = ranked(&mut store)?;
         assert_eq!(&order[0], newer_id);
         assert_eq!(order.len(), 2);
     }
@@ -992,7 +1007,7 @@ fn contradicting_equal_scores_rank_the_newer_memory_first() -> Result<(), StoreE
 }
 
 #[test]
-fn equal_scores_rank_decisions_before_other_memories() -> Result<(), StoreError> {
+fn hybrid_type_weight_prioritizes_decisions_over_repeated_terms() -> Result<(), StoreError> {
     let path = temp_store_path("decision-first");
     let mut store = MemoryStore::open(&path)?;
     let a = store.bootstrap_account("a@example.test", "correct horse battery staple")?;
@@ -1012,22 +1027,125 @@ fn equal_scores_rank_decisions_before_other_memories() -> Result<(), StoreError>
             Vec::new(),
             WorkContext::default(),
             LifecycleInput::default(),
-            kind.clone(),
+            kind,
         )?;
         if kind == MemoryKind::Decision {
             decision = memory.memory_id;
         }
     }
-    // A strictly higher score still ranks first: scores are unchanged.
+    // The decision multiplier outranks a note with more lexical occurrences.
     let strong = remember_owned(&mut store, &a.token, "rankdecision rankdecision strong")?;
 
     let hits = store.search_for_account(&a.token, "rankdecision", 10, &filter)?;
-    assert_eq!(hits[0].memory_id, strong.memory_id);
-    assert_eq!(hits[1].memory_id, decision);
+    assert_eq!(hits[0].memory_id, decision);
+    assert_eq!(hits[1].memory_id, strong.memory_id);
     let pack = store.context_for_account(&a.token, "rankdecision", 10, &filter)?;
-    assert_eq!(pack.results[1].memory_id, decision);
+    assert_eq!(pack.results[0].memory_id, decision);
     let plain = store.search("rankdecision", 10)?;
-    assert_eq!(plain[1].memory_id, decision);
+    assert_eq!(plain[0].memory_id, decision);
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn hybrid_entities_links_and_vector_visibility() -> Result<(), StoreError> {
+    let path = temp_store_path("hybrid");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("hybrid@example.test", "correct horse battery staple")?;
+    let other = store.register_account_as_admin(
+        &owner.token,
+        "other@hybrid.test",
+        "correct horse battery staple",
+    )?;
+    let seed = store.save_for_account(&owner.token, serde_json::from_value(serde_json::json!({"scope":"personal","title":"Orchard cultivation","summary":"Grow apples","reason":"food","tags":["planting"],"entities":["Tree::grow"]}))?)?;
+    let neighbour = store.save_for_account(&owner.token, serde_json::from_value(serde_json::json!({"scope":"personal","title":"Seasonal advice","summary":"Water regularly","reason":"health","evidence":[seed.memory_id]}))?)?;
+    let hidden = store.save_for_account(&other.token, serde_json::from_value(serde_json::json!({"scope":"personal","title":"Secret horticulture","summary":"Keep private","reason":"privacy","evidence":[seed.memory_id]}))?)?;
+    for query in ["planting", "Tree::grow", "Orchard"] {
+        let hits = store.search_for_account(&owner.token, query, 10, &RecallFilter::default())?;
+        assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+        assert!(hits.iter().any(|r| r.memory_id == neighbour.memory_id));
+        assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    }
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    assert!(
+        store
+            .search_with_vector(
+                Some(&owner.token),
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )?
+            .is_empty()
+    );
+    for m in [&seed, &hidden] {
+        assert!(store.put_embedding(crate::MemoryEmbedding::new(m, vector.clone())?)?);
+    }
+    let hits = store.search_with_vector(
+        Some(&owner.token),
+        "unrelated",
+        10,
+        &RecallFilter::default(),
+        Some(&vector),
+    )?;
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+    assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    assert!(hits.iter().all(|r| r.source == "personal"));
+    drop(store);
+    let mut store = MemoryStore::open(&path)?;
+    assert_eq!(
+        store
+            .search_with_vector(
+                Some(&owner.token),
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )?
+            .len(),
+        2
+    );
+    let row = store
+        .state
+        .memories
+        .iter_mut()
+        .find(|m| m.memory_id == seed.memory_id)
+        .unwrap();
+    row.fields.title = "Updated title".to_owned();
+    store.persist()?;
+    assert!(
+        store
+            .search_with_vector(
+                Some(&owner.token),
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )?
+            .is_empty()
+    );
+    assert!(!store.put_embedding(crate::MemoryEmbedding::new(&seed, vector.clone())?)?);
+    let current = store
+        .embedding_jobs(512)
+        .into_iter()
+        .find(|m| m.memory_id == seed.memory_id)
+        .unwrap();
+    assert!(store.put_embedding(crate::MemoryEmbedding::new(&current, vector.clone())?)?);
+    store.forget_for_account(&owner.token, &seed.memory_id)?;
+    assert!(
+        store
+            .search_with_vector(
+                Some(&owner.token),
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )?
+            .is_empty()
+    );
+    assert!(!store.put_embedding(crate::MemoryEmbedding::new(&seed, vector)?)?);
     fs::remove_file(path)?;
     Ok(())
 }

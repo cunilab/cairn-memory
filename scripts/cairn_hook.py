@@ -8,6 +8,10 @@ delivered event is followed by one bounded, nonblocking replay of that queue
 (REPLAY_LIMIT events, REPLAY_BUDGET seconds).
 """
 
+import contextlib
+import io
+import sqlite3
+import argparse
 import hashlib
 import http.client
 import json
@@ -167,6 +171,29 @@ def project_file_id(cwd):
     return None, "invalid .cairn/project.json project id; capture remains personal"
 
 
+def skip_capture(source, *, check_assistant=True):
+    nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
+    assistant = (
+        source.get("hook_event_name") == "Stop"
+        or any(str(value.get("role")).lower() == "assistant" or "last_assistant_message" in value
+               for value in (source, nested))
+    )
+    if check_assistant and assistant and os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1":
+        return True
+    cwd = first(source, "cwd") or first(nested, "cwd") or os.getcwd()
+    if not isinstance(cwd, str):
+        raise SystemExit("hook cwd must be a folder path")
+    folder = Path(cwd).resolve()
+    top = _git(str(folder), "rev-parse", "--show-toplevel")
+    boundary = Path(top).resolve() if top else None
+    for parent in (folder, *folder.parents):
+        if (parent / ".cairnignore").is_file():
+            return True
+        if parent == boundary:
+            break
+    return False
+
+
 def build_request(source):
     nested = source.get("payload") if isinstance(source.get("payload"), dict) else {}
     session_id = first(source, "sessionId", "session_id") or first(nested, "sessionId", "session_id") or os.environ.get("CAIRN_SESSION_ID")
@@ -175,10 +202,10 @@ def build_request(source):
     content = first(source, "content", "text", "message", "prompt", "last_assistant_message") or first(nested, "content", "text", "message")
     if not content and source.get("tool_name"):
         detail = json.dumps({"tool_input": source.get("tool_input"), "tool_response": source.get("tool_response")}, sort_keys=True, separators=(",", ":"))
-        content = f"{source['tool_name']} {detail}"[:TOOL_CONTENT_CHARS]
+        content = cairn_outbox.redact_content(f"{source['tool_name']} {detail}")[:TOOL_CONTENT_CHARS]
     if not content:
         content = json.dumps(source, sort_keys=True, separators=(",", ":"))
-    content = str(content)
+    content = cairn_outbox.redact_content(str(content))
     if len(content.encode()) > cairn_outbox.MAX_CONTENT_BYTES:
         keep = cairn_outbox.MAX_CONTENT_BYTES - len(TRUNCATED_MARKER)
         content = content.encode()[:keep].decode(errors="ignore") + TRUNCATED_MARKER
@@ -362,13 +389,131 @@ def deliver(token, request, content, raw, base_url, queue_retryable, attachment_
     sys.stdout.write("\n")
 
 
+# Byte limits are conservative token ceilings, without a tokenizer dependency.
+START_NOTE_MAX_BYTES = 256
+INSTRUCTIONS_MAX_BYTES = 2048
+END_ASK_MAX_BYTES = 2304
+BRIEF_MAX_BYTES = 4096
+SHORT_NOTE = "Cairn is available: use its memory tools to recall evidence and save reusable knowledge."
+WORK_TOOLS = {"Bash", "Edit", "Write", "MultiEdit", "apply_patch"}
+
+
+def _instructions():
+    text = Path(__file__).with_name("cairn_instructions.txt").read_text(encoding="utf-8").strip()
+    if len(text.encode()) > INSTRUCTIONS_MAX_BYTES:
+        raise ValueError("Cairn instructions exceed their byte limit")
+    return text
+
+
+def _agent_post(origin, token, path, body):
+    opener = _LOOPBACK_OPENER if origin[:5].lower() == "http:" else _OPENER
+    request = urllib.request.Request(origin + path, data=json.dumps(body).encode(),
+        headers={"Content-Type":"application/json", "Authorization":"Bearer " + token}, method="POST")
+    with opener.open(request, timeout=2) as response:
+        return json.loads(response.read(32768))
+
+
+def agent_context(source, agent, config, token, origin):
+    event = source.get("hook_event_name")
+    if skip_capture(source, check_assistant=False):
+        return {}, True
+    request, _, _ = build_request(source)
+    # Only delivery flags are local; never memory text, credentials or payloads.
+    key = hashlib.sha256(json.dumps([origin, token, agent, request["sessionId"]]).encode()).hexdigest()
+    state_path = config.parent / "hook-state.sqlite3"
+    state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(state_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+    text = None
+    ended_work = False
+    with contextlib.closing(sqlite3.connect(state_path, timeout=1)) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, instructed INTEGER, dirty INTEGER, worked INTEGER)")
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT instructed, dirty, worked FROM sessions WHERE id=?", (key,)).fetchone()
+        instructed, dirty, worked = row or (0, 0, 0)
+        if event == "PostToolUse" and source.get("tool_name") in WORK_TOOLS:
+            dirty, worked = 1, 1
+            if not instructed:
+                text, instructed = _instructions(), 1
+        elif event == "Stop":
+            if source.get("stop_hook_active"):
+                dirty = 0
+            elif dirty:
+                text = "Save what is worth remembering from the new work, then finish.\n" + _instructions()
+                dirty = 0
+        if event == "SessionEnd":
+            ended_work = bool(worked)
+            db.execute("DELETE FROM sessions WHERE id=?", (key,))
+        elif event in {"SessionStart", "PostToolUse", "Stop"}:
+            db.execute("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)", (key, instructed, dirty, worked))
+        db.commit()
+    if event == "SessionStart":
+        text = SHORT_NOTE
+        try:
+            reply = _agent_post(origin, token, "/cairn-memory/session/brief", {"context":request["context"]})
+            brief = reply.get("brief")
+            if isinstance(brief, str) and len(brief.encode()) <= BRIEF_MAX_BYTES:
+                text += "\n" + brief
+        except (OSError, ValueError, http.client.HTTPException):
+            sys.stderr.write("Cairn brief unavailable; use memory tools when connected.\n")
+    if ended_work:
+        try:
+            _agent_post(origin, token, "/cairn-memory/session/end", {"sessionId":request["sessionId"]})
+        except (OSError, ValueError, http.client.HTTPException):
+            sys.stderr.write("Cairn session close unavailable; idle distillation remains pending.\n")
+    if text is None:
+        return {}, event in {"SessionStart", "SessionEnd"} or (event == "Stop" and os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1")
+    if event == "Stop":
+        if len(text.encode()) > END_ASK_MAX_BYTES:
+            raise ValueError("Cairn end request exceeds its byte limit")
+        return {"decision":"block", "reason":text}, os.environ.get("CAIRN_CAPTURE_ASSISTANT") != "1"
+    return {"hookSpecificOutput":{"hookEventName":event, "additionalContext":text}}, event == "SessionStart"
+
+
+def _agent_config(path):
+    if not _present("CAIRN_URL") and not _present(DEVICE_ENV):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            os.environ["CAIRN_URL"] = value["url"]
+            os.environ[DEVICE_ENV] = value["token"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise SystemExit("cannot read valid Cairn config; run cairn setup") from None
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent", choices=["claude", "codex"])
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--cairn-managed", action="store_true")
+    args = parser.parse_args()
+    config = args.config or Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home()/".config"))) / "cairn/config.json"
+    if args.agent:
+        _agent_config(config)
     token = device_token()
     spool_value = _present(OUTBOX_ENV)
     bound = bool(spool_value)
     # Bad origin fails before stdin and before a lock file or a request.
     origin = _bound_origin() if bound else _unbound_base()
     raw, source = read_input()
+    if args.agent:
+        output, handled = agent_context(source, args.agent, config, token, origin)
+        if output:
+            print(scrub(json.dumps(output), token))
+            sys.stdout.flush()
+        if handled:
+            return
+    try:
+        capture(source, token, raw, bound, spool_value, origin, args.agent)
+    except SystemExit as error:
+        if not args.agent:
+            raise
+        # A capture failure must not make the host discard instruction JSON already emitted.
+        sys.stderr.write(str(error) + "\n")
+
+
+def capture(source, token, raw, bound, spool_value, origin, agent):
+    if skip_capture(source):
+        return
     request, content, attachment_warning = build_request(source)
     request = prepare_body(request, token, content, raw)
     spool = None
@@ -376,7 +521,8 @@ def main():
         spool = Path(spool_value)
         _preflight(spool, origin, token, content, raw)
     try:
-        deliver(token, request, content, raw, origin, bound, attachment_warning)
+        with contextlib.redirect_stdout(io.StringIO()) if agent else contextlib.nullcontext():
+            deliver(token, request, content, raw, origin, bound, attachment_warning)
     except _Retryable:
         # One POST already finished. Queue that same normalized body, or exit
         # nonzero. Do not post again and do not start a replay worker.

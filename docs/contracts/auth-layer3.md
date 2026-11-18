@@ -181,8 +181,8 @@ disabled account gets `401` on `sync/push`, `sync/pull`, and `sync/diagnose`. A
 | Identity | `auth/me` | yes | yes |
 | Capture and sync | `session/start`, `session/end`, `observe`, `sync/push`, `sync/pull`, `sync/diagnose` | start, end: yes; observe: yes on the file store, `401` on PostgreSQL (device only, it is a sync push); sync: `401` (device only) | yes |
 | Recall | `search`, `smart-search`, `context`, `recall`, `resume`, `unresolved`, `why-changed`, `diagnose` | yes | yes |
-| Memory | `remember`, `correct`, `forget`, `delete`, `export`, `import` | yes | yes |
-| Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `promote`, `projects/verify`, `projects/{id}/confirm`, branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `maintenance`, `memories`, `personal-memories` | yes | yes |
+| Memory | `remember`, `correct`, `forget`, `delete`, `contradict`, `supersede`, `similarity-reviews`, `export`, `import` | yes | yes |
+| Projects | `projects` (list and register), `projects/init`, `projects/{id}/members` (list), `projects/verify`, `projects/{id}/confirm` (verify an existing project memory), branches and worktrees (list, register), `branches/{branch}/close`, entities, `freshness`, `conflicts`, `maintenance`, `memories` | yes | yes |
 | Ownership transfer | `projects/{id}/ownership` | owner or admin, to an existing member | `403` |
 
 Project decisions use the author/current-owner edit rule; all project members read
@@ -346,9 +346,8 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
   (storage). The PostgreSQL test and `scripts/smoke_postgres.sh` were written
   but not run on 2026-11-14 because the disposable PostgreSQL container
   returned I/O errors; they compile under `clippy --all-targets`.
-  `scripts/smoke_layer3.sh`, `scripts/smoke_web.sh`, and
-  `scripts/smoke_hook_auth.py` run the same boundary over HTTP on the file
-  router.
+  `scripts/smoke_postgres.sh`, `scripts/smoke_web.sh`, and
+  `scripts/smoke_hook_auth.py` run the same boundary over HTTP.
 - The 30-day session expiry (`AUTH_SESSION_SECONDS`, checked on authentication
   in both adapters) is implemented in source but not verified: no test found
   builds an expired session. No test found covers the HTTP `400` for a second

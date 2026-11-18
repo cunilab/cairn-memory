@@ -1,7 +1,10 @@
+use crate::contradictions::{contradiction_counts, contradiction_factor};
+use crate::hybrid::tokenize;
 use crate::lifecycle::{Lifecycle, MemoryKind, MemoryScope, is_expired};
 use crate::memories::Memory;
+use crate::retention::ranking_multiplier;
 use crate::store::MemoryStore;
-use crate::types::{StoreError, WorkContext};
+use crate::types::{StoreError, WorkContext, now_seconds};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -9,6 +12,8 @@ const MAX_RELATIONSHIPS: usize = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RecallResult {
+    #[serde(flatten)]
+    pub fields: crate::MemoryFields,
     pub memory_id: String,
     pub content: String,
     pub source_event_ids: Vec<String>,
@@ -71,90 +76,120 @@ pub struct RecallFilter {
 }
 
 impl MemoryStore {
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<RecallResult>, StoreError> {
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Vec<RecallResult>, StoreError> {
         self.search_with_filter(query, limit, &RecallFilter::default())
     }
 
     pub fn search_with_filter(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
-        let mut results = self.ranked_matches(query, filter)?;
-        prefer_newer_contradiction(&mut results, &self.state.memories);
+        self.search_with_vector(None, query, limit, filter, None)
+    }
+
+    /// Server semantic channel; a missing vector keeps lexical/entity/link retrieval.
+    pub fn search_with_vector(
+        &mut self,
+        token: Option<&str>,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<Vec<RecallResult>, StoreError> {
+        let mut results = self.rank(token, query, filter, vector)?;
         results.truncate(limit);
+        self.record_recall(&results);
         Ok(results)
     }
 
-    /// Score-ranked matches before the contradiction tiebreak and the limit, so an account
-    /// read can drop foreign ids first and break ties only on what it may see.
-    fn ranked_matches(
-        &self,
-        query: &str,
-        filter: &RecallFilter,
-    ) -> Result<Vec<RecallResult>, StoreError> {
-        self.ranked_matches_in(query, filter, &self.state.memories)
-    }
-
-    fn ranked_matches_in(
-        &self,
-        query: &str,
-        filter: &RecallFilter,
-        memories: &[Memory],
-    ) -> Result<Vec<RecallResult>, StoreError> {
-        if query.trim().is_empty() {
-            return Err(StoreError::Validation("query must not be empty".to_owned()));
-        }
-
-        let terms = tokenize(query);
-        let superseded = superseded_targets(
-            memories,
-            &self.state.forgotten_ids,
-            &self.memory_owner_map(),
-        );
-        let mut results: Vec<RecallResult> = memories
-            .iter()
-            .filter(|memory| self.memory_is_recalled(memory, &superseded))
-            .filter(|memory| memory_matches_filter(memory, filter))
-            .filter_map(|memory| {
-                let score = score_memory(memory, &terms);
-                (score > 0.0).then(|| {
-                    recall_result_with(
-                        memory,
-                        score,
-                        memories,
-                        &self.state.forgotten_ids,
-                        filter,
-                        &superseded,
-                    )
-                })
-            })
-            .collect();
-
-        results.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
-        });
-        prefer_decision(&mut results, &self.state.memories);
-        Ok(results)
-    }
-
-    pub fn context(&self, query: &str, limit: usize) -> Result<ContextPack, StoreError> {
+    pub fn context(&mut self, query: &str, limit: usize) -> Result<ContextPack, StoreError> {
         self.context_with_filter(query, limit, &RecallFilter::default())
     }
 
     pub fn context_with_filter(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_with_filter(query, usize::MAX, filter)?;
-        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+        self.context_with_vector(None, query, limit, filter, None)
+    }
+
+    pub fn context_with_vector(
+        &mut self,
+        token: Option<&str>,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<ContextPack, StoreError> {
+        let results = self.rank(token, query, filter, vector)?;
+        self.pack_reinforced(query.to_owned(), results, limit)
+    }
+
+    fn rank(
+        &self,
+        token: Option<&str>,
+        query: &str,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<Vec<RecallResult>, StoreError> {
+        let mut memories = match token {
+            Some(token) => self.memories_for_account(token)?,
+            None => {
+                let hidden = self.live_superseded_targets();
+                self.state
+                    .memories
+                    .iter()
+                    .filter(|m| self.memory_is_recalled(m, &hidden))
+                    .cloned()
+                    .collect()
+            }
+        };
+        for m in &mut memories {
+            if m.published_by.is_some() {
+                m.promoted_from = None;
+            }
+        }
+        let counts = contradiction_counts(&memories);
+        memories.retain(|m| memory_matches_filter(m, filter));
+        let semantic = self.semantic_scores(&memories, vector)?;
+        let ranked = crate::hybrid_rank(&memories, query, filter, None, semantic)?;
+        let by_id = memories
+            .iter()
+            .map(|m| (m.memory_id.as_str(), m))
+            .collect::<HashMap<_, _>>();
+        let now = now_seconds();
+        let mut results = ranked
+            .into_iter()
+            .map(|(id, score)| {
+                let memory = by_id[id.as_str()];
+                let shaded = contradiction_factor(counts.get(id.as_str()).copied().unwrap_or(0));
+                recall_result(
+                    memory,
+                    score * ranking_multiplier(memory, now) * shaded,
+                    &memories,
+                    &self.state.forgotten_ids,
+                    filter,
+                )
+            })
+            .collect::<Vec<_>>();
+        prefer_decision(&mut results, &memories);
+        prefer_newer_contradiction(&mut results, &memories);
+        Ok(results)
+    }
+
+    fn pack_reinforced(
+        &mut self,
+        query: String,
+        mut results: Vec<RecallResult>,
+        limit: usize,
+    ) -> Result<ContextPack, StoreError> {
+        let pack = build_context_pack(query, &mut results, limit);
+        self.record_recall(&pack.results);
+        Ok(pack)
     }
 
     fn retain_account_recall(&self, person_id: &str, results: &mut Vec<RecallResult>) {
@@ -169,55 +204,55 @@ impl MemoryStore {
         }
     }
 
+    pub fn memories_for_account(&self, token: &str) -> Result<Vec<Memory>, StoreError> {
+        let account = self.authenticate_account(token)?;
+        let mut memories = self
+            .state
+            .memories
+            .iter()
+            .filter(|m| match m.scope {
+                MemoryScope::Global => true,
+                MemoryScope::Project if m.project_id.is_some() => m
+                    .project_id
+                    .as_deref()
+                    .is_some_and(|id| self.require_project_reader(&account, id).is_ok()),
+                _ => self.memory_owned_by(&m.memory_id, &account.person_id),
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let owners = self.memory_owner_map();
+        let hidden = superseded_targets(&memories, &self.state.forgotten_ids, &owners);
+        memories = memories
+            .iter()
+            .filter(|m| self.memory_is_recalled(m, &hidden))
+            .cloned()
+            .collect();
+        memories.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then(a.memory_id.cmp(&b.memory_id))
+        });
+        Ok(memories)
+    }
+
     pub fn search_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<Vec<RecallResult>, StoreError> {
-        let account = self.authenticate_account(account_token)?;
-        let mut eligible = self
-            .state
-            .memories
-            .iter()
-            .filter(|m| {
-                if let Some(project_id) =
-                    m.project_id.as_deref().filter(|_| m.published_by.is_some())
-                {
-                    self.project_owner_id(project_id).is_some()
-                        && (self.project_owner_id(project_id).as_deref()
-                            == Some(account.person_id.as_str())
-                            || self.state.project_members.iter().any(|r| {
-                                r.project_id == project_id
-                                    && r.member_person_id == account.person_id
-                            }))
-                } else {
-                    self.memory_owned_by(&m.memory_id, &account.person_id)
-                }
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for m in &mut eligible {
-            if m.published_by.is_some() {
-                m.promoted_from = None;
-            }
-        }
-        let mut results = self.ranked_matches_in(query, filter, &eligible)?;
-        prefer_newer_contradiction(&mut results, &eligible);
-        results.truncate(limit);
-        Ok(results)
+        self.search_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn context_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
-        Ok(build_context_pack(query.to_owned(), &mut results, limit))
+        self.context_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn resume_for_account(
@@ -253,31 +288,13 @@ impl MemoryStore {
     }
 
     pub fn why_changed_for_account(
-        &self,
+        &mut self,
         account_token: &str,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_for_account(account_token, query, usize::MAX, filter)?;
-        results.sort_by(|left, right| {
-            right
-                .decision_reason
-                .is_some()
-                .cmp(&left.decision_reason.is_some())
-                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
-                .then_with(|| {
-                    right
-                        .score
-                        .partial_cmp(&left.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        Ok(build_context_pack(
-            format!("why changed: {query}"),
-            &mut results,
-            limit,
-        ))
+        self.why_changed_with_vector(Some(account_token), query, limit, filter, None)
     }
 
     pub fn resume_context(
@@ -342,30 +359,25 @@ impl MemoryStore {
     }
 
     pub fn why_changed_context(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
         filter: &RecallFilter,
     ) -> Result<ContextPack, StoreError> {
-        let mut results = self.search_with_filter(query, usize::MAX, filter)?;
-        results.sort_by(|left, right| {
-            right
-                .decision_reason
-                .is_some()
-                .cmp(&left.decision_reason.is_some())
-                .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
-                .then_with(|| {
-                    right
-                        .score
-                        .partial_cmp(&left.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        Ok(build_context_pack(
-            format!("why changed: {query}"),
-            &mut results,
-            limit,
-        ))
+        self.why_changed_with_vector(None, query, limit, filter, None)
+    }
+
+    pub fn why_changed_with_vector(
+        &mut self,
+        token: Option<&str>,
+        query: &str,
+        limit: usize,
+        filter: &RecallFilter,
+        vector: Option<&[f32]>,
+    ) -> Result<ContextPack, StoreError> {
+        let mut results = self.rank(token, query, filter, vector)?;
+        order_why_changed(&mut results);
+        self.pack_reinforced(format!("why changed: {query}"), results, limit)
     }
 
     pub(crate) fn memory_is_forgotten(&self, memory: &Memory) -> bool {
@@ -398,18 +410,13 @@ impl MemoryStore {
         self.state
             .memories
             .iter()
-            .filter(|m| {
-                m.project_id.as_deref() == Some(project_id)
-                    && m.published_by.is_some()
-                    && m.lifecycle.sensitivity != crate::Sensitivity::Secret
-            })
+            .filter(|m| m.project_id.as_deref() == Some(project_id) && m.published_by.is_some())
             .cloned()
             .collect()
     }
 
     pub(crate) fn memory_is_recalled(&self, memory: &Memory, superseded: &HashSet<&str>) -> bool {
-        (memory.published_by.is_none()
-            || memory.lifecycle.sensitivity != crate::Sensitivity::Secret)
+        memory.fields.status != crate::MemoryStatus::Superseded
             && !self.memory_is_forgotten(memory)
             && !is_expired(&memory.lifecycle)
             && !superseded.contains(memory.memory_id.as_str())
@@ -446,6 +453,22 @@ fn decision_ids(memories: &[Memory]) -> HashSet<&str> {
         .filter(|memory| memory.kind == MemoryKind::Decision)
         .map(|memory| memory.memory_id.as_str())
         .collect()
+}
+
+fn order_why_changed(results: &mut [RecallResult]) {
+    results.sort_by(|left, right| {
+        right
+            .decision_reason
+            .is_some()
+            .cmp(&left.decision_reason.is_some())
+            .then_with(|| right.relationships.len().cmp(&left.relationships.len()))
+            .then_with(|| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
 }
 
 /// Among results with equal scores, a decision (project decision) ranks before any other
@@ -530,6 +553,7 @@ fn recall_result_with(
         })
         .collect::<Vec<_>>();
     RecallResult {
+        fields: memory.fields.clone(),
         memory_id: memory.memory_id.clone(),
         content: memory.content.clone(),
         source_event_ids: memory.source_event_ids.clone(),
@@ -539,7 +563,9 @@ fn recall_result_with(
         project_id: memory.project_id.clone(),
         next_steps: memory.next_steps.clone(),
         unresolved_work: memory.unresolved_work.clone(),
-        decision_reason: extract_decision_reason(&memory.content),
+        decision_reason: (!memory.fields.reason.is_empty())
+            .then(|| memory.fields.reason.clone())
+            .or_else(|| extract_decision_reason(&memory.content)),
         relationships: code_relationships(memory),
         stale,
         stale_reason,
@@ -548,10 +574,10 @@ fn recall_result_with(
         promoted_from: live_origin(memory, all_memories, forgotten_ids, superseded_ids),
         promotion_reason: memory.promotion_reason.clone(),
         verified_commit: memory.verified_commit.clone(),
-        source: if memory.published_by.is_some() {
-            "project"
-        } else {
-            "personal"
+        source: match memory.scope {
+            MemoryScope::Project => "project",
+            MemoryScope::Global => "global",
+            _ => "personal",
         }
         .to_owned(),
         score,
@@ -576,16 +602,6 @@ pub(crate) fn live_origin(
                 && !superseded_ids.contains(origin)
         })
         .map(|candidate| candidate.memory_id.clone())
-}
-
-/// Why-changed priority of a memory: whether it carries a decision reason, then its
-/// relationship count. These are the same helpers `recall_result` fills in, so a store can
-/// rank before building results.
-pub fn why_changed_priority(memory: &Memory) -> (bool, usize) {
-    (
-        extract_decision_reason(&memory.content).is_some(),
-        code_relationships(memory).len(),
-    )
 }
 
 fn extract_decision_reason(content: &str) -> Option<String> {
@@ -688,13 +704,13 @@ fn push_relationship(
 }
 
 fn stale_signal(memory: &Memory, filter: &RecallFilter) -> (bool, Option<String>) {
-    if memory.lifecycle.freshness < 50 {
+    if memory.fields.status == crate::MemoryStatus::Stale || memory.lifecycle.freshness < 50 {
         return (true, Some("memory freshness is below 50".to_owned()));
     }
     let Some(current) = filter.context.as_ref() else {
         return (false, None);
     };
-    if matches!(memory.scope, MemoryScope::Branch | MemoryScope::Worktree)
+    if memory.scope == MemoryScope::Personal
         && memory.context.repository == current.repository
         && memory.context.commit.is_some()
         && current.commit.is_some()
@@ -732,7 +748,9 @@ fn live_superseded_target<'a>(
     forgotten_ids: &HashSet<String>,
 ) -> Option<&'a str> {
     let target = candidate.supersedes.as_deref()?;
-    (!memory_forgotten(candidate, forgotten_ids) && !is_expired(&candidate.lifecycle))
+    (!memory_forgotten(candidate, forgotten_ids)
+        && !is_expired(&candidate.lifecycle)
+        && candidate.fields.status != crate::MemoryStatus::Superseded)
         .then_some(target)
 }
 
@@ -754,6 +772,12 @@ pub(crate) fn superseded_targets<'a>(
         .iter()
         .filter_map(|candidate| {
             let target = live_superseded_target(candidate, forgotten_ids)?;
+            if memories.iter().any(|m| {
+                m.memory_id == target
+                    && (m.scope != candidate.scope || m.project_id != candidate.project_id)
+            }) {
+                return None;
+            }
             let project_correction = candidate.published_by.is_some()
                 && publications
                     .get(target)
@@ -764,7 +788,11 @@ pub(crate) fn superseded_targets<'a>(
             let foreign = owners
                 .get(candidate.memory_id.as_str())
                 .is_some_and(|successor| owners.get(target) != Some(successor));
-            (!foreign || project_correction).then_some(target)
+            let global_correction = candidate.scope == MemoryScope::Global
+                && memories
+                    .iter()
+                    .any(|m| m.memory_id == target && m.scope == MemoryScope::Global);
+            (!foreign || project_correction || global_correction).then_some(target)
         })
         .collect()
 }
@@ -811,17 +839,12 @@ fn same_scope_context(left: &Memory, right: &Memory) -> bool {
     }
     match left.scope {
         MemoryScope::Global => true,
-        MemoryScope::Project => left.context.repository == right.context.repository,
-        MemoryScope::Branch => {
-            left.context.repository == right.context.repository
-                && left.context.branch == right.context.branch
-        }
-        MemoryScope::Worktree => {
+        MemoryScope::Project => left.project_id == right.project_id,
+        MemoryScope::Personal => {
             left.context.repository == right.context.repository
                 && left.context.branch == right.context.branch
                 && left.context.worktree == right.context.worktree
         }
-        MemoryScope::Session => left.session_id == right.session_id,
     }
 }
 
@@ -853,81 +876,42 @@ fn topic_tokens(content: &str) -> HashSet<String> {
 }
 
 pub fn memory_matches_filter(memory: &Memory, filter: &RecallFilter) -> bool {
-    if memory.published_by.is_some() {
-        return filter
-            .context
-            .as_ref()
-            .and_then(|c| c.project_id.as_ref())
-            .is_some_and(|id| memory.project_id.as_ref() == Some(id));
-    }
     if filter.session_id.is_none() && filter.context.is_none() {
         return true;
     }
-
     match memory.scope {
         MemoryScope::Global => true,
         MemoryScope::Project => filter
             .context
             .as_ref()
-            .and_then(|context| context.repository.as_ref())
-            .is_some_and(|repository| memory.context.repository.as_ref() == Some(repository)),
-        MemoryScope::Branch => filter.context.as_ref().is_some_and(|context| {
-            context.repository.is_some()
-                && memory.context.repository == context.repository
-                && context
-                    .branch
+            .and_then(|c| c.project_id.as_ref())
+            .is_some_and(|id| memory.project_id.as_ref() == Some(id)),
+        MemoryScope::Personal => {
+            if !matches!(
+                memory.kind,
+                MemoryKind::SessionSummary | MemoryKind::Capture | MemoryKind::Handoff
+            ) && !memory.fields.tags.iter().any(|tag| tag == "work-note")
+            {
+                return true;
+            }
+            if let Some(id) = &filter.session_id
+                && memory.session_id != *id
+            {
+                return false;
+            }
+            filter.context.as_ref().is_none_or(|c| {
+                c.repository
                     .as_ref()
-                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
-        }),
-        MemoryScope::Worktree => filter.context.as_ref().is_some_and(|context| {
-            context.repository.is_some()
-                && memory.context.repository == context.repository
-                && context
-                    .branch
-                    .as_ref()
-                    .is_none_or(|branch| memory.context.branch.as_ref() == Some(branch))
-                && context
-                    .worktree
-                    .as_ref()
-                    .is_none_or(|worktree| memory.context.worktree.as_ref() == Some(worktree))
-        }),
-        MemoryScope::Session => filter
-            .session_id
-            .as_ref()
-            .is_some_and(|session_id| memory.session_id == *session_id),
+                    .is_none_or(|r| memory.context.repository.as_ref() == Some(r))
+                    && c.branch
+                        .as_ref()
+                        .is_none_or(|r| memory.context.branch.as_ref() == Some(r))
+                    && c.worktree
+                        .as_ref()
+                        .is_none_or(|r| memory.context.worktree.as_ref() == Some(r))
+            })
+        }
     }
-}
-
-fn tokenize(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .filter(|term| term.len() >= 2)
-        .map(|term| term.to_ascii_lowercase())
-        .collect()
-}
-
-fn score_memory(memory: &Memory, terms: &[String]) -> f32 {
-    let haystack = format!(
-        "{} {} {} {} {} {} {} {} {}",
-        memory.content,
-        memory.context.repository.as_deref().unwrap_or_default(),
-        memory.context.branch.as_deref().unwrap_or_default(),
-        memory.context.worktree.as_deref().unwrap_or_default(),
-        memory.context.files.join(" "),
-        memory.context.symbols.join(" "),
-        memory.context.commands.join(" "),
-        memory.context.tests.join(" "),
-        memory.context.services.join(" "),
-    )
-    .to_ascii_lowercase();
-
-    terms
-        .iter()
-        .map(|term| {
-            let count = haystack.matches(term).count();
-            count as f32
-        })
-        .sum()
 }
 
 #[cfg(test)]

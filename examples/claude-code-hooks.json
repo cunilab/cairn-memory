@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
             "timeout": 20
           }
         ]
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
             "timeout": 20
           }
         ]
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
             "timeout": 20
           }
         ]
@@ -44,7 +44,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py >/dev/null",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
             "timeout": 20
           }
         ]

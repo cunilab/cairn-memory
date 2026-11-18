@@ -12,6 +12,8 @@ from pathlib import Path
 
 LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 ID_PATTERN = re.compile(r"^id:\s*(\S+)", re.MULTILINE)
+TITLE_PATTERN = re.compile(r'^title:\s*"(.*)"\s*$', re.MULTILINE)
+H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
 
 def validate_markdown(root: Path) -> list[str]:
@@ -40,6 +42,10 @@ def validate_markdown(root: Path) -> list[str]:
                             f"{relative}: duplicate id {document_id} also in {ids[document_id]}"
                         )
                     ids[document_id] = str(relative)
+                title = TITLE_PATTERN.search(header)
+                heading = H1_PATTERN.search(parts[2])
+                if title is None or heading is None or title.group(1) != heading.group(1).strip():
+                    errors.append(f"{relative}: title does not match the H1")
 
         for target in LINK_PATTERN.findall(text):
             target = target.split("#", 1)[0]

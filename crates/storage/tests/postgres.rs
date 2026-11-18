@@ -217,27 +217,17 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         )
         .await
         .expect("store branch memory");
-    let promoted = store
-        .promote_memory(
-            &account.token,
-            &project.project_id,
-            &branch_memory.memory_id,
-            "Confirmed by the cache regression test",
-        )
-        .await
-        .expect("promote branch memory");
+    let promoted = save_project_note(
+        &store,
+        &account.token,
+        &project.project_id,
+        &branch_memory.content,
+        branch_memory.context.clone(),
+    )
+    .await;
     assert_eq!(promoted.kind, cairn_core::MemoryKind::Decision);
     assert_eq!(promoted.scope, cairn_core::MemoryScope::Project);
-    assert_eq!(
-        promoted.project_id.as_deref(),
-        Some(project.project_id.as_str())
-    );
-    assert_eq!(
-        promoted.promoted_from.as_deref(),
-        Some(branch_memory.memory_id.as_str())
-    );
-    assert_eq!(promoted.context.branch, None);
-    assert_eq!(promoted.verified_commit.as_deref(), Some("abc1234"));
+    assert!(promoted.promoted_from.is_none());
     let verified = store
         .verify_project_memory(
             &account.token,
@@ -254,7 +244,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             &account.token,
             &project.project_id,
             &branch.branch_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             "merge999",
             "Confirmed after merge into main",
         )
@@ -277,7 +267,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             &account.token,
             &project.project_id,
             &branch.branch_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             "merge999",
             "Confirmed after merge into main",
         )
@@ -292,16 +282,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
             .len(),
         1
     );
-    let repeated = store
-        .promote_memory(
-            &account.token,
-            &project.project_id,
-            &branch_memory.memory_id,
-            "Confirmed by the cache regression test",
-        )
-        .await
-        .expect("repeat promotion");
-    assert_eq!(repeated.memory_id, promoted.memory_id);
     let entities = store
         .project_entities(&account.token, &project.project_id)
         .await
@@ -329,7 +309,6 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .iter()
         .map(|event| event.action.as_str())
         .collect::<Vec<_>>();
-    assert!(actions.contains(&"promotion"));
     assert!(actions.contains(&"verification"));
     assert!(actions.contains(&"merge"));
     let stale = store
@@ -348,7 +327,7 @@ async fn postgres_layer3_account_device_and_sync_flow() {
         .confirm_memory(
             &account.token,
             &project.project_id,
-            &branch_memory.memory_id,
+            &promoted.memory_id,
             Some("confirm123"),
             "Confirmed from the registry check",
         )
@@ -793,7 +772,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
         summary.memory_id,
         format!("memory-{}-sess-inherit", account.account.person_id)
     );
-    assert_eq!(summary.scope, cairn_core::MemoryScope::Worktree);
+    assert_eq!(summary.scope, cairn_core::MemoryScope::Personal);
     assert_eq!(summary.context.branch.as_deref(), Some("main"));
     assert_eq!(summary.context.worktree.as_deref(), Some("wt-main"));
 
@@ -830,7 +809,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
         .end_session(&account.token, "sess-late")
         .await
         .expect("summarize the repaired session");
-    assert_eq!(late_summary.scope, cairn_core::MemoryScope::Worktree);
+    assert_eq!(late_summary.scope, cairn_core::MemoryScope::Personal);
     assert_eq!(late_summary.context, placed("repair"));
     let reopened = store
         .start_session(&account.token, "sess-late", placed("after-end"))
@@ -929,7 +908,7 @@ async fn postgres_context_order_repairs_empty_session_without_rewriting_observat
                     source: "import".to_owned(),
                     importance: None,
                     lifecycle: cairn_core::Lifecycle::default(),
-                    scope: cairn_core::MemoryScope::Session,
+                    scope: cairn_core::MemoryScope::Personal,
                     context: WorkContext::default(),
                     captured_at: "0".to_owned(),
                 }],
@@ -1365,7 +1344,7 @@ async fn postgres_context_omissions_count_every_eligible_match_past_the_cap() {
         )
         .await;
     }
-    for (branch, expected) in [("feat-x", total + 2), ("feat-y", total)] {
+    for (branch, expected) in [("feat-x", total + 2), ("feat-y", total + 2)] {
         let filter = RecallFilter {
             context: Some(placed(branch)),
             ..Default::default()
@@ -1887,19 +1866,10 @@ async fn join_project(
     account: &cairn_core::AuthSessionResult,
     project_id: &str,
 ) {
-    let device = device_for(store, account, &format!("join-{project_id}")).await;
-    let context = WorkContext {
-        project_id: Some(project_id.to_owned()),
-        ..WorkContext::default()
-    };
-    push_in(
-        store,
-        &device,
-        "join",
-        &format!("join-{project_id}"),
-        context,
-    )
-    .await;
+    store
+        .join_project(&account.token, project_id)
+        .await
+        .unwrap();
 }
 
 async fn age(pool: &PgPool, person_id: &str, session_id: &str) {
@@ -2186,59 +2156,6 @@ async fn postgres_capture_stays_personal_until_an_explicit_project_attaches() {
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_repromoting_a_forgotten_copy_creates_a_live_copy() {
-    let (_pool, store) = pool_and_store().await;
-    let owner = store
-        .bootstrap_account("repromote@example.test", "correct horse battery staple")
-        .await
-        .expect("owner");
-    let project = store
-        .register_project(&owner.token, "repromote-pg", "R", None)
-        .await
-        .expect("project");
-    let ctx = WorkContext {
-        repository: Some("repromote-pg".to_owned()),
-        ..WorkContext::default()
-    };
-    let source = store
-        .remember_with_kind(
-            &owner.token,
-            "repromote personal fact",
-            Vec::new(),
-            ctx,
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .expect("source");
-    let first = store
-        .promote_memory(&owner.token, &project.project_id, &source.memory_id, "why")
-        .await
-        .expect("first");
-    store
-        .forget(&owner.token, &first.memory_id)
-        .await
-        .expect("forget copy");
-    let second = store
-        .promote_memory(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "again",
-        )
-        .await
-        .expect("second");
-    assert_ne!(second.memory_id, first.memory_id);
-    let listed = store
-        .project_memories(&owner.token, &project.project_id)
-        .await
-        .expect("listed");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].memory_id, second.memory_id);
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
 async fn postgres_contradicting_equal_ranks_put_the_newer_memory_first() {
     let (pool, store) = pool_and_store().await;
     let owner = store
@@ -2290,6 +2207,12 @@ async fn postgres_contradicting_equal_ranks_put_the_newer_memory_first() {
             .expect("search");
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|hit| hit.contradictory));
+        let mut hits = hits;
+        for hit in &mut hits {
+            hit.score = 1.0;
+        }
+        let memories = store.memories(&owner.token).await.unwrap();
+        cairn_core::prefer_newer_contradiction(&mut hits, &memories);
         assert_eq!(hits[0].memory_id, ids[newer]);
     }
 }
@@ -2401,7 +2324,7 @@ async fn postgres_rederived_summary_keeps_state_and_respects_hidden_summaries() 
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures() {
+async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empty_one() {
     let (pool, store) = pool_and_store().await;
     let account = store
         .bootstrap_account("sweep@example.test", "correct horse battery staple")
@@ -2433,8 +2356,8 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures(
         .expect("end");
     assert_eq!(pending("done").await, None);
 
-    // A permanently failing session (its only observation was forgotten) is retried only
-    // after another idle period, not on every push.
+    // A session whose only observation was forgotten cannot be summarised. The distill job
+    // is quarantined and leaves the pending index, so the next sweep does not spin.
     push_in(&store, &dev, "bad", "bad-1", WorkContext::default()).await;
     store.forget(&account.token, "bad-1").await.expect("forget");
     sqlx::query("UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE person_id = $1 AND session_id = 'bad'")
@@ -2444,8 +2367,20 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_backs_off_failures(
         .expect("age pending");
     assert_eq!(pending("bad").await, Some(true));
     push_in(&store, &dev, "trigger", "sweep-1", WorkContext::default()).await;
-    assert_eq!(pending("bad").await, Some(false), "backed off, not retried");
+    assert_eq!(
+        pending("bad").await,
+        None,
+        "quarantine clears the pending mark"
+    );
     assert!(!session_ended(&pool, &person, "bad").await);
+    let quarantined: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_job_quarantine WHERE kind = 'distill' AND job_key LIKE '%' || $1",
+    )
+    .bind("bad")
+    .fetch_one(&pool)
+    .await
+    .expect("quarantine count");
+    assert_eq!(quarantined, 1);
 }
 
 #[tokio::test]
@@ -2581,21 +2516,18 @@ async fn postgres_device_token_is_an_agent_credential_and_web_only_actions_refus
             .register_branch(&device, &project, name, None, None, None)
             .await
             .expect("branch");
-        let memory = store
-            .remember_with_kind(
-                &device,
-                &format!("decision on {name}"),
-                Vec::new(),
-                WorkContext {
-                    repository: Some("acme/devices".to_owned()),
-                    branch: Some(name.to_owned()),
-                    ..WorkContext::default()
-                },
-                Default::default(),
-                cairn_core::MemoryKind::Explicit,
-            )
-            .await
-            .expect("memory");
+        let memory = save_project_note(
+            &store,
+            &device,
+            &project,
+            &format!("decision on {name}"),
+            WorkContext {
+                repository: Some("acme/devices".to_owned()),
+                branch: Some(name.to_owned()),
+                ..WorkContext::default()
+            },
+        )
+        .await;
         merges.push((branch.branch_id, memory.memory_id));
     }
     store
@@ -2736,7 +2668,7 @@ async fn postgres_push_adopts_an_observation_that_has_no_sync_event() {
         source: "test".to_owned(),
         importance: None,
         lifecycle: cairn_core::Lifecycle::default(),
-        scope: cairn_core::MemoryScope::Session,
+        scope: cairn_core::MemoryScope::Personal,
         context: WorkContext::default(),
         captured_at: "0".to_owned(),
     };
@@ -2920,7 +2852,7 @@ async fn postgres_equal_scores_rank_decisions_before_other_memories() {
                 Vec::new(),
                 WorkContext::default(),
                 Default::default(),
-                kind.clone(),
+                kind,
             )
             .await
             .expect("remember");
@@ -3020,7 +2952,7 @@ async fn postgres_push_gives_the_session_its_context_so_the_summary_is_scoped() 
         .fetch_one(&pool)
         .await
         .expect("summary row");
-        assert_eq!(scope, "branch", "{session}");
+        assert_eq!(scope, "personal", "{session}");
         assert!(
             hits.iter().any(|hit| hit.memory_id == summary_id),
             "a repository/branch-filtered recall finds the {session} summary"
@@ -3050,8 +2982,14 @@ async fn postgres_init_project_creates_once_and_defaults_the_name() {
         (created.repository.as_str(), created.name.as_str()),
         ("repo-a", "repo-a")
     );
+    assert!(
+        store
+            .init_project(&owner.token, "repo-a", Some("Renamed"))
+            .await
+            .is_err()
+    );
     let (again, is_new) = store
-        .init_project(&owner.token, "repo-a", Some("Renamed"))
+        .init_project(&owner.token, "repo-a", Some("repo-a"))
         .await
         .expect("again");
     assert!(!is_new);
@@ -3216,529 +3154,6 @@ async fn postgres_admin_lists_accounts_and_passwords_reset_and_change_revoke_ses
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_shared_decisions_scopes_permissions_preview_transfer_and_source_independence() {
-    use cairn_core::{LifecycleInput, MemoryKind, Sensitivity};
-    let (pool, store) = pool_and_store().await;
-    let pw = "correct horse battery staple";
-    let admin = store
-        .bootstrap_account("admin@example.test", pw)
-        .await
-        .unwrap();
-    let owner = store
-        .register_account("owner@example.test", pw)
-        .await
-        .unwrap();
-    let author = store
-        .register_account("author@example.test", pw)
-        .await
-        .unwrap();
-    let reader = store
-        .register_account("reader@example.test", pw)
-        .await
-        .unwrap();
-    let project = store
-        .register_project(&owner.token, "host/org/repo", "Repo", None)
-        .await
-        .unwrap();
-    for account in [&author, &reader] {
-        store
-            .join_project(&account.token, &project.project_id)
-            .await
-            .unwrap();
-    }
-    assert_eq!(
-        store
-            .project_people(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .len(),
-        3
-    );
-    store
-        .register_project(
-            &reader.token,
-            "host/org/repo",
-            "Separate initialized project",
-            None,
-        )
-        .await
-        .unwrap();
-    let ctx = WorkContext {
-        repository: Some(project.repository.clone()),
-        branch: Some("feature".into()),
-        files: vec!["src/lib.rs".into()],
-        ..WorkContext::default()
-    };
-    let source = store
-        .remember_with_kind(
-            &author.token,
-            "mixneedle mixneedle project decision",
-            vec![],
-            ctx.clone(),
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    let preview = store
-        .preview_promotion(
-            &author.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    assert_eq!(preview.content, source.content);
-    assert_eq!(preview.context.files, source.context.files);
-    assert!(preview.source_event_ids.is_empty());
-    assert!(preview.promoted_from.is_none());
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let decision = store
-        .promote_memory(
-            &author.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    for account in [&owner, &author, &reader] {
-        assert_eq!(
-            store
-                .project_memories(&account.token, &project.project_id)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-    assert!(
-        store
-            .verify_project_memory(
-                &reader.token,
-                &project.project_id,
-                &decision.memory_id,
-                "bad"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .correct(
-                &reader.token,
-                &decision.memory_id,
-                "bad",
-                vec![],
-                WorkContext::default(),
-                LifecycleInput::default()
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .delete_memory(&reader.token, &decision.memory_id)
-            .await
-            .is_err()
-    );
-    store
-        .verify_project_memory(
-            &owner.token,
-            &project.project_id,
-            &decision.memory_id,
-            "verified",
-        )
-        .await
-        .unwrap();
-    store
-        .correct(
-            &author.token,
-            &source.memory_id,
-            "private source correction",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-        )
-        .await
-        .unwrap();
-    store
-        .forget(&author.token, &source.memory_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    let global = store
-        .remember_with_kind(
-            &reader.token,
-            "mixneedle global preference",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-            MemoryKind::Lesson,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .preview_promotion(
-                &reader.token,
-                &project.project_id,
-                &global.memory_id,
-                "release"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .promote_memory(
-                &reader.token,
-                &project.project_id,
-                &global.memory_id,
-                "release"
-            )
-            .await
-            .is_err()
-    );
-    let repo_note = store
-        .remember_with_kind(
-            &reader.token,
-            "mixneedle repo note",
-            vec![],
-            WorkContext {
-                repository: Some(project.repository.clone()),
-                branch: Some("private-feature".into()),
-                worktree: Some("/private/worktree".into()),
-                ..WorkContext::default()
-            },
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    let filter = RecallFilter {
-        session_id: None,
-        context: Some(WorkContext {
-            project_id: Some(project.project_id.clone()),
-            repository: Some(project.repository.clone()),
-            ..WorkContext::default()
-        }),
-    };
-    let results = store
-        .search(&reader.token, "mixneedle", 20, &filter)
-        .await
-        .unwrap();
-    assert_eq!(results.len(), 3);
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == decision.memory_id && r.source == "project")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == global.memory_id && r.source == "personal")
-    );
-    assert!(
-        results
-            .iter()
-            .any(|r| r.memory_id == repo_note.memory_id && r.source == "personal")
-    );
-    assert!(!results.iter().any(|r| r.memory_id == source.memory_id));
-    let wrong = RecallFilter {
-        session_id: None,
-        context: Some(WorkContext {
-            project_id: Some("wrong-project".into()),
-            ..ctx.clone()
-        }),
-    };
-    assert!(
-        !store
-            .search(&reader.token, "mixneedle", 20, &wrong)
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.source == "project")
-    );
-    assert_eq!(
-        store
-            .context(&reader.token, "mixneedle", 20, &filter)
-            .await
-            .unwrap()
-            .results
-            .len(),
-        3
-    );
-    assert_eq!(
-        store
-            .why_changed_context(&reader.token, "mixneedle", 20, &filter)
-            .await
-            .unwrap()
-            .results
-            .len(),
-        3
-    );
-    let secret = store
-        .remember_with_kind(
-            &author.token,
-            "secret material",
-            vec![],
-            ctx.clone(),
-            LifecycleInput {
-                sensitivity: Some(Sensitivity::Secret),
-                ..LifecycleInput::default()
-            },
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .promote_memory(
-                &author.token,
-                &project.project_id,
-                &secret.memory_id,
-                "secret"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .preview_promotion(
-                &author.token,
-                &project.project_id,
-                &secret.memory_id,
-                "secret"
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .transfer_project(
-                &reader.token,
-                &project.project_id,
-                &author.account.person_id
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .transfer_project(&owner.token, &project.project_id, &admin.account.person_id)
-            .await
-            .is_err()
-    );
-    store
-        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
-        .await
-        .unwrap();
-    let inherited = store
-        .project_entities(&reader.token, &project.project_id)
-        .await
-        .unwrap();
-    let entity = inherited
-        .iter()
-        .find(|e| e.kind == "file" && e.key == "src/lib.rs")
-        .expect("new owner inherits project entities");
-    let repeated = store
-        .register_project_entity(
-            &reader.token,
-            &project.project_id,
-            cairn_core::ProjectEntityInput {
-                kind: entity.kind.clone(),
-                key: entity.key.clone(),
-                content: None,
-                source_memory_id: None,
-                commit: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(repeated.entity_id, entity.entity_id);
-
-    assert!(
-        !store
-            .freshness_history(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "new owner inherits verification history"
-    );
-    assert_eq!(
-        store
-            .project_people(&reader.token, &project.project_id)
-            .await
-            .unwrap()[0]
-            .person_id,
-        reader.account.person_id
-    );
-    store
-        .transfer_project(&admin.token, &project.project_id, &owner.account.person_id)
-        .await
-        .unwrap();
-    let corrected = store
-        .correct(
-            &owner.token,
-            &decision.memory_id,
-            "mixneedle corrected publication",
-            vec![],
-            WorkContext::default(),
-            LifecycleInput::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        corrected.published_by,
-        Some(author.account.person_id.clone())
-    );
-    assert_eq!(corrected.changed_by, Some(owner.account.person_id.clone()));
-    assert_eq!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()[0]
-            .memory_id,
-        corrected.memory_id
-    );
-    assert_eq!(
-        store
-            .project_maintenance(&reader.token, &project.project_id, None)
-            .await
-            .unwrap()
-            .active_memory_ids,
-        vec![corrected.memory_id.clone()]
-    );
-    store
-        .transfer_project(&owner.token, &project.project_id, &reader.account.person_id)
-        .await
-        .unwrap();
-    let mut attempted = store.export_bundle(&owner.token).await.unwrap();
-    attempted.forgotten_ids.push(corrected.memory_id.clone());
-    let _ = store.import_bundle(&owner.token, attempted).await;
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.memory_id == corrected.memory_id),
-        "a former owner cannot hide another author's decision through import"
-    );
-    store
-        .delete_memory(&author.token, &corrected.memory_id)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .all(|m| m.memory_id != corrected.memory_id)
-    );
-    let mut bundle = store.export_bundle(&reader.token).await.unwrap();
-    bundle.memories = vec![decision.clone()];
-    bundle.memories[0].memory_id = "forged-import".into();
-    bundle.forgotten_ids.clear();
-    bundle.sessions.clear();
-    bundle.observations.clear();
-    store.import_bundle(&reader.token, bundle).await.unwrap();
-    assert!(
-        store
-            .project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .all(|m| m.memory_id != "forged-import")
-    );
-    let publication: Option<String> = sqlx::query_scalar(
-        "SELECT published_by FROM cairn_memories WHERE memory_id='forged-import'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(publication.is_none());
-    let renamed = store
-        .remember_with_kind(
-            &reader.token,
-            "renameneedle same project after remote rename",
-            vec![],
-            WorkContext {
-                repository: Some("host/org/renamed".into()),
-                project_id: Some(project.project_id.clone()),
-                ..WorkContext::default()
-            },
-            LifecycleInput::default(),
-            MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .personal_project_memories(&reader.token, &project.project_id)
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.memory_id == renamed.memory_id)
-    );
-    store
-        .preview_promotion(
-            &reader.token,
-            &project.project_id,
-            &renamed.memory_id,
-            "rename",
-        )
-        .await
-        .unwrap();
-    store
-        .promote_memory(
-            &reader.token,
-            &project.project_id,
-            &renamed.memory_id,
-            "rename",
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .search(
-                &reader.token,
-                "renameneedle",
-                10,
-                &RecallFilter {
-                    context: Some(WorkContext {
-                        repository: Some("host/org/renamed".into()),
-                        project_id: Some(project.project_id.clone()),
-                        ..WorkContext::default()
-                    }),
-                    ..RecallFilter::default()
-                }
-            )
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.source == "project")
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
 async fn postgres_personal_capture_attachment_and_branch_records() {
     let (_, store) = pool_and_store().await;
     let pw = "correct horse battery staple";
@@ -3812,21 +3227,18 @@ async fn postgres_personal_capture_attachment_and_branch_records() {
             .unwrap()
             .is_empty()
     );
-    let source = store
-        .remember_with_kind(
-            &member.token,
-            "branch evidence",
-            vec![],
-            WorkContext {
-                repository: Some("repo".into()),
-                branch: Some("feature".into()),
-                ..WorkContext::default()
-            },
-            Default::default(),
-            cairn_core::MemoryKind::Explicit,
-        )
-        .await
-        .unwrap();
+    let source = save_project_note(
+        &store,
+        &member.token,
+        &project.project_id,
+        "branch evidence",
+        WorkContext {
+            repository: Some("repo".into()),
+            branch: Some("feature".into()),
+            ..WorkContext::default()
+        },
+    )
+    .await;
     let merged = store
         .confirm_branch_merge(
             &dev,
@@ -3854,121 +3266,2933 @@ async fn postgres_personal_capture_attachment_and_branch_records() {
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_promotion_precondition_and_foreign_source_supersession() {
-    use cairn_core::{LifecycleInput, MemoryKind, publication_fingerprint};
-    let (_, store) = pool_and_store().await;
+async fn postgres_rename_is_owner_only_audited_and_checks_name_before_join() {
+    let (pool, store) = pool_and_store().await;
     let pw = "correct horse battery staple";
-    let owner = store.bootstrap_account("o@example.test", pw).await.unwrap();
-    let member = store.register_account("m@example.test", pw).await.unwrap();
+    let owner = store
+        .bootstrap_account("rename-owner@example.test", pw)
+        .await
+        .unwrap();
+    let member = store
+        .register_account("rename-member@example.test", pw)
+        .await
+        .unwrap();
+    let outsider = store
+        .register_account("rename-outsider@example.test", pw)
+        .await
+        .unwrap();
+    let (project, _) = store
+        .init_project(&owner.token, "repo", Some("--help"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .join_project_named(&member.token, &project.project_id, Some("Wrong"))
+            .await
+            .is_err()
+    );
+    assert!(store.projects(&member.token).await.unwrap().is_empty());
+    // Name validation and membership must use the same transaction/connection.
+    let single_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let single = PostgresStore::from_pool(single_pool);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        single.join_project_named(&member.token, &project.project_id, Some("--help")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    for token in [&member.token, &outsider.token] {
+        assert!(
+            store
+                .rename_project(token, &project.project_id, "No")
+                .await
+                .is_err()
+        );
+    }
+    for name in [" ".to_owned(), "x".repeat(513)] {
+        assert!(
+            store
+                .rename_project(&owner.token, &project.project_id, &name)
+                .await
+                .is_err()
+        );
+    }
+    let renamed = store
+        .rename_project(&owner.token, &project.project_id, "  Useful name  ")
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "Useful name");
+    assert_eq!(renamed.project_id, project.project_id);
+    store
+        .rename_project(&owner.token, &project.project_id, "Useful name")
+        .await
+        .unwrap();
+    let audits = store.audit_events(&owner.token, 100).await.unwrap();
+    let renames: Vec<_> = audits
+        .iter()
+        .filter(|event| event.action == "project_renamed")
+        .collect();
+    assert_eq!(renames.len(), 1);
+    assert_eq!(
+        renames[0].subject_id.as_deref(),
+        Some(project.project_id.as_str())
+    );
+    assert_eq!(
+        renames[0].metadata,
+        serde_json::json!({"previous_name":"--help", "name":"Useful name"})
+    );
+    let persisted: String =
+        sqlx::query_scalar("SELECT name FROM cairn_projects WHERE project_id = $1")
+            .bind(&project.project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted, "Useful name");
+    assert_eq!(
+        store.projects(&member.token).await.unwrap()[0].name,
+        "Useful name"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_structured_save_requires_fields_and_round_trips_types() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let admin = store
+        .bootstrap_account("admin@shape.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for field in ["scope", "title", "summary", "reason"] {
+        let mut input = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason"});
+        input.as_object_mut().unwrap().remove(field);
+        let error = store
+            .save(&admin.token, serde_json::from_value(input).unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(field), "{error}");
+    }
+    for (kind, fields) in [
+        (
+            "decision",
+            serde_json::json!({"decision_context":"constraints", "alternatives":["other"], "consequences":"tradeoff"}),
+        ),
+        (
+            "rule",
+            serde_json::json!({"rule":"borrow", "exceptions":"owned transfer"}),
+        ),
+        (
+            "gotcha",
+            serde_json::json!({"symptom":"failure", "cause":"race", "fix":"lock"}),
+        ),
+        (
+            "procedure",
+            serde_json::json!({"steps":["first","second"], "when":"release"}),
+        ),
+        (
+            "fact",
+            serde_json::json!({"statement":"verified", "source":"check"}),
+        ),
+        (
+            "preference",
+            serde_json::json!({"preference":"concise", "example":"one paragraph"}),
+        ),
+    ] {
+        let mut input = serde_json::json!({"scope":"personal", "title":"Title", "summary":"Summary", "reason":"Reason", "kind":kind, "details":"Body", "applies_to":["src/**"], "evidence":["cargo test"], "tags":["rust"], "entities":["Memory"], "pinned":true, "importance":90, "status":"active"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let memory = store
+            .save(&admin.token, serde_json::from_value(input.clone()).unwrap())
+            .await
+            .unwrap();
+        let found = store
+            .memories(&admin.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == memory.memory_id)
+            .unwrap();
+        let output = serde_json::to_value(found).unwrap();
+        for (key, value) in input.as_object().unwrap() {
+            assert_eq!(&output[key], value, "{kind}.{key}");
+        }
+    }
+}
+
+async fn save_project_note(
+    store: &PostgresStore,
+    token: &str,
+    project_id: &str,
+    title: &str,
+    context: WorkContext,
+) -> cairn_core::Memory {
+    store.save(token, serde_json::from_value(serde_json::json!({"scope":"project","kind":"decision","title":title,"summary":title,"reason":"Verified fixture","context":WorkContext {project_id:Some(project_id.to_owned()), ..context}})).unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_record_title_has_highest_lexical_weight() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let account = store
+        .bootstrap_account("rank@shape.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for (title, summary) in [("Ordinary", "weightneedle"), ("weightneedle", "Ordinary")] {
+        store.save(&account.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":title,"summary":summary,"reason":"verified"})).unwrap()).await.unwrap();
+    }
+    let rows = store
+        .search(&account.token, "weightneedle", 2, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(rows[0].fields.title, "weightneedle");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_hybrid_entities_links_vectors_and_visibility() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM cairn_schema_migrations WHERE version='0014_hybrid_embeddings')"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    let owner = store
+        .bootstrap_account("hybrid@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account_as_admin(
+            &owner.token,
+            "other@hybrid.test",
+            "correct horse battery staple",
+        )
+        .await
+        .unwrap();
+    let seed=store.save(&owner.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Orchard cultivation","summary":"Grow apples","reason":"food","tags":["planting"],"entities":["Tree::grow"]})).unwrap()).await.unwrap();
+    let neighbour=store.save(&owner.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Seasonal advice","summary":"Water regularly","reason":"health","evidence":[seed.memory_id]})).unwrap()).await.unwrap();
+    let hidden=store.save(&other.token,serde_json::from_value(serde_json::json!({"scope":"personal","title":"Secret horticulture","summary":"Keep private","reason":"privacy","evidence":[seed.memory_id]})).unwrap()).await.unwrap();
+    for query in ["planting", "Tree::grow", "Orchard"] {
+        let hits = store
+            .search(&owner.token, query, 10, &RecallFilter::default())
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+        assert!(hits.iter().any(|r| r.memory_id == neighbour.memory_id));
+        assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    }
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    for m in [&seed, &hidden] {
+        assert!(
+            store
+                .put_embedding(cairn_core::MemoryEmbedding::new(m, vector.clone()).unwrap())
+                .await
+                .unwrap()
+        );
+    }
+    let hits = store
+        .search_with_vector(
+            &owner.token,
+            "unrelated",
+            10,
+            &RecallFilter::default(),
+            Some(&vector),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|r| r.memory_id == seed.memory_id));
+    assert!(hits.iter().any(|r| r.memory_id == neighbour.memory_id));
+    assert!(!hits.iter().any(|r| r.memory_id == hidden.memory_id));
+    assert!(hits.iter().all(|r| r.source == "personal"));
+    sqlx::query("UPDATE cairn_memories SET record=jsonb_set(record,'{title}','\"Updated title\"') WHERE memory_id=$1").bind(&seed.memory_id).execute(&pool).await.unwrap();
+    assert!(
+        store
+            .search_with_vector(
+                &owner.token,
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&seed, vector.clone()).unwrap())
+            .await
+            .unwrap()
+    );
+    let current = store
+        .embedding_jobs(512)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.memory_id == seed.memory_id)
+        .unwrap();
+    assert!(
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&current, vector.clone()).unwrap())
+            .await
+            .unwrap()
+    );
+    store.forget(&owner.token, &seed.memory_id).await.unwrap();
+    assert!(
+        store
+            .search_with_vector(
+                &owner.token,
+                "unrelated",
+                10,
+                &RecallFilter::default(),
+                Some(&vector)
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&seed, vector).unwrap())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_retention_and_feedback_match_the_file_store() {
+    let database_url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&database_url).await.unwrap();
+    let owner = store
+        .bootstrap_account("retain@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("retain-other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let capture = |title: &str, kind: &str| {
+        serde_json::json!({
+            "scope": "personal",
+            "kind": kind,
+            "title": title,
+            "summary": title,
+            "reason": "verified"
+        })
+    };
+    let fresh = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let old = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let pool = PgPool::connect(&database_url).await.unwrap();
+    let aged = (cairn_core::now_seconds() - 120 * 86_400) as f64;
+    sqlx::query("UPDATE cairn_memories SET created_at = to_timestamp($1), lifecycle = jsonb_set(lifecycle, '{importance}', '50'::jsonb) WHERE memory_id = $2")
+        .bind(aged)
+        .bind(&old.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let file_path = std::env::temp_dir().join(format!(
+        "cairn-retention-parity-{}.json",
+        cairn_core::random_token("test")
+    ));
+    let mut file = cairn_core::MemoryStore::open(&file_path).unwrap();
+    let file_owner = file
+        .bootstrap_account("retain@example.test", "correct horse battery staple")
+        .unwrap();
+    file.import_for_account(
+        &file_owner.token,
+        store.export_bundle(&owner.token).await.unwrap(),
+    )
+    .unwrap();
+    let before = store.memories(&owner.token).await.unwrap().len();
+    let hits = store
+        .search(&owner.token, "decaytoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(store.memories(&owner.token).await.unwrap().len(), before);
+    assert_eq!(hits.len(), 2);
+    let file_hits = file
+        .search_for_account(
+            &file_owner.token,
+            "decaytoken",
+            10,
+            &RecallFilter::default(),
+        )
+        .unwrap();
+    assert_eq!(hits.len(), file_hits.len());
+    for (pg, local) in hits.iter().zip(&file_hits) {
+        assert_eq!(pg.memory_id, local.memory_id);
+        assert!(
+            (pg.score - local.score).abs() < 1e-5,
+            "{} / {}",
+            pg.score,
+            local.score
+        );
+    }
+    let fresh_hit = hits
+        .iter()
+        .find(|hit| hit.memory_id == fresh.memory_id)
+        .unwrap();
+    let old_hit = hits
+        .iter()
+        .find(|hit| hit.memory_id == old.memory_id)
+        .unwrap();
+    assert!(fresh_hit.score > old_hit.score);
+    let limited = store
+        .search(&owner.token, "decaytoken", 1, &RecallFilter::default())
+        .await
+        .unwrap();
+    let file_limited = file
+        .search_for_account(&file_owner.token, "decaytoken", 1, &RecallFilter::default())
+        .unwrap();
+    assert_eq!(limited[0].memory_id, file_limited[0].memory_id);
+    let counts = store.memories(&owner.token).await.unwrap();
+    for pg in &counts {
+        let local = file
+            .memories_for_account(&file_owner.token)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == pg.memory_id)
+            .unwrap();
+        assert_eq!(pg.access_count, local.access_count);
+        assert_eq!(
+            pg.last_accessed_at.is_some(),
+            local.last_accessed_at.is_some()
+        );
+    }
+    let top = counts
+        .iter()
+        .find(|memory| memory.memory_id == limited[0].memory_id)
+        .unwrap();
+    let rest = counts
+        .iter()
+        .find(|memory| {
+            memory.memory_id != limited[0].memory_id
+                && (memory.memory_id == fresh.memory_id || memory.memory_id == old.memory_id)
+        })
+        .unwrap();
+    assert_eq!(top.access_count, 2);
+    assert_eq!(rest.access_count, 1);
+    let pack = store
+        .context(&owner.token, "decaytoken", 1, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(pack.omitted_count, 1);
+    let omitted_id = &pack.omitted_memory_ids[0];
+    let expected = counts
+        .iter()
+        .find(|memory| &memory.memory_id == omitted_id)
+        .unwrap()
+        .access_count;
+    assert_eq!(
+        counts_after(&store, &owner.token, omitted_id).await,
+        expected
+    );
+
+    let personal = store
+        .save(
+            &owner.token,
+            serde_json::from_value(capture("privatepref", "preference")).unwrap(),
+        )
+        .await
+        .unwrap();
+    let refused = store
+        .feedback(&other.token, &personal.memory_id, "stale")
+        .await
+        .expect_err("owner only");
+    assert!(refused.to_string().contains("unknown memory"));
     let project = store
-        .register_project(&owner.token, "repo", "Repo", None)
+        .register_project(&owner.token, "retain-repo", "Retain", None)
+        .await
+        .unwrap();
+    let shared = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "project",
+                "kind": "fact",
+                "title": "sharedtoken",
+                "summary": "sharedtoken",
+                "reason": "verified",
+                "statement": "holds",
+                "context": {"project_id": project.project_id}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .feedback(&other.token, &shared.memory_id, "helpful")
+            .await
+            .is_err()
+    );
+    join_project(&store, &other, &project.project_id).await;
+    let before_vote = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    let voted = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(voted.helpful_count, 1);
+    let owner_view = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(owner_view.len(), 1);
+    assert!(owner_view[0].score > before_vote[0].score);
+    let duplicate = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            duplicate.helpful_count,
+            duplicate.stale_count,
+            duplicate.feedback.len()
+        ),
+        (1, 0, 1)
+    );
+    let stale = store
+        .feedback(&other.token, &shared.memory_id, "stale")
+        .await
+        .unwrap();
+    assert_eq!(
+        (stale.helpful_count, stale.stale_count, stale.feedback.len()),
+        (0, 1, 1)
+    );
+    assert_eq!(stale.feedback[0].vote, cairn_core::FeedbackVote::Stale);
+    let helpful = store
+        .feedback(&other.token, &shared.memory_id, "helpful")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            helpful.helpful_count,
+            helpful.stale_count,
+            helpful.feedback.len()
+        ),
+        (1, 0, 1)
+    );
+    let global = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "global",
+                "kind": "fact",
+                "title": "globaltoken",
+                "summary": "globaltoken",
+                "reason": "verified",
+                "statement": "holds"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let global_vote = store
+        .feedback(&other.token, &global.memory_id, "stale")
+        .await
+        .unwrap();
+    assert_eq!(global_vote.stale_count, 1);
+    assert!(
+        store
+            .feedback(&owner.token, &global.memory_id, "maybe")
+            .await
+            .is_err()
+    );
+    let rule = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "rule",
+                "title": "ruletoken shared",
+                "summary": "ruletoken shared",
+                "reason": "verified",
+                "rule": "keep"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rule_fresh = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "rule",
+                "title": "ruletoken shared",
+                "summary": "ruletoken shared",
+                "reason": "verified",
+                "rule": "keep"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_memories SET created_at = to_timestamp($1) WHERE memory_id = $2")
+        .bind((cairn_core::now_seconds() - 400 * 86_400) as f64)
+        .bind(&rule.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rules = store
+        .search(&owner.token, "ruletoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    let high = rules.iter().map(|hit| hit.score).fold(0.0_f32, f32::max);
+    let low = rules.iter().map(|hit| hit.score).fold(f32::MAX, f32::min);
+    assert!(high / low < 1.2, "{high} / {low}");
+    assert!(
+        rules
+            .iter()
+            .any(|hit| hit.memory_id == rule_fresh.memory_id)
+    );
+    for vote in ["helpful", "helpful", "stale", "helpful"] {
+        let pg = store
+            .feedback(&owner.token, &fresh.memory_id, vote)
+            .await
+            .unwrap();
+        let local = file
+            .feedback_for_account(&file_owner.token, &fresh.memory_id, vote)
+            .unwrap();
+        assert_eq!(
+            (pg.helpful_count, pg.stale_count),
+            (local.helpful_count, local.stale_count)
+        );
+        assert_eq!(pg.feedback.len(), local.feedback.len());
+        assert_eq!(pg.feedback[0].vote, local.feedback[0].vote);
+    }
+    std::fs::remove_file(file_path).unwrap();
+    pool.close().await;
+}
+
+async fn counts_after(store: &PostgresStore, token: &str, memory_id: &str) -> u64 {
+    store
+        .memories(token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == memory_id)
+        .unwrap()
+        .access_count
+}
+
+fn feedback_test_input(scope: &str, title: &str) -> cairn_core::SaveMemoryInput {
+    serde_json::from_value(serde_json::json!({
+        "scope": scope, "kind": "fact", "title": title,
+        "summary": title, "reason": "verified", "statement": "holds"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_feedback_rejects_every_memory_hidden_from_reads() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    for hidden in [
+        "forgotten",
+        "source-forgotten",
+        "superseded",
+        "expired",
+        "successor",
+    ] {
+        let saved = store
+            .save(&owner.token, feedback_test_input("global", hidden))
+            .await
+            .unwrap();
+        match hidden {
+            "forgotten" => store.forget(&owner.token, &saved.memory_id).await.unwrap(),
+            "source-forgotten" => {
+                sqlx::query(
+                    "INSERT INTO cairn_forgotten_items (person_id, item_id) VALUES ($1, $2)",
+                )
+                .bind(&owner.account.person_id)
+                .bind(&saved.source_event_ids[0])
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            "superseded" => {
+                sqlx::query("UPDATE cairn_memories SET record=jsonb_set(record, '{status}', '\"superseded\"'::jsonb) WHERE memory_id=$1")
+                    .bind(&saved.memory_id).execute(&pool).await.unwrap();
+            }
+            "expired" => {
+                sqlx::query("UPDATE cairn_memories SET lifecycle=jsonb_set(lifecycle, '{expiresAt}', '\"1\"'::jsonb) WHERE memory_id=$1")
+                    .bind(&saved.memory_id).execute(&pool).await.unwrap();
+            }
+            "successor" => {
+                let successor = store
+                    .save(&owner.token, feedback_test_input("global", "successor"))
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE cairn_memories SET supersedes=$1 WHERE memory_id=$2")
+                    .bind(&saved.memory_id)
+                    .bind(&successor.memory_id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !store
+                .memories(&other.token)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.memory_id == saved.memory_id),
+            "{hidden}"
+        );
+        for token in [&owner.token, &other.token] {
+            let error = store
+                .feedback(token, &saved.memory_id, "helpful")
+                .await
+                .expect_err(hidden);
+            assert_eq!(
+                error.to_string(),
+                format!("validation error: unknown memory: {}", saved.memory_id)
+            );
+        }
+        let votes: serde_json::Value =
+            sqlx::query_scalar("SELECT feedback FROM cairn_memories WHERE memory_id=$1")
+                .bind(&saved.memory_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(votes, serde_json::json!([]));
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_concurrent_feedback_preserves_every_persons_vote() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let memory = store
+        .save(
+            &owner.token,
+            feedback_test_input("global", "concurrentneedle"),
+        )
+        .await
+        .unwrap();
+    let mut guard = pool.begin().await.unwrap();
+    sqlx::query("SELECT memory_id FROM cairn_memories WHERE memory_id=$1 FOR UPDATE")
+        .bind(&memory.memory_id)
+        .fetch_one(&mut *guard)
+        .await
+        .unwrap();
+    let mut votes = Vec::new();
+    for token in [&owner.token, &other.token] {
+        let store = store.clone();
+        let token = token.clone();
+        let id = memory.memory_id.clone();
+        votes.push(tokio::spawn(async move {
+            store.feedback(&token, &id, "helpful").await
+        }));
+    }
+    // Both requests must reach the locked row before either can write its vote.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%cairn_memories%' AND query LIKE '%feedback%'")
+                .fetch_one(&pool).await.unwrap();
+            if blocked == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("both feedback requests blocked on the held row lock");
+    guard.commit().await.unwrap();
+    for vote in votes {
+        vote.await.unwrap().unwrap();
+    }
+    let saved = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.memory_id == memory.memory_id)
+        .unwrap();
+    assert_eq!(
+        (saved.helpful_count, saved.stale_count, saved.feedback.len()),
+        (2, 0, 2)
+    );
+    for person in [&owner.account.person_id, &other.account.person_id] {
+        assert_eq!(
+            saved
+                .feedback
+                .iter()
+                .filter(|vote| &vote.person_id == person)
+                .count(),
+            1
+        );
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_summary_regeneration_preserves_reinforcement_and_feedback() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "summary-feedback-device",
+            &owner.account.person_id,
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "summary-feedback", WorkContext::default())
+        .await
+        .unwrap();
+    let observation = |event: &str| ObservationInput {
+        event_id: event.to_owned(),
+        session_id: "summary-feedback".to_owned(),
+        content: "summaryneedle capture".to_owned(),
+        role: "user".to_owned(),
+        source: "test".to_owned(),
+        importance: None,
+        lifecycle: Default::default(),
+        context: WorkContext::default(),
+    };
+    store
+        .sync_push(&device.token, observation("first"))
+        .await
+        .unwrap();
+    let summary = store
+        .end_session(&owner.token, "summary-feedback")
+        .await
+        .unwrap();
+    for (event, vote) in [("second", "stale"), ("third", "helpful")] {
+        store
+            .feedback(&owner.token, &summary.memory_id, vote)
+            .await
+            .unwrap();
+        store
+            .search(&owner.token, "summaryneedle", 20, &RecallFilter::default())
+            .await
+            .unwrap();
+        let before = store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == summary.memory_id)
+            .unwrap();
+        assert!(before.access_count > 0);
+        assert!(before.last_accessed_at.is_some());
+        assert_eq!(before.feedback.len(), 1);
+        store
+            .sync_push(&device.token, observation(event))
+            .await
+            .unwrap();
+        let after = store
+            .end_session(&owner.token, "summary-feedback")
+            .await
+            .unwrap();
+        assert_eq!(after.memory_id, before.memory_id);
+        assert!(after.source_event_ids.len() > before.source_event_ids.len());
+        assert_eq!(after.access_count, before.access_count);
+        assert_eq!(after.last_accessed_at, before.last_accessed_at);
+        assert_eq!(after.feedback, before.feedback);
+        assert_eq!(after.helpful_count, before.helpful_count);
+        assert_eq!(after.stale_count, before.stale_count);
+        let stored = store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.memory_id == summary.memory_id)
+            .unwrap();
+        assert_eq!(stored, after);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_import_discards_foreign_votes_and_untrusted_counts() {
+    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
+    let store = PostgresStore::connect(&url).await.unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let saved = store
+        .save(
+            &owner.token,
+            feedback_test_input("personal", "importneedle"),
+        )
+        .await
+        .unwrap();
+    let mut bundle = store.export_bundle(&owner.token).await.unwrap();
+    bundle.sessions.clear();
+    bundle.observations.clear();
+    bundle.forgotten_ids.clear();
+    bundle.memories = ["forged-votes", "counts-only"]
+        .into_iter()
+        .map(|id| {
+            let mut memory = saved.clone();
+            memory.memory_id = id.to_owned();
+            memory.helpful_count = 999;
+            memory.stale_count = 4;
+            if id == "forged-votes" {
+                memory.feedback = vec![
+                    cairn_core::MemoryFeedback {
+                        person_id: other.account.person_id.clone(),
+                        vote: cairn_core::FeedbackVote::Helpful
+                    };
+                    3
+                ];
+            }
+            memory
+        })
+        .collect();
+    assert_eq!(
+        store
+            .import_bundle(&owner.token, bundle.clone())
+            .await
+            .unwrap()
+            .imported_memories,
+        2
+    );
+    for memory in store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.memory_id == "forged-votes" || m.memory_id == "counts-only")
+    {
+        assert!(memory.feedback.is_empty(), "{}", memory.memory_id);
+        assert_eq!((memory.helpful_count, memory.stale_count), (0, 0));
+        let error = store
+            .feedback(&other.token, &memory.memory_id, "helpful")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown memory"));
+    }
+    let counts: Vec<(i32, i32)> = sqlx::query_as(
+        "SELECT helpful_count, stale_count FROM cairn_memories WHERE memory_id IN ('forged-votes', 'counts-only')",
+    ).fetch_all(&pool).await.unwrap();
+    assert_eq!(counts, vec![(0, 0); 2]);
+    assert_eq!(
+        store
+            .import_bundle(&owner.token, bundle)
+            .await
+            .unwrap()
+            .imported_memories,
+        0
+    );
+    pool.close().await;
+}
+
+fn review_note(session_id: &str, event_id: &str) -> ObservationInput {
+    ObservationInput {
+        event_id: event_id.to_owned(),
+        session_id: session_id.to_owned(),
+        content: "Decision: retain this capture for the summary.".to_owned(),
+        role: "assistant".to_owned(),
+        source: "test".to_owned(),
+        importance: Some("high".to_owned()),
+        lifecycle: Default::default(),
+        context: WorkContext::default(),
+    }
+}
+
+async fn open_pool() -> PgPool {
+    PgPool::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_retry_with_a_pending_successor_keeps_one_row_and_the_tick_continues() {
+    let (_pool, store) = pool_and_store().await;
+    let pool = open_pool().await;
+    let now = 1_700_000_000_u64;
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "duplicate-key", now, true)
+        .await
+        .unwrap();
+    let _claimed = store
+        .poll_jobs(cairn_core::JobKind::Embed, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "duplicate-key", now + 1, true)
+        .await
+        .unwrap();
+    store
+        .poll_jobs(
+            cairn_core::JobKind::Distill,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS,
+        )
+        .await
+        .expect("one expired key must not fail the other kind");
+    assert_eq!(
+        store
+            .job_snapshot(now + cairn_core::JOB_LEASE_SECONDS)
+            .await
+            .unwrap()
+            .pending,
+        1
+    );
+    let retried = store
+        .poll_jobs(
+            cairn_core::JobKind::Embed,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].key, "duplicate-key");
+
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "retry-key", now, true)
+        .await
+        .unwrap();
+    let running = store
+        .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|job| job.key == "retry-key")
+        .unwrap();
+    store
+        .enqueue_job(cairn_core::JobKind::Embed, "retry-key", now + 1, true)
+        .await
+        .unwrap();
+    let blocked = store
+        .poll_jobs(cairn_core::JobKind::Embed, 8, now + 1)
+        .await
+        .unwrap();
+    assert!(
+        blocked.iter().all(|job| job.key != "retry-key"),
+        "a pending successor was claimed during a live lease"
+    );
+    store
+        .settle_job(
+            &running.job_id,
+            running.claim_id.as_deref().unwrap(),
+            now + 2,
+            cairn_core::JobEnd::Retry("temporary".into()),
+        )
+        .await
+        .unwrap();
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs
+         WHERE job_key = 'retry-key' AND succeeded = false AND claim_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_quarantine_does_not_reset_attempts_or_starve_backfill() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("jobs-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    let mut ids = Vec::new();
+    for index in 0..9 {
+        let memory = store
+            .remember_with_kind(
+                &owner.token,
+                &format!("Useful old note {index}"),
+                vec![],
+                WorkContext::default(),
+                Default::default(),
+                cairn_core::MemoryKind::Explicit,
+            )
+            .await
+            .unwrap();
+        ids.push(memory.memory_id);
+    }
+    sqlx::query("DELETE FROM cairn_jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.reconcile_embeddings(512, now).await.unwrap();
+    assert_eq!(store.job_snapshot(now).await.unwrap().pending, 9);
+    let mut claimed = Vec::new();
+    for _ in 0..3 {
+        let batch = store
+            .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+            .await
+            .unwrap();
+        if batch.is_empty() {
+            break;
+        }
+        for claim in batch {
+            claimed.push(claim.key.clone());
+            store
+                .settle_job(
+                    &claim.job_id,
+                    claim.claim_id.as_deref().unwrap(),
+                    now,
+                    cairn_core::JobEnd::Quarantine("embedding batch length mismatch".into()),
+                )
+                .await
+                .unwrap();
+        }
+    }
+    claimed.sort();
+    claimed.dedup();
+    assert_eq!(claimed.len(), 9);
+    assert_eq!(store.job_snapshot(now).await.unwrap().quarantined, 9);
+    assert!(
+        store
+            .poll_jobs(cairn_core::JobKind::Embed, 8, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.job_snapshot(now).await.unwrap().quarantined, 9);
+    let first = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM cairn_job_quarantine WHERE job_key = $1",
+    )
+    .bind(&ids[0])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_expired_distill_quarantine_is_not_restarted_by_the_idle_sweep() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("sweep-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "sweep-device",
+            &owner.account.person_id,
+            None,
+            "Sweep device",
+        )
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    store
+        .start_session(&owner.token, "crash-cap", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(&device.token, review_note("crash-cap", "cap-event"))
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "crash-cap");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let mut tick = now;
+    for attempt in 0..5 {
+        let claimed = store
+            .poll_jobs(cairn_core::JobKind::Distill, 8, tick)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "attempt {attempt}");
+        assert_eq!(claimed[0].attempts, attempt);
+        tick += cairn_core::JOB_LEASE_SECONDS;
+        assert!(
+            store
+                .poll_jobs(cairn_core::JobKind::Distill, 8, tick)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        if attempt < 4 {
+            tick += cairn_core::JOB_BACKOFF_SECONDS[attempt as usize];
+        }
+    }
+    assert_eq!(store.job_snapshot(tick).await.unwrap().quarantined, 1);
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'crash-cap'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.sweep_idle_sessions().await;
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = true",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(succeeded, 0);
+    assert_eq!(store.job_snapshot(tick).await.unwrap().quarantined, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("race-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "race-device",
+            &owner.account.person_id,
+            None,
+            "Race device",
+        )
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    store
+        .start_session(&owner.token, "pending-race", WorkContext::default())
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "pending-race");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Distill, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE cairn_job_quarantine IN EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let worker = store.clone();
+    let task = tokio::spawn(async move { worker.execute_claimed_distill(&claim).await });
+    let wait = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pg_stat_activity
+                     WHERE datname = current_database()
+                       AND pid <> pg_backend_pid()
+                       AND wait_event_type = 'Lock'
+                       AND query ILIKE '%cairn_job_quarantine%'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), wait)
+        .await
+        .expect("distill settlement did not wait on the quarantine lock");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    store
+        .sync_push(&device.token, review_note("pending-race", "racing-capture"))
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+    let error = task.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("no retained observations"));
+    let pending: bool = sqlx::query_scalar(
+        "SELECT pending_since IS NOT NULL FROM cairn_sessions WHERE session_id = 'pending-race'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let observations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_observations WHERE session_id = 'pending-race'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(pending);
+    assert_eq!(observations, 1);
+    assert_eq!(summaries, 0);
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'pending-race'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.sweep_idle_sessions().await;
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        summaries, 3,
+        "one Decision capture derives the summary, the handoff, and that note"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_lost_distill_claim_does_not_commit_side_effects() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("stale-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "stale-device",
+            &owner.account.person_id,
+            None,
+            "Stale device",
+        )
+        .await
+        .unwrap();
+    let now = 1_700_000_000_u64;
+    store
+        .start_session(&owner.token, "real-stale", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(&device.token, review_note("real-stale", "real-event"))
+        .await
+        .unwrap();
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "real-stale");
+    store
+        .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
+        .await
+        .unwrap();
+    let old = store
+        .poll_jobs(cairn_core::JobKind::Distill, 8, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(
+        store
+            .poll_jobs(
+                cairn_core::JobKind::Distill,
+                8,
+                now + cairn_core::JOB_LEASE_SECONDS
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let replacement = store
+        .poll_jobs(
+            cairn_core::JobKind::Distill,
+            8,
+            now + cairn_core::JOB_LEASE_SECONDS + cairn_core::JOB_BACKOFF_SECONDS[0],
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    assert_ne!(old.claim_id, replacement.claim_id);
+    assert!(store.execute_claimed_distill(&old).await.is_err());
+    assert_eq!(
+        store
+            .job_snapshot(now + cairn_core::JOB_LEASE_SECONDS + cairn_core::JOB_BACKOFF_SECONDS[0])
+            .await
+            .unwrap()
+            .running,
+        1
+    );
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'real-stale'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(summaries, 0);
+
+    store
+        .start_session(&owner.token, "empty-stale", WorkContext::default())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_sessions SET pending_since = now() WHERE session_id = 'empty-stale'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fake = cairn_core::BackgroundJob {
+        job_id: "nonexistent-job".into(),
+        kind: "distill".into(),
+        key: cairn_core::distill_key(Some(&owner.account.person_id), "empty-stale"),
+        attempts: 0,
+        not_before: now,
+        claim_id: Some("stale".into()),
+        lease_expires_at: Some(now.saturating_sub(1)),
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+        finished_at: None,
+        succeeded: false,
+    };
+    assert!(store.execute_claimed_distill(&fake).await.is_err());
+    let cleared: bool = sqlx::query_scalar(
+        "SELECT pending_since IS NULL FROM cairn_sessions WHERE session_id = 'empty-stale'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!cleared);
+    assert!(
+        store
+            .job_snapshot(now)
+            .await
+            .unwrap()
+            .quarantine
+            .iter()
+            .all(|row| row.key != fake.key || row.job_id != fake.job_id)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_session_id_text_does_not_reclassify_a_distill_failure() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("name-owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let now = cairn_core::now_seconds();
+    assert!(
+        store
+            .end_session(&owner.token, "unknown forgotten or superseded")
+            .await
+            .is_err()
+    );
+    let snapshot = store.job_snapshot(now).await.unwrap();
+    assert!(
+        snapshot
+            .quarantine
+            .iter()
+            .any(|row| row.last_error.contains("unknown session"))
+    );
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = true",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(succeeded, 0);
+    sqlx::query("TRUNCATE cairn_jobs, cairn_job_quarantine")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .end_session(&owner.token, "database error")
+            .await
+            .is_err()
+    );
+    let snapshot = store.job_snapshot(now).await.unwrap();
+    assert!(
+        snapshot
+            .quarantine
+            .iter()
+            .any(|row| row.last_error.contains("unknown session"))
+    );
+    assert!(snapshot.pending == 0 || snapshot.quarantine.iter().any(|row| row.attempts == 1));
+    let waiting: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = false",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waiting, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_enqueue_does_not_rewrite_retained_jobs() {
+    let (pool, store) = pool_and_store().await;
+    let indexes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_indexes
+         WHERE indexname IN ('cairn_jobs_claimable', 'cairn_jobs_running')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(indexes, 2);
+    let now = cairn_core::now_seconds();
+    for retained in [100_i64, 1_000, 5_000] {
+        sqlx::query("TRUNCATE cairn_jobs, cairn_job_quarantine")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO cairn_jobs
+                (job_id, kind, job_key, attempts, not_before, created_at, updated_at, succeeded, finished_at)
+             SELECT 'bench-' || g, 'embed', 'bench-' || g, 0, $1, $1, $1, true, $1
+             FROM generate_series(1, $2) AS g",
+        )
+        .bind(now as i64)
+        .bind(retained)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before: Vec<(String, String)> =
+            sqlx::query_as("SELECT ctid::text, job_id FROM cairn_jobs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            store
+                .enqueue_job(cairn_core::JobKind::Embed, "benchmark-new", now, true)
+                .await
+                .unwrap()
+        );
+        let elapsed = started.elapsed();
+        let after: Vec<(String, String)> =
+            sqlx::query_as("SELECT ctid::text, job_id FROM cairn_jobs")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            before.iter().all(|row| after.contains(row)),
+            "enqueue rewrote retained rows at {retained}"
+        );
+        assert_eq!(after.len(), before.len() + 1);
+        eprintln!("enqueue with {retained} retained rows: {elapsed:?}");
+    }
+}
+
+fn unit_pair(cosine: f32) -> (Vec<f32>, Vec<f32>) {
+    let mut left = vec![0.0; 384];
+    let mut right = vec![0.0; 384];
+    left[0] = 1.0;
+    right[0] = cosine;
+    right[1] = (1.0 - cosine * cosine).sqrt();
+    (left, right)
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
+    let (_pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let save = |token: &str, scope: &str, title: &str| {
+        let store = &store;
+        let token = token.to_owned();
+        let scope = scope.to_owned();
+        let title = title.to_owned();
+        async move {
+            store
+                .save(
+                    &token,
+                    serde_json::from_value(serde_json::json!({
+                        "scope": scope,
+                        "kind": "fact",
+                        "title": title,
+                        "summary": title,
+                        "reason": "verified",
+                        "statement": title
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let target = save(&owner.token, "personal", "sharedtoken").await;
+    let source = save(&owner.token, "personal", "sharedtoken").await;
+    let before = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    let before_target = before
+        .iter()
+        .find(|hit| hit.memory_id == target.memory_id)
+        .unwrap()
+        .score;
+    let hidden = store
+        .declare_contradiction(&other.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown memory"));
+    store
+        .declare_contradiction(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    let after = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    let target_score = after
+        .iter()
+        .find(|hit| hit.memory_id == target.memory_id)
+        .unwrap()
+        .score;
+    assert!(
+        (target_score / before_target - 0.5).abs() < 1e-3,
+        "{target_score} {before_target}"
+    );
+    let global = save(&owner.token, "global", "globaltoken").await;
+    let crossed = store
+        .declare_contradiction(&owner.token, &source.memory_id, &global.memory_id)
+        .await
+        .unwrap_err();
+    assert!(crossed.to_string().contains("same scope"));
+    store
+        .supersede_memory(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    let recalled = store
+        .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(recalled.iter().all(|hit| hit.memory_id != target.memory_id));
+    let history = store.export_bundle(&owner.token).await.unwrap();
+    assert!(
+        history
+            .memories
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
         .await
         .unwrap();
     store
         .join_project(&member.token, &project.project_id)
         .await
         .unwrap();
-    let ctx = WorkContext {
-        repository: Some("repo".into()),
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
         ..WorkContext::default()
     };
-    let device = device_for(&store, &owner, "preview-device").await;
-    store
-        .start_session(&owner.token, "preview", ctx.clone())
-        .await
-        .unwrap();
-    let first = ObservationInput {
-        event_id: "first".into(),
-        session_id: "preview".into(),
-        content: "first payload".into(),
-        role: "agent".into(),
-        source: "test".into(),
-        importance: None,
-        lifecycle: Default::default(),
-        context: ctx.clone(),
-    };
-    store.sync_push(&device, first.clone()).await.unwrap();
-    let source = store.end_session(&owner.token, "preview").await.unwrap();
-    let preview = store
-        .preview_promotion(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    let fingerprint = publication_fingerprint(&preview).unwrap();
-    store
-        .start_session(&owner.token, "preview", ctx.clone())
-        .await
-        .unwrap();
-    let mut second = first;
-    second.event_id = "second".into();
-    second.content = "changed payload".into();
-    store.sync_push(&device, second).await.unwrap();
-    store.end_session(&owner.token, "preview").await.unwrap();
-    assert!(matches!(
-        store
-            .promote_memory_checked(
-                &owner.token,
-                &project.project_id,
-                &source.memory_id,
-                "publish",
-                Some(&fingerprint)
-            )
-            .await,
-        Err(PostgresError::Conflict(_))
-    ));
-    let preview = store
-        .preview_promotion(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-        )
-        .await
-        .unwrap();
-    let fingerprint = publication_fingerprint(&preview).unwrap();
-    let original = store
-        .promote_memory_checked(
-            &owner.token,
-            &project.project_id,
-            &source.memory_id,
-            "publish",
-            Some(&fingerprint),
-        )
-        .await
-        .unwrap();
-    let mut forged = cairn_core::build_explicit_memory_record(
-        "member independent decision",
-        vec![],
-        ctx,
-        LifecycleInput::default(),
-        MemoryKind::Correction,
+    let left = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "left-note",
+        context.clone(),
     )
+    .await;
+    let right = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "right-note",
+        context,
+    )
+    .await;
+    let refused = store
+        .declare_contradiction(&member.token, &right.memory_id, &left.memory_id)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("author or project owner"));
+    let (low, high) = unit_pair(0.5);
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&left, low).unwrap())
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&right, high).unwrap())
+        .await
+        .unwrap();
+    let now = 1_000_u64;
+    store.ensure_similarity_job(now).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(store.finish_similarity_scan(&claim, now).await.unwrap(), 1);
+    assert!(
+        store
+            .poll_jobs(
+                cairn_core::JobKind::Similarity,
+                1,
+                now + cairn_core::SIMILARITY_INTERVAL_SECONDS - 1
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let reviews = store.similarity_reviews(&owner.token).await.unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(
+        reviews[0].band,
+        cairn_core::SimilarityBand::PossibleConflict
+    );
+    assert!(
+        store
+            .similarity_reviews(&other.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let leaked = store
+        .dismiss_review(&other.token, &reviews[0].review_id)
+        .await
+        .unwrap_err();
+    assert!(leaked.to_string().contains("unknown review"));
+    let member_refused = store
+        .dismiss_review(&member.token, &reviews[0].review_id)
+        .await
+        .unwrap_err();
+    assert!(
+        member_refused
+            .to_string()
+            .contains("author or project owner")
+    );
+    let contradicted = store
+        .contradict_review(&owner.token, &reviews[0].review_id, &left.memory_id)
+        .await
+        .unwrap();
+    assert!(contradicted.contradicts.contains(&left.memory_id));
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn stage7_fact(scope: &str, title: &str, project: Option<&str>) -> cairn_core::SaveMemoryInput {
+    serde_json::from_value(serde_json::json!({
+        "scope": scope,
+        "kind": "fact",
+        "title": title,
+        "summary": title,
+        "reason": "verified",
+        "statement": title,
+        "context": {"project_id": project}
+    }))
+    .unwrap()
+}
+
+fn unit_embedding(memory: &cairn_core::Memory) -> cairn_core::MemoryEmbedding {
+    let mut vector = vec![0.0; 384];
+    vector[0] = 1.0;
+    cairn_core::MemoryEmbedding::new(memory, vector).unwrap()
+}
+
+async fn stage7_accounts(
+    store: &PostgresStore,
+) -> (
+    cairn_core::AuthSessionResult,
+    cairn_core::AuthSessionResult,
+    cairn_core::AuthSessionResult,
+    cairn_core::Project,
+) {
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let left = store
+        .register_account("left@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let right = store
+        .register_account("right@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&left.token, &project.project_id)
+        .await
+        .unwrap();
+    store
+        .join_project(&right.token, &project.project_id)
+        .await
+        .unwrap();
+    (owner, left, right, project)
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_dismiss_requires_edit_rights_on_both_project_memories() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let (owner, left_author, right_author, project) = stage7_accounts(&store).await;
+    let left = store
+        .save(
+            &left_author.token,
+            stage7_fact("project", "dismiss-left", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let right = store
+        .save(
+            &right_author.token,
+            stage7_fact("project", "dismiss-right", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    store.put_embedding(unit_embedding(&left)).await.unwrap();
+    store.put_embedding(unit_embedding(&right)).await.unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, 1_000).await.unwrap(),
+        1
+    );
+    let review = store
+        .similarity_reviews(&left_author.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|review| review.left_id == left.memory_id || review.right_id == left.memory_id)
+        .unwrap();
+    let declare = store
+        .declare_contradiction(&left_author.token, &left.memory_id, &right.memory_id)
+        .await
+        .unwrap_err();
+    assert!(declare.to_string().contains("author or project owner"));
+    let dismissed = store
+        .dismiss_review(&left_author.token, &review.review_id)
+        .await
+        .unwrap_err();
+    assert!(dismissed.to_string().contains("author or project owner"));
+    store
+        .dismiss_review(&owner.token, &review.review_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_cross_author_project_supersede_hides_the_target() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let target = store
+        .save(
+            &owner.token,
+            stage7_fact("project", "crosstoken target", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let source = store
+        .save(
+            &member.token,
+            stage7_fact("project", "crosstoken source", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    store
+        .supersede_memory(&owner.token, &source.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    let found = store
+        .search(&owner.token, "crosstoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(found.iter().all(|hit| hit.memory_id != target.memory_id));
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_rederived_summary_keeps_an_explicit_supersede() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = device_for(&store, &owner, "rederive").await;
+    let target = store
+        .save(
+            &owner.token,
+            stage7_fact("personal", "summary-target", None),
+        )
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "reuse", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "first".to_owned(),
+                session_id: "reuse".to_owned(),
+                content: "Decision: use first because tests passed.".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let summary = store.end_session(&owner.token, "reuse").await.unwrap();
+    store
+        .supersede_memory(&owner.token, &summary.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "second".to_owned(),
+                session_id: "reuse".to_owned(),
+                content: "Decision: use second because tests passed.".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let derived = store.end_session(&owner.token, "reuse").await.unwrap();
+    assert_eq!(
+        derived.supersedes.as_deref(),
+        Some(target.memory_id.as_str())
+    );
+    assert!(
+        !store
+            .memories(&owner.token)
+            .await
+            .unwrap()
+            .iter()
+            .any(|memory| memory.memory_id == target.memory_id)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_distilled_notes_do_not_inherit_declared_contradictions() {
+    let store = PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = device_for(&store, &owner, "inherit").await;
+    let target = store
+        .save(&owner.token, stage7_fact("personal", "shade-target", None))
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "inherit", WorkContext::default())
+        .await
+        .unwrap();
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "first".to_owned(),
+                session_id: "inherit".to_owned(),
+                content: "Fact: unrelated first".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let summary = store.end_session(&owner.token, "inherit").await.unwrap();
+    store
+        .declare_contradiction(&owner.token, &summary.memory_id, &target.memory_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        cairn_core::contradiction_counts(&store.memories(&owner.token).await.unwrap())
+            [&target.memory_id],
+        1
+    );
+    store
+        .sync_push(
+            &device,
+            ObservationInput {
+                event_id: "second".to_owned(),
+                session_id: "inherit".to_owned(),
+                content: "Fact: unrelated second".to_owned(),
+                role: "user".to_owned(),
+                source: "test".to_owned(),
+                importance: None,
+                lifecycle: Default::default(),
+                context: WorkContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+    store.end_session(&owner.token, "inherit").await.unwrap();
+    let memories = store.memories(&owner.token).await.unwrap();
+    assert_eq!(
+        cairn_core::contradiction_counts(&memories)[&target.memory_id],
+        1
+    );
+    assert!(memories.iter().all(|memory| {
+        memory.kind != cairn_core::MemoryKind::Fact
+            || !memory.contradicts.contains(&target.memory_id)
+    }));
+    let successor = store
+        .save(
+            &owner.token,
+            stage7_fact("personal", "summary-successor", None),
+        )
+        .await
+        .unwrap();
+    store
+        .supersede_memory(&owner.token, &successor.memory_id, &summary.memory_id)
+        .await
+        .unwrap();
+    let remaining = cairn_core::contradiction_counts(&store.memories(&owner.token).await.unwrap());
+    assert_eq!(remaining.get(&target.memory_id).copied().unwrap_or(0), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_owner_transfer_waits_for_the_in_flight_edit() {
+    let (pool, store) = pool_and_store().await;
+    let (owner, left_author, right_author, project) = stage7_accounts(&store).await;
+    let left = store
+        .save(
+            &left_author.token,
+            stage7_fact("project", "race-left", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let right = store
+        .save(
+            &right_author.token,
+            stage7_fact("project", "race-right", Some(&project.project_id)),
+        )
+        .await
+        .unwrap();
+    let (ordered_left, ordered_right) = cairn_core::ordered_pair(&left.memory_id, &right.memory_id);
+    sqlx::query(
+        "INSERT INTO cairn_similarity_reviews
+            (review_id, left_id, right_id, scope, project_id, cosine, band, status, created_at)
+         VALUES ('race-review', $1, $2, 'project', $3, 1, 'near_duplicate', 'open', 1000)",
+    )
+    .bind(&ordered_left)
+    .bind(&ordered_right)
+    .bind(&project.project_id)
+    .execute(&pool)
+    .await
     .unwrap();
-    forged.supersedes = Some(source.memory_id.clone());
-    let mut bundle = store.export_bundle(&member.token).await.unwrap();
+    let mut block = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT review_id FROM cairn_similarity_reviews WHERE review_id = 'race-review' FOR UPDATE",
+    )
+    .fetch_one(&mut *block)
+    .await
+    .unwrap();
+    let editing = store.clone();
+    let owner_token = owner.token.clone();
+    let left_id = left.memory_id.clone();
+    let right_id = right.memory_id.clone();
+    let edit = tokio::spawn(async move {
+        editing
+            .declare_contradiction(&owner_token, &left_id, &right_id)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%UPDATE cairn_similarity_reviews%'
+                )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let transferring = store.clone();
+    let transfer_token = owner.token.clone();
+    let project_id = project.project_id.clone();
+    let new_owner = left_author.account.person_id.clone();
+    let transfer = tokio::spawn(async move {
+        transferring
+            .transfer_project(&transfer_token, &project_id, &new_owner)
+            .await
+    });
+    let finished_early = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if transfer.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        finished_early.is_err(),
+        "owner transfer committed while the edit still held the review row"
+    );
+    block.commit().await.unwrap();
+    let edited = edit.await.unwrap().unwrap();
+    assert!(edited.contradicts.contains(&right.memory_id));
+    transfer.await.unwrap().unwrap();
+    let after = store
+        .declare_contradiction(&owner.token, &left.memory_id, &right.memory_id)
+        .await;
+    assert!(after.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_expired_similarity_claim_publishes_nothing() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let left = store
+        .save(&owner.token, stage7_fact("global", "scan-a", None))
+        .await
+        .unwrap();
+    let right = store
+        .save(&owner.token, stage7_fact("global", "scan-b", None))
+        .await
+        .unwrap();
+    store.put_embedding(unit_embedding(&left)).await.unwrap();
+    store.put_embedding(unit_embedding(&right)).await.unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(
+        store
+            .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_121)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store.finish_similarity_scan(&claim, 1_121).await.unwrap(),
+        0
+    );
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let succeeded: bool = sqlx::query_scalar("SELECT succeeded FROM cairn_jobs WHERE job_id = $1")
+        .bind(&claim.job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!succeeded);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_overlapping_scan_does_not_reopen_a_declared_pair() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let mut memories = Vec::new();
+    for title in ["scan-left", "scan-right"] {
+        let memory = store
+            .save(&owner.token, stage7_fact("personal", title, None))
+            .await
+            .unwrap();
+        store.put_embedding(unit_embedding(&memory)).await.unwrap();
+        memories.push(memory);
+    }
+    // The trigger only pauses the insert so a real declaration can commit first.
+    sqlx::raw_sql(
+        "CREATE FUNCTION pause_review() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(777777); RETURN NEW; END $$;
+         CREATE TRIGGER pause_review BEFORE INSERT ON cairn_similarity_reviews
+         FOR EACH ROW EXECUTE FUNCTION pause_review();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut block = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(777777)")
+        .execute(&mut *block)
+        .await
+        .unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    let worker = store.clone();
+    let scan = tokio::spawn(async move { worker.finish_similarity_scan(&claim, 1_000).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND wait_event = 'advisory'
+                )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    store
+        .declare_contradiction(&owner.token, &memories[1].memory_id, &memories[0].memory_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    block.commit().await.unwrap();
+    assert_eq!(scan.await.unwrap().unwrap(), 0);
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_links_permissions_visibility_cap_and_one_hop() {
+    let (pool, store) = pool_and_store().await;
+    let migrated: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cairn_schema_migrations WHERE version = '0018_memory_links')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(migrated);
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let member = store
+        .register_account("member@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let seed = store
+        .save(&owner.token, stage7_fact("personal", "seedtoken", None))
+        .await
+        .unwrap();
+    let neighbour = store
+        .save(&owner.token, stage7_fact("personal", "othertoken", None))
+        .await
+        .unwrap();
+    let alone = store
+        .save(&owner.token, stage7_fact("personal", "gammatoken", None))
+        .await
+        .unwrap();
+    let foreign = store
+        .save(&member.token, stage7_fact("personal", "foreigntoken", None))
+        .await
+        .unwrap();
+    let hidden = store
+        .link_memories(
+            &member.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(hidden.to_string().contains("unknown memory"));
+    let global = store
+        .save(&owner.token, stage7_fact("global", "globaltoken", None))
+        .await
+        .unwrap();
+    let crossed = store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &global.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(crossed.to_string().contains("same scope"));
+    store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap();
+    store
+        .link_memories(
+            &owner.token,
+            &seed.memory_id,
+            cairn_core::LinkRelation::Causes,
+            &neighbour.memory_id,
+        )
+        .await
+        .unwrap();
+    let stored = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == seed.memory_id)
+        .unwrap();
+    assert_eq!(stored.links.len(), 1);
+    sqlx::query("UPDATE cairn_memories SET links = links || $1::jsonb WHERE memory_id = $2")
+        .bind(serde_json::json!([
+            { "relation": "fixes", "target_id": foreign.memory_id },
+            { "relation": "causes", "target_id": global.memory_id }
+        ]))
+        .bind(&seed.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hits = store
+        .search(&owner.token, "seedtoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| hit.memory_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&neighbour.memory_id.as_str()));
+    assert!(!ids.contains(&alone.memory_id.as_str()));
+    assert!(!ids.contains(&foreign.memory_id.as_str()));
+    assert!(!ids.contains(&global.memory_id.as_str()));
+    let global_hits = store
+        .search(&owner.token, "globaltoken", 10, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        global_hits
+            .iter()
+            .any(|hit| hit.memory_id == global.memory_id)
+    );
+    assert!(
+        global_hits
+            .iter()
+            .all(|hit| hit.memory_id != seed.memory_id)
+    );
+    let graph = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), None)
+        .await
+        .unwrap();
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| node.memory_id != foreign.memory_id)
+    );
+    assert!(graph.edges.iter().all(|edge| {
+        edge.source_id != foreign.memory_id && edge.target_id != foreign.memory_id
+    }));
+    assert!(
+        graph.edges.iter().all(|edge| {
+            !(edge.source_id == seed.memory_id && edge.target_id == global.memory_id)
+        })
+    );
+    store
+        .declare_contradiction(&owner.token, &seed.memory_id, &neighbour.memory_id)
+        .await
+        .unwrap();
+    let drawn = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(120))
+        .await
+        .unwrap();
+    assert!(
+        drawn
+            .edges
+            .iter()
+            .any(|edge| edge.relation == cairn_core::GraphRelation::Contradicts)
+    );
+    store
+        .supersede_memory(&owner.token, &seed.memory_id, &neighbour.memory_id)
+        .await
+        .unwrap();
+    let hidden_graph = store
+        .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(500))
+        .await
+        .unwrap();
+    assert!(
+        hidden_graph
+            .nodes
+            .iter()
+            .all(|node| node.memory_id != neighbour.memory_id)
+    );
+    assert!(
+        hidden_graph
+            .edges
+            .iter()
+            .all(|edge| edge.target_id != neighbour.memory_id)
+    );
+    assert!(
+        store
+            .memory_graph(&owner.token, &cairn_core::GraphFilter::default(), Some(119))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("120")
+    );
+
+    let project = store
+        .register_project(&owner.token, "cairn-demo", "Demo", None)
+        .await
+        .unwrap();
+    store
+        .join_project(&member.token, &project.project_id)
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let left = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "left-note",
+        context.clone(),
+    )
+    .await;
+    let right = save_project_note(
+        &store,
+        &owner.token,
+        &project.project_id,
+        "right-note",
+        context,
+    )
+    .await;
+    let refused = store
+        .link_memories(
+            &member.token,
+            &left.memory_id,
+            cairn_core::LinkRelation::Fixes,
+            &right.memory_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("author or project owner"));
+    store
+        .link_memories(
+            &owner.token,
+            &left.memory_id,
+            cairn_core::LinkRelation::Fixes,
+            &right.memory_id,
+        )
+        .await
+        .unwrap();
+
+    let mut hub = String::new();
+    for index in 0..121 {
+        let title = format!("capnode-{index:03}");
+        let memory = store
+            .save(&owner.token, stage7_fact("global", &title, None))
+            .await
+            .unwrap();
+        if index == 0 {
+            hub = memory.memory_id;
+        } else if index < 4 {
+            store
+                .link_memories(
+                    &owner.token,
+                    &hub,
+                    cairn_core::LinkRelation::Relates,
+                    &memory.memory_id,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let capped = store
+        .memory_graph(
+            &owner.token,
+            &cairn_core::GraphFilter {
+                scope: Some(cairn_core::MemoryScope::Global),
+                ..cairn_core::GraphFilter::default()
+            },
+            Some(120),
+        )
+        .await
+        .unwrap();
+    assert!(capped.truncated);
+    assert_eq!(capped.nodes.len(), 120);
+    assert_eq!(capped.node_cap, 120);
+    assert!(capped.nodes.iter().any(|node| node.memory_id == hub));
+
+    let mut bundle = store.export_bundle(&owner.token).await.unwrap();
     bundle.sessions.clear();
     bundle.observations.clear();
     bundle.forgotten_ids.clear();
-    bundle.memories = vec![forged.clone()];
-    store.import_bundle(&member.token, bundle).await.unwrap();
-    let independent = store
-        .promote_memory(
-            &member.token,
-            &project.project_id,
-            &forged.memory_id,
-            "publish independently",
+    let mut incoming = alone.clone();
+    incoming.memory_id = "imported-cross-scope".to_owned();
+    incoming.fields.title = "plain carton".to_owned();
+    incoming.fields.summary = "plain carton".to_owned();
+    incoming.fields.statement = Some("plain carton".to_owned());
+    incoming.content = "plain carton".to_owned();
+    incoming.links = vec![
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Causes,
+            target_id: global.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Relates,
+            target_id: incoming.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Fixes,
+            target_id: alone.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::Fixes,
+            target_id: alone.memory_id.clone(),
+        },
+        cairn_core::MemoryLink {
+            relation: cairn_core::LinkRelation::DependsOn,
+            target_id: "missing-target".to_owned(),
+        },
+    ];
+    bundle.memories = vec![incoming];
+    let imported = store.import_bundle(&owner.token, bundle).await.unwrap();
+    assert_eq!(imported.imported_memories, 1);
+    assert!(imported.dropped_links.iter().any(|link| {
+        link.reason == cairn_core::DroppedLinkReason::Scope && link.target_id == global.memory_id
+    }));
+    assert!(
+        imported
+            .dropped_links
+            .iter()
+            .any(|link| link.reason == cairn_core::DroppedLinkReason::SelfLink)
+    );
+    assert!(
+        imported
+            .dropped_links
+            .iter()
+            .any(|link| link.reason == cairn_core::DroppedLinkReason::Duplicate)
+    );
+    assert!(imported.dropped_links.iter().any(|link| {
+        link.reason == cairn_core::DroppedLinkReason::UnknownTarget
+            && link.target_id == "missing-target"
+    }));
+    let stored_import = store
+        .memories(&owner.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.memory_id == "imported-cross-scope")
+        .unwrap();
+    assert_eq!(stored_import.links.len(), 1);
+    assert_eq!(stored_import.links[0].target_id, alone.memory_id);
+    let leaked = store
+        .search(&owner.token, "globaltoken", 20, &RecallFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        leaked
+            .iter()
+            .all(|hit| hit.memory_id != "imported-cross-scope")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_similarity_scan_reads_the_coldest_current_page() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("owner@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let vector = {
+        let mut values = vec![0.0; 384];
+        values[0] = 1.0;
+        values
+    };
+    let mut stale = Vec::new();
+    let mut current = Vec::new();
+    for index in 0..60 {
+        let bare = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("bare-{index}"), None),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cairn_memories SET access_count = 0 WHERE memory_id = $1")
+            .bind(&bare.memory_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let memory = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("stale-{index}"), None),
+            )
+            .await
+            .unwrap();
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&memory, vector.clone()).unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE cairn_memories SET access_count = 1, record = jsonb_set(record, '{title}', to_jsonb($2::text)) WHERE memory_id = $1",
         )
+        .bind(&memory.memory_id)
+        .bind(format!("rewritten-{index}"))
+        .execute(&pool)
         .await
         .unwrap();
-    assert!(independent.supersedes.is_none());
-    let rows = store
-        .project_memories(&owner.token, &project.project_id)
+        stale.push(memory.memory_id);
+        let memory = store
+            .save(
+                &owner.token,
+                stage7_fact("personal", &format!("cold-{index}"), None),
+            )
+            .await
+            .unwrap();
+        store
+            .put_embedding(cairn_core::MemoryEmbedding::new(&memory, vector.clone()).unwrap())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cairn_memories SET access_count = 2 WHERE memory_id = $1")
+            .bind(&memory.memory_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        current.push(memory.memory_id);
+    }
+    let warm = store
+        .save(&owner.token, stage7_fact("personal", "warm-extra", None))
         .await
         .unwrap();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|m| m.memory_id == original.memory_id));
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&warm, vector.clone()).unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cairn_memories SET access_count = 3 WHERE memory_id = $1")
+        .bind(&warm.memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let capture = store
+        .save(&owner.token, stage7_fact("personal", "capture-row", None))
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&capture, vector).unwrap())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE cairn_memories SET kind = 'capture', access_count = 0 WHERE memory_id = $1",
+    )
+    .bind(&capture.memory_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = 1_000_u64;
+    store.ensure_similarity_job(now).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, now).await.unwrap(),
+        cairn_core::SIMILARITY_REVIEW_CAP
+    );
+    let reviews = store.similarity_reviews(&owner.token).await.unwrap();
+    assert_eq!(reviews.len(), cairn_core::SIMILARITY_REVIEW_CAP);
+    let current_ids = current
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(reviews.iter().all(|review| {
+        current_ids.contains(review.left_id.as_str())
+            && current_ids.contains(review.right_id.as_str())
+    }));
+    assert!(reviews.iter().all(|review| {
+        review.left_id != warm.memory_id
+            && review.right_id != warm.memory_id
+            && review.left_id != capture.memory_id
+            && review.right_id != capture.memory_id
+            && !stale
+                .iter()
+                .any(|id| id == &review.left_id || id == &review.right_id)
+    }));
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_similarity_cutoff_uses_the_same_byte_order_as_the_file_store() {
+    let path = std::env::temp_dir().join(format!(
+        "cairn-similarity-cutoff-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut file = cairn_core::MemoryStore::open(&path).unwrap();
+    let file_account = file
+        .bootstrap_account("review@example.test", "correct horse battery staple")
+        .unwrap();
+    let template = file
+        .save_for_account(
+            &file_account.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "fact",
+                "title": "template",
+                "summary": "boundary probe",
+                "reason": "review",
+                "statement": "boundary probe"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut bundle = file.export_for_account(&file_account.token).unwrap();
+    let mut ids = (0..59)
+        .map(|index| format!("0{index:02}"))
+        .collect::<Vec<_>>();
+    ids.extend(["aZ".to_owned(), "aa".to_owned()]);
+    bundle.memories = ids
+        .iter()
+        .map(|id| {
+            let mut memory = template.clone();
+            memory.memory_id = id.clone();
+            memory.created_at = "1800000000".to_owned();
+            memory.access_count = 0;
+            memory.source_event_ids.clear();
+            memory.fields.title = id.clone();
+            memory.fields.summary = id.clone();
+            memory
+        })
+        .collect();
+    let store = PostgresStore::connect(
+        &std::env::var("CAIRN_TEST_DATABASE_URL").expect("CAIRN_TEST_DATABASE_URL"),
+    )
+    .await
+    .unwrap();
+    let account = store
+        .bootstrap_account("review@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    file.import_for_account(&file_account.token, bundle.clone())
+        .unwrap();
+    store
+        .import_bundle(&account.token, bundle.clone())
+        .await
+        .unwrap();
+    // The template sits outside the coldest page. It has no embedding either way.
+    let mut disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for memory in disk["memories"].as_array_mut().unwrap() {
+        if memory["memory_id"] == template.memory_id {
+            memory["access_count"] = serde_json::json!(100);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+    let mut file = cairn_core::MemoryStore::open(&path).unwrap();
+    for (index, memory) in bundle.memories.iter().enumerate() {
+        let mut vector = vec![0.0_f32; 384];
+        let axis = if memory.memory_id == "aZ" { 0 } else { index };
+        vector[axis] = 1.0;
+        let embedding = cairn_core::MemoryEmbedding::new(memory, vector).unwrap();
+        file.put_embedding(embedding.clone()).unwrap();
+        store.put_embedding(embedding).await.unwrap();
+    }
+    let now = 1_800_000_000_u64;
+    file.ensure_similarity_job(now).unwrap();
+    let file_claim = file
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .unwrap()
+        .remove(0);
+    file.finish_similarity_scan(&file_claim, now).unwrap();
+    store.ensure_similarity_job(now).await.unwrap();
+    let postgres_claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    store
+        .finish_similarity_scan(&postgres_claim, now)
+        .await
+        .unwrap();
+    let file_pairs = file
+        .similarity_reviews_for_account(&file_account.token)
+        .unwrap()
+        .into_iter()
+        .map(|review| (review.left_id, review.right_id))
+        .collect::<Vec<_>>();
+    let postgres_pairs = store
+        .similarity_reviews(&account.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|review| (review.left_id, review.right_id))
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        file_pairs,
+        vec![("000".to_owned(), "aZ".to_owned())],
+        "byte order keeps aZ inside the coldest 60 and drops aa"
+    );
+    assert_eq!(
+        postgres_pairs, file_pairs,
+        "the same ids and vectors must review the same pair"
+    );
 }

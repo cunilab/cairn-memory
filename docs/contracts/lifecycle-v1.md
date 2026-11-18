@@ -95,15 +95,14 @@ the observation label. The secret bytes are not stored. A secret in the
 capture, remember, or correction request itself still raises that record's
 label. A new session summary copies the stricter source label and redacts the
 human-readable lists and handoff text it writes. It does not rescan a secret
-that was already removed from an older observation. A new promotion copies the
-source label and redacts those same metadata fields on the new row. The source
-row stays as stored.
+that was already removed from an older observation. Distilled notes inherit
+that lifecycle and redact the same metadata fields. Source rows stay as stored.
 
 ## Recall and diagnostics
 
 - Recall results include their lifecycle classification.
-- Memories also carry a `kind`: `session_summary`, `explicit`, `lesson`,
-  `correction`, or `decision` (set on a promoted project memory).
+- Memories also carry a `kind`: `session_summary`, `handoff`, `explicit`, `lesson`,
+  `correction`, `decision`, `rule`, `gotcha`, `procedure`, `fact`, `preference`, or `capture`. Structured fields and scopes are defined in [the scope contract](project-layer4.md#memory-scopes-and-record).
 - Session-derived memories aggregate the highest importance and sensitivity,
   average confidence, and durable retention from their source observations.
 - `GET /cairn-memory/diagnose` reports temporary observations, durable memories,
@@ -115,21 +114,22 @@ row stays as stored.
   decision remains open. The local Layer 1 policy uses a 30-day default for
   temporary raw observations, while explicit `expiresAt` values are honored.
 
-Corrections create a new durable `correction` memory with `supersedes` pointing
-to the old memory or observation. The old item stays stored and linked. Normal
-recall skips it while a newer memory for the same person has `supersedes` set
-to its id and that newer memory is not forgotten and not expired. For published
-decisions, the successor must instead be published in the same project; an
-authorized owner may correct another author’s decision. A private source
-correction never hides or changes a published project copy. Project corrections
-are visible to every member and supersede only project decisions. Forget
-still tombstones. Forgetting or deleting a promoted project copy tombstones only
-that copy, never the personal memory or its source events it was promoted from,
-and forgetting the personal memory does not tombstone the copy
-([CM-ADR-0009](../adr/0009-explicit-project-promotion.md)). The correction's confidence is `100`. A source survey of how other
-systems score confidence and keep or replace a corrected record is
-[CM-RESEARCH-001](../research/memory-confidence-and-correction.md). The accepted
-decision is [CM-ADR-0010](../adr/0010-correction-keeps-linked-history.md).
+Corrections retain the old record and create a live successor with `supersedes`, keeping the target's scope, typed fields and author and recording the actor. Only authorized same-scope successors suppress a target. Project author/owner and global author/admin checks apply. A successor's deletion may reveal its predecessor. The correction's confidence is `100`. See [ADR 0010](../adr/0010-correction-keeps-linked-history.md).
+
+## Forgetting shared knowledge
+
+Authenticated forgetting or retained deletion of a project note hides only that
+record. This applies to session notes, handoffs, typed notes, explicit project
+notes and captures exposed as memory records: shared source observations and
+sibling knowledge remain. Global-note forgetting also hides only that record.
+Author/owner (project) and author/admin (global) authorization still applies.
+Both stores implement this boundary.
+
+Explicitly forgetting a source event hides that capture and every record derived
+from it. A session end may refresh its summary and handoff from remaining retained
+captures, but never resurrects a forgotten or superseded note. Private personal
+memory forgetting retains its owned-source cascade. A source ID in metadata alone
+never grants authority over another person's capture.
 
 The shared project model is pre-release and requires fresh development stores;
 no compatibility or migration of older project data is provided.

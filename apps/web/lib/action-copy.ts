@@ -1,5 +1,5 @@
 export function deleteDecisionImpact(memoryId: string): string {
-  return `This hides ${memoryId} from the project. Cairn keeps the stored record and records a retained delete. The decision leaves this page and every member’s project view. Your private source stays as it is. This console cannot undo it.`;
+  return `This hides ${memoryId} from the project. Cairn keeps the stored record and records a retained delete. The decision leaves this page and every member’s project view. This console cannot undo it.`;
 }
 
 export function revokeDeviceImpact(name: string): string {
@@ -15,5 +15,5 @@ export function closeBranchImpact(name: string): string {
 }
 
 export function mergeBranchImpact(name: string): string {
-  return `Record the merge of your branch ${name}. The selected memory becomes a decision for every member; only your branch and worktree records change. Preview the full copy first.`;
+  return `Record the merge of your branch ${name}. The selected project memory is verified at the merge commit; only your branch and worktree records change.`;
 }

@@ -2,6 +2,7 @@
 //! API with a device token. Humans use the web console; this crate never holds an account
 //! session and never touches a store file.
 
+pub mod agents;
 pub mod mcp;
 pub mod project;
 pub mod tools;

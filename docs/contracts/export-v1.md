@@ -36,8 +36,7 @@ The session, observation, and memory entries use the serialized domain types.
 Row fields are snake_case (`session_id`, `source_event_ids`), except that a
 row's `lifecycle` object uses `expiresAt`. The envelope keys are camelCase
 (`exportedAt`, `forgottenIds`). Memory and recall-related entries may include the
-additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
-`global`). Memory entries also include lifecycle, `kind`, `next_steps`,
+additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entries include the structured common and per-type fields from [the scope contract](project-layer4.md#memory-scopes-and-record), lifecycle, `kind`, `next_steps`,
 `unresolved_work`, `project_id`, `promoted_from`, `promotion_reason`,
 `verified_commit`, `source_event_ids`, and optional `supersedes` fields.
 `forgottenIds` is the authoritative suppression set for imported state.
@@ -103,6 +102,11 @@ additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
   project tag or publication marker cannot publish a decision. Personal exports
   exclude published decisions and do not back up project identity, membership or
   governance. Project decisions are read online; explicit re-promotion is required.
+- Every import clears the memory's feedback votes and recomputes `helpful_count`
+  and `stale_count` as zero. Exported voter identities are not authority to vote
+  as another person, and supplied counts are not trusted. Access statistics are
+  retained. This normalization applies before same-ID conflict comparison;
+  an existing local vote is never erased by importing a bundle.
 - PostgreSQL import runs in one transaction keyed to the authenticated person.
   It does not apply the file-store rules on session `person_id` or `forgottenIds`
   ownership. It ignores a bundle session's
@@ -137,7 +141,10 @@ additive Layer 2 `scope` field (`session`, `worktree`, `branch`, `project`, or
 Export returns the envelope itself. REST import takes `{"bundle": <envelope>}`,
 and MCP `memory_import` takes the envelope as its `bundle` argument. The import
 result keys are `imported_sessions`, `imported_observations`,
-`imported_memories`, and `imported_forgotten_ids`. A file-store account
+`imported_memories`, `imported_forgotten_ids`, and `dropped_links`.
+`dropped_links` lists typed links the import did not store because they are
+self-links, duplicates, or point at a missing, unreadable, or other-scope
+target. A file-store account
 ownership rejection returns HTTP 401. PostgreSQL has no such rejection, and its
 database errors return HTTP 500.
 

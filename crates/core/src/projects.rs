@@ -1,8 +1,8 @@
 use crate::accounts::{hash_token, random_token};
-use crate::lifecycle::{MemoryKind, MemoryScope, Retention, Sensitivity, is_expired};
+use crate::lifecycle::{MemoryScope, is_expired};
 use crate::memories::Memory;
 use crate::ownership::{ProjectMemberRecord, owner_matches};
-use crate::privacy::{redact_memory_metadata, redact_sensitive_content};
+use crate::privacy::redact_sensitive_content;
 use crate::sessions::MAX_HANDOFF_ITEM_BYTES;
 use crate::store::MemoryStore;
 use crate::types::{StoreError, WorkContext, timestamp};
@@ -148,12 +148,16 @@ impl MemoryStore {
         let name = name.map(str::trim).filter(|name| !name.is_empty());
         let short_name = repository.rsplit('/').next().unwrap_or(repository);
         let default_name = short_name.strip_prefix("local:").unwrap_or(short_name);
-        self.ensure_project(
+        let result = self.ensure_project(
             account_token,
             repository,
             name.unwrap_or(default_name),
             None,
-        )
+        )?;
+        if name.is_some_and(|name| name != result.0.name) {
+            return Err(StoreError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
+        Ok(result)
     }
 
     fn ensure_project(
@@ -409,6 +413,15 @@ impl MemoryStore {
     }
 
     pub fn join_project(&mut self, token: &str, project_id: &str) -> Result<Project, StoreError> {
+        self.join_project_named(token, project_id, None)
+    }
+
+    pub fn join_project_named(
+        &mut self,
+        token: &str,
+        project_id: &str,
+        name: Option<&str>,
+    ) -> Result<Project, StoreError> {
         let account = self.authenticate_account(token)?;
         let project = self
             .state
@@ -417,6 +430,9 @@ impl MemoryStore {
             .find(|p| p.project_id == project_id)
             .cloned()
             .ok_or_else(|| StoreError::Validation("unknown project on this server".to_owned()))?;
+        if name.is_some_and(|name| name.trim() != project.name) {
+            return Err(StoreError::Validation("project name differs from the server; use `cairn init --rename <name>` as the owner".to_owned()));
+        }
         self.auto_register_project(
             &account.person_id,
             &WorkContext {
@@ -659,7 +675,7 @@ impl MemoryStore {
         })
     }
 
-    fn index_project_memory(&mut self, project_id: &str, memory: &Memory) {
+    pub(crate) fn index_project_memory(&mut self, project_id: &str, memory: &Memory) {
         let mut candidates = vec![("decision", memory.memory_id.clone(), None)];
         candidates.extend(
             memory
@@ -817,8 +833,7 @@ impl MemoryStore {
             if branch.merge_commit.as_deref() == Some(commit)
                 && let Some(merged_memory_id) = &branch.merge_memory_id
                 && let Some(memory) = self.project_rows(project_id).into_iter().find(|memory| {
-                    memory.memory_id == *merged_memory_id
-                        && memory.promoted_from.as_deref() == Some(memory_id)
+                    memory.memory_id == *merged_memory_id && memory.memory_id == memory_id
                 })
             {
                 return Ok(ProjectMergeResult { branch, memory });
@@ -859,39 +874,21 @@ impl MemoryStore {
                 .contains(source.memory_id.as_str())
         {
             return Err(StoreError::Validation(
-                "forgotten or expired memories cannot be promoted".to_owned(),
+                "forgotten or expired memories cannot be selected for merge".to_owned(),
             ));
         }
         if source.scope == MemoryScope::Global {
             return Err(StoreError::Validation(
-                "global personal memories cannot be promoted".to_owned(),
+                "global personal memories cannot be selected for merge".to_owned(),
             ));
         }
-        if source.lifecycle.sensitivity == Sensitivity::Secret {
+        if source.scope != MemoryScope::Project || source.project_id.as_deref() != Some(project_id)
+        {
             return Err(StoreError::Validation(
-                "secret memories cannot be promoted".to_owned(),
+                "merge requires an existing project-scoped memory".to_owned(),
             ));
         }
-
-        // Owner-visible rows only, as in `promote_memory`: a stored foreign row must not stand
-        // in for this merge.
-        let mut promoted = if let Some(existing) =
-            self.project_rows(project_id).into_iter().find(|memory| {
-                memory.promoted_from.as_deref() == Some(memory_id)
-                    && !self.memory_is_forgotten(memory)
-                    && !is_expired(&memory.lifecycle)
-            }) {
-            existing
-        } else {
-            let mut promoted =
-                build_project_decision(source, &project, &account.person_id, reason)?;
-            promoted.supersedes = self.prior_project_copy(
-                project_id,
-                promoted.supersedes.as_deref(),
-                &account.person_id,
-            );
-            promoted
-        };
+        let mut promoted = source;
         let previous_commit = promoted.verified_commit.clone();
         promoted.verified_commit = Some(commit.to_owned());
         promoted.lifecycle.freshness = 100;
@@ -1015,198 +1012,36 @@ impl MemoryStore {
         Ok(result)
     }
 
-    pub fn promote_memory(
+    pub fn rename_project(
         &mut self,
         token: &str,
         project_id: &str,
-        memory_id: &str,
-        reason: &str,
-    ) -> Result<Memory, StoreError> {
-        self.promote_memory_checked(token, project_id, memory_id, reason, None)
-    }
-
-    pub fn promote_memory_checked(
-        &mut self,
-        account_token: &str,
-        project_id: &str,
-        memory_id: &str,
-        reason: &str,
-        expected_preview: Option<&str>,
-    ) -> Result<Memory, StoreError> {
-        let account = self.authenticate_account(account_token)?;
-        self.require_project_reader(&account, project_id)?;
-        if !self.memory_owned_by(memory_id, &account.person_id) {
-            return Err(StoreError::Validation(
-                "only your own personal memories may be promoted".to_owned(),
-            ));
-        }
-        let reason = reason.trim();
-        if project_id.trim().is_empty() || memory_id.trim().is_empty() || reason.is_empty() {
-            return Err(StoreError::Validation(
-                "project_id, memory_id, and promotion reason are required".to_owned(),
-            ));
-        }
-        if reason.len() > MAX_HANDOFF_ITEM_BYTES {
-            return Err(StoreError::Validation(
-                "promotion reason exceeds the 2048 byte limit".to_owned(),
-            ));
-        }
+        name: &str,
+    ) -> Result<Project, StoreError> {
+        let account = self.authenticate_account(token)?;
+        self.require_project_owner(&account, project_id)?;
+        let name = name.trim();
+        validate_project_text(name, "project name")?;
         let project = self
             .state
             .projects
-            .iter()
-            .find(|project| project.project_id == project_id)
-            .cloned()
-            .ok_or_else(|| StoreError::Validation(format!("unknown project: {project_id}")))?;
-        let source = self
-            .state
-            .memories
-            .iter()
-            .find(|memory| memory.memory_id == memory_id)
-            .cloned()
-            .ok_or_else(|| StoreError::Validation(format!("unknown memory: {memory_id}")))?;
-        if self.memory_is_forgotten(&source)
-            || is_expired(&source.lifecycle)
-            || self
-                .live_superseded_targets()
-                .contains(source.memory_id.as_str())
-        {
-            return Err(StoreError::Validation(
-                "forgotten or expired memories cannot be promoted".to_owned(),
-            ));
+            .iter_mut()
+            .find(|p| p.project_id == project_id)
+            .expect("checked owner");
+        if project.name == name {
+            return Ok(project.clone());
         }
-        if source.scope == MemoryScope::Global {
-            return Err(StoreError::Validation(
-                "global personal memories cannot be promoted".to_owned(),
-            ));
-        }
-        if source.lifecycle.sensitivity == Sensitivity::Secret {
-            return Err(StoreError::Validation(
-                "secret memories cannot be promoted".to_owned(),
-            ));
-        }
-        if source.context.repository.is_none()
-            || (source.context.project_id.as_deref() != Some(project.project_id.as_str())
-                && source.context.repository.as_deref() != Some(project.repository.as_str()))
-        {
-            return Err(StoreError::Validation(
-                "memory repository does not match the project".to_owned(),
-            ));
-        }
-        // A hidden copy is history: only a currently live decision makes promotion idempotent.
-        if let Some(existing) = self
-            .live_project_memories(project_id)
-            .into_iter()
-            .find(|memory| memory.promoted_from.as_deref() == Some(memory_id))
-        {
-            self.record_memory_owner(&account.person_id, &existing.memory_id);
-            self.persist()?;
-            return Ok(existing);
-        }
-        let mut promoted = build_project_decision(source, &project, &account.person_id, reason)?;
-        promoted.supersedes = self.prior_project_copy(
-            project_id,
-            promoted.supersedes.as_deref(),
-            &account.person_id,
-        );
-        if let Some(expected) = expected_preview
-            && publication_fingerprint(&promoted)? != expected
-        {
-            return Err(StoreError::Conflict(
-                "publication changed; preview it again".to_owned(),
-            ));
-        }
-        self.state.memories.push(promoted.clone());
-        self.record_memory_owner(&account.person_id, &promoted.memory_id);
-        self.index_project_memory(project_id, &promoted);
-        if let Some(commit) = promoted.verified_commit.clone() {
-            self.record_freshness_event(
-                project_id,
-                &promoted.memory_id,
-                None,
-                &commit,
-                "promotion",
-                Some(redact_sensitive_content(reason)),
-            );
-        }
+        let previous_name = std::mem::replace(&mut project.name, name.to_owned());
+        project.updated_at = timestamp();
+        let project = project.clone();
         self.record_share_audit(
             &account.person_id,
-            "memory_promote",
-            Some(memory_id),
-            serde_json::json!({
-                "project_id": project_id,
-                "promotion_id": promoted.memory_id,
-            }),
+            "project_renamed",
+            Some(project_id),
+            serde_json::json!({"previous_name": previous_name, "name": name}),
         );
         self.persist()?;
-        Ok(promoted)
-    }
-
-    pub fn personal_project_memories(
-        &self,
-        token: &str,
-        project_id: &str,
-    ) -> Result<Vec<Memory>, StoreError> {
-        let account = self.authenticate_account(token)?;
-        self.require_project_reader(&account, project_id)?;
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.project_id == project_id)
-            .expect("checked reader");
-        let hidden = self.live_superseded_targets();
-        Ok(self
-            .state
-            .memories
-            .iter()
-            .filter(|m| {
-                m.published_by.is_none()
-                    && self.memory_owned_by(&m.memory_id, &account.person_id)
-                    && (m.context.project_id.as_deref() == Some(project_id)
-                        || m.context.repository.as_deref() == Some(&project.repository))
-                    && !self.memory_is_forgotten(m)
-                    && !is_expired(&m.lifecycle)
-                    && !hidden.contains(m.memory_id.as_str())
-            })
-            .cloned()
-            .collect())
-    }
-
-    pub fn preview_promotion(
-        &self,
-        token: &str,
-        project_id: &str,
-        memory_id: &str,
-        reason: &str,
-    ) -> Result<Memory, StoreError> {
-        let account = self.authenticate_account(token)?;
-        self.require_project_reader(&account, project_id)?;
-        let source = self
-            .state
-            .memories
-            .iter()
-            .find(|m| {
-                m.memory_id == memory_id && self.memory_owned_by(memory_id, &account.person_id)
-            })
-            .ok_or_else(|| StoreError::Validation("unknown personal memory".to_owned()))?;
-        if self.memory_is_forgotten(source) || self.live_superseded_targets().contains(memory_id) {
-            return Err(StoreError::Validation(
-                "memory is no longer live".to_owned(),
-            ));
-        }
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.project_id == project_id)
-            .expect("checked reader");
-        let mut decision =
-            build_project_decision(source.clone(), project, &account.person_id, reason)?;
-        decision.supersedes =
-            self.prior_project_copy(project_id, source.supersedes.as_deref(), &account.person_id);
-        decision.promoted_from = None;
-        Ok(decision)
+        Ok(project)
     }
 
     pub fn transfer_project(
@@ -1273,9 +1108,20 @@ impl MemoryStore {
         project_id: &str,
         memory_id: &str,
         commit: Option<&str>,
-        reason: &str,
+        _reason: &str,
     ) -> Result<Memory, StoreError> {
-        let promoted = self.promote_memory(account_token, project_id, memory_id, reason)?;
+        let account = self.authenticate_account(account_token)?;
+        self.require_project_reader(&account, project_id)?;
+        self.reject_member_mutation(&account, memory_id)?;
+        let promoted = self
+            .project_memories(account_token, project_id)?
+            .into_iter()
+            .find(|m| m.memory_id == memory_id)
+            .ok_or_else(|| {
+                StoreError::Validation(
+                    "confirmation requires an existing project memory".to_owned(),
+                )
+            })?;
         match commit.map(str::trim).filter(|value| !value.is_empty()) {
             Some(commit) => {
                 self.verify_project_memory(account_token, project_id, &promoted.memory_id, commit)
@@ -1361,74 +1207,7 @@ impl MemoryStore {
     }
 }
 
-/// The full publication payload. Only explicit promotion or a project correction may set publication attribution.
-pub fn build_project_decision(
-    mut source: Memory,
-    project: &Project,
-    author: &str,
-    reason: &str,
-) -> Result<Memory, StoreError> {
-    let reason = reason.trim();
-    if reason.trim().is_empty() || reason.len() > MAX_HANDOFF_ITEM_BYTES {
-        return Err(StoreError::Validation(
-            "promotion reason must contain 1 to 2048 bytes".to_owned(),
-        ));
-    }
-    if source.published_by.is_some() {
-        return Err(StoreError::Validation(
-            "only personal memories may be promoted".to_owned(),
-        ));
-    }
-    if is_expired(&source.lifecycle) {
-        return Err(StoreError::Validation(
-            "expired memories cannot be promoted".to_owned(),
-        ));
-    }
-    if source.scope == MemoryScope::Global {
-        return Err(StoreError::Validation(
-            "global personal memories cannot be promoted".to_owned(),
-        ));
-    }
-    if source.lifecycle.sensitivity == Sensitivity::Secret {
-        return Err(StoreError::Validation(
-            "secret memories cannot be promoted".to_owned(),
-        ));
-    }
-    if source.context.repository.is_none()
-        || (source.context.project_id.as_deref() != Some(project.project_id.as_str())
-            && source.context.repository.as_deref() != Some(project.repository.as_str()))
-    {
-        return Err(StoreError::Validation(
-            "memory repository does not match the project".to_owned(),
-        ));
-    }
-    let origin = source.memory_id.clone();
-    source.memory_id = format!(
-        "memory-project-{}",
-        &hash_token(&random_token("promotion"))[..24]
-    );
-    source.session_id = format!("publication-{}", source.memory_id);
-    source.kind = MemoryKind::Decision;
-    source.scope = MemoryScope::Project;
-    source.project_id = Some(project.project_id.clone());
-    source.context.project_id = Some(project.project_id.clone());
-    source.verified_commit = source.context.commit.take();
-    source.context.branch = None;
-    source.context.worktree = None;
-    source.promoted_from = Some(origin);
-    source.source_event_ids.clear();
-    source.promotion_reason = Some(redact_sensitive_content(reason));
-    source.published_by = Some(author.to_owned());
-    source.changed_by = Some(author.to_owned());
-    source.changed_at = Some(timestamp());
-    source.created_at = timestamp();
-    source.lifecycle.retention = Retention::Durable;
-    source.lifecycle.expires_at = None;
-    redact_memory_metadata(&mut source);
-    Ok(source)
-}
-
-/// Binds a preview to every copied field; generated publication IDs/timestamps are excluded.
+/// Hash of the publication payload a merge preview must still match at commit.
 pub fn publication_fingerprint(memory: &Memory) -> Result<String, StoreError> {
     Ok(hash_token(&serde_json::to_string(&(
         &memory.content,

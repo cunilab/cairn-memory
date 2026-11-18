@@ -171,7 +171,7 @@ fn account_sessions_isolate_context_for_one_public_id() -> Result<(), StoreError
     );
 
     let owner_summary = store.end_session_for_account(&owner.token, session_id)?;
-    assert_eq!(owner_summary.scope, MemoryScope::Worktree);
+    assert_eq!(owner_summary.scope, MemoryScope::Personal);
     assert_eq!(
         owner_summary.context.branch.as_deref(),
         Some("owner-branch")
@@ -194,7 +194,7 @@ fn account_sessions_isolate_context_for_one_public_id() -> Result<(), StoreError
     assert_eq!(resumed.context, owner_context);
     assert!(resumed.ended_at.is_some());
     let member_summary = store.end_session_for_account(&member.token, session_id)?;
-    assert_eq!(member_summary.scope, MemoryScope::Branch);
+    assert_eq!(member_summary.scope, MemoryScope::Personal);
     assert_eq!(
         member_summary.context.repository.as_deref(),
         Some("member-repo")
@@ -211,13 +211,13 @@ fn account_sessions_isolate_context_for_one_public_id() -> Result<(), StoreError
     );
     let legacy_summary = store.end_session(session_id)?;
     assert_eq!(legacy_summary.memory_id, format!("memory-{session_id}"));
-    assert_eq!(legacy_summary.scope, MemoryScope::Worktree);
+    assert_eq!(legacy_summary.scope, MemoryScope::Personal);
     assert!(legacy_summary.content.contains("legacyfact"));
     assert!(!legacy_summary.content.contains("ownerfact"));
 
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 1);
+    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
     assert_eq!(
         owner_hits[0].context.branch.as_deref(),
         Some("owner-branch")
@@ -415,8 +415,17 @@ fn two_accounts_keep_distinct_session_summaries_for_one_session_id() -> Result<(
     assert!(!owner_summary.content.contains("memberfact"));
     let owner_hits =
         store.search_for_account(&owner.token, "ownerfact", 5, &RecallFilter::default())?;
-    assert_eq!(owner_hits.len(), 1);
-    assert_eq!(owner_hits[0].memory_id, owner_summary.memory_id);
+    assert_eq!(owner_hits.len(), 2, "session note and linked handoff");
+    assert!(
+        owner_hits
+            .iter()
+            .any(|m| m.memory_id == owner_summary.memory_id)
+    );
+    assert!(
+        owner_hits
+            .iter()
+            .all(|m| m.source_event_ids == owner_summary.source_event_ids)
+    );
     let member_hits =
         store.search_for_account(&member.token, "ownerfact", 5, &RecallFilter::default())?;
     assert!(member_hits.is_empty());
@@ -809,7 +818,7 @@ fn failed_account_capture_persist_leaves_no_unowned_observation() -> Result<(), 
 
     store.end_session_for_account(&owner.token, "sess-commit")?;
     drop(store);
-    let reopened = MemoryStore::open(&path)?;
+    let mut reopened = MemoryStore::open(&path)?;
     assert_eq!(
         reopened
             .observations()
@@ -821,8 +830,12 @@ fn failed_account_capture_persist_leaves_no_unowned_observation() -> Result<(), 
     assert!(!reopened.observation_owned_by("retry-event", &member.account.person_id));
     let hits =
         reopened.search_for_account(&owner.token, "retrybetafact", 5, &RecallFilter::default())?;
-    assert_eq!(hits.len(), 1);
-    assert!(hits[0].content.contains("retrybetafact"));
+    assert_eq!(hits.len(), 2, "session note and linked handoff");
+    assert!(hits.iter().any(|m| m.content.contains("retrybetafact")));
+    assert!(
+        hits.iter()
+            .all(|m| m.source_event_ids.contains(&"retry-event".to_owned()))
+    );
     let member_hits =
         reopened.search_for_account(&member.token, "retrybetafact", 5, &RecallFilter::default())?;
     assert!(member_hits.is_empty());
@@ -855,7 +868,7 @@ fn capture_inherits_context_from_started_session() -> Result<(), StoreError> {
 
     assert_eq!(captured.observation.context, context());
     let memory = store.end_session("sess-context")?;
-    assert_eq!(memory.scope, MemoryScope::Worktree);
+    assert_eq!(memory.scope, MemoryScope::Personal);
 
     fs::remove_file(path)?;
     Ok(())

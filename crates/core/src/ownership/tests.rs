@@ -2,7 +2,7 @@ use crate::projects::Project;
 use crate::store::MemoryStore;
 use crate::test_support::{
     capture_in, context, import_forgotten, join_project, observation_for, owned_project,
-    project_row, remember_with_context, repo_context, temp_store_path, with_project_id,
+    project_row, repo_context, temp_store_path, with_project_id,
 };
 use crate::types::{StoreError, WorkContext};
 use std::fs;
@@ -25,64 +25,6 @@ fn account_import_always_keeps_rows_personal_even_with_forged_publication() -> R
     assert_eq!(exported.memories[0].published_by, None);
     assert_eq!(exported.memories[0].project_id, None);
     std::fs::remove_file(path)?;
-    Ok(())
-}
-
-#[test]
-fn a_capture_with_a_project_id_makes_the_capturer_a_member_once() -> Result<(), StoreError> {
-    let path = temp_store_path("join-by-project-file");
-    let mut store = MemoryStore::open(&path)?;
-    let owner = store.bootstrap_account("o@example.test", "correct horse battery staple")?;
-    let member = store.register_account("m@example.test", "correct horse battery staple")?;
-    let shared = store.register_project(&owner.token, "cairn-demo", "Shared", None)?;
-
-    // The member's repository name differs, so only the project id can link it.
-    let context = with_project_id(
-        repo_context("other-name", Some("feat/m")),
-        &shared.project_id,
-    );
-    capture_in(&mut store, &member.token, "j1", context.clone())?;
-    capture_in(&mut store, &member.token, "j2", context)?;
-
-    assert_eq!(
-        store.state.projects.len(),
-        1,
-        "no duplicate private project"
-    );
-    assert_eq!(store.state.project_branches.len(), 1);
-    let projects = store.projects(&member.token)?;
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].project_id, shared.project_id);
-    let team = store.project_people(&owner.token, &shared.project_id)?;
-    assert_eq!(team.len(), 2, "joining twice records one membership");
-    assert_eq!(team[1].email, "m@example.test");
-    let stored = store
-        .observations()
-        .find(|observation| observation.event_id == "j1")
-        .expect("the observation is stored");
-    assert_eq!(
-        stored.context.project_id.as_deref(),
-        Some(shared.project_id.as_str())
-    );
-    let audit = store.audit_events(&owner.token, 10)?;
-    assert_eq!(
-        audit
-            .iter()
-            .filter(|event| event.action == "project_member_joined")
-            .count(),
-        1
-    );
-
-    // The new member can be shared with, and reads the shared decision.
-    let source = remember_with_context(&mut store, &owner.token, "member shared source")?;
-    store.promote_memory(&owner.token, &shared.project_id, &source.memory_id, "why")?;
-    assert_eq!(
-        store
-            .project_memories(&member.token, &shared.project_id)?
-            .len(),
-        1
-    );
-    fs::remove_file(path)?;
     Ok(())
 }
 

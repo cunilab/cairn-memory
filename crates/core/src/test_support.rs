@@ -1,4 +1,3 @@
-use crate::accounts::hash_token;
 use crate::capture::ObservationInput;
 use crate::lifecycle::{LifecycleInput, MemoryKind, MemoryScope, Sensitivity};
 use crate::memories::{Memory, build_explicit_memory_record};
@@ -152,15 +151,7 @@ pub(crate) fn owned_project(
     content: &str,
 ) -> Result<(String, Memory), StoreError> {
     let project = store.register_project(token, "cairn-demo", "Demo", None)?;
-    let source = store.remember_for_account(
-        token,
-        content,
-        Vec::new(),
-        context(),
-        LifecycleInput::default(),
-        MemoryKind::Explicit,
-    )?;
-    let promoted = store.promote_memory(token, &project.project_id, &source.memory_id, "why")?;
+    let promoted = save_project_memory(store, token, &project.project_id, content, context())?;
     Ok((project.project_id, promoted))
 }
 
@@ -202,17 +193,7 @@ pub(crate) fn join_project(
     token: &str,
     project_id: &str,
 ) -> Result<(), StoreError> {
-    let event_id = format!("join-{project_id}-{}", &hash_token(token)[..8]);
-    store.capture_for_account(
-        token,
-        ObservationInput {
-            context: WorkContext {
-                project_id: Some(project_id.to_owned()),
-                ..WorkContext::default()
-            },
-            ..observation_for("join", &event_id, "joined by project file")
-        },
-    )?;
+    store.join_project(token, project_id)?;
     Ok(())
 }
 
@@ -334,32 +315,6 @@ pub(crate) fn temp_store_dir(test_name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).expect("temp store dir");
     dir
-}
-
-// Runs `op` against a blocked store file, then again once it is released. The failed call
-// must leave the in-memory state untouched and the retry must reach the disk.
-pub(crate) fn failed_write_rolls_back_then_retry_persists(
-    store: &mut MemoryStore,
-    path: &Path,
-    op: impl Fn(&mut MemoryStore) -> Result<(), StoreError>,
-) -> Result<(), StoreError> {
-    let before_state = serde_json::to_value(&store.state)?;
-    let before_file = fs::read(path)?;
-    let mut blocked = HeldStoreDir::block(path);
-    let failed = op(store).expect_err("a blocked rename must fail the write");
-    assert!(matches!(failed, StoreError::Io(_)), "got {failed}");
-    assert_eq!(serde_json::to_value(&store.state)?, before_state);
-    blocked.release();
-    assert_eq!(fs::read(path)?, before_file);
-
-    op(store)?;
-    assert_ne!(fs::read(path)?, before_file, "the retry must write");
-    let reopened = MemoryStore::open(path)?;
-    assert_eq!(
-        serde_json::to_value(&reopened.state)?,
-        serde_json::to_value(&store.state)?
-    );
-    Ok(())
 }
 
 // A bundle with a session, a live row, an already-expired row, a tombstoned row and a memory.
@@ -518,4 +473,14 @@ pub(crate) fn context_items(value: &Value, key: &str) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+pub(crate) fn save_project_memory(
+    store: &mut MemoryStore,
+    token: &str,
+    project_id: &str,
+    content: &str,
+    context: WorkContext,
+) -> Result<Memory, StoreError> {
+    store.save_for_account(token, serde_json::from_value(serde_json::json!({"scope":"project", "title":content,"summary":content,"reason":"verified fixture","context":WorkContext { project_id:Some(project_id.to_owned()), ..context }}))?)
 }

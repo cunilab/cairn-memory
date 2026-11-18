@@ -1,7 +1,7 @@
 ---
 id: CM-SPEC-001
 title: "Specification — Collaborative Memory Source"
-status: draft
+status: superseded
 ---
 
 # Specification — Collaborative Memory Source

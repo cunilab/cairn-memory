@@ -15,13 +15,14 @@ How changes reach `main`, how a release is cut, and how installed clients update
 - A pull request needs every required check green. The required checks are the CI job names:
   - `Rust format and clippy`
   - `Rust tests`
-  - `PostgreSQL tests` (each ignored test runs against its own fresh PostgreSQL 16 database, see `scripts/ci_postgres_tests.sh`)
+  - `PostgreSQL tests` (each ignored test runs against its own fresh PostgreSQL 17 database with pgvector, see `scripts/ci_postgres_tests.sh`)
   - `Build on macos-15` and `Build on windows-latest`
   - `Web console typecheck, lint, build`
   - `Python hook and outbox tests`
   - `Documentation validation`
+  - `Acceptance smokes` (`scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, `scripts/smoke_postgres.sh`, and `scripts/smoke_web.sh`)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
-- The workflows do not run `scripts/smoke_full_flow.sh` or `scripts/smoke_layer3.sh`; run them locally for transport, persistence, or sync changes (see [AGENTS.md](../AGENTS.md)).
+- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the PostgreSQL tests job.
 
 ## Cut a release
 
@@ -39,12 +40,38 @@ Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[w
 
 4. The `Release` workflow then:
    - fails unless the tag equals the workspace version, is `MAJOR.MINOR.PATCH` (no pre-release suffix), and points at a commit on `main`;
-   - builds `cairn` and `cairn-server` natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`;
-   - creates the GitHub Release with generated notes and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
+   - builds the CLI natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`; the server uses the same macOS/Windows targets and `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` on Linux, because ONNX Runtime requires glibc;
+   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
    - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-memory-server` and `ghcr.io/cunilab/cairn-memory-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (each platform is built natively, then merged into one multi-arch manifest). How to run them: [deploy](./deploy.md).
 5. A bad release is not edited in place: delete the release and tag, fix on a branch, and release the next patch version. Clients never install a version lower than their own.
 
 Only the `Publish release` job has `contents: write`, and only the image and manifest jobs have `packages: write`.
+
+## 0.1.4 upgrade notes
+
+Upgrade the server and CLI together. This patch adds offline CLI help and rejects
+flag-like positional arguments before requests; `cairn init --help` can no longer
+create a project. Init writes the display name to `.cairn/project.json`, reads
+older files without it, and refuses name conflicts. The owner can repair an
+accidental `--help` name with `cairn init --rename "Project name"` in the affected
+checkout, then commit its updated file. This uses a new owner-only REST route and
+records an audit event; see the [project contract](contracts/project-layer4.md).
+Older CLI/hook readers tolerate the added project-name field. A downgrade loses
+the rename route and restores the old CLI argument bug; use 0.1.4 for init/rename.
+
+The memory-scope change requires fresh pre-release stores: reset older databases
+and file stores before using 0.1.4, because old private `global` notes must never
+be reinterpreted as server-wide notes. See [ADR 0014](adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
+PostgreSQL now requires pgvector and migration `0014_hybrid_embeddings.sql`.
+The server adds `fastembed`/CPU ONNX Runtime and a pinned Apache-2.0 MiniLM model;
+the CLI remains static musl on Linux. Linux server release assets are GNU binaries
+built on Ubuntu 24.04: use a compatible glibc system (2.39 or newer), with the C++
+runtime installed, rather than Alpine/musl. The exact minimum runtime version has
+not been measured. The `linux/amd64` and `linux/arm64` production images build on
+Debian trixie and run on `debian:trixie-slim`, with the C++ runtime and local
+model included. Standalone servers provision the model using the pinned download
+script and `--embedding-model-dir` / `CAIRN_EMBEDDING_MODEL_DIR`; no model means
+lexical/entity/link fallback. See [hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014).
 
 ## How clients update
 

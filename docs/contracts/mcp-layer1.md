@@ -60,18 +60,19 @@ configuration is the only credential, and the server scopes every call to its ac
 
 | Tool | Route | Behavior |
 | --- | --- | --- |
-| `memory_save` | `POST /remember` | Save explicit durable memory |
+| `memory_save` | `POST /remember` | Save a scoped structured record; scope, title, summary and reason required |
+| `memory_list`, `memory_get` | `GET /memories`, `GET /memories/{id}` | List readable records or get every field |
 | `memory_recall` | `POST /recall` | Return a bounded context pack |
 | `memory_consolidate` | `POST /session/end` | End a session and create its evidence-backed memory |
 | `memory_smart_search` | `POST /smart-search` | Search durable memories |
 | `memory_why_changed` | `POST /why-changed` | Return decisions, reasons, evidence, relationships, and conflict signals |
 | `memory_diagnose` | `GET /diagnose` | Report the account's lifecycle counts |
-| `memory_lesson_save` | `POST /remember` | Save an explicit memory classified as a lesson |
-| `memory_reflect` | `POST /context` | Return retrieval candidates; no model is invoked |
+| `memory_lesson_save` | `POST /remember` | Save a scoped record; defaults to gotcha unless kind is explicit |
+| `memory_reflect` | `POST /context` | Return hybrid retrieval candidates; local embeddings when enabled |
 | `memory_session_start` | `POST /session/start` | Start or resume a session |
 | `memory_observe` | `POST /observe` | Capture one bounded, idempotent observation |
 | `memory_session_end` | `POST /session/end` | Alias for session consolidation |
-| `memory_search` | `POST /search` | Keyword search |
+| `memory_search` | `POST /search` | Hybrid search |
 | `memory_context` | `POST /context` | Bounded context assembly |
 | `memory_resume` | `POST /resume` | Recover recent session summaries for current work context |
 | `memory_unresolved` | `POST /unresolved` | Recover session summaries with unresolved work |
@@ -79,13 +80,22 @@ configuration is the only credential, and the server scopes every call to its ac
 | `memory_export` | `POST /export` | Return a versioned portable memory bundle |
 | `memory_import` | `POST /import` | Merge a versioned bundle idempotently |
 | `memory_correct` | `POST /correct` | Supersede a memory or observation with a corrected durable memory |
+| `memory_contradict` | `POST /contradict` | Declare that one visible memory contradicts another |
+| `memory_supersede` | `POST /supersede` | Set `supersedes` on an existing memory |
+| `memory_similarity_reviews` | `GET /similarity-reviews` | List open reviews the caller can read on both sides |
+| `memory_review_dismiss` | `POST /similarity-reviews/dismiss` | Dismiss one open review |
+| `memory_review_contradict` | `POST /similarity-reviews/contradict` | Declare a contradiction from a review |
+| `memory_review_supersede` | `POST /similarity-reviews/supersede` | Supersede one side of a review |
+| `memory_link` | `POST /links` | Add one typed link; edit rights on the source |
+| `memory_unlink` | `POST /links/remove` | Remove one typed link |
+| `memory_graph` | `GET /graph` | Readable memory link graph, with optional scope, project, relation, and cap |
 
 Project tools run the same routes as the web console, with the same
 account scope. Their behavior is owned by the contract named here:
 
 | Tool | Owner |
 | --- | --- |
-| `memory_project_list`, `memory_project_register`, `memory_promote`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
+| `memory_project_list`, `memory_project_register`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
 | `memory_project_members`, `memory_project_verify`, `memory_delete` | [CM-CONTRACT-009](project-layer4.md) |
 
 Removed with the local-store mode: `memory_sessions` (it listed the file store's unscoped
@@ -97,7 +107,7 @@ member add or member removal at all, so `memory_project_invite` and
 whose `.cairn/project.json` names it ([project-layer4](project-layer4.md)). `cairn init`, which
 writes that file, is a CLI command only. `memory_diagnose` returns the lifecycle
 summary of `GET /diagnose`, not the earlier local storage counts. `memory_project_list` is
-new: an agent needs a project id before it can publish a decision. Argument names are the
+new: an agent needs a project id before saving project memory. Argument names are the
 camelCase names of the REST bodies; path ids (`projectId`, `memoryId`) are percent-encoded
 into the route.
 
@@ -109,49 +119,21 @@ checks its required arguments before the request.
 Capture and explicit-save tools accept the nested Layer 1 `lifecycle` object
 defined in [CM-CONTRACT-004](lifecycle-v1.md).
 
-## Shared project tools
+## Scoped records and CLI
 
-`memory_promote` accepts `dryRun: true` to preview the full publication payload
-without writing and returns `previewFingerprint`, which can be echoed on promotion
-to reject a changed source. It publishes only the caller's own live personal memory to every
-member. `memory_project_memories` returns one role-neutral decision list;
-`memory_project_members` lists the roster, and `memory_project_verify` takes
-`projectId`, `memoryId`, `commit`. `memory_correct` and `memory_delete` accept project
-decisions only for their author or the current owner. Search/context/recall and
-why-changed combine personal and published results, labelled by `source`, using
-`context.project_id` for the project. No project ID means no project decisions.
+The flat common and per-type fields, visibility and authority rules are defined in [the scope contract](project-layer4.md#memory-scopes-and-record). MCP `memory_save` and `memory_lesson_save` expose every field and require `scope`, `title`, `summary`, `reason`. The lesson alias defaults `kind` to `gotcha`; an explicit kind is preserved. Project saves in an initialized checkout fill `context.project_id` from its committed file when absent. Scope is always explicit.
 
-Removed: `memory_project_share`, `memory_project_shared`, `memory_project_revoke`,
-`memory_project_team_create`, `memory_project_team`. No grant, policy or team API
-remains. Decisions are online reads; personal sync/export does not restore project
-publication. See [ADR 0013](../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same fields, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. CLI and MCP print the server's fields without stripping them.
 
-## CLI
-
-`cairn` is the same table behind positional arguments. Every command prints the server's
-JSON, prints nothing for an empty result, and exits 1 with `cairn: <message>` on an error.
-
-```text
-cairn setup <server-url>                 cairn mcp
-cairn start <session-id> [repository] [branch] [worktree] [commit]
-cairn capture <session-id> <event-id> <content> [role] [source]
-cairn end <session-id>
-cairn search|context|why-changed <query> [limit] [repository] [branch] [worktree] [commit]
-cairn resume|unresolved [limit] [repository] [branch] [worktree] [commit]
-cairn forget <memory-or-event-id>        cairn lesson <content>
-cairn correct <memory-or-event-id> <content>
-cairn export <output>                    cairn import <input>
+```sh
+cairn save '{"scope":"personal","kind":"preference","title":"Concise replies","summary":"Answer in one paragraph.","reason":"Reduce reading time.","preference":"concise","example":"one paragraph"}'
+cairn memories
+cairn memory memory-id
 ```
 
-An empty string skips an optional positional. `setup` reads the token from stdin
-(`cairn setup <url> <<<"$TOKEN"` or an interactive prompt). `export` writes the bundle with mode
-`0600` to a temporary file and renames it over the output path, so an existing symlink at
-that path is replaced, not followed.
-Project commands include `project-memories`, `project-members`, `promote`,
-`promote-preview` and `project-verify`. Old share/shared/revoke/team commands are
-removed. `cairn init` joins an existing committed project instead of creating an
-additional project. A remember/lesson with no repository context is global personal
-memory; supplying repository context keeps it private to that repository.
+Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `contradict`, `supersede`, `reviews`, `review-dismiss`, `review-contradict`, `review-supersede`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
+
+All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v014); no external model API is used.
 
 ## Layer 2 context filters
 
@@ -182,9 +164,21 @@ The query tools `memory_recall`, `memory_context`, `memory_reflect`,
   (file mode, environment override, loopback-only `http`, redirect refusal, token never in
   output or errors).
 - `crates/client/tests/agent_flow.rs` runs the real `cairn` binary and `cairn mcp` against
-  the file-store router (capture, recall, session, promote, share, a `403` on web-only
+  the file-store router (capture, recall, session, scoped save, a `403` on web-only
   routes, revocation) and, as an ignored test with `CAIRN_TEST_DATABASE_URL`, against the
   PostgreSQL router.
-- `scripts/smoke_mcp.sh`, `scripts/smoke_layer1.sh`, `scripts/smoke_layer4_cli.sh`,
-  `scripts/smoke_layer5_cli.sh`, and `scripts/smoke_export.sh` drive the binaries against a
-  spawned `cairn-server`.
+- `scripts/smoke_mcp.sh` drives `cairn mcp` against a spawned `cairn-server`.
+  `scripts/smoke_full_flow.sh` drives the CLI, including capture, scoped save,
+  project visibility, and same-account export/import, against the same kind of server.
+
+## Agent guidance (v0.1.4)
+
+MCP `initialize.instructions` returns the same compact text used by hook and
+instruction-file integration (`scripts/cairn_instructions.txt`, at most 2048
+UTF-8 bytes). It tells the agent when to recall/save, choose project/personal/global
+scope explicitly, supply title/summary/reason and fill known per-type fields and
+evidence. Save/lesson tool descriptions repeat their required fields and scope
+visibility; missing causal fields must never be invented. Tool schemas and REST
+validation still enforce required fields. This is agent guidance, not a
+server-side memory-writing LLM. Setup, removal, per-agent capabilities and limits
+are owned by [the hook contract](hook-v1.md#agent-instructions-and-setup-v014).

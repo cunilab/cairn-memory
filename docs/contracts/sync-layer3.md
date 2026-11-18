@@ -473,8 +473,12 @@ unsupported context keys stay unredacted. Older spool bytes are not rewritten.
   `scripts/smoke_hook_offline.py` checks the opt-in device hook: one POST,
   a redacted version 2 append, explicit duplicate replay, no observe queue,
   and a nonblocking lock. It does not start the Cairn server.
-- `scripts/smoke_layer3.sh` proves registration, replay, deduplication, pull,
-  cursor resume, rotation, last-seen state, and revocation with real processes.
+- `scripts/smoke_postgres.sh` proves registration, deduplication, pull,
+  cursor lag, rotation, last-seen state, and revocation with a real PostgreSQL
+  server. `scripts/smoke_outbox.py` proves enqueue redaction, offline replay,
+  and purge of a revoked credential. `file_sync_adopts_an_owned_observation_once`
+  in `crates/server/src/lib.rs` proves a duplicate event id from another person
+  is rejected.
 - `postgres_context_order_repairs_empty_session_without_rewriting_observations`
   calls `PostgresStore::start_session`, `sync_push`, `end_session`,
   `import_bundle`, and `export_bundle` on a fresh database. It covers empty

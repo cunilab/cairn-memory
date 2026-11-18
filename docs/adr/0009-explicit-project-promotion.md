@@ -1,7 +1,7 @@
 ---
 id: CM-ADR-0009
-title: "Explicit evidence-backed project promotion"
-status: proposed
+title: "ADR 0009 — Explicit evidence-backed project promotion"
+status: superseded
 ---
 
 # ADR 0009 — Explicit evidence-backed project promotion

@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS cairn_observations (
     source text NOT NULL,
     importance text,
     lifecycle jsonb NOT NULL DEFAULT '{}'::jsonb,
-    scope text NOT NULL DEFAULT 'session',
+    scope text NOT NULL DEFAULT 'personal',
     context jsonb NOT NULL DEFAULT '{}'::jsonb,
     captured_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (person_id, event_id),
@@ -90,16 +90,17 @@ CREATE TABLE IF NOT EXISTS cairn_memories (
     person_id text NOT NULL REFERENCES cairn_accounts(person_id),
     session_id text NOT NULL,
     content text NOT NULL,
+    record jsonb NOT NULL DEFAULT '{}'::jsonb,
     source_event_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
     context jsonb NOT NULL DEFAULT '{}'::jsonb,
     lifecycle jsonb NOT NULL DEFAULT '{}'::jsonb,
     kind text NOT NULL DEFAULT 'explicit',
-    scope text NOT NULL DEFAULT 'global',
+    scope text NOT NULL DEFAULT 'personal',
     next_steps jsonb NOT NULL DEFAULT '[]'::jsonb,
     unresolved_work jsonb NOT NULL DEFAULT '[]'::jsonb,
     supersedes text,
     created_at timestamptz NOT NULL DEFAULT now(),
-    search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED
+    search_tsv tsvector GENERATED ALWAYS AS (setweight(to_tsvector('simple', coalesce(record->>'title', '')), 'A') || setweight(to_tsvector('simple', content), 'B')) STORED
 );
 
 CREATE INDEX IF NOT EXISTS cairn_memories_person_scope_idx

@@ -11,7 +11,6 @@ import { DataTable } from "@/components/data-table";
 import { FormDialog } from "@/components/form-dialog";
 import { PageHeader } from "@/components/page-header";
 import { ProjectBranches } from "@/components/project-branches";
-import { ProjectMemories } from "@/components/project-memories";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +36,7 @@ import { deleteDecisionImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
+import { MemoryFeedback } from "@/components/memory-feedback";
 import type { ListedProject, ProjectBranch, ProjectMember, ProjectMemory } from "@/lib/types";
 
 type Action = { kind: "verify" | "correct" | "delete"; memory: ProjectMemory };
@@ -142,8 +142,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     () => [
       {
         id: "decision",
-        header: "Decision",
-        accessorFn: (m) => `${m.memory_id} ${m.content}`,
+        header: "Memory",
+        accessorFn: (m) => `${m.memory_id} ${m.title} ${m.summary}`,
         enableSorting: false,
         cell: ({ row }) => (
           <div className="flex min-w-0 flex-col gap-1.5">
@@ -153,8 +153,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               className="line-clamp-2 text-left text-sm break-words hover:underline focus-visible:ring-2"
               onClick={() => setDetail(row.original)}
             >
-              {row.original.content}
+              {row.original.title}
             </button>
+            <p className="line-clamp-2 text-sm text-muted-foreground">{row.original.summary}</p>
+            <span className="text-xs text-muted-foreground">Project</span>
             <IdText id={row.original.memory_id} />
           </div>
         ),
@@ -162,7 +164,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       {
         id: "author",
         header: "Author",
-        accessorFn: (m) => nameOf(m.published_by),
+        accessorFn: (m) => nameOf(m.author),
         meta: { className: "hidden md:table-cell" },
       },
       {
@@ -194,7 +196,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         enableSorting: false,
         cell: ({ row }) => {
           const memory = row.original;
-          if (!owner && memory.published_by !== account?.person_id) return null;
+          if (!owner && memory.author !== account?.person_id) return null;
           return (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -275,32 +277,25 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       {project ? (
         <Tabs defaultValue="decisions">
           <TabsList>
-            <TabsTrigger value="decisions">Decisions</TabsTrigger>
-            <TabsTrigger value="memories">Memories</TabsTrigger>
+            <TabsTrigger value="decisions">Memories</TabsTrigger>
+            <TabsTrigger value="memories">Branches</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
           </TabsList>
           <TabsContent value="decisions">
             <DataTable
-              label="decisions"
+              label="memories"
               data={decisions}
               columns={columns}
               getRowId={(m) => m.memory_id}
-              filterPlaceholder="Filter decisions"
+              filterPlaceholder="Filter memories"
               empty={
                 <p className="p-6 text-sm text-muted-foreground">
-                  No project decisions yet. Promote one of your memories to publish it to every
-                  member.
+                  No project memories yet. Notes and captures from this initialized repository are visible to every member.
                 </p>
               }
             />
           </TabsContent>
           <TabsContent value="memories">
-            <ProjectMemories
-              projectId={projectId}
-              repository={project.repository}
-              submit={submit}
-              onSessionRequired={requireSignIn}
-            />
             <ProjectBranches
               projectId={projectId}
               branches={branches}
@@ -400,16 +395,20 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
-            <SheetTitle>Project decision</SheetTitle>
+            <SheetTitle>{detail?.title ?? "Project memory"}</SheetTitle>
             <SheetDescription>{detail?.memory_id}</SheetDescription>
           </SheetHeader>
           <div className="space-y-4 p-4">
-            <p className="whitespace-pre-wrap break-words">{detail?.content}</p>
-            <p className="text-sm text-muted-foreground">
-              Author: {nameOf(detail?.published_by)}
-              <br />
-              Last changed by: {nameOf(detail?.changed_by)}
-            </p>
+            {detail ? <MemoryFeedback memory={detail} onUpdated={(updated) => {
+              setDetail(updated);
+              setDecisions((rows) => rows.map((row) => row.memory_id === updated.memory_id ? updated : row));
+            }} /> : null}
+            {detail ? Object.entries(detail).map(([field, value]) => (
+              <div key={field}>
+                <p className="text-xs font-medium text-muted-foreground">{field.replaceAll("_", " ")}</p>
+                <p className="whitespace-pre-wrap break-words text-sm">{typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : String(value ?? "—")}</p>
+              </div>
+            )) : null}
           </div>
         </SheetContent>
       </Sheet>

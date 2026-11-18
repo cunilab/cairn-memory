@@ -1,14 +1,21 @@
 ---
 id: CM-SPEC-003
 title: "Specification — Graph-Assisted Retrieval"
-status: draft
+status: superseded
 ---
 
 # Specification — Graph-Assisted Retrieval
 
+Current implemented retrieval is owned by [ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md)
+and the [continuity contract](../contracts/continuity-v1.md#hybrid-recall-v014).
+The broader graph design below is retained as a historical proposal.
+v0.1.4 ships only the memory link graph in
+[ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
+The code graph and work graph in this document are not implemented.
+
 | Field | Value |
 | --- | --- |
-| Status | Draft |
+| Status | Superseded |
 | Owner | Cairn Memory maintainers |
 | Target | Layer 6: advanced intelligence and operations; deterministic code context may begin in Layers 2–4 |
 | Related | [Architecture](../architecture.md), [Memory context and promotion](./memory-context-and-promotion.md), [ADR 0003](../adr/0003-server-authoritative-postgres.md) |

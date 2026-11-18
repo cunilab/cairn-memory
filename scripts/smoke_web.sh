@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+
 cd "$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/cairn-web.XXXXXX")"
@@ -129,6 +131,17 @@ if (/permanently|erase|purged|undo button/i.test(deleted)) {
 const rotated = rotateDeviceImpact("laptop");
 if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
   throw new Error("rotate copy must name the device, the old token and the one-time new token");
+}
+const detail = await import("node:fs").then((fs) =>
+  fs.readFileSync("apps/web/components/project-detail.tsx", "utf8"),
+);
+if (!detail.includes("do not repeat the action")) {
+  throw new Error("a failed reload must tell the user not to repeat the action");
+}
+for (const removed of ["Share decision", "Revoke share", "Create team", "Promote to decision"]) {
+  if (detail.includes(removed)) {
+    throw new Error(`retired project action is still in the console: ${removed}`);
+  }
 }
 
 JS
@@ -267,8 +280,8 @@ source_id="$(printf '%s' "$ended_json" | python3 -c 'import json,sys; print(json
 
 promoted_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d "{\"project_id\":\"${project_id}\",\"memory_id\":\"${source_id}\",\"reason\":\"Share the promoted repository decision\"}" \
-  "${api}/cairn-memory/promote")"
+  -d "{\"scope\":\"project\",\"kind\":\"decision\",\"title\":\"Cache decision\",\"summary\":\"repository cache decision is ready for the project\",\"reason\":\"Verified by web smoke\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\"}}" \
+  "${api}/cairn-memory/remember")"
 promoted_id="$(printf '%s' "$promoted_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
 
 # Membership is automatic: capturing with the project id in the context joins the project.
@@ -437,6 +450,11 @@ curl -fsS -o /dev/null -c "$member_accounts_jar" -H 'content-type: application/j
   -d "{\"email\":\"member@example.test\",\"password\":\"${password}\"}" \
   "${web}/api/cairn/auth/login"
 member_accounts_code="$(curl -sS -o /dev/null -b "$member_accounts_jar" -w '%{http_code}' "${web}/api/cairn/auth/accounts")"
+member_jobs_code="$(curl -sS -o /dev/null -b "$member_accounts_jar" -w '%{http_code}' "${web}/api/cairn/admin/jobs")"
+if [ "$member_jobs_code" != "403" ]; then
+  printf '%s\n' "a non-admin must not list jobs: ${member_jobs_code}" >&2
+  exit 1
+fi
 if [ "$member_accounts_code" != "403" ]; then
   printf '%s\n' "a non-admin must not list accounts: ${member_accounts_code}" >&2
   exit 1
@@ -549,7 +567,7 @@ curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device
 console_source="$(curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
   -d '{"session_id":"web-console-promote"}' "${api}/cairn-memory/session/end" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
-owner_ok "promote" promote "{\"project_id\":\"${project_id}\",\"memory_id\":\"${console_source}\",\"reason\":\"Console promote\"}"
+owner_ok "save project memory" remember "{\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Save from console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\"}}"
 console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["memory_id"])' "$workdir/owner-post.body")"
 owner_ok "verify" projects/verify "{\"project_id\":\"${project_id}\",\"memory_id\":\"${console_promoted}\",\"commit\":\"abc1234\"}"
 for branch in feature-merge feature-close; do
@@ -557,7 +575,7 @@ for branch in feature-merge feature-close; do
     -d "{\"name\":\"${branch}\"}" "${api}/cairn-memory/projects/${project_id}/branches" >/dev/null
 done
 curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-branch","context":{"repository":"cairn-demo","branch":"feature-merge","commit":"def5678"}}' \
+  -d "{\"session_id\":\"web-branch\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\",\"commit\":\"def5678\"}}" \
   "${api}/cairn-memory/session/start" >/dev/null
 curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
   -d '{"event_id":"evt-branch","session_id":"web-branch","content":"branch decision ready to merge","role":"agent","source":"hook"}' \
@@ -577,7 +595,7 @@ import json, os
 status = {b["name"]: b["status"] for b in json.load(open(os.environ["BRANCHES"]))}
 assert status["feature-merge"] == "merged" and status["feature-close"] == "closed", status
 PY
-for page in accounts "projects/${project_id}"; do
+for page in accounts jobs memories "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
     printf '%s\n' "${page} page status: ${page_code}" >&2

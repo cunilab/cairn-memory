@@ -73,7 +73,55 @@ const COMMANDS: &[Command] = &[
         ..command("unresolved", "memory_unresolved", &["limit"], 0)
     },
     command("forget", "memory_forget", &["id"], 1),
-    command("lesson", "memory_lesson_save", &["content"], 1),
+    command("save", "memory_save", &["record"], 0),
+    command("lesson", "memory_lesson_save", &["record"], 0),
+    command("memories", "memory_list", &[], 0),
+    command("memory", "memory_get", &["memoryId"], 1),
+    command("feedback", "memory_feedback", &["memoryId", "vote"], 2),
+    command(
+        "contradict",
+        "memory_contradict",
+        &["contradictingId", "contradictedId"],
+        2,
+    ),
+    command(
+        "supersede",
+        "memory_supersede",
+        &["successorId", "targetId"],
+        2,
+    ),
+    command(
+        "link",
+        "memory_link",
+        &["sourceId", "relation", "targetId"],
+        3,
+    ),
+    command(
+        "unlink",
+        "memory_unlink",
+        &["sourceId", "relation", "targetId"],
+        3,
+    ),
+    command(
+        "graph",
+        "memory_graph",
+        &["scope", "projectId", "relation", "cap"],
+        0,
+    ),
+    command("reviews", "memory_similarity_reviews", &[], 0),
+    command("review-dismiss", "memory_review_dismiss", &["reviewId"], 1),
+    command(
+        "review-contradict",
+        "memory_review_contradict",
+        &["reviewId", "contradictedId"],
+        2,
+    ),
+    command(
+        "review-supersede",
+        "memory_review_supersede",
+        &["reviewId", "successorId"],
+        2,
+    ),
     command("correct", "memory_correct", &["targetId", "content"], 2),
     command(
         "project-register",
@@ -82,12 +130,6 @@ const COMMANDS: &[Command] = &[
         2,
     ),
     command("project-list", "memory_project_list", &[], 0),
-    command(
-        "promote",
-        "memory_promote",
-        &["projectId", "memoryId", "reason", "previewFingerprint"],
-        3,
-    ),
     command(
         "project-memories",
         "memory_project_memories",
@@ -112,15 +154,6 @@ const COMMANDS: &[Command] = &[
         &["projectId", "memoryId", "commit"],
         3,
     ),
-    Command {
-        defaults: &[("dryRun", "true")],
-        ..command(
-            "promote-preview",
-            "memory_promote",
-            &["projectId", "memoryId", "reason"],
-            3,
-        )
-    },
     command("delete-memory", "memory_delete", &["id"], 1),
     command("export", "memory_export", &["output"], 1),
     command("import", "memory_import", &["input"], 1),
@@ -128,11 +161,12 @@ const COMMANDS: &[Command] = &[
 
 const CONTEXT_KEYS: [&str; 4] = ["repository", "branch", "worktree", "commit"];
 
-fn usage() -> ! {
-    eprintln!(
+fn print_usage() {
+    println!(
         "Usage:\n\
-  cairn setup <server-url>      (reads the device token from stdin)\n\
-  cairn init [name]             (create this repository's project, write .cairn/project.json)\n\
+  cairn setup <server-url> [--agent claude|codex|opencode] [--remove]\n\
+  cairn init [name]             (create or join; write .cairn/project.json)\n\
+  cairn init --rename <name>    (owner only; update server and project file)\n\
   cairn mcp\n\
   cairn update [--check]        (install the latest release; --check only reports)\n\
   cairn --version\n\
@@ -145,14 +179,23 @@ fn usage() -> ! {
   cairn resume [limit] [repository] [branch] [worktree] [commit]\n\
   cairn unresolved [limit] [repository] [branch] [worktree] [commit]\n\
   cairn forget <memory-or-event-id>\n\
-  cairn lesson <content>\n\
+  cairn save|lesson [JSON-record] (or stdin)\n\
+  cairn memories | memory <memory-id>\n\
+  cairn feedback <memory-id> helpful|stale\n\
+  cairn contradict <contradicting-id> <contradicted-id>\n\
+  cairn supersede <successor-id> <target-id>\n\
+  cairn link <source-id> <relation> <target-id>\n\
+  cairn unlink <source-id> <relation> <target-id>\n\
+  cairn graph [scope] [project-id] [relation] [cap]\n\
+  cairn reviews\n\
+  cairn review-dismiss <review-id>\n\
+  cairn review-contradict <review-id> <contradicted-id>\n\
+  cairn review-supersede <review-id> <successor-id>\n\
   cairn correct <memory-or-event-id> <content>\n\
   cairn export <output>\n\
   cairn import <input>\n\
   cairn project-register <repository> <name> [default-branch]\n\
   cairn project-list\n\
-  cairn promote <project-id> <memory-id> <reason> [preview-fingerprint]\n\
-  cairn promote-preview <project-id> <memory-id> <reason>\n\
   cairn project-members <project-id>\n\
   cairn project-verify <project-id> <memory-id> <commit>\n\
   cairn project-memories <project-id>\n\
@@ -161,17 +204,62 @@ fn usage() -> ! {
 Create the device token in the web console; it is an agent credential. Account and device\n\
 management stay in the web console."
     );
+}
+
+fn usage() -> ! {
+    print_usage();
     process::exit(2);
+}
+
+/// Help and option errors are handled before config, stdin, requests or update checks.
+fn check_arguments(args: &[String]) -> Result<bool, Error> {
+    let known = |name: &str| {
+        matches!(
+            name,
+            "init" | "setup" | "mcp" | "update" | "version" | "--version"
+        ) || COMMANDS.iter().any(|command| command.name == name)
+    };
+    if matches!(args, [flag] if flag == "--help" || flag == "-h")
+        || matches!(args, [help] if help == "help")
+        || matches!(args, [help, name] if help == "help" && known(name))
+        || matches!(args, [name, flag] if known(name) && (flag == "--help" || flag == "-h"))
+    {
+        return Ok(true);
+    }
+    for (index, value) in args.iter().enumerate() {
+        let allowed = (index == 0 && value == "--version")
+            || (index == 1 && args[0] == "update" && value == "--check")
+            || (index == 1 && args[0] == "init" && value == "--rename")
+            || (args[0] == "setup"
+                && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
+        if value.starts_with('-') && !allowed {
+            return Err(Error::Input(format!(
+                "unexpected option {value:?}; run `cairn --help`"
+            )));
+        }
+    }
+    Ok(false)
 }
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    match check_arguments(&args) {
+        Ok(true) => {
+            print_usage();
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("cairn: {error}");
+            process::exit(1);
+        }
+    }
     update::remove_old_exe();
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
-        Some("mcp") => Config::load().and_then(mcp::run_stdio),
-        Some("version" | "--version") => {
+        Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),
+        Some("version" | "--version") if args.len() == 1 => {
             println!("cairn {}", update::VERSION);
             Ok(())
         }
@@ -203,13 +291,39 @@ fn main() {
 }
 
 fn setup(args: &[String]) -> Result<(), Error> {
-    let [url] = args else { usage() };
+    let (url, agent, remove) = match args {
+        [url] => (url, None, false),
+        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), false),
+        [url, flag, agent, remove] if flag == "--agent" && remove == "--remove" => {
+            (url, Some(agent.as_str()), true)
+        }
+        _ => usage(),
+    };
+    if agent.is_some_and(|a| !cairn_client::agents::AGENTS.contains(&a)) {
+        return Err(Error::Input(
+            "agent must be claude, codex or opencode".into(),
+        ));
+    }
+    if remove {
+        println!(
+            "{}",
+            cairn_client::agents::configure(agent.expect("remove has an agent"), true)?
+        );
+        return Ok(());
+    }
     let config = Config::new(url, &read_token()?)?;
     let path = config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
-    // The hook scripts come from the release matching this binary; being offline (or running a
-    // build with no release) must not undo a good setup.
+    if let Some(agent) = agent {
+        println!("{}", update::install_bundled_hooks()?);
+        println!("{}", cairn_client::agents::configure(agent, false)?);
+        if agent == "codex" {
+            println!("Review and trust the installed hooks with /hooks in Codex before they run.");
+        }
+        return Ok(());
+    }
+    // Offline URL-only setup still retains its valid credentials.
     match update::install_hooks() {
         Ok(message) => println!("{message}"),
         Err(error) => eprintln!(
@@ -222,27 +336,60 @@ fn setup(args: &[String]) -> Result<(), Error> {
 /// Creates (or finds) the caller's project for this repository and writes
 /// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
 fn init(args: &[String]) -> Result<(), Error> {
-    if args.len() > 1 {
-        usage();
+    let (rename, name) = match args {
+        [] => (false, None),
+        [name] if name != "--rename" => (false, Some(name.trim())),
+        [flag, name] if flag == "--rename" => (true, Some(name.trim())),
+        _ => usage(),
+    };
+    if name.is_some_and(str::is_empty) {
+        return Err(Error::Input("project name must not be empty".to_owned()));
     }
     let cwd = env::current_dir()
         .map_err(|error| Error::Input(format!("cannot read the current directory: {error}")))?;
     let top = project::toplevel(&cwd)
         .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
     let repository = project::repository_name(&top);
-    let mut body = json!({ "repository": repository });
-    if let Some(id) = project::read_project_id(&cwd)? {
-        body["project_id"] = json!(id);
-    }
-    if let Some(name) = args.first().filter(|name| !name.is_empty()) {
-        body["name"] = json!(name);
+    let existing = project::read(&cwd)?;
+    if !rename
+        && let (Some(requested), Some(recorded)) = (
+            name,
+            existing.as_ref().and_then(|file| file.name.as_deref()),
+        )
+        && requested != recorded
+    {
+        return Err(Error::Input(format!(
+            "project file names {recorded:?}; use `cairn init --rename <name>` as the owner to rename it"
+        )));
     }
     let client = Client::new(Config::load()?);
-    let created = client.post("/cairn-memory/projects/init", &body)?;
+    let created = if rename {
+        let file = existing.as_ref().ok_or_else(|| {
+            Error::Input("no .cairn/project.json; run `cairn init [name]` first".to_owned())
+        })?;
+        let path = tools::fill_path(
+            "/cairn-memory/projects/{projectId}/rename",
+            &mut Map::from_iter([("projectId".to_owned(), json!(file.project_id))]),
+        )?;
+        client.post(&path, &json!({"name": name}))?
+    } else {
+        let mut body = json!({ "repository": repository });
+        if let Some(file) = &existing {
+            body["project_id"] = json!(file.project_id);
+        }
+        if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref()))
+        {
+            body["name"] = json!(name);
+        }
+        client.post("/cairn-memory/projects/init", &body)?
+    };
     let project_id = created["project_id"]
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
-    let written = project::write(&top, project_id, &repository)?;
+    let name = created["name"]
+        .as_str()
+        .ok_or_else(|| Error::Input("the server sent no project name".to_owned()))?;
+    let written = project::write(&top, project_id, &repository, name)?;
     if !written {
         println!("already initialized, you are a member");
     }
@@ -327,6 +474,27 @@ fn run(command: &Command, args: &[String]) -> Result<(), Error> {
 }
 
 fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Value>, Error> {
+    if matches!(command.name, "save" | "lesson") {
+        let raw = match args {
+            [] => {
+                let mut raw = String::new();
+                io::Read::read_to_string(&mut io::stdin(), &mut raw)
+                    .map_err(|e| Error::Input(e.to_string()))?;
+                raw
+            }
+            [raw] => raw.clone(),
+            _ => {
+                return Err(Error::Input(
+                    "save/lesson takes one JSON record or stdin".to_owned(),
+                ));
+            }
+        };
+        return serde_json::from_str::<Value>(&raw)
+            .map_err(|e| Error::Input(format!("memory record is not valid JSON: {e}")))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| Error::Input("memory record must be a JSON object".to_owned()));
+    }
     let present = |index: usize| args.get(index).filter(|value| !value.is_empty());
     let mut arguments = Map::new();
     for (index, key) in command.args.iter().enumerate() {
@@ -369,11 +537,11 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
 }
 
 fn argument_value(key: &str, value: &str) -> Result<Value, Error> {
-    if key == "limit" {
+    if key == "limit" || key == "cap" {
         return value
             .parse::<u64>()
             .map(|limit| json!(limit))
-            .map_err(|_| Error::Input("limit must be a positive integer".to_owned()));
+            .map_err(|_| Error::Input(format!("{key} must be a positive integer")));
     }
     Ok(json!(value))
 }
@@ -391,13 +559,5 @@ fn export(client: &Client, tool: &Tool, arguments: &Map<String, Value>) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{TokenInput, token_input};
-
-    #[test]
-    fn token_input_falls_back_when_the_terminal_cannot_hide() {
-        assert_eq!(token_input(false, || unreachable!()), TokenInput::Piped);
-        assert_eq!(token_input(true, || true), TokenInput::Hidden);
-        assert_eq!(token_input(true, || false), TokenInput::Visible);
-    }
-}
+#[path = "cairn/tests.rs"]
+mod tests;

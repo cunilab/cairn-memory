@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+
 : "${CAIRN_DATABASE_URL:?set CAIRN_DATABASE_URL to a fresh PostgreSQL database}"
 
 python3 - "$CAIRN_DATABASE_URL" <<'PY'
@@ -146,6 +148,10 @@ try:
     _, remembered = call(
         "/cairn-memory/remember",
         {
+            "scope": "personal",
+            "title": "Redis cache",
+            "summary": "Redis cache is disabled because the server is authoritative",
+            "reason": "The server is authoritative",
             "content": "Redis cache is disabled because the server is authoritative",
             "concepts": ["retrieval", "authority"],
             "context": {"repository": "cairn", "branch": "feature/cache", "commit": "abc1234"},
@@ -179,19 +185,27 @@ try:
         account_token,
     )
     assert closed_branch["status"] == "closed"
+    # ADR 0014 item 0: a project decision is saved directly. There is no promote step.
     _, promoted = call(
-        "/cairn-memory/promote",
+        "/cairn-memory/remember",
         {
-            "projectId": project["project_id"],
-            "memoryId": remembered["memory_id"],
+            "scope": "project",
+            "kind": "decision",
+            "title": "Redis cache",
+            "summary": "Redis cache is disabled because the server is authoritative",
             "reason": "Confirmed by the PostgreSQL retrieval smoke flow",
+            "context": {
+                "project_id": project["project_id"],
+                "repository": "cairn",
+                "branch": "feature/cache",
+                "commit": "abc1234",
+            },
         },
         account_token,
     )
     assert promoted["kind"] == "decision"
     assert promoted["scope"] == "project"
-    assert promoted["promoted_from"] == remembered["memory_id"]
-    assert promoted["verified_commit"] == "abc1234"
+    assert promoted.get("promoted_from") in (None, "")
     _, verified = call(
         "/cairn-memory/projects/verify",
         {
@@ -205,7 +219,7 @@ try:
     _, merged = call(
         f"/cairn-memory/projects/{project['project_id']}/branches/{branch['branch_id']}/merge",
         {
-            "memoryId": remembered["memory_id"],
+            "memoryId": promoted["memory_id"],
             "commit": "merge999",
             "reason": "Confirmed after merge into main",
         },
@@ -217,7 +231,7 @@ try:
     _, repeated_merge = call(
         f"/cairn-memory/projects/{project['project_id']}/branches/{branch['branch_id']}/merge",
         {
-            "memoryId": remembered["memory_id"],
+            "memoryId": promoted["memory_id"],
             "commit": "merge999",
             "reason": "Confirmed after merge into main",
         },
@@ -272,7 +286,8 @@ try:
         token=account_token,
     )
     recorded_actions = {event["action"] for event in history}
-    assert {"promotion", "verification", "merge"} <= recorded_actions
+    assert {"verification", "merge"} <= recorded_actions
+    assert "promotion" not in recorded_actions
     _, stale = call(
         f"/cairn-memory/projects/{project['project_id']}/maintenance",
         {"currentCommit": "other-commit"},
@@ -384,23 +399,40 @@ try:
     expect_error("/cairn-memory/auth/register", register_body, member_token, 403)
     _, private_memory = call(
         "/cairn-memory/remember",
-        {"content": "private observation stays on the owner account"},
+        {
+            "scope": "personal",
+            "title": "Private observation",
+            "summary": "private observation stays on the owner account",
+            "reason": "It is not a project record",
+            "content": "private observation stays on the owner account",
+        },
         account_token,
     )
     _, repository_memory = call(
         "/cairn-memory/remember",
         {
+            "scope": "personal",
+            "title": "Repository cache source",
+            "summary": "repository cache decision is ready for the project",
+            "reason": "Kept private beside the project decision",
             "content": "repository cache decision is ready for the project",
             "context": {"repository": "cairn", "commit": "abc1234"},
         },
         account_token,
     )
     _, shared_promoted = call(
-        "/cairn-memory/promote",
+        "/cairn-memory/remember",
         {
-            "projectId": project["project_id"],
-            "memoryId": repository_memory["memory_id"],
-            "reason": "Share the promoted repository decision",
+            "scope": "project",
+            "kind": "decision",
+            "title": "Repository cache",
+            "summary": "repository cache decision is ready for the project",
+            "reason": "Visible to project members",
+            "context": {
+                "project_id": project["project_id"],
+                "repository": "cairn",
+                "commit": "abc1234",
+            },
         },
         account_token,
     )
@@ -448,16 +480,40 @@ try:
     assert any(m["memory_id"] == shared_promoted["memory_id"] for m in decisions)
     assert all(m["memory_id"] != private_memory["memory_id"] for m in decisions)
     _, recall = call("/cairn-memory/context", {"query":"repository cache", "context":{"project_id":project_id,"repository":"cairn"}}, member_token)
-    assert any(r["memory_id"] == shared_promoted["memory_id"] and r["source"] == "project" for r in recall["results"])
+    assert any(
+        r["memory_id"] == shared_promoted["memory_id"] and r["scope"] == "project" and r["source"] == "project"
+        for r in recall["results"]
+    )
+    expect_error("/cairn-memory/promote", None, account_token, 404)
+    expect_error("/cairn-memory/promote", {}, account_token, 404)
     for route in ("team", "shares", "shared", "policy", "share-candidates", "revocations"):
         expect_error(path + "/" + route, None, member_token, 404)
         expect_error(path + "/" + route, {}, account_token, 404)
     expect_error("/cairn-memory/projects/verify", {"projectId":project_id,"memoryId":shared_promoted["memory_id"],"commit":"bad"}, member_token, 400)
-    _, own = call("/cairn-memory/remember", {"content":"member's publication", "context":{"repository":"cairn"}},member_token)
-    _, preview = call("/cairn-memory/promote", {"projectId":project_id,"memoryId":own["memory_id"],"reason":"publish","dryRun":True},member_token)
-    assert preview["content"] == own["content"]
-    _, member_decision = call("/cairn-memory/promote", {"projectId":project_id,"memoryId":own["memory_id"],"reason":"publish"},member_token)
-    call("/cairn-memory/correct", {"targetId":own["memory_id"],"content":"private corrected source"},member_token)
+    _, own = call(
+        "/cairn-memory/remember",
+        {
+            "scope": "personal",
+            "title": "Member private note",
+            "summary": "member's publication",
+            "reason": "Stays on the member account",
+            "context": {"repository": "cairn"},
+        },
+        member_token,
+    )
+    _, member_decision = call(
+        "/cairn-memory/remember",
+        {
+            "scope": "project",
+            "kind": "fact",
+            "title": "Member project fact",
+            "summary": "member's publication",
+            "reason": "Visible to project members",
+            "context": {"project_id": project_id, "repository": "cairn"},
+        },
+        member_token,
+    )
+    call("/cairn-memory/correct", {"targetId": own["memory_id"], "content": "private corrected source"}, member_token)
     _, decisions = call(path + "/memories", token=account_token)
     assert any(m["memory_id"] == member_decision["memory_id"] for m in decisions)
     call(path + "/ownership", {"personId":member["account"]["person_id"]},account_token)
@@ -488,6 +544,9 @@ try:
     call("/cairn-memory/devices/revoke", {"deviceId": "postgres-device-a"}, account_token)
     expect_unauthorized("/cairn-memory/sync/pull", {"cursor": 0}, token_a)
     expect_unauthorized("/cairn-memory/projects", None, token_a)
+except urllib.error.HTTPError as error:
+    detail = error.read().decode()
+    raise RuntimeError(f"HTTP {error.code} {error.reason}: {detail}") from None
 finally:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGTERM)

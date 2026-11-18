@@ -33,13 +33,6 @@ export function ProjectBranches({
   const [memoryId, setMemoryId] = useState("");
   const [commit, setCommit] = useState("");
   const [reason, setReason] = useState("");
-  const [preview, setPreview] = useState<{
-    key: string;
-    payload: Record<string, unknown>;
-    fingerprint: string;
-  } | null>(null);
-  const previewKey = JSON.stringify([memoryId, commit.trim(), reason.trim()]);
-  const previewCurrent = preview?.key === previewKey;
   const [error, setError] = useState<string | null>(null);
   const path = `projects/${encodeURIComponent(projectId)}`;
 
@@ -48,12 +41,11 @@ export function ProjectBranches({
     setReason("");
     setCommit("");
     setMemoryId("");
-    setPreview(null);
     setError(null);
     if (merge) {
       try {
         setMemories(
-          (await cairn<PersonalMemory[]>(`${path}/personal-memories`)).filter(
+          (await cairn<PersonalMemory[]>(`${path}/memories`)).filter(
             (m) => m.context?.branch === branch.name,
           ),
         );
@@ -126,8 +118,6 @@ export function ProjectBranches({
         submitLabel={action?.merge ? "Record merge" : "Close branch"}
         onSubmit={async () => {
           if (!action) return;
-          if (action.merge && !previewCurrent)
-            throw new Error("Preview the full publication payload first.");
           await submit(
             () =>
               cairn(
@@ -138,7 +128,6 @@ export function ProjectBranches({
                     memoryId,
                     commit,
                     reason,
-                    previewFingerprint: preview?.fingerprint,
                   }),
                 },
               ),
@@ -149,13 +138,12 @@ export function ProjectBranches({
         {action?.merge ? (
           <>
             <Field>
-              <FieldLabel htmlFor="merge-memory">Your evidence memory</FieldLabel>
+              <FieldLabel htmlFor="merge-memory">Your project evidence memory</FieldLabel>
               <Select
                 value={memoryId || null}
                 onValueChange={(value) => {
                   setMemoryId(value ?? "");
-                  setPreview(null);
-                }}
+                              }}
               >
                 <SelectTrigger id="merge-memory">
                   <SelectValue placeholder="Choose a memory" />
@@ -177,8 +165,7 @@ export function ProjectBranches({
                 required
                 onChange={(event) => {
                   setCommit(event.target.value);
-                  setPreview(null);
-                }}
+                              }}
               />
             </Field>
           </>
@@ -191,58 +178,16 @@ export function ProjectBranches({
             required
             onChange={(event) => {
               setReason(event.target.value);
-              setPreview(null);
-            }}
+                      }}
           />
         </Field>
-        {action?.merge ? (
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!memoryId || !commit.trim() || !reason.trim()}
-            onClick={async () => {
-              setError(null);
-              try {
-                const key = previewKey;
-                const response = await cairn<Record<string, unknown>>("promote", {
-                  method: "POST",
-                  body: JSON.stringify({ projectId, memoryId, reason, dryRun: true, commit }),
-                });
-                const {
-                  previewFingerprint,
-                  memory_id: _id,
-                  session_id: _session,
-                  created_at: _created,
-                  changed_at: _changed,
-                  ...payload
-                } = response;
-                void _id;
-                void _session;
-                void _created;
-                void _changed;
-                setPreview({ key, payload, fingerprint: String(previewFingerprint) });
-              } catch (cause) {
-                if (cause instanceof SessionRequiredError) {
-                  onSessionRequired();
-                  return;
-                }
-                setError(cause instanceof Error ? cause.message : "Preview failed");
-              }
-            }}
-          >
-            Preview full payload
-          </Button>
-        ) : null}
+
         {error ? (
           <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
         ) : null}
-        {previewCurrent && preview ? (
-          <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-all">
-            {JSON.stringify(preview.payload, null, 2)}
-          </pre>
-        ) : null}
+
       </FormDialog>
     </section>
   );

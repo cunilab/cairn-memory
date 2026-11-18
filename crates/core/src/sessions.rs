@@ -1,4 +1,7 @@
 use crate::capture::Observation;
+use crate::jobs::{
+    BackgroundJob, JobEnd, JobKind, distill_job_end, distill_key, parse_distill_key,
+};
 use crate::lifecycle::{
     Lifecycle, MemoryKind, MemoryScope, Retention, is_expired, stricter_sensitivity,
 };
@@ -97,11 +100,9 @@ impl MemoryStore {
         Ok(session)
     }
 
-    /// Finishes this person's sessions that have retained observations, none newer than
-    /// `IDLE_SESSION_SECS`, and no current summary: open ones, and ended ones whose id was
-    /// reused for observations the summary does not cover. A session with no retained
-    /// observations is skipped. Failures are logged; the trigger that called this has
-    /// already succeeded.
+    /// Finishes this person's idle sessions that still need a summary. A session that already
+    /// has a distill job is left for that job. A quarantined session waits for a newer
+    /// observation. Failures are logged; the trigger that called this has already succeeded.
     pub(crate) fn finish_idle_sessions(&mut self, person_id: &str) {
         let now = now_seconds();
         let retained = self.retained_by_session(person_id);
@@ -145,7 +146,12 @@ impl MemoryStore {
 
     fn finish_sessions(&mut self, person_id: &str, session_ids: &[String]) {
         for session_id in session_ids {
-            if let Err(error) = self.finish_session(Some(person_id.to_owned()), session_id) {
+            if self.distill_is_idle_paused(person_id, session_id) {
+                continue;
+            }
+            if let Err(error) = self.finish_session(Some(person_id.to_owned()), session_id)
+                && !matches!(distill_job_end(&error.to_string()), JobEnd::Succeeded)
+            {
                 eprintln!("cairn: automatic session close failed: {error}");
             }
         }
@@ -215,14 +221,68 @@ impl MemoryStore {
     }
 
     /// A refused end leaves the session open: `ended_at` is set before the checks that can fail.
+    /// The distill job is claimed in the same write as its enqueue, then the summary runs.
     fn finish_session(
         &mut self,
         person_id: Option<String>,
         session_id: &str,
     ) -> Result<Memory, StoreError> {
-        let finished = self.finish_session_staged(person_id, session_id);
+        let now = now_seconds();
+        let key = distill_key(person_id.as_deref(), session_id);
+        let claim = self.with_jobs(|book| {
+            book.enqueue(JobKind::Distill, &key, now, true);
+            book.claim_key(JobKind::Distill, &key, now)
+        });
+        let Some(claim) = claim else {
+            self.state = self.persisted.clone();
+            return Err(StoreError::Validation(
+                "distill job was not claimable".to_owned(),
+            ));
+        };
+        self.persist()?;
+        self.finish_claimed_distill(claim)
+    }
+
+    pub fn finish_claimed_distill(&mut self, claim: BackgroundJob) -> Result<Memory, StoreError> {
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
+        let owns = self.state.jobs.iter().any(|job| {
+            job.job_id == claim.job_id
+                && job.claim_id.as_deref() == Some(claim_id.as_str())
+                && !job.succeeded
+        });
+        if !owns {
+            return Err(StoreError::Conflict(
+                "distill claim is no longer held".to_owned(),
+            ));
+        }
+        let Some((person_id, session_id)) = parse_distill_key(&claim.key) else {
+            let now = now_seconds();
+            let claim_id = claim.claim_id.unwrap_or_default();
+            self.settle_job(
+                &claim.job_id,
+                &claim_id,
+                now,
+                JobEnd::Quarantine("distill job key is invalid".to_owned()),
+            )?;
+            return Err(StoreError::Validation(
+                "distill job key is invalid".to_owned(),
+            ));
+        };
+        let finished = self.finish_session_staged(person_id, &session_id);
         if finished.is_err() {
             self.state = self.persisted.clone();
+        }
+        let now = now_seconds();
+        let claim_id = claim.claim_id.clone().unwrap_or_default();
+        let end = match &finished {
+            Ok(_) => JobEnd::Succeeded,
+            Err(error) => distill_job_end(&error.to_string()),
+        };
+        if let Err(persist_error) = self.settle_job(&claim.job_id, &claim_id, now, end) {
+            return match finished {
+                Err(original) => Err(original),
+                Ok(_) => Err(persist_error),
+            };
         }
         finished
     }
@@ -319,8 +379,44 @@ impl MemoryStore {
             &session.context,
             &observations,
         )?;
+        if memory.project_id.as_deref().is_some_and(|id| {
+            person_id.as_deref().is_none_or(|person| {
+                self.project_owner_id(id).as_deref() != Some(person)
+                    && !self
+                        .state
+                        .project_members
+                        .iter()
+                        .any(|m| m.project_id == id && m.member_person_id == person)
+            })
+        }) {
+            memory.scope = MemoryScope::Personal;
+            memory.project_id = None;
+            memory.published_by = None;
+        }
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
+        }
+        let superseded = self.live_superseded_targets();
+        let mut notes = crate::distill_session_notes(&memory, &observations);
+        notes.retain(|note| {
+            !self.state.forgotten_ids.contains(&note.memory_id)
+                && !superseded.contains(note.memory_id.as_str())
+        });
+        for mut note in notes {
+            if let Some(person_id) = person_id.as_deref() {
+                self.record_memory_owner(person_id, &note.memory_id);
+            }
+            if let Some(existing) = self
+                .state
+                .memories
+                .iter_mut()
+                .find(|m| m.memory_id == note.memory_id)
+            {
+                carry_summary_state(existing, &mut note);
+                *existing = note;
+            } else {
+                self.state.memories.push(note);
+            }
         }
         self.state.memories.push(memory.clone());
         if let Some(person_id) = person_id.as_deref() {
@@ -368,38 +464,41 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
         content.push_str(&observation.event_id);
         content.push_str("]\n");
 
-        let lower = normalized.to_ascii_lowercase();
-        let evidence = format!("{normalized} [evidence: {}]", observation.event_id);
-        if contains_marker(
-            &lower,
-            &[
-                "next step",
-                "next:",
-                "follow up",
-                "follow-up",
-                "should ",
-                "need to ",
-                "todo",
-                "remaining",
-            ],
-        ) {
-            push_unique(&mut next_steps, evidence.clone());
-        }
-        if contains_marker(
-            &lower,
-            &[
-                "todo",
-                "unresolved",
-                "blocked",
-                "not yet",
-                "not covered",
-                "untested",
-                "follow up",
-                "follow-up",
-                "remaining",
-            ],
-        ) {
-            push_unique(&mut unresolved_work, evidence);
+        for source_line in observation.content.lines() {
+            let normalized = source_line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let lower = normalized.to_ascii_lowercase();
+            let evidence = format!("{normalized} [evidence: {}]", observation.event_id);
+            if contains_marker(
+                &lower,
+                &[
+                    "next step",
+                    "next:",
+                    "follow up",
+                    "follow-up",
+                    "should ",
+                    "need to ",
+                    "todo",
+                    "remaining",
+                ],
+            ) {
+                push_unique(&mut next_steps, evidence.clone());
+            }
+            if contains_marker(
+                &lower,
+                &[
+                    "todo",
+                    "unresolved",
+                    "blocked",
+                    "not yet",
+                    "not covered",
+                    "untested",
+                    "follow up",
+                    "follow-up",
+                    "remaining",
+                ],
+            ) {
+                push_unique(&mut unresolved_work, evidence);
+            }
         }
     }
     if omitted > 0 {
@@ -431,8 +530,8 @@ fn summary_is_stale(
             .any(|event_id| forgotten_ids.contains(event_id))
 }
 
-/// A re-derived summary keeps what the earlier one accumulated: verification, lifecycle (the
-/// sensitivity can only rise) and creation time.
+/// A re-derived summary keeps verification, lifecycle (sensitivity can only rise),
+/// creation time, reinforcement, feedback, and its declared links.
 pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
     derived.lifecycle = Lifecycle {
         sensitivity: stricter_sensitivity(
@@ -443,6 +542,16 @@ pub fn carry_summary_state(earlier: &Memory, derived: &mut Memory) {
     };
     derived.verified_commit.clone_from(&earlier.verified_commit);
     derived.created_at.clone_from(&earlier.created_at);
+    derived.access_count = earlier.access_count;
+    derived
+        .last_accessed_at
+        .clone_from(&earlier.last_accessed_at);
+    derived.feedback.clone_from(&earlier.feedback);
+    derived.contradicts.clone_from(&earlier.contradicts);
+    derived.supersedes.clone_from(&earlier.supersedes);
+    derived.links.clone_from(&earlier.links);
+    derived.helpful_count = earlier.helpful_count;
+    derived.stale_count = earlier.stale_count;
 }
 
 pub fn session_memory_id(person_id: Option<&str>, session_id: &str) -> String {
@@ -453,18 +562,7 @@ pub fn session_memory_id(person_id: Option<&str>, session_id: &str) -> String {
 }
 
 pub(crate) fn keeps_expired_source(memory: &Memory) -> bool {
-    if memory.lifecycle.retention != Retention::Durable || is_expired(&memory.lifecycle) {
-        return false;
-    }
-    matches!(
-        memory.kind,
-        MemoryKind::Explicit
-            | MemoryKind::Lesson
-            | MemoryKind::Correction
-            | MemoryKind::Decision
-            | MemoryKind::SessionSummary
-    ) || memory.project_id.is_some()
-        || memory.scope == MemoryScope::Project
+    memory.lifecycle.retention == Retention::Durable && !is_expired(&memory.lifecycle)
 }
 
 pub fn derive_session_memory(
@@ -485,6 +583,18 @@ pub fn derive_session_memory(
     }
     let digest = build_session_digest(observations);
     let mut memory = Memory {
+        fields: crate::MemoryFields {
+            title: format!("Session {session_id}"),
+            summary: format!(
+                "Session {session_id}: {} retained captures.",
+                observations.len()
+            ),
+            details: Some(digest.content.clone()),
+            evidence: observations.iter().map(|o| o.event_id.clone()).collect(),
+            tags: vec!["work-note".to_owned(), "distilled".to_owned()],
+            author: person_id.map(str::to_owned),
+            ..Default::default()
+        },
         memory_id: session_memory_id(person_id, session_id),
         session_id: session_id.to_owned(),
         content: digest.content,
@@ -496,18 +606,47 @@ pub fn derive_session_memory(
         lifecycle: Lifecycle::durable_from(observations),
         kind: MemoryKind::SessionSummary,
         scope: session_scope(session_context),
-        project_id: None,
+        project_id: session_context.project_id.clone(),
         next_steps: digest.next_steps,
         unresolved_work: digest.unresolved_work,
         supersedes: None,
+        contradicts: Vec::new(),
+        links: Vec::new(),
         promoted_from: None,
         promotion_reason: None,
         verified_commit: None,
-        published_by: None,
+        published_by: session_context
+            .project_id
+            .as_ref()
+            .and(person_id)
+            .map(str::to_owned),
         changed_by: None,
         changed_at: None,
         created_at: timestamp(),
+        access_count: 0,
+        last_accessed_at: None,
+        helpful_count: 0,
+        stale_count: 0,
+        feedback: Vec::new(),
     };
+    memory.project_id = memory.context.project_id.clone().filter(|id| {
+        observations
+            .iter()
+            .all(|o| o.scope == MemoryScope::Project && o.context.project_id.as_ref() == Some(id))
+    });
+    memory.scope = if memory.project_id.is_some() {
+        MemoryScope::Project
+    } else {
+        MemoryScope::Personal
+    };
+    memory.published_by = memory.project_id.as_ref().and(person_id).map(str::to_owned);
+    memory.fields.importance = Some(memory.lifecycle.importance);
+    memory.fields.applies_to.clone_from(&memory.context.files);
+    if let Some(branch) = &memory.context.branch {
+        push_unique(&mut memory.fields.applies_to, branch.clone());
+    }
+    memory.changed_by = person_id.map(str::to_owned);
+    memory.changed_at = Some(memory.created_at.clone());
     redact_memory_metadata(&mut memory);
     Ok(memory)
 }
@@ -552,6 +691,10 @@ fn merge_context(observations: &[Observation]) -> WorkContext {
     let mut context = WorkContext::default();
     for observation in observations {
         let source = &observation.context;
+        context.project_id = context
+            .project_id
+            .clone()
+            .or_else(|| source.project_id.clone());
         context.repository = context
             .repository
             .clone()
@@ -581,22 +724,15 @@ fn merge_context_items(target: &mut Vec<String>, source: &[String]) {
 }
 
 fn session_scope(context: &WorkContext) -> MemoryScope {
-    if context.repository.is_some() && context.branch.is_some() && context.worktree.is_some() {
-        MemoryScope::Worktree
-    } else if context.repository.is_some() && context.branch.is_some() {
-        MemoryScope::Branch
-    } else if context.repository.is_some() {
+    if context.project_id.is_some() {
         MemoryScope::Project
     } else {
-        MemoryScope::Session
+        MemoryScope::Personal
     }
 }
 
 pub(crate) fn memory_scope(context: &WorkContext) -> MemoryScope {
-    match session_scope(context) {
-        MemoryScope::Session => MemoryScope::Global,
-        scope => scope,
-    }
+    session_scope(context)
 }
 
 #[cfg(test)]

@@ -25,33 +25,104 @@ export type Account = {
 
 export type AccountRow = Required<Account> & { created_at: string };
 
-export type PersonalMemory = {
-  memory_id: string;
-  content: string;
-  kind?: string;
-  created_at?: string;
-  scope: string;
-  /** Set on a project decision, never on a personal memory. */
-  project_id?: string | null;
-  context?: { branch?: string | null; repository?: string | null };
-  lifecycle?: { sensitivity?: string };
+export type QuarantinedJob = {
+  job_id: string;
+  kind: string;
+  key: string;
+  label: string;
+  attempts: number;
+  last_error: string;
+  created_at: number;
+  failed_at: number;
+  quarantined_at: number;
+};
+
+export type JobQueue = {
+  pending: number;
+  running: number;
+  quarantined: number;
+  quarantine: QuarantinedJob[];
 };
 
 export type ProjectMemory = {
   memory_id: string;
+  title: string;
+  summary: string;
+  details?: string | null;
+  reason: string;
+  applies_to: string[];
+  evidence: string[];
+  tags: string[];
+  entities: string[];
+  status: "active" | "stale" | "superseded";
+  pinned: boolean;
+  importance?: number | null;
+  author?: string | null;
+  decision_context?: string | null;
+  alternatives: string[];
+  consequences?: string | null;
+  rule?: string | null;
+  exceptions?: string | null;
+  symptom?: string | null;
+  cause?: string | null;
+  fix?: string | null;
+  steps: string[];
+  when?: string | null;
+  statement?: string | null;
+  source?: string | null;
+  preference?: string | null;
+  example?: string | null;
   content: string;
   kind?: string;
-  scope: string;
+  scope: "project" | "personal" | "global";
   verified_commit?: string | null;
   supersedes?: string | null;
-  lifecycle?: {
-    freshness?: number;
-    sensitivity?: string;
-  };
+  project_id?: string | null;
+  context?: { branch?: string | null; repository?: string | null };
+  lifecycle?: { freshness?: number; sensitivity?: string; importance?: number };
   published_by?: string | null;
   changed_by?: string | null;
   changed_at?: string | null;
   created_at?: string;
+  access_count?: number;
+  last_accessed_at?: string | null;
+  helpful_count?: number;
+  stale_count?: number;
+};
+
+export type PersonalMemory = ProjectMemory;
+
+export type MemoryGraphNode = {
+  memory_id: string;
+  title: string;
+  scope: "project" | "personal" | "global";
+  project_id?: string | null;
+  kind: string;
+};
+
+export type MemoryGraphEdge = {
+  source_id: string;
+  target_id: string;
+  relation: string;
+};
+
+export type MemoryGraph = {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+  truncated: boolean;
+  node_cap: number;
+};
+
+export type SimilarityReview = {
+  review_id: string;
+  left_id: string;
+  right_id: string;
+  scope: "project" | "personal" | "global";
+  project_id?: string | null;
+  cosine: number;
+  band: "possible_conflict" | "near_duplicate";
+  status: "open" | "dismissed" | "contradicted" | "superseded";
+  created_at: number;
 };
 
 export type ProjectMember = {

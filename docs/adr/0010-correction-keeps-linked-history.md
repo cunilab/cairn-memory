@@ -1,6 +1,6 @@
 ---
 id: CM-ADR-0010
-title: "Correction keeps linked history"
+title: "ADR 0010 — Correction keeps linked history"
 status: accepted
 ---
 

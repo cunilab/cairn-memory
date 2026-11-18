@@ -1,6 +1,6 @@
 use cairn_server::AppState;
 use cairn_server::app;
-use cairn_server::postgres_app;
+use cairn_server::{LocalEmbeddings, postgres_app_with_embeddings};
 use cairn_storage::PostgresStore;
 use std::env;
 use std::future::Future;
@@ -19,6 +19,20 @@ async fn main() {
         eprintln!("invalid --bind value {bind}: {error}");
         process::exit(2);
     });
+    let model_dir = option_value(&args, "--embedding-model-dir")
+        .or_else(|| env::var("CAIRN_EMBEDDING_MODEL_DIR").ok());
+    let embeddings =
+        model_dir.and_then(
+            |path| match LocalEmbeddings::load(std::path::Path::new(&path)) {
+                Ok(model) => Some(model),
+                Err(_) => {
+                    eprintln!(
+                        "local embedding model unavailable; using lexical/entity/link recall"
+                    );
+                    None
+                }
+            },
+        );
     let router = if let Some(database_url) =
         option_value(&args, "--database-url").or_else(|| env::var("CAIRN_DATABASE_URL").ok())
     {
@@ -33,16 +47,19 @@ async fn main() {
             let store = sweeper.clone();
             async move { store.sweep_idle_sessions().await }
         });
-        postgres_app(store)
+        postgres_app_with_embeddings(store, embeddings)
     } else {
         let store_path = option_value(&args, "--store").unwrap_or_else(|| {
             eprintln!("missing --store <path> or --database-url <url>");
             usage_and_exit();
         });
-        let state = AppState::open(store_path).unwrap_or_else(|error| {
+        let mut state = AppState::open(store_path).unwrap_or_else(|error| {
             eprintln!("failed to open Cairn store: {error}");
             process::exit(1);
         });
+        if let Some(model) = embeddings {
+            state = state.with_embeddings(model);
+        }
         let sweeper = state.clone();
         spawn_idle_sweep(move || {
             let state = sweeper.clone();
@@ -87,7 +104,11 @@ fn option_value(args: &[String], name: &str) -> Option<String> {
 }
 
 fn usage_and_exit() -> ! {
-    eprintln!("Usage: cairn-server --store <path> [--bind 127.0.0.1:3111]");
-    eprintln!("   or: cairn-server --database-url <postgres-url> [--bind 127.0.0.1:3111]");
+    eprintln!(
+        "Usage: cairn-server --store <path> [--bind 127.0.0.1:3111] [--embedding-model-dir <path>]"
+    );
+    eprintln!(
+        "   or: cairn-server --database-url <postgres-url> [--bind 127.0.0.1:3111] [--embedding-model-dir <path>]"
+    );
     process::exit(2);
 }

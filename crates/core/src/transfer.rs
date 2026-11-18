@@ -31,6 +31,9 @@ pub struct ImportResult {
     pub imported_observations: usize,
     pub imported_memories: usize,
     pub imported_forgotten_ids: usize,
+    /// Links removed because link creation would reject them.
+    #[serde(default)]
+    pub dropped_links: Vec<crate::DroppedLink>,
 }
 
 impl MemoryStore {
@@ -61,7 +64,8 @@ impl MemoryStore {
             .iter()
             .filter(|memory| {
                 person_id.is_none_or(|person_id| {
-                    memory.published_by.is_none()
+                    memory.scope == crate::MemoryScope::Personal
+                        && memory.published_by.is_none()
                         && self.memory_owned_by(&memory.memory_id, person_id)
                 })
             })
@@ -141,9 +145,12 @@ impl MemoryStore {
             }
         }
         for memory in &mut bundle.memories {
+            memory.fields.author = Some(person_id.clone());
             memory.published_by = None;
-            memory.changed_by = None;
-            memory.changed_at = None;
+            memory.scope = crate::MemoryScope::Personal;
+            if memory.changed_by.is_some() {
+                memory.changed_by = Some(person_id.clone());
+            }
             memory.project_id = None;
             memory.promoted_from = None;
             memory.promotion_reason = None;
@@ -198,7 +205,8 @@ impl MemoryStore {
         }
         // One persist for rows, tombstones, expiry tombstones and owners: a failure restores
         // the prior state, so no row is left in memory or on disk without its owner.
-        let (candidate, result, _) = self.stage_import(bundle)?;
+        let readable = self.memories_for_account(account_token)?;
+        let (candidate, result, _) = self.stage_import(bundle, &readable)?;
         self.state = candidate;
         for event_id in observation_ids {
             self.record_observation_owner(&person_id, &event_id);
@@ -211,7 +219,7 @@ impl MemoryStore {
     }
 
     pub fn import_bundle(&mut self, bundle: ExportBundle) -> Result<ImportResult, StoreError> {
-        let (candidate, result, changed) = self.stage_import(bundle)?;
+        let (candidate, result, changed) = self.stage_import(bundle, &self.state.memories)?;
         if changed {
             self.state = candidate;
             self.persist()?;
@@ -224,14 +232,17 @@ impl MemoryStore {
     fn stage_import(
         &self,
         mut bundle: ExportBundle,
+        readable: &[crate::Memory],
     ) -> Result<(StoreState, ImportResult, bool), StoreError> {
         normalize_export_bundle(&mut bundle)?;
+        let dropped_links = crate::sanitize_imported_links(&mut bundle.memories, readable);
         let mut candidate = self.state.clone();
         let mut result = ImportResult {
             imported_sessions: 0,
             imported_observations: 0,
             imported_memories: 0,
             imported_forgotten_ids: 0,
+            dropped_links,
         };
 
         for session in bundle.sessions {
@@ -318,6 +329,7 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
         session.context = redact_work_context(&session.context);
     }
     for observation in &mut bundle.observations {
+        observation.scope = crate::MemoryScope::Personal;
         if observation.event_id.trim().is_empty() || observation.session_id.trim().is_empty() {
             return Err(StoreError::Validation(
                 "export observation ids must not be empty".to_owned(),
@@ -334,9 +346,10 @@ pub fn normalize_export_bundle(bundle: &mut ExportBundle) -> Result<(), StoreErr
         validate_lifecycle(&observation.lifecycle)?;
     }
     for memory in &mut bundle.memories {
+        memory.feedback.clear();
+        crate::sync_feedback_counts(memory);
         memory.published_by = None;
-        memory.changed_by = None;
-        memory.changed_at = None;
+        memory.scope = crate::MemoryScope::Personal;
         memory.project_id = None;
         memory.promoted_from = None;
         memory.promotion_reason = None;

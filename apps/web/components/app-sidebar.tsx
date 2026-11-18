@@ -6,6 +6,7 @@ import { useState } from "react";
 import {
   ChevronsUpDownIcon,
   FolderIcon,
+  BrainIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   LockKeyholeIcon,
@@ -13,7 +14,9 @@ import {
   MonitorIcon,
   MoonIcon,
   SunIcon,
+  ListTodoIcon,
   UsersIcon,
+  WaypointsIcon,
 } from "lucide-react";
 import { CairnMark } from "@/components/cairn-logo";
 import { ChangePasswordDialog } from "@/components/change-password-dialog";
@@ -56,6 +59,8 @@ const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
 const WORKSPACE = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboardIcon },
+  { href: "/memories", label: "Memories", icon: BrainIcon },
+  { href: "/graph", label: "Graph", icon: WaypointsIcon },
   { href: "/projects", label: "Projects", icon: FolderIcon },
   { href: "/devices", label: "Devices", icon: KeyRoundIcon },
 ];
@@ -192,6 +197,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <SidebarGroupContent>
               <SidebarMenu>
                 <NavItem href="/accounts" label="Accounts" icon={UsersIcon} pathname={pathname} />
+                <NavItem href="/jobs" label="Jobs" icon={ListTodoIcon} pathname={pathname} />
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

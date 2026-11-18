@@ -33,9 +33,10 @@ These are the useful project-level parts of the Karpathy-inspired guidance:
   ADR or ADR update.
 - Use the project’s existing checks as appropriate:
   `cargo fmt --check`, `cargo test --workspace`,
-  `./scripts/smoke_full_flow.sh`, `python3 scripts/measure_layer2.py`, and
-  `./scripts/smoke_layer3.sh`. Do not run expensive or unrelated checks when a
-  narrower check proves the requested result.
+  `./scripts/smoke_full_flow.sh`, `./scripts/smoke_mcp.sh`,
+  `./scripts/smoke_web.sh`, and `./scripts/smoke_postgres.sh`. Do not run
+  expensive or unrelated checks when a narrower check proves the requested
+  result.
 - Keep the product boundary clear: personal memory and branch continuity come
   before project promotion, collaboration, or federation.
 - Rust unit tests live in a sibling `tests.rs` next to their module, declared
@@ -50,11 +51,14 @@ These are the useful project-level parts of the Karpathy-inspired guidance:
 - Sync event IDs are person-scoped. A duplicate must first resolve to a persisted
   sync event owned by the authenticated person; never acknowledge a collision
   from another person’s event. See `crates/core/src/sync.rs`,
-  `crates/server/src/lib.rs`, and `scripts/smoke_layer3.sh`.
+  `crates/server/src/lib.rs`, `crates/core/src/sync/tests.rs`
+  (`sync_event_id_collision_cannot_leak_another_persons_observation`), and
+  `crates/server/src/lib.rs` (`file_sync_adopts_an_owned_observation_once`).
+  `scripts/smoke_postgres.sh` covers same-person duplicate push on PostgreSQL.
 - REST smoke readiness must allow a clean Cargo build to finish before polling
   gives up. The current startup window is 60 seconds; do not reduce it to a
   short fixed timeout without accounting for first-build time. See
-  `scripts/smoke_rest.sh`.
+  `scripts/smoke_full_flow.sh`.
 
 ## Curated project memory
 

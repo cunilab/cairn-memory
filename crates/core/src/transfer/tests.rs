@@ -209,7 +209,7 @@ fn foreign_tombstones_reject_the_whole_import_and_change_nothing() -> Result<(),
         assert_eq!(fs::read(&path)?, before, "nothing is written on rejection");
     }
 
-    let reopened = MemoryStore::open(&path)?;
+    let mut reopened = MemoryStore::open(&path)?;
     let hits = reopened.search_for_account(&owner.token, "tombfact", 10, &filter)?;
     assert_eq!(ids_of(&hits), vec![kept.memory_id.as_str()]);
     let resume = reopened.resume_for_account(&owner.token, 10, &filter)?;
@@ -568,7 +568,10 @@ fn export_import_round_trip_is_idempotent_and_preserves_forget() -> Result<(), S
     let first = target.import_bundle(bundle.clone())?;
     assert_eq!(first.imported_sessions, 1);
     assert_eq!(first.imported_observations, 1);
-    assert_eq!(first.imported_memories, 1);
+    assert_eq!(
+        first.imported_memories, 2,
+        "session note and separate handoff"
+    );
     assert_eq!(first.imported_forgotten_ids, 1);
     assert!(target.search("providers", 5)?.is_empty());
 
@@ -580,10 +583,11 @@ fn export_import_round_trip_is_idempotent_and_preserves_forget() -> Result<(), S
             imported_observations: 0,
             imported_memories: 0,
             imported_forgotten_ids: 0,
+            dropped_links: Vec::new(),
         }
     );
     drop(target);
-    let restored = MemoryStore::open(&target_path)?;
+    let mut restored = MemoryStore::open(&target_path)?;
     assert!(restored.search("providers", 5)?.is_empty());
 
     fs::remove_file(source_path)?;
@@ -616,6 +620,7 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
         sessions: vec![],
         observations: vec![],
         memories: vec![Memory {
+            fields: Default::default(),
             memory_id: "memory-import-secret".to_owned(),
             session_id: "session-import-secret".to_owned(),
             content: "api_key=should-not-persist".to_owned(),
@@ -628,6 +633,8 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
             next_steps: Vec::new(),
             unresolved_work: Vec::new(),
             supersedes: None,
+            contradicts: Vec::new(),
+            links: Vec::new(),
             promoted_from: None,
             promotion_reason: None,
             verified_commit: None,
@@ -635,6 +642,11 @@ fn import_rejects_unknown_version_and_redacts_payload() -> Result<(), StoreError
             changed_by: None,
             changed_at: None,
             created_at: "0".to_owned(),
+            access_count: 0,
+            last_accessed_at: None,
+            helpful_count: 0,
+            stale_count: 0,
+            feedback: Vec::new(),
         }],
         forgotten_ids: vec![],
     };

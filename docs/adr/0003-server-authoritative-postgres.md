@@ -72,3 +72,20 @@ Rejected because provider outages, cost, and privacy must not prevent capture or
 - Decision 7: an identical replay returns the original acceptance result. A replay of the same event id with a changed session, content, role, or source returns `409 Conflict` instead; see the [2026-11-15 amendment to ADR 0007](0007-layer3-local-trusted-device-slice.md#amendment-2026-11-15-a-changed-or-out-of-scope-replay-is-a-conflict).
 
 This ADR keeps its `draft` status.
+
+## Amendment 2026-11-17: local hybrid recall
+
+ADR 0014 item 2 implements decision 4 using exact pgvector cosine retrieval,
+with versioned 384-dimensional FP32 MiniLM embeddings computed inside the server.
+Production images bake pinned, checksum-verified model files; standalone instances
+load an explicitly provisioned directory without runtime downloads. Decision 8
+is implemented by a bounded background re-embedding job on startup and after
+source changes; search never blocks on backfill. Missing/unloadable models preserve
+lexical/entity/link recall. The file development adapter persists the same vector
+metadata. [The continuity contract](../contracts/continuity-v1.md#hybrid-recall-v014)
+owns the model revision, ranking and worker bounds.
+
+The approved ONNX distributions require GNU libc and a newer C++ runtime than
+Debian bookworm provides. Production server images build/run on Debian trixie;
+Linux server release binaries use GNU targets while the CLI remains static
+musl. Runtime requirements and upgrade notes belong to [release](../release.md).
