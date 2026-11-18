@@ -26,6 +26,24 @@ replacement for the project documentation.
   requiring the complete platform.
 - **Evidence:** `README.md`; `docs/product.md`; `docs/roadmap.md`
 
+### Acceptance smokes are four scripts
+
+- **Type:** workflow rule
+- **Status:** active
+- **Date:** 2026-11-18
+- **Summary:** The current acceptance smokes are `scripts/smoke_full_flow.sh`,
+  `scripts/smoke_mcp.sh`, `scripts/smoke_web.sh`, and `scripts/smoke_postgres.sh`.
+  They run in the `Acceptance smokes` CI job without an embedding model.
+  Older entries that name `smoke_layer1.sh`, `smoke_layer3.sh`,
+  `smoke_layer4_cli.sh`, `smoke_layer5_cli.sh`, `smoke_rest.sh`, `smoke_hook.sh`,
+  `smoke_export.sh`, `smoke_viewer.sh`, `measure_layer2.py`, or
+  `check_detail_actions.mjs` record the command that ran that day.
+- **Reason:** ADR 0014 removed promotion and collapsed scopes to project,
+  personal, and global. The coverage map is in `docs/evidence.md`.
+- **Evidence:** `docs/evidence.md` ("Script consolidation (2026-11-18)");
+  `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`;
+  `.github/workflows/ci.yml`
+
 ### Documentation is evidence-driven
 
 - **Type:** workflow rule

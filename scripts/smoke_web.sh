@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+
 cd "$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/cairn-web.XXXXXX")"
@@ -129,6 +131,17 @@ if (/permanently|erase|purged|undo button/i.test(deleted)) {
 const rotated = rotateDeviceImpact("laptop");
 if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
   throw new Error("rotate copy must name the device, the old token and the one-time new token");
+}
+const detail = await import("node:fs").then((fs) =>
+  fs.readFileSync("apps/web/components/project-detail.tsx", "utf8"),
+);
+if (!detail.includes("do not repeat the action")) {
+  throw new Error("a failed reload must tell the user not to repeat the action");
+}
+for (const removed of ["Share decision", "Revoke share", "Create team", "Promote to decision"]) {
+  if (detail.includes(removed)) {
+    throw new Error(`retired project action is still in the console: ${removed}`);
+  }
 }
 
 JS

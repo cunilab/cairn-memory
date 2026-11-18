@@ -545,14 +545,15 @@ compares `person_id` in the query.
 
 ## Layer 2 measurement
 
-Run the real-process golden-corpus measurement with:
-
-```bash
-python3 scripts/measure_layer2.py
-```
-
-The measurement reports first-informed-action success, repeated-investigation
-stability, branch scope precision, and stale/contradiction signal coverage.
+Branch isolation of a branch-local capture, and stable handoff retrieval, are
+checked by `scripts/smoke_full_flow.sh`. Why-changed evidence, the stale-commit
+signal, the lexical contradiction signal, and repeated-investigation stability
+are checked by `why_changed_reports_reason_relationships_staleness_and_contradictions`
+in `crates/core/src/recall/tests.rs` and
+`why_changed_route_returns_reason_relationships_and_conflicts` in
+`crates/server/src/lib.rs`. `scripts/smoke_full_flow.sh` repeats one why-changed
+query and requires the same memory ids in the same order. These checks do not
+measure time or avoided investigation.
 
 ## Safety boundary
 
@@ -575,8 +576,10 @@ stability, branch scope precision, and stale/contradiction signal coverage.
 - `scripts/smoke_full_flow.sh` verifies branch-local memory does not leak into
   `main` context, that omitted results remain recoverable, and that handoff
   fields survive real REST retrieval.
-- `scripts/measure_layer2.py` runs the Layer 2 golden-corpus checks against a
-  real Cairn server process.
+- `why_changed_reports_reason_relationships_staleness_and_contradictions` and
+  `scoped_search_keeps_branch_memory_out_of_main_context` cover the Layer 2
+  structural checks. `scripts/smoke_full_flow.sh` runs the branch-isolation
+  case against a real server process.
 
 ## Session-start brief (v0.1.4)
 

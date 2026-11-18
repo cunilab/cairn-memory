@@ -346,9 +346,8 @@ email/identity provider decision beyond the self-hosted Layer 3 boundary.
   (storage). The PostgreSQL test and `scripts/smoke_postgres.sh` were written
   but not run on 2026-11-14 because the disposable PostgreSQL container
   returned I/O errors; they compile under `clippy --all-targets`.
-  `scripts/smoke_layer3.sh`, `scripts/smoke_web.sh`, and
-  `scripts/smoke_hook_auth.py` run the same boundary over HTTP on the file
-  router.
+  `scripts/smoke_postgres.sh`, `scripts/smoke_web.sh`, and
+  `scripts/smoke_hook_auth.py` run the same boundary over HTTP.
 - The 30-day session expiry (`AUTH_SESSION_SECONDS`, checked on authentication
   in both adapters) is implemented in source but not verified: no test found
   builds an expired session. No test found covers the HTTP `400` for a second

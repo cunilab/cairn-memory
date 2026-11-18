@@ -223,35 +223,26 @@ To verify the complete local application flow with real server processes and tem
 
 ```bash
 ./scripts/smoke_full_flow.sh
+./scripts/smoke_mcp.sh
+./scripts/smoke_web.sh
 ```
 
-This simulates hook capture, duplicate delivery, session consolidation, secret redaction, restart recovery, correction, forget, export/import, and viewer availability without requiring PostgreSQL or an external model provider.
+`smoke_full_flow.sh` simulates hook capture, duplicate delivery, session
+consolidation, secret redaction, restart recovery, correction, forget,
+export/import, and the embedded viewer. It also runs the CLI capture, recall,
+three-scope project flow, distillation, links, a declared contradiction,
+feedback, and the admin job queue. It does not require PostgreSQL or an
+embedding model: without `--embedding-model-dir` the server keeps lexical,
+entity, and link recall.
 
-For Layer 2 branch-aware continuity, the same flow also verifies that project
-and global memories remain available while a worktree-local hypothesis stays
-out of an unrelated `main` context. It also verifies deterministic resume and
-unresolved-work retrieval from the session summary, plus structured files,
-symbols, commands, tests, and services context.
+The same flow verifies that a project memory and a personal preference stay in
+an unrelated `main` context while a branch-local capture stays out of it, and
+that resume and unresolved-work retrieval return the session summary. Stale and
+lexical contradiction signals are covered by
+`why_changed_reports_reason_relationships_staleness_and_contradictions` in
+`crates/core/src/recall/tests.rs`.
 
-The Layer 2 measurement gate is:
-
-```bash
-python3 scripts/measure_layer2.py
-```
-
-It checks why-changed evidence, branch isolation, stale and contradictory
-signals, and repeated-investigation stability against the Layer 2 golden corpus.
-
-The first Layer 3 trusted-device acceptance flow is:
-
-```bash
-./scripts/smoke_layer3.sh
-```
-
-It verifies authenticated outbox replay, cross-device pull, cursor resume,
-duplicate delivery, token rotation, last-seen state, secret redaction, and
-revocation against the local compatibility path. PostgreSQL adapter execution
-requires a fresh database and can be checked with:
+PostgreSQL adapter execution requires a fresh database and can be checked with:
 
 ```bash
 CAIRN_TEST_DATABASE_URL="$CAIRN_DATABASE_URL" \

@@ -1,7 +1,7 @@
 ---
 id: CM-AUDIT-008
 title: "Memory capture and persistence — 2026-11-12"
-status: draft
+status: superseded
 ---
 
 # Memory capture and persistence — 2026-11-12

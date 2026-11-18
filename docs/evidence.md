@@ -12,6 +12,33 @@ status: draft
 | Date | 2026-10-25 |
 | Implementation state | Local Layer 1 personal-memory vertical slice is complete: `cairn-core`, REST, hook adapter, export/import, and local viewer exist; the CLI and MCP are device-token network clients (`crates/client`); `apps/web` is the first Next.js console |
 
+## Script consolidation (2026-11-18)
+
+The per-layer smoke scripts were merged into `scripts/smoke_full_flow.sh`, `scripts/smoke_web.sh`, `scripts/smoke_mcp.sh`, and `scripts/smoke_postgres.sh`. Those four run in the `Acceptance smokes` CI job. The job does not download the embedding model. `crates/server/src/main.rs` keeps lexical, entity, and link recall when `--embedding-model-dir` is absent. Historical sections below keep the command that ran that day.
+
+| Removed script | Where the assertion lives now |
+| --- | --- |
+| `smoke_layer1.sh` CLI start, capture, end, context recall, resume id, why-changed source event, forget, lesson, correct | `smoke_full_flow.sh`. Scope `worktree` is obsolete: ADR 0014 item 0 leaves an unattached capture in `personal`, which the smoke asserts. |
+| `smoke_layer1.sh` repeated why-changed order | `smoke_full_flow.sh` compares two why-changed responses. |
+| `smoke_rest.sh` unauthenticated start, observe, end, context source event, forget, empty search | Authenticated equivalent is `smoke_full_flow.sh`. The file router still accepts a missing bearer before an account exists; `capture_end_context_and_forget_work_over_http` in `crates/server/src/lib.rs` exercises that path. |
+| `smoke_hook.sh` accepted hook event, session-end search of the summary and handoff | `smoke_full_flow.sh`, plus CI `scripts/smoke_hook_auth.py` and `scripts/smoke_hook_offline.py`. |
+| `smoke_export.sh` same-account import counts of zero and a forgotten id kept out of recall | `smoke_full_flow.sh` CLI re-import, and the HTTP restore already in that script. `export_and_import_round_trip_over_http` covers the HTTP round trip. |
+| `smoke_viewer.sh` viewer markers, removed share/team controls, empty diagnose counts | `smoke_full_flow.sh`. The same markers are in `viewer_page_is_available_from_the_server`. |
+| `smoke_layer3.sh` outbox redaction, offline pending, revoked purge | CI `scripts/smoke_outbox.py` (`test_queue_file_bytes_omit_synthetic_content_secrets`, `test_queue_policy_replay_order_and_auth_purge`). |
+| `smoke_layer3.sh` duplicate push, cross-device pull, cursor, rotate, revoke | `smoke_postgres.sh`. Cross-person event-id rejection is `sync_event_id_collision_cannot_leak_another_persons_observation` and `file_sync_adopts_an_owned_observation_once`. |
+| `smoke_layer4_cli.sh` project decision fields, verify, correct keeping scope and alternatives, freshness verification | `smoke_full_flow.sh`. |
+| `smoke_layer5_cli.sh` init join, member visibility of project capture and summary, personal hidden, global visible, reader cannot correct or delete, promote and retired commands stay gone, delete hides the row | `smoke_full_flow.sh`. Promote is removed by ADR 0014 item 0 and `docs/contracts/project-layer4.md` ("Retired surfaces"). |
+| `smoke_postgres.sh` promote, `promoted_from`, preview, and the `promotion` freshness action | Replaced in the same script by a direct project save (ADR 0014 item 0). Sync, devices, verify, merge, entities, maintenance, member visibility, and retired project routes stay. |
+| `measure_layer2.py` why-changed reason and `file_contains_symbol` | `why_changed_reports_reason_relationships_staleness_and_contradictions` and `why_changed_route_returns_reason_relationships_and_conflicts`. |
+| `measure_layer2.py` branch memory absent from `main` and present in the matching context | `smoke_full_flow.sh` and `scoped_search_keeps_branch_memory_out_of_main_context`. |
+| `measure_layer2.py` stale freshness below 50 and lexical `contradictory` / `contradiction_ids` | The same core recall test. ADR 0014 stage 7 keeps the lexical signal and adds declared `contradicts`, which `smoke_full_flow.sh` posts. |
+| `measure_layer2.py` repeated-investigation id stability | `smoke_full_flow.sh`. |
+| `check_detail_actions.mjs` promote preview and publication posts | Obsolete. ADR 0014 item 0 and the retired surfaces in `project-layer4.md`. The console source no longer contains those actions; `smoke_web.sh` fails if they return. |
+| `check_detail_actions.mjs` delete copy, reload sentence, verify, merge, close, member visibility, login and logout | `smoke_web.sh` (action copy, the reload sentence in `project-detail.tsx`, verify, merge, close, member list). Account reset and password change are `file_admin_lists_accounts_and_resets_a_password` and `file_password_change_needs_the_current_password_and_is_rate_limited`. |
+| `check_detail_actions.mjs` dialog timing (no POST before confirm, phone overflow, theme class) | Not re-run. The script required a machine-local Playwright install, which is not a repository dependency and is not a reliable GitHub Actions job, and its fixture called the removed promote route. |
+| `graph_canvas_shots.mjs` | Deleted. No repository reference. |
+| `smoke_agent_lib.sh` | Kept. It is the account and device harness for `smoke_mcp.sh`, and it unsets `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. |
+
 ## Result
 
 Phase 0 artifacts now exist in the workspace, and Layer 1 now exercises capture, redaction, lifecycle classification, lesson and correction workflows, deterministic session compression, keyword recall, bounded context packing, forget, retention sweep, export/import, restart persistence, hook ingestion, CLI, MCP, REST, and the local viewer. A reviewer can inspect the product promise, the AI-managed memory policy, the upstream compatibility surface, representative safety fixtures, and a versioned retrieval corpus.

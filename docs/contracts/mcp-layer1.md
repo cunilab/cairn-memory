@@ -167,9 +167,9 @@ The query tools `memory_recall`, `memory_context`, `memory_reflect`,
   the file-store router (capture, recall, session, scoped save, a `403` on web-only
   routes, revocation) and, as an ignored test with `CAIRN_TEST_DATABASE_URL`, against the
   PostgreSQL router.
-- `scripts/smoke_mcp.sh`, `scripts/smoke_layer1.sh`, `scripts/smoke_layer4_cli.sh`,
-  `scripts/smoke_layer5_cli.sh`, and `scripts/smoke_export.sh` drive the binaries against a
-  spawned `cairn-server`.
+- `scripts/smoke_mcp.sh` drives `cairn mcp` against a spawned `cairn-server`.
+  `scripts/smoke_full_flow.sh` drives the CLI, including capture, scoped save,
+  project visibility, and same-account export/import, against the same kind of server.
 
 ## Agent guidance (v0.1.4)
 

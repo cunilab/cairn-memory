@@ -59,7 +59,7 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 
 > **Usable outcome:** A new agent session can resume previous work with the right project, branch, files, decisions, tests, and unresolved work.
 
-> **Layer 2 status:** Complete. New memories derive session/worktree/branch/project/global scopes, REST/MCP/CLI retrieval accepts current context, bounded context packs expose scope labels plus omitted-result recovery hints, session summaries expose deterministic next steps and unresolved work, and why-changed retrieval exposes evidence, relationships, stale signals, and contradictions. The local Layer 2 gate is the structural regression `scripts/measure_layer2.py` against the `cairn-golden/layer2-v0.1` corpus. It does not measure time or avoided investigation.
+> **Layer 2 status:** Complete. New memories derive session/worktree/branch/project/global scopes, REST/MCP/CLI retrieval accepts current context, bounded context packs expose scope labels plus omitted-result recovery hints, session summaries expose deterministic next steps and unresolved work, and why-changed retrieval exposes evidence, relationships, stale signals, and contradictions. The structural checks live in `crates/core/src/recall/tests.rs` and `scripts/smoke_full_flow.sh`. They do not measure time or avoided investigation.
 
 - [x] Capture repository, branch, worktree, commit, files, symbols, commands, tests, and services when available.
 - [x] Keep session, branch/worktree, project, and user-global scopes distinct for local retrieval.
@@ -67,9 +67,9 @@ The project should ship in small, reviewable layers. **Every layer must produce 
 - [x] Add “what happened last time?”, “why was this changed?”, and “what remains unresolved?” retrieval paths through deterministic handoff and evidence summaries.
 - [x] Add deterministic code relationships inspired by Graphify where they improve context quality.
 - [x] Add stale-memory and contradiction signals without silently selecting a winner.
-- [x] Check the Layer 2 golden corpus with `scripts/measure_layer2.py`, a structural regression for why-changed evidence, branch isolation, stale and contradiction signals, and stable repeated investigation. It does not measure time or avoided investigation.
+- [x] Check why-changed evidence, branch isolation, stale and contradiction signals, and stable repeated investigation in `crates/core/src/recall/tests.rs` and `scripts/smoke_full_flow.sh`. This does not measure time or avoided investigation.
 
-**Gate:** A new session receives relevant context without receiving unrelated branch-local hypotheses, can inspect why a change exists, and sees stale or contradictory evidence instead of an invisible winner. Verified by `python3 scripts/measure_layer2.py` as that structural regression, and by the full acceptance suite.
+**Gate:** A new session receives relevant context without receiving unrelated branch-local hypotheses, can inspect why a change exists, and sees stale or contradictory evidence instead of an invisible winner. Verified by `scripts/smoke_full_flow.sh` and `why_changed_reports_reason_relationships_staleness_and_contradictions`.
 
 ### Layer 3 — Personal Cross-Device Memory
 

@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+# A shell that points these at a real server would send this smoke's writes there.
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+
 store="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-store.XXXXXX")"
 restored="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-restored.XXXXXX")"
 log="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-log.XXXXXX")"
@@ -25,6 +28,8 @@ import_result="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-import-result.XXXXXX")"
 search_restored="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-search-restored.XXXXXX")"
 pid=""
 restored_pid=""
+session=""
+cli_root=""
 port="3115"
 restored_port="3116"
 base="http://127.0.0.1:${port}"
@@ -44,6 +49,9 @@ cleanup() {
     "$project_memory" "$branch_memory" "$preference_memory" "$scoped_main" "$scoped_branch" \
     "$search_after_restart" "$corrected" "$search_after_correction" \
     "$search_after_forget" "$import_result" "$search_restored"
+  if [ -n "$cli_root" ]; then
+    rm -rf "$cli_root"
+  fi
 }
 trap cleanup EXIT INT TERM
 rm -f "$store" "$restored"
@@ -90,7 +98,21 @@ bootstrap_device() {
 }
 
 start_source_server
-device="$(bootstrap_device "$base" | cut -d' ' -f2)"
+
+# Fresh file store: the embedded viewer diagnose counts stay at zero before any write.
+diagnose="$(curl -fsS "$base/cairn-memory/diagnose")"
+DIAGNOSE_JSON="$diagnose" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["DIAGNOSE_JSON"])
+assert payload["temporary_observations"] == 0
+assert payload["durable_memories"] == 0
+PY
+
+tokens="$(bootstrap_device "$base")"
+session="$(printf '%s\n' "$tokens" | cut -d' ' -f1)"
+device="$(printf '%s\n' "$tokens" | cut -d' ' -f2)"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/start" \
   -H 'Content-Type: application/json' \
@@ -224,8 +246,17 @@ PAGE_HTML="$page" python3 - <<'PY'
 import os
 
 page = os.environ["PAGE_HTML"]
-for marker in ("Cairn / memory field", "/cairn-memory/correct", "Forget this"):
+for marker in (
+    "Cairn / memory field",
+    "/cairn-memory/export",
+    "/cairn-memory/correct",
+    "Forget this",
+    "Use the web console for project decisions",
+    "Content-Type",
+):
     assert marker in page, marker
+for removed in ("Share decision", "Revoke share", "Create team", "Delete memory", "/shared"):
+    assert removed not in page, removed
 PY
 
 kill "$pid"
@@ -329,4 +360,266 @@ assert len(search) == 2
 assert {m["memory_id"] for m in search} == {os.environ["MEMORY_ID"], "handoff-" + os.environ["MEMORY_ID"]}
 PY
 
-echo "Full Layer 1/2 acceptance flow passed"
+# CLI capture, three scopes, and distillation on the same file-store server.
+# An unattached capture is personal (ADR 0014 item 0). An initialized checkout
+# stores the capture and the session note in the project, visible to members.
+cargo build -q -p cairn-client
+bin_dir="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug"
+cli_root="$(mktemp -d "${TMPDIR:-/tmp}/cairn-full-flow-cli.XXXXXX")"
+printf '%s' "$device" >"$cli_root/owner.device"
+XDG_CONFIG_HOME="$cli_root/owner" "$bin_dir/cairn" setup "$base" <"$cli_root/owner.device" >/dev/null
+owner() { XDG_CONFIG_HOME="$cli_root/owner" "$bin_dir/cairn" "$@"; }
+as_member() { XDG_CONFIG_HOME="$cli_root/member" "$bin_dir/cairn" "$@"; }
+as_reader() { XDG_CONFIG_HOME="$cli_root/reader" "$bin_dir/cairn" "$@"; }
+project_rows() {
+  case "$1" in
+    owner) owner project-memories "$2" ;;
+    member) as_member project-memories "$2" ;;
+    reader) as_reader project-memories "$2" ;;
+  esac
+}
+
+# Recall from outside the product repo. Inside a Git checkout the CLI adds that
+# checkout's repository to search, which would hide this unattached capture.
+(cd "$cli_root" && owner start cli-session cairn-demo feat/demo wt-demo abc1234 >/dev/null)
+(cd "$cli_root" && owner capture cli-session evt-cli "The quartz latch token passed after the isolated signature fix." >/dev/null)
+cli_summary="$(cd "$cli_root" && owner end cli-session)"
+SUMMARY_JSON="$cli_summary" python3 - <<'PY'
+import json
+import os
+
+summary = json.loads(os.environ["SUMMARY_JSON"])
+assert summary["kind"] == "session_summary", summary
+assert summary["scope"] == "personal", summary.get("scope")
+assert summary["source_event_ids"] == ["evt-cli"], summary.get("source_event_ids")
+assert "quartz" in summary["content"], summary["content"][:800]
+PY
+before_forget="$(cd "$cli_root" && owner context "quartz latch token" 5)"
+case "$before_forget" in
+  *evt-cli*) ;;
+  *) printf '%s\n' "CLI capture was not recalled" >&2; exit 1 ;;
+esac
+scoped_context="$(cd "$cli_root" && owner context "quartz latch token" 5 cairn-demo feat/demo wt-demo abc1234)"
+SCOPED_CONTEXT_JSON="$scoped_context" python3 - <<'PY'
+import json
+import os
+
+pack = json.loads(os.environ["SCOPED_CONTEXT_JSON"])
+assert pack["results"][0]["scope"] == "personal"
+PY
+resume_cli="$(cd "$cli_root" && owner resume 5 cairn-demo feat/demo wt-demo abc1234)"
+RESUME_JSON="$resume_cli" python3 - <<'PY'
+import json
+import os
+
+pack = json.loads(os.environ["RESUME_JSON"])
+assert pack["results"][0]["memory_id"].endswith("-cli-session")
+PY
+why_cli="$(cd "$cli_root" && owner why-changed "quartz latch token" 5 cairn-demo feat/demo wt-demo abc1234)"
+WHY_CHANGED_JSON="$why_cli" python3 - <<'PY'
+import json
+import os
+
+pack = json.loads(os.environ["WHY_CHANGED_JSON"])
+assert pack["results"][0]["memory_id"].endswith("-cli-session")
+assert pack["results"][0]["source_event_ids"] == ["evt-cli"]
+PY
+why_again="$(cd "$cli_root" && owner why-changed "quartz latch token" 5 cairn-demo feat/demo wt-demo abc1234)"
+WHY_A="$why_cli" WHY_B="$why_again" python3 - <<'PY'
+import json
+import os
+
+first = [m["memory_id"] for m in json.loads(os.environ["WHY_A"])["results"]]
+second = [m["memory_id"] for m in json.loads(os.environ["WHY_B"])["results"]]
+assert first == second
+assert len(first) == len(set(first))
+PY
+(cd "$cli_root" && owner forget evt-cli)
+after_forget="$(cd "$cli_root" && owner search "quartz latch token" 5)"
+case "$after_forget" in
+  *evt-cli*) printf '%s\n' "forgotten CLI evidence was recalled" >&2; exit 1 ;;
+esac
+lesson="$(owner lesson '{"scope":"personal","title":"Keep imports idempotent.","summary":"Keep imports idempotent.","reason":"Preserve tombstones","kind":"preference","preference":"idempotent imports"}')"
+LESSON_JSON="$lesson" python3 - <<'PY'
+import json
+import os
+
+memory = json.loads(os.environ["LESSON_JSON"])
+assert memory["kind"] == "preference"
+assert memory["scope"] == "personal"
+PY
+lesson_id="$(LESSON_JSON="$lesson" python3 -c 'import json, os; print(json.loads(os.environ["LESSON_JSON"])["memory_id"])')"
+corrected_lesson="$(owner correct "$lesson_id" "Keep imports idempotent and preserve tombstones.")"
+CORRECTED_JSON="$corrected_lesson" python3 - <<'PY'
+import json
+import os
+
+memory = json.loads(os.environ["CORRECTED_JSON"])
+assert memory["kind"] == "correction"
+PY
+
+password="correct horse battery staple"
+register_agent() {
+  name="$1"
+  email="$2"
+  agent_session="$(curl -fsS -X POST "$base/cairn-memory/auth/register" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $session" \
+    -d "{\"email\":\"$email\",\"password\":\"$password\"}" | json_field '["token"]')"
+  agent_device="$(curl -fsS -X POST "$base/cairn-memory/devices/register" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $agent_session" \
+    -d "{\"name\":\"$name\"}" | json_field '["token"]')"
+  printf '%s' "$agent_session" >"$cli_root/$name.session"
+  printf '%s' "$agent_device" >"$cli_root/$name.device"
+  XDG_CONFIG_HOME="$cli_root/$name" "$bin_dir/cairn" setup "$base" <"$cli_root/$name.device" >/dev/null
+}
+register_agent member member@example.test
+register_agent reader reader@example.test
+
+checkout="$cli_root/checkout"
+git init -q "$checkout"
+git -C "$checkout" remote add origin git@EXAMPLE.TEST:acme/cairn-demo.git
+(cd "$checkout" && owner init >/dev/null)
+project_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$checkout/.cairn/project.json")"
+(cd "$checkout" && as_member init) | grep -q 'already initialized, you are a member'
+(cd "$checkout" && as_reader capture join-reader reader-event 'reader joined' >/dev/null)
+(cd "$checkout" && as_member start source-session example.test/acme/cairn-demo main >/dev/null)
+(cd "$checkout" && as_member capture source-session source-event 'shared raw capture because regression passed' >/dev/null)
+as_member end source-session >/dev/null
+saved="$(cd "$checkout" && as_member save '{"scope":"project","kind":"rule","title":"shared rule","summary":"Bound concurrent writes","reason":"Prevent lost data","rule":"Use transactions","exceptions":"read-only"}')"
+rule_id="$(printf '%s' "$saved" | json_field '["memory_id"]')"
+decision="$(cd "$checkout" && owner save '{"scope":"project","kind":"decision","title":"Cache decision","summary":"Use bounded writes","reason":"Regression passed","details":"Verified persistence","decision_context":"Concurrent capture","alternatives":["unbounded writes"],"consequences":"Short transactions","evidence":["cargo test"],"context":{"project_id":"'"$project_id"'","repository":"cairn-demo"}}')"
+decision_id="$(printf '%s' "$decision" | json_field '["memory_id"]')"
+owner project-verify "$project_id" "$decision_id" abc1234 >/dev/null
+owner memory "$decision_id" | python3 -c 'import json,sys; m=json.load(sys.stdin); assert m["title"]=="Cache decision" and m["reason"]=="Regression passed" and m["alternatives"]==["unbounded writes"] and m["scope"]=="project"'
+corrected_decision="$(owner correct "$decision_id" "The cache decision stays project-scoped after correction.")"
+CORRECTED="$corrected_decision" ID="$decision_id" python3 - <<'PY'
+import json
+import os
+
+memory = json.loads(os.environ["CORRECTED"])
+assert memory["scope"] == "project" and memory["supersedes"] == os.environ["ID"]
+assert memory["title"] == "Cache decision" and memory["alternatives"] == ["unbounded writes"]
+PY
+owner project-freshness "$project_id" | python3 -c 'import json,sys; assert any(e["action"]=="verification" for e in json.load(sys.stdin))'
+for who in owner member reader; do
+  rows="$(project_rows "$who" "$project_id")"
+  ROWS="$rows" ID="$rule_id" python3 - <<'PY'
+import json
+import os
+
+rows = json.loads(os.environ["ROWS"])
+assert any(m["memory_id"] == os.environ["ID"] and m["rule"] == "Use transactions" for m in rows)
+assert any(m["kind"] == "capture" and "shared raw capture" in m["summary"] for m in rows)
+assert any(m["kind"] == "session_summary" for m in rows)
+PY
+done
+as_member lesson '{"scope":"personal","title":"concise answers","summary":"Prefer concise answers","reason":"Save attention","kind":"preference","preference":"concise"}' >/dev/null
+as_member save '{"scope":"global","title":"lock writes","summary":"Lock shared writes","reason":"Avoid races","kind":"gotcha","cause":"concurrency","fix":"transaction"}' >/dev/null
+as_reader memories | python3 -c 'import json,sys; r=json.load(sys.stdin); assert any(m["scope"]=="global" and m["title"]=="lock writes" for m in r); assert not any(m["scope"]=="personal" and "concise answers" in m["title"] for m in r)'
+if as_reader correct "$rule_id" bad >/dev/null 2>&1; then
+  printf '%s\n' "a reader corrected a project rule" >&2
+  exit 1
+fi
+if as_reader delete-memory "$rule_id" >/dev/null 2>&1; then
+  printf '%s\n' "a reader deleted a project rule" >&2
+  exit 1
+fi
+for method in GET POST; do
+  status="$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" "$base/cairn-memory/promote" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $session" -d '{}')"
+  [ "$status" = 404 ] || [ "$status" = 405 ]
+done
+for old in promote promote-preview project-share project-team; do
+  if owner "$old" "$project_id" >/dev/null 2>&1; then
+    printf '%s\n' "retired command succeeded: $old" >&2
+    exit 1
+  fi
+done
+owner delete-memory "$rule_id" >/dev/null
+as_reader project-memories "$project_id" | ID="$rule_id" python3 -c 'import json,sys,os; assert not any(m["memory_id"]==os.environ["ID"] for m in json.load(sys.stdin))'
+
+bundle_path="$cli_root/bundle.json"
+import_output="$cli_root/import.json"
+owner export "$bundle_path" >/dev/null
+owner import "$bundle_path" >"$import_output"
+OUTPUT_JSON="$(cat "$import_output")" python3 - <<'PY'
+import json
+import os
+
+result = json.loads(os.environ["OUTPUT_JSON"])
+assert result["imported_sessions"] == 0, result
+assert result["imported_observations"] == 0, result
+assert result["imported_memories"] == 0, result
+PY
+
+# Links, a declared contradiction, feedback, and the admin job queue.
+cause="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"personal","kind":"fact","title":"Signed cookies","summary":"Signed cookies stop replay.","reason":"The signature check failed closed.","statement":"Signed cookies stop replay."}')"
+effect="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remember" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"personal","kind":"gotcha","title":"Unsigned cookies","summary":"Unsigned cookies were accepted.","reason":"The check was skipped.","symptom":"replayed session","cause":"missing signature","fix":"require the signature"}')"
+cause_id="$(printf '%s' "$cause" | json_field '["memory_id"]')"
+effect_id="$(printf '%s' "$effect" | json_field '["memory_id"]')"
+linked="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/links" \
+  -H 'Content-Type: application/json' \
+  -d "{\"sourceId\":\"$cause_id\",\"relation\":\"causes\",\"targetId\":\"$effect_id\"}")"
+LINKED="$linked" TARGET="$effect_id" python3 - <<'PY'
+import json
+import os
+
+memory = json.loads(os.environ["LINKED"])
+assert any(link["relation"] == "causes" and link["target_id"] == os.environ["TARGET"] for link in memory["links"])
+PY
+graph="$(curl -fsS -H "Authorization: Bearer $device" "$base/cairn-memory/graph?scope=personal")"
+GRAPH="$graph" SOURCE="$cause_id" TARGET="$effect_id" python3 - <<'PY'
+import json
+import os
+
+graph = json.loads(os.environ["GRAPH"])
+assert any(
+    edge["relation"] == "causes"
+    and {edge["source_id"], edge["target_id"]} == {os.environ["SOURCE"], os.environ["TARGET"]}
+    for edge in graph["edges"]
+)
+PY
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/links/remove" \
+  -H 'Content-Type: application/json' \
+  -d "{\"sourceId\":\"$cause_id\",\"relation\":\"causes\",\"targetId\":\"$effect_id\"}" \
+  | TARGET="$effect_id" python3 -c 'import json,sys,os; assert not any(link["target_id"]==os.environ["TARGET"] for link in json.load(sys.stdin)["links"])'
+contradicted="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/contradict" \
+  -H 'Content-Type: application/json' \
+  -d "{\"contradictingId\":\"$cause_id\",\"contradictedId\":\"$effect_id\"}")"
+CONTRADICTED="$contradicted" TARGET="$effect_id" python3 - <<'PY'
+import json
+import os
+
+memory = json.loads(os.environ["CONTRADICTED"])
+assert os.environ["TARGET"] in memory["contradicts"]
+PY
+voted="$(curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/feedback" \
+  -H 'Content-Type: application/json' \
+  -d "{\"memoryId\":\"$cause_id\",\"vote\":\"helpful\"}")"
+VOTED="$voted" python3 -c 'import json,os,sys; assert json.loads(os.environ["VOTED"])["helpful_count"] == 1'
+
+curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"sessionId":"empty-job"}' >/dev/null
+empty_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $device" \
+  "$base/cairn-memory/session/end" -H 'Content-Type: application/json' \
+  -d '{"sessionId":"empty-job"}')"
+[ "$empty_status" = 400 ]
+jobs="$(curl -fsS -H "Authorization: Bearer $session" "$base/cairn-memory/admin/jobs")"
+JOBS="$jobs" python3 - <<'PY'
+import json
+import os
+
+queue = json.loads(os.environ["JOBS"])
+assert queue["quarantined"] >= 1
+assert queue["quarantine"]
+PY
+member_jobs="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $(cat "$cli_root/member.session")" \
+  "$base/cairn-memory/admin/jobs")"
+[ "$member_jobs" = 403 ]
+
+echo "Full flow smoke check passed"

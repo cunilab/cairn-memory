@@ -20,8 +20,9 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Web console typecheck, lint, build`
   - `Python hook and outbox tests`
   - `Documentation validation`
+  - `Acceptance smokes` (`scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, `scripts/smoke_postgres.sh`, and `scripts/smoke_web.sh`)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
-- The workflows do not run `scripts/smoke_full_flow.sh` or `scripts/smoke_layer3.sh`; run them locally for transport, persistence, or sync changes (see [AGENTS.md](../AGENTS.md)).
+- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the PostgreSQL tests job.
 
 ## Cut a release
 
