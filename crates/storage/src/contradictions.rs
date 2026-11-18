@@ -445,9 +445,9 @@ impl PostgresStore {
              WHERE m.kind <> 'capture' AND {} AND {}
                AND e.model_id = $1 AND e.model_version = $2
                AND e.dimensions = {EMBEDDING_DIMENSIONS} AND e.normalized
-               AND ($3::bigint IS NULL OR (m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text, m.memory_id)
-                    > ($3::bigint, $4::text, $5::text))
-             ORDER BY m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text, m.memory_id
+               AND ($3::bigint IS NULL OR (m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text COLLATE \"C\", m.memory_id COLLATE \"C\")
+                    > ($3::bigint, $4::text COLLATE \"C\", $5::text COLLATE \"C\"))
+             ORDER BY m.access_count, (EXTRACT(EPOCH FROM m.created_at)::bigint)::text COLLATE \"C\", m.memory_id COLLATE \"C\"
              LIMIT {SIMILARITY_CANDIDATES}",
             memory_select_sql().trim_end_matches("FROM cairn_memories m"),
             live_memory_sql(),

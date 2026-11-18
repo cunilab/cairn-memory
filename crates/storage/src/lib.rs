@@ -1151,7 +1151,7 @@ impl PostgresStore {
         .await?;
         // Session row first, then the cursor lock: the order sync_push takes them in.
         insert_sync_deletion(&mut transaction, &account.person_id, item_id).await?;
-        // A promoted copy never cascades: its origin and the origin's events stay personal.
+        // A row that names an origin does not hide that origin's events.
         if let Some(memory) = memory
             && memory
                 .try_get::<Option<String>, _>("promoted_from")?

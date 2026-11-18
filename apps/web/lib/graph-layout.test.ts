@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { NODE_SIZE, fitBBox, layoutGraph } from "./graph-layout.ts";
+import { NODE_SIZE, fitBBox, labelBox, layoutGraph, renderedNodeRadius, selectLabelIds } from "./graph-layout.ts";
 
 function chain(count: number, prefix: string) {
   const ids = Array.from({ length: count }, (_, index) => `${prefix}${index}`);
@@ -121,4 +121,46 @@ test("a sparse layout is capped so fitted nodes stay a readable size", () => {
     ),
     null,
   );
+});
+
+test("zooming scales node disks with the gap between their centers", () => {
+  const pixelsPerUnit = 2.5325;
+  const fitted = renderedNodeRadius(NODE_SIZE, 1, pixelsPerUnit);
+  const zoomed = renderedNodeRadius(NODE_SIZE, 0.25, pixelsPerUnit);
+  assert.ok(Math.abs(zoomed / fitted - 4) < 1e-9, `4x zoom grew the radius by ${zoomed / fitted}`);
+  const centerGap = NODE_SIZE * 4;
+  const clearance = (ratio: number) => centerGap * (pixelsPerUnit / ratio) - 2 * renderedNodeRadius(NODE_SIZE, ratio, pixelsPerUnit);
+  assert.ok(clearance(1) > 0);
+  assert.ok(clearance(0.25) > 0, `zoomed disks overlap by ${-clearance(0.25)}`);
+  assert.ok(Math.abs(clearance(0.25) - clearance(1) * 4) < 1e-6);
+});
+
+test("selected labels stay inside the viewport and do not cover each other", () => {
+  const nodes = [
+    { id: "a", x: 200, y: 200, radius: 8, textWidth: 140, textHeight: 14 },
+    { id: "b", x: 240, y: 200, radius: 8, textWidth: 140, textHeight: 14 },
+  ];
+  assert.deepEqual(selectLabelIds(nodes, { width: 800, height: 600 }), ["a"]);
+  const packed = Array.from({ length: 500 }, (_, index) => ({
+    id: `n${index}`,
+    x: 30 + (index % 22) * 14,
+    y: 80 + Math.floor(index / 22) * 14,
+    radius: 2.91,
+    textWidth: 148,
+    textHeight: 14,
+  }));
+  const viewport = { width: 356, height: 698 };
+  const ids = selectLabelIds(packed, viewport);
+  assert.ok(ids.length > 0, "a dense mobile graph dropped every label");
+  const boxes = ids.map((id) => labelBox(packed.find((node) => node.id === id)!));
+  for (const box of boxes) {
+    assert.ok(box.minX >= 0 && box.minY >= 0 && box.maxX <= viewport.width && box.maxY <= viewport.height);
+  }
+  for (let left = 0; left < boxes.length; left += 1) {
+    for (let right = left + 1; right < boxes.length; right += 1) {
+      const a = boxes[left];
+      const b = boxes[right];
+      assert.equal(a.minX < b.maxX && a.maxX > b.minX && a.minY < b.maxY && a.maxY > b.minY, false);
+    }
+  }
 });

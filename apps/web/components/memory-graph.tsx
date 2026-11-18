@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { graphEdgeKey } from "@/lib/graph-edge-key";
-import { NODE_SIZE, createLayoutSession, fitBBox } from "@/lib/graph-layout";
+import {
+  NODE_SIZE,
+  createLayoutSession,
+  fitBBox,
+  selectLabelIds,
+  zoomToSizeRatio,
+  type LabelCandidate,
+} from "@/lib/graph-layout";
 import type { MemoryGraph } from "@/lib/types";
 
 const SCOPE_COLOR = {
@@ -29,6 +36,18 @@ function subscribeDarkClass(onChange: () => void) {
 function canvasLabel(title: string): string {
   const limit = 22;
   return title.length > limit ? `${title.slice(0, limit - 1)}…` : title;
+}
+
+const LABEL_FONT = "14px sans-serif";
+
+function measureLabel(text: string): { width: number; height: number } {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) return { width: text.length * 8, height: 14 };
+  context.font = LABEL_FONT;
+  const metrics = context.measureText(text);
+  const measured = (metrics.actualBoundingBoxAscent ?? 0) + (metrics.actualBoundingBoxDescent ?? 0);
+  return { width: metrics.width, height: Math.max(14, measured) };
 }
 
 function rasterHex(color: string, fallback: string): string {
@@ -90,13 +109,22 @@ export function MemoryGraphCanvas({
           import("sigma/primitives"),
         ]);
         if (cancelled || !element.isConnected) return;
+        const labels = new Map(graph.nodes.map((node) => [node.memory_id, canvasLabel(node.title)]));
+        const measured = new Map<string, { width: number; height: number }>();
+        const textSize = (text: string) => {
+          const cached = measured.get(text);
+          if (cached) return cached;
+          const size = measureLabel(text);
+          measured.set(text, size);
+          return size;
+        };
         const model = new Graph({ type: "directed", multi: true });
         for (const node of graph.nodes) {
           model.addNode(node.memory_id, {
             x: 0,
             y: 0,
             size: NODE_SIZE,
-            label: canvasLabel(node.title),
+            label: null,
             color: cssHex(SCOPE_COLOR[node.scope][0], SCOPE_COLOR[node.scope][1], "color"),
           });
         }
@@ -137,13 +165,12 @@ export function MemoryGraphCanvas({
                 enableNodeDrag: true,
                 itemSizesReference: "positions",
                 autoRescale: true,
-                autoRescaleContent: model.order <= 80 ? "labels" : "nodes",
+                autoRescaleContent: "nodes",
                 stagePadding: 48,
-                // Quadratic so zooming in enlarges nodes; ratio 1 matches graph units.
-                zoomToSizeRatioFunction: (ratio) => ratio * ratio,
-                labelRenderedSizeThreshold: 3,
+                zoomToSizeRatioFunction: zoomToSizeRatio,
+                labelRenderedSizeThreshold: 0,
                 labelDensity: 1,
-                labelGridCellSize: 200,
+                labelGridCellSize: 1,
                 nodePickingPadding: 8,
               },
               primitives: {
@@ -170,10 +197,50 @@ export function MemoryGraphCanvas({
                 stage: { background: card },
               },
             });
+            let shown: string | null = null;
+            const showReadableLabels = () => {
+              const viewport = { width: element.clientWidth, height: element.clientHeight };
+              const candidates: LabelCandidate[] = model.nodes().map((id: string) => {
+                const attributes = model.getNodeAttributes(id) as { x: number; y: number };
+                const point = instance.graphToViewport({ x: attributes.x, y: attributes.y });
+                const text = labels.get(id) ?? "";
+                const size = textSize(text);
+                return {
+                  id,
+                  x: point.x,
+                  y: point.y,
+                  radius: instance.scaleSize(NODE_SIZE),
+                  textWidth: size.width,
+                  textHeight: size.height,
+                };
+              });
+              const visible = new Set(selectLabelIds(candidates, viewport));
+              element.dataset.radius = String(instance.scaleSize(NODE_SIZE));
+              element.dataset.cameraRatio = String(instance.getCamera().ratio);
+              element.dataset.labelCount = String(visible.size);
+              const key = [...visible].join("\n");
+              if (key === shown) {
+                element.dataset.labels = "ready";
+                return;
+              }
+              shown = key;
+              let changed = false;
+              model.updateEachNodeAttributes((id: string, attributes: { label?: string | null }) => {
+                const next = visible.has(id) ? (labels.get(id) ?? null) : null;
+                if ((attributes.label ?? null) === next) return attributes;
+                changed = true;
+                return { ...attributes, label: next };
+              });
+              // A label-only graph update skips Sigma's label-grid rebuild.
+              if (changed) instance.scheduleRefresh();
+              else element.dataset.labels = "ready";
+            };
             const frame = () => {
               const box = fitBBox(session.positions().values(), element.getBoundingClientRect(), 48);
               instance.setCustomBBox(box);
+              instance.refresh();
             };
+            instance.on("afterRender", showReadableLabels);
             frame();
             const resize = new ResizeObserver(frame);
             resize.observe(element);

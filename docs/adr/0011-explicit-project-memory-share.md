@@ -1,6 +1,6 @@
 ---
 id: CM-ADR-0011
-title: "Explicit project memory share"
+title: "ADR 0011 — Explicit project memory share"
 status: superseded
 ---
 

@@ -4,6 +4,24 @@ import forceAtlas2 from "graphology-layout-forceatlas2";
 /** Radius in graph units. Sigma draws this with `itemSizesReference: "positions"`. */
 export const NODE_SIZE = 8;
 
+/**
+ * Sigma multiplies position-referenced sizes by the camera ratio and by a
+ * graph-to-viewport ratio that already includes that zoom. The ratio itself
+ * keeps disk growth linear with the gaps between centers.
+ */
+export function zoomToSizeRatio(ratio: number): number {
+  return ratio;
+}
+
+/**
+ * Screen radius from Sigma 4 `scaleSize` when sizes are in graph units.
+ * `pixelsPerUnit` is the graph-to-viewport ratio at camera ratio 1.
+ */
+export function renderedNodeRadius(size: number, cameraRatio: number, pixelsPerUnit: number): number {
+  const graphToViewport = pixelsPerUnit / cameraRatio;
+  return (size / zoomToSizeRatio(cameraRatio)) * cameraRatio * graphToViewport;
+}
+
 const SPACING = NODE_SIZE * 4;
 const COMPONENT_GAP = NODE_SIZE * 6;
 /** Fitted radius above this, in pixels, means a sparse graph would become giant disks. */
@@ -131,6 +149,57 @@ export function fitBBox(
     x: [centerX - boxW / 2, centerX + boxW / 2],
     y: [centerY - boxH / 2, centerY + boxH / 2],
   };
+}
+
+/** Sigma's default label gap, background padding, and size. The canvas measures the text. */
+const LABEL_MARGIN = 5;
+const LABEL_PAD = 3;
+
+export type LabelBox = { minX: number; minY: number; maxX: number; maxY: number };
+
+export type LabelCandidate = {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  textWidth: number;
+  textHeight: number;
+};
+
+/** Axis-aligned label above a node, matching Sigma's above placement. */
+export function labelBox(node: LabelCandidate): LabelBox {
+  const textHalfY = node.textHeight / 2;
+  const centerY = node.y - (node.radius + LABEL_MARGIN + textHalfY);
+  const halfW = node.textWidth / 2 + LABEL_PAD;
+  const halfH = node.textHeight / 2 + LABEL_PAD;
+  return {
+    minX: node.x - halfW,
+    maxX: node.x + halfW,
+    minY: centerY - halfH,
+    maxY: centerY + halfH,
+  };
+}
+
+function boxesOverlap(left: LabelBox, right: LabelBox): boolean {
+  return left.minX < right.maxX && left.maxX > right.minX && left.minY < right.maxY && left.maxY > right.minY;
+}
+
+function boxInside(box: LabelBox, viewport: { width: number; height: number }): boolean {
+  return box.minX >= 0 && box.minY >= 0 && box.maxX <= viewport.width && box.maxY <= viewport.height;
+}
+
+/** Labels whose drawn boxes sit inside the viewport and do not cover each other. */
+export function selectLabelIds(nodes: LabelCandidate[], viewport: { width: number; height: number }): string[] {
+  const ordered = [...nodes].sort((left, right) => left.y - right.y || left.x - right.x || (left.id < right.id ? -1 : 1));
+  const chosen: LabelBox[] = [];
+  const ids: string[] = [];
+  for (const node of ordered) {
+    const box = labelBox(node);
+    if (!boxInside(box, viewport) || chosen.some((other) => boxesOverlap(box, other))) continue;
+    chosen.push(box);
+    ids.push(node.id);
+  }
+  return ids;
 }
 
 type ComponentLayout = { graph: Graph; ids: string[]; remaining: number };

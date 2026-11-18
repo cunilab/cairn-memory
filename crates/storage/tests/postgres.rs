@@ -6077,3 +6077,122 @@ async fn postgres_similarity_scan_reads_the_coldest_current_page() {
                 .any(|id| id == &review.left_id || id == &review.right_id)
     }));
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_similarity_cutoff_uses_the_same_byte_order_as_the_file_store() {
+    let path = std::env::temp_dir().join(format!(
+        "cairn-similarity-cutoff-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut file = cairn_core::MemoryStore::open(&path).unwrap();
+    let file_account = file
+        .bootstrap_account("review@example.test", "correct horse battery staple")
+        .unwrap();
+    let template = file
+        .save_for_account(
+            &file_account.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "fact",
+                "title": "template",
+                "summary": "boundary probe",
+                "reason": "review",
+                "statement": "boundary probe"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut bundle = file.export_for_account(&file_account.token).unwrap();
+    let mut ids = (0..59)
+        .map(|index| format!("0{index:02}"))
+        .collect::<Vec<_>>();
+    ids.extend(["aZ".to_owned(), "aa".to_owned()]);
+    bundle.memories = ids
+        .iter()
+        .map(|id| {
+            let mut memory = template.clone();
+            memory.memory_id = id.clone();
+            memory.created_at = "1800000000".to_owned();
+            memory.access_count = 0;
+            memory.source_event_ids.clear();
+            memory.fields.title = id.clone();
+            memory.fields.summary = id.clone();
+            memory
+        })
+        .collect();
+    let store = PostgresStore::connect(
+        &std::env::var("CAIRN_TEST_DATABASE_URL").expect("CAIRN_TEST_DATABASE_URL"),
+    )
+    .await
+    .unwrap();
+    let account = store
+        .bootstrap_account("review@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    file.import_for_account(&file_account.token, bundle.clone())
+        .unwrap();
+    store
+        .import_bundle(&account.token, bundle.clone())
+        .await
+        .unwrap();
+    // The template sits outside the coldest page. It has no embedding either way.
+    let mut disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for memory in disk["memories"].as_array_mut().unwrap() {
+        if memory["memory_id"] == template.memory_id {
+            memory["access_count"] = serde_json::json!(100);
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+    let mut file = cairn_core::MemoryStore::open(&path).unwrap();
+    for (index, memory) in bundle.memories.iter().enumerate() {
+        let mut vector = vec![0.0_f32; 384];
+        let axis = if memory.memory_id == "aZ" { 0 } else { index };
+        vector[axis] = 1.0;
+        let embedding = cairn_core::MemoryEmbedding::new(memory, vector).unwrap();
+        file.put_embedding(embedding.clone()).unwrap();
+        store.put_embedding(embedding).await.unwrap();
+    }
+    let now = 1_800_000_000_u64;
+    file.ensure_similarity_job(now).unwrap();
+    let file_claim = file
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .unwrap()
+        .remove(0);
+    file.finish_similarity_scan(&file_claim, now).unwrap();
+    store.ensure_similarity_job(now).await.unwrap();
+    let postgres_claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    store
+        .finish_similarity_scan(&postgres_claim, now)
+        .await
+        .unwrap();
+    let file_pairs = file
+        .similarity_reviews_for_account(&file_account.token)
+        .unwrap()
+        .into_iter()
+        .map(|review| (review.left_id, review.right_id))
+        .collect::<Vec<_>>();
+    let postgres_pairs = store
+        .similarity_reviews(&account.token)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|review| (review.left_id, review.right_id))
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        file_pairs,
+        vec![("000".to_owned(), "aZ".to_owned())],
+        "byte order keeps aZ inside the coldest 60 and drops aa"
+    );
+    assert_eq!(
+        postgres_pairs, file_pairs,
+        "the same ids and vectors must review the same pair"
+    );
+}

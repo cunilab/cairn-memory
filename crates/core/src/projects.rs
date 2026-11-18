@@ -1207,7 +1207,7 @@ impl MemoryStore {
     }
 }
 
-/// The full publication payload. Only explicit promotion or a project correction may set publication attribution.
+/// Hash of the publication payload a merge preview must still match at commit.
 pub fn publication_fingerprint(memory: &Memory) -> Result<String, StoreError> {
     Ok(hash_token(&serde_json::to_string(&(
         &memory.content,
