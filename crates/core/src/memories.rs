@@ -214,19 +214,27 @@ fn redact_field_values(value: &mut serde_json::Value) {
     }
 }
 
+/// A short label for a new capture. Tool envelopes keep the tool name; the
+/// observation text stays in `content` and `details`. Stored rows are not rewritten.
+fn capture_title(content: &str) -> String {
+    let line = content.lines().next().unwrap_or("").trim();
+    let head = line.split('{').next().unwrap_or(line).trim();
+    let head = if head.is_empty() { "Capture" } else { head };
+    let mut title: String = head.chars().take(80).collect();
+    if head.chars().count() > 80 {
+        title.push('…');
+    }
+    title
+}
+
 /// A raw capture is a readable project record without a publication step.
 pub fn capture_memory(observation: &crate::Observation, author: &str) -> Memory {
+    let title = capture_title(&observation.content);
     Memory {
         fields: MemoryFields {
-            title: observation
-                .content
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(120)
-                .collect(),
-            summary: observation.content.clone(),
+            title: title.clone(),
+            summary: title,
+            details: Some(observation.content.clone()),
             author: Some(author.to_owned()),
             importance: Some(observation.lifecycle.importance),
             evidence: vec![observation.event_id.clone()],

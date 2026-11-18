@@ -37,7 +37,7 @@ The per-layer smoke scripts were merged into `scripts/smoke_full_flow.sh`, `scri
 | `check_detail_actions.mjs` delete copy, reload sentence, verify, merge, close, member visibility, login and logout | `smoke_web.sh` (action copy, the reload sentence in `project-detail.tsx`, verify, merge, close, member list). Account reset and password change are `file_admin_lists_accounts_and_resets_a_password` and `file_password_change_needs_the_current_password_and_is_rate_limited`. |
 | `check_detail_actions.mjs` dialog timing (no POST before confirm, phone overflow, theme class) | Not re-run. The script required a machine-local Playwright install, which is not a repository dependency and is not a reliable GitHub Actions job, and its fixture called the removed promote route. |
 | `graph_canvas_shots.mjs` | Deleted. No repository reference. |
-| `smoke_agent_lib.sh` | Kept. It is the account and device harness for `smoke_mcp.sh`, and it unsets `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, and `CAIRN_OUTBOX`. |
+| `smoke_agent_lib.sh` | Kept. It is the account and device harness for `smoke_mcp.sh`, and it unsets `CAIRN_URL`, `CAIRN_DEVICE_TOKEN`, `CAIRN_CONFIG`, and `CAIRN_OUTBOX`. |
 
 ## Result
 
@@ -618,3 +618,124 @@ The pinned MiniLM directory was `/tmp/cairn-stage7-fix-minilm`.
   row with separated labels. At 500 nodes the desktop canvas shows distinct
   circles; a narrow viewport still stacks a long chain, and the link table
   lists every connection. A few dense labels still share a line.
+
+## v0.1.5 release verification (2026-11-18)
+
+Checked on macOS, uncommitted `main` at `8e20409`, with `CAIRN_URL`,
+`CAIRN_DEVICE_TOKEN`, `CAIRN_CONFIG`, and `CAIRN_OUTBOX` unset. No release,
+version bump, commit, or push. Stores were disposable. The detailed fixture
+log is `/tmp/cairn-v015-point5/report.json` on this machine. It contains
+synthetic markers only.
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: passed.
+- `cargo test --workspace --locked --no-fail-fast`: 251 passed, 0 failed, 60 ignored.
+  Before the handoff assertion below, `file_http_session_distillation` failed
+  because a forgotten next-step capture no longer leaves an empty handoff.
+- `scripts/ci_postgres_tests.sh`: the first run, before the expectation
+  updates, was 60 tests and 3 failed. After those updates, one fresh
+  `pgvector/pgvector:pg17` container (`cairn-v015-ci-pg2`, host port 32780)
+  ran the whole script again: **60 PostgreSQL tests, 0 failed**. The pinned
+  MiniLM directory `/tmp/cairn-stage9-fix-minilm` was reused and its checksums
+  matched. This machine has no host `psql`; a `docker exec` wrapper supplied
+  it. The container was removed after the run. No Rust files changed in that
+  follow-up, so fmt and Clippy were not repeated.
+- `scripts/smoke_mcp.sh`, `scripts/smoke_postgres.sh`, `scripts/smoke_web.sh`,
+  and `scripts/smoke_full_flow.sh`: passed. The full-flow prose next step is
+  now a user prompt, and the branch context query is `redis cache`, so the
+  floor still returns that branch summary. The first web run failed because
+  the shell still had `CAIRN_DATABASE_URL`; the clean rerun passed.
+- `python3 scripts/test_agent_hooks.py`: 14 passed.
+  `python3 scripts/test_agent_setup.py`: 12 passed.
+
+Direct `cairn mcp` against a loopback file server and a fresh PostgreSQL
+database both returned four-field `memory_save` and `memory_lesson_save`
+receipts, object list results, one decision card among three distractors,
+`memory_get` of that decision, an empty `config reload` search, and the raw
+capture only after `includeCaptures`. CLI search stayed pretty server JSON.
+REST get and account export stayed full records. Graph text was tab-delimited
+TOON; its `structuredContent` stayed JSON.
+
+Token counts use the already installed `gpt-tokenizer` 3.0.1
+`countTokens` encoding `o200k_base`. No tokenizer was downloaded. On the file
+fixture, the search card text was 64 tokens and its `structuredContent`
+compact form was also 64. Pretty JSON of that same card was 90 (compact is
+28.9% smaller). The CLI pretty server result for the same search was 594
+tokens; the card is 89.2% smaller, and that gap is the dropped fields, not
+the encoder. The context card was 90 text, 90 compact, and 126 pretty.
+Graph text was 265 against 518 CLI pretty JSON (48.8% smaller) and 331
+compact `structuredContent` (the TOON text is 19.9% smaller than that
+object). A later file-store seed added three open global reviews whose
+memories were visible. `memory_similarity_reviews` returned those three rows.
+The TOON text was 175 tokens and kept `project_id` null. Compact
+`structuredContent` was 207 tokens and dropped those nulls. Pretty JSON of
+that same omitted object was 295 tokens, so compact is 29.8% smaller than
+pretty JSON of the identical object; that pair is the encoding comparison.
+The TOON text is 15.5% smaller than the compact object even though the text
+still contains the nulls the object drops. CLI `cairn reviews` and REST
+`GET /similarity-reviews` were both 351 pretty tokens and kept the nulls. No independent comprehension
+check was run.
+
+Fixture hook integration, not a native model session: a Claude checkpoint was
+silent, Codex's later brief in the same checkout contained the identity and
+the handoff marker, and the other worktree and the other account contained
+neither. A `SessionStart` with `source` `compact` returned the fenced brief.
+
+Native hosts were retried against listening loopback stubs with inherited
+provider credentials removed. PostgreSQL and the token counts above were left
+as recorded. The host captures are
+`/tmp/cairn-v015-point5/followup/report-native.json` and
+`/tmp/cairn-v015-point5/followup/report.json` on this machine.
+
+Claude Code 2.1.327 `-p` used `--autocompact 100000`, a temporary
+`CLAUDE_CONFIG_DIR`, and `ANTHROPIC_BASE_URL` on the Messages stub. It sent two
+`POST /v1/messages` requests to that loopback. The stub streamed
+`input_json_delta` for the advertised `Write` tool with an absolute
+`file_path` and `content`. The tool result began `File created successfully`,
+and `src/alpha-v015.txt` contained `ALPHA-V015`. `UserPromptSubmit` stored the
+prompt, `PostToolUse` stored the Write payload, and Stop stored silent handoff
+`587d133d-5fc4-4355-9dfb-47782496af9a`. No third request and no compaction
+request followed the synthetic `usage.input_tokens` of 180000.
+
+Codex CLI 0.170.0 `exec` used a temporary `CODEX_HOME`,
+`wire_api = "responses"`, `--trust`,
+`--dangerously-bypass-approvals-and-sandbox`, and
+`--dangerously-bypass-hook-trust`. `hooks.json` was
+`{"hooks": {"SessionStart": ...}}`. Stderr recorded SessionStart and
+UserPromptSubmit completing, then `mcp: cairn/memory_save (completed)`,
+`memory_lesson_save`, `memory_search`, and `memory_get`. Each function call
+used namespace `mcp__cairn`. Search returned one decision card titled
+`Host stub cedar_marker_v015`. `memory_get` returned that full record.
+`exec_command` wrote `src/codex-marker.txt` with `codex-marker` and exited 0;
+`PostToolUse` recorded it as `Bash`, and Stop completed. The cedar decision
+and birch lesson were in the disposable store. Stderr did not mention
+`api.openai.com`. `exec resume --last` with
+`model_auto_compact_token_limit=200` reported `tokens used 112` and ran
+SessionStart, UserPromptSubmit, and Stop, with no PreCompact or PostCompact.
+The Codex SessionStart brief contained the Claude handoff next step for
+`ALPHA-V015`; the resume brief also contained the cedar and birch notes.
+
+OpenCode 2.1.4 direct mode kept `mcp.servers.cairn.codemode` false, denied
+`execute`, and allowed `cairn_memory_save`, `cairn_memory_lesson_save`,
+`cairn_memory_search`, and `cairn_memory_get` with resource `*`. One
+`opencode serve` process stayed up for the scratch checkout.
+`GET /api/mcp` with `x-opencode-directory` set to that checkout returned
+`{"data":[]}`. The first prompt in session `ses_e109279f4ffeBStsy8sl3TpSYY`
+advertised 11 built-in tools and no `cairn_*` name. The second prompt in that
+same session advertised 49 tools, including those four Cairn names. The host
+executed them: `memory_save` returned a global decision receipt,
+`memory_lesson_save` returned a gotcha receipt, `memory_search` returned one
+card titled `Host stub cedar_marker_v015`, and `memory_get` returned that full
+record. Both memories were in the disposable store. The capture is
+`/tmp/cairn-v015-point5/warm/report.json`. The installed 2.1.4 build still
+omits the MCP registry on the first turn; this run does not treat a newer
+release as fixed. Code Mode and a separate ping server were not needed after
+that second turn. This is a host tool-list result, not model comprehension.
+
+This MCP rerun did not compact. An earlier OpenCode 2.1.4 loopback session in
+`/tmp/cairn-oc-report.json` did: its event list includes
+`session.compaction.ended`, its hook log includes `SessionStart` with `source`
+`compact`, and a later summary request still carried the brief and its next
+step. Claude Code and Codex native probes in this point-5 pass did not emit a
+compaction event. Their compaction check remains the fixture `SessionStart`
+with `source` `compact`.

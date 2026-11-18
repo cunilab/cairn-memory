@@ -15,6 +15,10 @@ pub struct RecallResult {
     #[serde(flatten)]
     pub fields: crate::MemoryFields,
     pub memory_id: String,
+    /// Stored record kind. File ranking and PostgreSQL `hybrid_matches`, resume, and
+    /// unresolved all build hits here, so both adapters emit the same field.
+    #[serde(default)]
+    pub kind: MemoryKind,
     pub content: String,
     pub source_event_ids: Vec<String>,
     pub context: WorkContext,
@@ -67,12 +71,40 @@ pub struct ContextPack {
     pub recovery_hint: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecallFilter {
     #[serde(rename = "sessionId", alias = "session_id", default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub context: Option<WorkContext>,
+    /// Raw `MemoryKind::Capture` rows. JSON defaults to false. `Default` stays
+    /// true so existing store callers keep their candidate set; agent HTTP
+    /// copies the request field, which defaults to false.
+    #[serde(
+        default = "exclude_captures",
+        rename = "includeCaptures",
+        alias = "include_captures"
+    )]
+    pub include_captures: bool,
+    /// Absolute evidence floor used by agent search and context. Resume,
+    /// unresolved, and why-changed leave it false.
+    #[serde(default)]
+    pub relevance_floor: bool,
+}
+
+fn exclude_captures() -> bool {
+    false
+}
+
+impl Default for RecallFilter {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            context: None,
+            include_captures: true,
+            relevance_floor: false,
+        }
+    }
 }
 
 impl MemoryStore {
@@ -155,6 +187,11 @@ impl MemoryStore {
         }
         let counts = contradiction_counts(&memories);
         memories.retain(|m| memory_matches_filter(m, filter));
+        // Eligibility is before ranking so a hidden capture cannot take a slot
+        // or change another hit's reciprocal-rank position.
+        if !filter.include_captures {
+            memories.retain(|memory| memory.kind != MemoryKind::Capture);
+        }
         let semantic = self.semantic_scores(&memories, vector)?;
         let ranked = crate::hybrid_rank(&memories, query, filter, None, semantic)?;
         let by_id = memories
@@ -178,6 +215,13 @@ impl MemoryStore {
             .collect::<Vec<_>>();
         prefer_decision(&mut results, &memories);
         prefer_newer_contradiction(&mut results, &memories);
+        if filter.relevance_floor {
+            results.retain(|hit| {
+                by_id
+                    .get(hit.memory_id.as_str())
+                    .is_some_and(|memory| passes_relevance_floor(memory, query))
+            });
+        }
         Ok(results)
     }
 
@@ -555,6 +599,7 @@ fn recall_result_with(
     RecallResult {
         fields: memory.fields.clone(),
         memory_id: memory.memory_id.clone(),
+        kind: memory.kind,
         content: memory.content.clone(),
         source_event_ids: memory.source_event_ids.clone(),
         context: memory.context.clone(),
@@ -797,12 +842,177 @@ pub(crate) fn superseded_targets<'a>(
         .collect()
 }
 
+/// Direct evidence required of a hit. A fraction of the best fused score is not
+/// used: every candidate can fail, and the result is then empty.
+///
+/// A hit passes when the query has an exact entity or technical token in the
+/// memory, a distinctive token in the title, any distinctive token in a rule or
+/// decision, two distinctive tokens, or one distinctive token of at least five
+/// characters (five or more). Stopwords and a lone shorter word do not pass. Linked neighbours
+/// still need their own evidence. Explicit `include_captures` only adds capture
+/// rows to this test. Resume, unresolved, and why-changed do not call it.
+pub fn passes_relevance_floor(memory: &Memory, query: &str) -> bool {
+    if entity_exact(memory, query) {
+        return true;
+    }
+    let terms = tokenize(query);
+    let technical = terms
+        .iter()
+        .filter(|term| is_technical(term))
+        .collect::<Vec<_>>();
+    let distinctive = terms
+        .iter()
+        .filter(|term| is_distinctive(term))
+        .collect::<Vec<_>>();
+    if technical.is_empty() && distinctive.is_empty() {
+        return false;
+    }
+    let title = tokenize(&memory.fields.title);
+    let body = memory_tokens(memory);
+    let in_text = |token: &str| {
+        title.iter().any(|item| item == token) || body.iter().any(|item| item == token)
+    };
+    if technical.iter().any(|token| in_text(token)) {
+        return true;
+    }
+    if distinctive
+        .iter()
+        .any(|token| title.iter().any(|item| item == *token))
+    {
+        return true;
+    }
+    if matches!(memory.kind, MemoryKind::Rule | MemoryKind::Decision)
+        && distinctive.iter().any(|token| in_text(token))
+    {
+        return true;
+    }
+    // Repeated query words are one term. Generated summaries and handoffs need
+    // two terms here; one ordinary word, however long, is not enough.
+    let matched = distinctive
+        .iter()
+        .filter(|token| in_text(token))
+        .map(|token| token.as_str())
+        .collect::<HashSet<_>>();
+    let ordinary_long_word = !matches!(
+        memory.kind,
+        MemoryKind::SessionSummary | MemoryKind::Handoff
+    ) && distinctive
+        .iter()
+        .any(|token| token.len() >= 5 && in_text(token));
+    matched.len() >= 2 || ordinary_long_word
+}
+
+fn entity_exact(memory: &Memory, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return false;
+    }
+    let tokens = tokenize(&query);
+    memory
+        .fields
+        .entities
+        .iter()
+        .chain(&memory.fields.applies_to)
+        .chain(&memory.fields.tags)
+        .chain(&memory.context.files)
+        .chain(&memory.context.symbols)
+        .chain(&memory.context.commands)
+        .chain(&memory.context.tests)
+        .chain(&memory.context.services)
+        .any(|value| {
+            let folded = value.to_lowercase();
+            folded == query || tokens.contains(&folded)
+        })
+}
+
+fn memory_tokens(memory: &Memory) -> Vec<String> {
+    tokenize(&format!(
+        "{} {} {} {} {} {} {} {}",
+        memory.content,
+        memory.fields.summary,
+        memory.fields.details.as_deref().unwrap_or_default(),
+        memory.fields.reason,
+        memory.fields.rule.as_deref().unwrap_or_default(),
+        memory.fields.statement.as_deref().unwrap_or_default(),
+        memory
+            .fields
+            .decision_context
+            .as_deref()
+            .unwrap_or_default(),
+        memory.next_steps.join(" ")
+    ))
+}
+
+fn is_technical(term: &str) -> bool {
+    term.contains('_') || term.chars().any(|c| c.is_ascii_digit())
+}
+
+fn is_distinctive(term: &str) -> bool {
+    term.len() >= 4
+        && !is_technical(term)
+        && !matches!(
+            term,
+            "about"
+                | "after"
+                | "also"
+                | "because"
+                | "been"
+                | "before"
+                | "capture"
+                | "could"
+                | "files"
+                | "from"
+                | "handoff"
+                | "have"
+                | "here"
+                | "into"
+                | "just"
+                | "memory"
+                | "note"
+                | "notes"
+                | "only"
+                | "over"
+                | "session"
+                | "should"
+                | "summary"
+                | "test"
+                | "tests"
+                | "that"
+                | "their"
+                | "them"
+                | "then"
+                | "there"
+                | "they"
+                | "this"
+                | "tools"
+                | "under"
+                | "used"
+                | "using"
+                | "were"
+                | "what"
+                | "when"
+                | "where"
+                | "which"
+                | "while"
+                | "will"
+                | "with"
+                | "work"
+                | "would"
+                | "your"
+        )
+}
+
 pub(crate) fn contradiction_ids(
     memory: &Memory,
     all_memories: &[Memory],
     forgotten_ids: &HashSet<String>,
     superseded_ids: &HashSet<&str>,
 ) -> Vec<String> {
+    // Keyword flags are inferred. A raw capture neither emits them nor receives them.
+    // Declared `contradicts` links stay on the stored record.
+    if memory.kind == MemoryKind::Capture {
+        return Vec::new();
+    }
     let target_negative = contains_negation(&memory.content);
     let target_topics = topic_tokens(&memory.content);
     if target_topics.is_empty() {
@@ -811,6 +1021,7 @@ pub(crate) fn contradiction_ids(
     all_memories
         .iter()
         .filter(|other| other.memory_id != memory.memory_id)
+        .filter(|other| other.kind != MemoryKind::Capture)
         .filter(|other| {
             !memory_forgotten(other, forgotten_ids)
                 && !is_expired(&other.lifecycle)

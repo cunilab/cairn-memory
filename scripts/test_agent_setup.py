@@ -108,4 +108,80 @@ class Installer(unittest.TestCase):
         self.assertFalse((self.home/'.codex/hooks.json').exists())
         self.assertFalse((self.home/'.config/opencode/AGENTS.md').exists())
 
+    def test_sessionstart_covers_compaction_without_a_precompact_hook(self):
+        root = {}
+        setup.hook_config(root, 'claude', '/hook.py', '/cfg.json', False)
+        setup.hook_config(root, 'codex', '/hook.py', '/cfg.json', False)
+        for agent_hooks in (root['hooks'],):
+            self.assertIn('SessionStart', agent_hooks)
+            self.assertNotIn('PreCompact', agent_hooks)
+            self.assertNotIn('PostCompact', agent_hooks)
+            self.assertNotIn('matcher', agent_hooks['SessionStart'][-1])
+
+    def test_opencode_plugin_install_and_remove_keep_unrelated_config(self):
+        self.spec['agent'] = 'opencode'
+        secret = 'device-secret-value'
+        config = Path(self.spec['config'])
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({'url':'http://127.0.0.1:9','token':secret}))
+        folder = self.home/'.config/opencode'
+        folder.mkdir(parents=True)
+        (folder/'plugin').mkdir()
+        (folder/'plugin'/'other.js').write_text('keep-plugin\n')
+        (folder/'plugin'/'cairn.js').write_text('// cairn:continuity\nlegacy\n')
+        (folder/'plugin'/'stranger.js').write_text('not cairn\n')
+        raw = '''{
+ // keep
+ "plugins": ["other-plugin", {"package":"kept","options":{"cairn":"continuity"}}, {"package":"/tmp/opencode/plugin/cairn.js","options":{"cairn":"continuity"}}],
+ "mcp": {"servers": {"other": {"command":["keep"]}}}
+}
+'''
+        path = folder/'opencode.jsonc'
+        path.write_text(raw)
+        (folder/'AGENTS.md').write_text('User instructions\n')
+        with patch('shutil.which', return_value='/stub/opencode'), patch.object(setup, 'native', return_value=''):
+            setup.configure(self.spec)
+            text = path.read_text()
+            plugin = (folder/'plugins'/'cairn'/'index.js').read_text()
+            self.assertIn('// keep', text)
+            self.assertIn('other-plugin', text)
+            self.assertIn('kept', text)
+            self.assertNotIn('plugin/cairn.js', text)
+            hook = str(config.parent/'hook'/'cairn_hook.py')
+            self.assertTrue(plugin.startswith('// cairn:continuity\n'))
+            self.assertIn(hook, plugin)
+            self.assertIn(str(config), plugin)
+            self.assertIn('CAIRN_CONFIG', plugin)
+            self.assertIn('session.hook', plugin)
+            self.assertIn('compaction', plugin)
+            self.assertIn('execute.after', plugin)
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, plugin)
+            self.assertFalse((folder/'plugin'/'cairn.js').exists())
+            self.assertEqual((folder/'plugin'/'stranger.js').read_text(), 'not cairn\n')
+            self.assertIn('keep-plugin', (folder/'plugin'/'other.js').read_text())
+            self.assertIn('User instructions', (folder/'AGENTS.md').read_text())
+            self.assertIn('cairn:begin', (folder/'AGENTS.md').read_text())
+            again = path.read_text()
+            setup.configure(self.spec)
+            self.assertEqual(again, path.read_text())
+            self.assertEqual(plugin, (folder/'plugins'/'cairn'/'index.js').read_text())
+            (folder/'plugins'/'cairn'/'index.js').write_text('user plugin\n')
+            setup.configure(self.spec)
+            self.assertEqual((folder/'plugins'/'cairn'/'index.js').read_text(), 'user plugin\n')
+            (folder/'plugins'/'cairn'/'index.js').write_text(plugin)
+            self.spec['remove'] = True
+            setup.configure(self.spec)
+        removed = path.read_text()
+        self.assertIn('// keep', removed)
+        self.assertIn('other-plugin', removed)
+        self.assertIn('kept', removed)
+        self.assertNotIn('plugin/cairn.js', removed)
+        self.assertNotIn(secret, removed)
+        self.assertFalse((folder/'plugins'/'cairn'/'index.js').exists())
+        self.assertEqual((folder/'plugin'/'other.js').read_text(), 'keep-plugin\n')
+        self.assertEqual((folder/'plugin'/'stranger.js').read_text(), 'not cairn\n')
+        self.assertEqual((folder/'AGENTS.md').read_text(), 'User instructions\n')
+        self.assertIn('"other"', removed)
+
 if __name__=='__main__': unittest.main()

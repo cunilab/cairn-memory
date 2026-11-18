@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_CONFIG CAIRN_OUTBOX
 
 cd "$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 

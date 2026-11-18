@@ -12,6 +12,22 @@ use crate::types::{StoreError, WorkContext, now_seconds, timestamp};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Result of refreshing a session handoff without treating transport as success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointStatus {
+    Stored,
+    Unchanged,
+    Empty,
+}
+
+enum SessionRefresh {
+    Written(Memory),
+    Current(Option<Memory>),
+    Empty,
+    Hidden,
+}
+
 const MAX_HANDOFF_ITEMS: usize = 16;
 
 pub(crate) const MAX_HANDOFF_ITEM_BYTES: usize = 2048;
@@ -220,6 +236,33 @@ impl MemoryStore {
         self.finish_session(Some(person_id), session_id)
     }
 
+    /// Refreshes the resumable handoff while the session stays open.
+    /// A current or closed summary is left in place.
+    pub fn checkpoint_session(&mut self, session_id: &str) -> Result<CheckpointStatus, StoreError> {
+        self.checkpoint_scoped(None, session_id)
+    }
+
+    pub fn checkpoint_session_for_account(
+        &mut self,
+        account_token: &str,
+        session_id: &str,
+    ) -> Result<CheckpointStatus, StoreError> {
+        let account = self.authenticate_account(account_token)?;
+        self.checkpoint_scoped(Some(account.person_id), session_id)
+    }
+
+    fn checkpoint_scoped(
+        &mut self,
+        person_id: Option<String>,
+        session_id: &str,
+    ) -> Result<CheckpointStatus, StoreError> {
+        match self.finish_session_staged(person_id, session_id, false)? {
+            SessionRefresh::Written(_) => Ok(CheckpointStatus::Stored),
+            SessionRefresh::Current(_) | SessionRefresh::Hidden => Ok(CheckpointStatus::Unchanged),
+            SessionRefresh::Empty => Ok(CheckpointStatus::Empty),
+        }
+    }
+
     /// A refused end leaves the session open: `ended_at` is set before the checks that can fail.
     /// The distill job is claimed in the same write as its enqueue, then the summary runs.
     fn finish_session(
@@ -268,7 +311,22 @@ impl MemoryStore {
                 "distill job key is invalid".to_owned(),
             ));
         };
-        let finished = self.finish_session_staged(person_id, &session_id);
+        let finished = match self.finish_session_staged(person_id.clone(), &session_id, true) {
+            Ok(SessionRefresh::Written(memory) | SessionRefresh::Current(Some(memory))) => {
+                Ok(memory)
+            }
+            Ok(SessionRefresh::Current(None)) => Err(StoreError::Validation(format!(
+                "unknown session: {session_id}"
+            ))),
+            Ok(SessionRefresh::Empty) => Err(StoreError::Validation(format!(
+                "session has no retained observations: {session_id}"
+            ))),
+            Ok(SessionRefresh::Hidden) => Err(StoreError::Validation(format!(
+                "session summary was forgotten or superseded: {}",
+                session_memory_id(person_id.as_deref(), &session_id)
+            ))),
+            Err(error) => Err(error),
+        };
         if finished.is_err() {
             self.state = self.persisted.clone();
         }
@@ -291,7 +349,8 @@ impl MemoryStore {
         &mut self,
         person_id: Option<String>,
         session_id: &str,
-    ) -> Result<Memory, StoreError> {
+        close: bool,
+    ) -> Result<SessionRefresh, StoreError> {
         if session_id.trim().is_empty() {
             return Err(StoreError::Validation(
                 "session_id must not be empty".to_owned(),
@@ -315,7 +374,11 @@ impl MemoryStore {
             .iter_mut()
             .find(|session| session.session_id == session_id && session.person_id == person_id)
             .ok_or_else(|| StoreError::Validation(format!("unknown session: {session_id}")))?;
-        if session.ended_at.is_none() {
+        if !close && session.ended_at.is_some() {
+            // A closed summary is newer than this open-session refresh.
+            return Ok(SessionRefresh::Current(None));
+        }
+        if close && session.ended_at.is_none() {
             session.ended_at = Some(timestamp());
         }
 
@@ -341,9 +404,12 @@ impl MemoryStore {
             .collect();
 
         if observations.is_empty() {
-            return Err(StoreError::Validation(format!(
-                "session has no retained observations: {session_id}"
-            )));
+            if close {
+                return Err(StoreError::Validation(format!(
+                    "session has no retained observations: {session_id}"
+                )));
+            }
+            return Ok(SessionRefresh::Empty);
         }
 
         let mut earlier = None;
@@ -356,14 +422,19 @@ impl MemoryStore {
         {
             if hidden {
                 // Forgotten or corrected by the person: respect it, do not derive it again.
-                return Err(StoreError::Validation(format!(
-                    "session summary was forgotten or superseded: {memory_id}"
-                )));
+                if close {
+                    return Err(StoreError::Validation(format!(
+                        "session summary was forgotten or superseded: {memory_id}"
+                    )));
+                }
+                return Ok(SessionRefresh::Hidden);
             }
             let refs: Vec<&Observation> = observations.iter().collect();
             if !summary_is_stale(&memory, &refs, &self.state.forgotten_ids) {
-                self.persist()?;
-                return Ok(memory);
+                if close {
+                    self.persist()?;
+                }
+                return Ok(SessionRefresh::Current(Some(memory)));
             }
             // The session id was reused after its summary, or a source was forgotten:
             // derive the summary again from what is retained.
@@ -393,8 +464,20 @@ impl MemoryStore {
             memory.project_id = None;
             memory.published_by = None;
         }
+        let continuity = !close
+            || earlier
+                .as_ref()
+                .is_some_and(|memory| memory.fields.tags.iter().any(|tag| tag == "continuity"));
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
+        }
+        // A checkpoint handoff stays with the author. Session close keeps that
+        // visibility when it only refreshes the same sources.
+        if continuity {
+            memory.scope = MemoryScope::Personal;
+            if !memory.fields.tags.iter().any(|tag| tag == "continuity") {
+                memory.fields.tags.push("continuity".to_owned());
+            }
         }
         let superseded = self.live_superseded_targets();
         let mut notes = crate::distill_session_notes(&memory, &observations);
@@ -423,7 +506,7 @@ impl MemoryStore {
             self.record_memory_owner(person_id, &memory.memory_id);
         }
         self.persist()?;
-        Ok(memory)
+        Ok(SessionRefresh::Written(memory))
     }
 }
 
@@ -431,6 +514,47 @@ struct SessionDigest {
     content: String,
     next_steps: Vec<String>,
     unresolved_work: Vec<String>,
+}
+
+pub(crate) fn observation_is_tool_payload(observation: &Observation) -> bool {
+    let role = observation.role.trim().to_ascii_lowercase();
+    let source = observation
+        .source
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "");
+    if matches!(source.as_str(), "posttooluse" | "pretooluse")
+        && role != "user"
+        && role != "assistant"
+    {
+        return true;
+    }
+    // A tool name before JSON, or a raw JSON object/array from a tool role.
+    // Prose that merely uses role "tool" stays, including labeled notes.
+    role == "tool"
+        && (tool_envelope(&observation.content) || structured_tool_body(&observation.content))
+}
+
+fn structured_tool_body(content: &str) -> bool {
+    let trimmed = content.trim();
+    (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+}
+
+fn tool_envelope(content: &str) -> bool {
+    let line = content.lines().next().unwrap_or("").trim();
+    let Some((name, rest)) = line.split_once(char::is_whitespace) else {
+        return false;
+    };
+    if name.is_empty()
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        return false;
+    }
+    let rest = rest.trim_start();
+    rest.starts_with('{') || rest.starts_with('[')
 }
 
 fn build_session_digest(observations: &[Observation]) -> SessionDigest {
@@ -441,6 +565,11 @@ fn build_session_digest(observations: &[Observation]) -> SessionDigest {
     let mut unresolved_work = Vec::new();
     let mut source_actors = Vec::new();
     for observation in observations {
+        // Tool payloads stay stored as observations. They do not enter the
+        // summary text or the next-step lists.
+        if observation_is_tool_payload(observation) {
+            continue;
+        }
         if !observation.source.trim().is_empty() {
             push_unique(&mut source_actors, observation.source.clone());
         }

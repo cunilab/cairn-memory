@@ -1,6 +1,7 @@
 use crate::capture::ObservationInput;
-use crate::lifecycle::{LifecycleInput, MemoryScope, Sensitivity};
+use crate::lifecycle::{LifecycleInput, MemoryKind, MemoryScope, Sensitivity};
 use crate::recall::RecallFilter;
+use crate::sessions::CheckpointStatus;
 use crate::store::MemoryStore;
 use crate::test_support::{
     age_observations, context, context_from_fixture, ended, observation, observation_for,
@@ -34,7 +35,11 @@ fn captures_and_recalls_evidence_backed_session_memory() -> Result<(), StoreErro
     assert_eq!(memory.context.services, context().services);
 
     let results = store.search("missing signature", 5)?;
-    assert_eq!(results.len(), 2, "session note and separate handoff");
+    assert_eq!(
+        results.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert!(
         results
             .iter()
@@ -76,6 +81,7 @@ fn session_handoff_extracts_next_steps_and_unresolved_work() -> Result<(), Store
     let filter = RecallFilter {
         session_id: None,
         context: Some(context()),
+        ..RecallFilter::default()
     };
     let resume = store.resume_context(5, &filter)?;
     assert_eq!(resume.results.len(), 1);
@@ -122,7 +128,11 @@ fn reopening_store_preserves_session_memory() -> Result<(), StoreError> {
 
     let mut store = MemoryStore::open(&path)?;
     let results = store.search("restart persistence", 5)?;
-    assert_eq!(results.len(), 2, "session note and linked handoff");
+    assert_eq!(
+        results.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert!(
         results
             .iter()
@@ -438,7 +448,11 @@ fn a_summary_with_a_forgotten_source_is_derived_again_without_it() -> Result<(),
     age_observations(&mut store, "src", 31 * 60);
     store.capture_for_account(&a.token, observation_for("trigger", "t-src", "trigger"))?;
     let hits = store.search_for_account(&a.token, "keepmeword", 5, &filter)?;
-    assert_eq!(hits.len(), 2, "session note and linked handoff");
+    assert_eq!(
+        hits.len(),
+        1,
+        "session note; an empty handoff is not stored"
+    );
     assert!(
         hits.iter().all(|m| !m.content.contains("forgetmeword")
             && m.source_event_ids == vec!["src-2".to_owned()])
@@ -611,4 +625,206 @@ fn summaries_never_broaden_personal_or_mixed_project_sources() {
         assert!(summary.project_id.is_none());
         assert!(summary.published_by.is_none());
     }
+}
+
+#[test]
+fn structured_tool_payloads_do_not_become_steps_and_labeled_prose_does() -> Result<(), StoreError> {
+    let path = temp_store_path("tool-payload-steps");
+    let mut store = MemoryStore::open(&path)?;
+    store.start_session("tool-steps", WorkContext::default())?;
+    let mut observe = |event_id: &str, role: &str, source: &str, content: &str| {
+        store.capture_observation(ObservationInput {
+            event_id: event_id.to_owned(),
+            session_id: "tool-steps".to_owned(),
+            content: content.to_owned(),
+            role: role.to_owned(),
+            source: source.to_owned(),
+            importance: None,
+            lifecycle: LifecycleInput::default(),
+            context: WorkContext::default(),
+        })
+    };
+    observe(
+        "evt-json",
+        "tool",
+        "hook",
+        r#"{"todo":"remaining work","fact":"spurious fact"}"#,
+    )?;
+    observe(
+        "evt-prefixed",
+        "tool",
+        "hook",
+        r#"Bash {"todo":"remaining work"}"#,
+    )?;
+    observe(
+        "evt-prose",
+        "tool",
+        "test",
+        "Fact: one writer\nThe next step is to keep the ownership rule.",
+    )?;
+    let summary = store.end_session("tool-steps")?;
+    assert!(
+        summary
+            .next_steps
+            .iter()
+            .any(|step| step.contains("ownership rule"))
+    );
+    assert!(
+        summary
+            .next_steps
+            .iter()
+            .all(|step| { !step.contains("remaining work") && !step.contains("spurious") })
+    );
+    assert!(!summary.content.contains("spurious"));
+    assert!(!summary.content.contains("remaining work"));
+    let notes = store
+        .state
+        .memories
+        .iter()
+        .filter(|memory| memory.kind == crate::MemoryKind::Fact)
+        .collect::<Vec<_>>();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].fields.summary, "one writer");
+    assert!(
+        store
+            .state
+            .memories
+            .iter()
+            .any(|memory| { memory.memory_id == format!("handoff-{}", summary.memory_id) })
+    );
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn checkpoint_hands_work_to_the_same_person_and_worktree_only() -> Result<(), StoreError> {
+    let path = temp_store_path("checkpoint-agents");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    let other = store.register_account_as_admin(
+        &owner.token,
+        "other@example.test",
+        "correct horse battery staple",
+    )?;
+    let (project, _) = store.init_project(&owner.token, "local:cairn", Some("cairn"))?;
+    store.join_project(&other.token, &project.project_id)?;
+    let agent_a = store.register_device(
+        "dev-a",
+        &owner.account.person_id,
+        Some("agent-a".into()),
+        "A",
+    )?;
+    let agent_b = store.register_device(
+        "dev-b",
+        &owner.account.person_id,
+        Some("agent-b".into()),
+        "B",
+    )?;
+    let mut work = context();
+    work.project_id = Some(project.project_id.clone());
+    work.repository = Some("local:cairn".into());
+    work.branch = Some("feature".into());
+    work.worktree = Some("wt-a".into());
+    store.start_session_for_account(&agent_a.token, "sess-cross", work.clone())?;
+    store.capture_for_account(
+        &agent_a.token,
+        ObservationInput {
+            event_id: "evt-cross".into(),
+            session_id: "sess-cross".into(),
+            content: "The next step is to finish the checkpoint. The issue is not yet verified."
+                .into(),
+            role: "assistant".into(),
+            source: "PostToolUse".into(),
+            importance: None,
+            lifecycle: LifecycleInput::default(),
+            context: work.clone(),
+        },
+    )?;
+    let missing = store
+        .checkpoint_session_for_account(&agent_a.token, "empty-sess")
+        .unwrap_err();
+    assert_eq!(
+        missing.to_string(),
+        "validation error: unknown session: empty-sess"
+    );
+    store.start_session_for_account(&agent_a.token, "sess-empty", work.clone())?;
+    assert_eq!(
+        store.checkpoint_session_for_account(&agent_a.token, "sess-empty")?,
+        CheckpointStatus::Empty
+    );
+    assert_eq!(
+        store.checkpoint_session_for_account(&agent_a.token, "sess-cross")?,
+        CheckpointStatus::Stored
+    );
+    let created = store
+        .state
+        .memories
+        .iter()
+        .find(|memory| {
+            memory.session_id == "sess-cross" && memory.kind == MemoryKind::SessionSummary
+        })
+        .map(|memory| memory.created_at.clone())
+        .unwrap();
+    assert_eq!(
+        store.checkpoint_session_for_account(&agent_a.token, "sess-cross")?,
+        CheckpointStatus::Unchanged
+    );
+    assert_eq!(
+        store
+            .state
+            .memories
+            .iter()
+            .find(|memory| memory.session_id == "sess-cross"
+                && memory.kind == MemoryKind::SessionSummary)
+            .unwrap()
+            .created_at,
+        created
+    );
+    assert!(
+        store
+            .sessions()
+            .find(|session| session.session_id == "sess-cross")
+            .unwrap()
+            .ended_at
+            .is_none()
+    );
+    let filter = RecallFilter {
+        context: Some(work.clone()),
+        ..RecallFilter::default()
+    };
+    let resumed = store.resume_for_account(&agent_b.token, 5, &filter)?;
+    assert_eq!(resumed.results.len(), 1);
+    assert!(!resumed.results[0].next_steps.is_empty());
+    let unresolved = store.unresolved_for_account(&agent_b.token, 5, &filter)?;
+    assert_eq!(unresolved.results.len(), 1);
+    let owner_brief = crate::session_brief(&store.memories_for_account(&agent_b.token)?, &work);
+    assert!(owner_brief.contains("Handoff") || owner_brief.contains("next"));
+    let mut other_tree = work.clone();
+    other_tree.worktree = Some("wt-b".into());
+    let other_checkout =
+        crate::session_brief(&store.memories_for_account(&agent_b.token)?, &other_tree);
+    assert!(!other_checkout.contains("sess-cross"));
+    let stranger = crate::session_brief(&store.memories_for_account(&other.token)?, &work);
+    assert!(!stranger.contains("sess-cross"));
+    assert!(
+        store
+            .resume_for_account(&other.token, 5, &filter)?
+            .results
+            .is_empty()
+    );
+    store.end_session_for_account(&agent_a.token, "sess-cross")?;
+    assert_eq!(
+        store.checkpoint_session_for_account(&agent_a.token, "sess-cross")?,
+        CheckpointStatus::Unchanged
+    );
+    assert!(
+        store
+            .sessions()
+            .find(|session| session.session_id == "sess-cross")
+            .unwrap()
+            .ended_at
+            .is_some()
+    );
+    fs::remove_file(path)?;
+    Ok(())
 }

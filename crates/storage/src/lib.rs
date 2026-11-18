@@ -9,8 +9,8 @@ mod embeddings;
 mod jobs;
 
 use cairn_core::{
-    AUTH_SESSION_SECONDS, Account, AccountStatus, AuditEvent, AuthSessionResult, ContextPack,
-    Device, DeviceRegistration, DeviceStatus, ExportBundle, ImportResult, Lifecycle,
+    AUTH_SESSION_SECONDS, Account, AccountStatus, AuditEvent, AuthSessionResult, CheckpointStatus,
+    ContextPack, Device, DeviceRegistration, DeviceStatus, ExportBundle, ImportResult, Lifecycle,
     LifecycleInput, LifecycleSummary, Memory, MemoryKind, MemoryScope, Observation,
     ObservationInput, Project, ProjectBranch, ProjectConflict, ProjectEntity, ProjectEntityInput,
     ProjectFreshnessEvent, ProjectMaintenanceReport, ProjectMergeResult, ProjectPerson,
@@ -97,6 +97,15 @@ impl fmt::Display for PostgresError {
             Self::RateLimited => write!(formatter, "authentication rate limit exceeded"),
         }
     }
+}
+
+fn empty_checkpoint(error: &PostgresError) -> bool {
+    let message = match error {
+        PostgresError::Validation(message) => message.as_str(),
+        PostgresError::Core(cairn_core::StoreError::Validation(message)) => message.as_str(),
+        _ => return false,
+    };
+    message.contains("no retained observations")
 }
 
 impl std::error::Error for PostgresError {}
@@ -762,6 +771,38 @@ impl PostgresStore {
         self.finish_session(&account.person_id, session_id).await
     }
 
+    /// Refreshes the resumable handoff and leaves `ended_at` unset.
+    /// A closed or current summary is not rewritten.
+    pub async fn checkpoint_session(
+        &self,
+        account_token: &str,
+        session_id: &str,
+    ) -> Result<CheckpointStatus, PostgresError> {
+        let account = self.authenticate_account(account_token).await?;
+        let mut tx = self.pool.begin().await?;
+        let outcome = self
+            .finish_session_summary(&account.person_id, session_id, &mut tx, false)
+            .await;
+        match outcome {
+            Ok((Some(_), true)) => {
+                tx.commit().await?;
+                Ok(CheckpointStatus::Stored)
+            }
+            Ok(_) => {
+                tx.commit().await?;
+                Ok(CheckpointStatus::Unchanged)
+            }
+            Err(error) if empty_checkpoint(&error) => {
+                tx.rollback().await?;
+                Ok(CheckpointStatus::Empty)
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                Err(error)
+            }
+        }
+    }
+
     /// Explicit end. A summary the person forgot or corrected is reported, not returned.
     async fn finish_session(
         &self,
@@ -780,25 +821,41 @@ impl PostgresStore {
 
     /// Ends the session and derives its summary. `None`: the person forgot or corrected the
     /// summary, so it stays as it is and is not derived again under the same id.
+    /// `(summary, wrote)`. `None` means the person hid the summary. `wrote` is false when
+    /// the stored summary already covered the retained observations.
     async fn finish_session_summary(
         &self,
         person_id: &str,
         session_id: &str,
         transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<Option<Memory>, PostgresError> {
+        close: bool,
+    ) -> Result<(Option<Memory>, bool), PostgresError> {
         if session_id.trim().is_empty() {
             return Err(PostgresError::Validation(
                 "session_id must not be empty".to_owned(),
             ));
         }
-        sqlx::query(
-            "UPDATE cairn_sessions SET ended_at = COALESCE(ended_at, now())
-             WHERE person_id = $1 AND session_id = $2",
+        let ended: Option<bool> = sqlx::query_scalar(
+            "SELECT ended_at IS NOT NULL FROM cairn_sessions
+             WHERE person_id = $1 AND session_id = $2 FOR UPDATE",
         )
         .bind(person_id)
         .bind(session_id)
-        .execute(&mut **transaction)
+        .fetch_optional(&mut **transaction)
         .await?;
+        if !close && ended == Some(true) {
+            return Ok((None, false));
+        }
+        if close {
+            sqlx::query(
+                "UPDATE cairn_sessions SET ended_at = COALESCE(ended_at, now())
+                 WHERE person_id = $1 AND session_id = $2",
+            )
+            .bind(person_id)
+            .bind(session_id)
+            .execute(&mut **transaction)
+            .await?;
+        }
         let session_row = sqlx::query(
             "SELECT session_id,
                     EXTRACT(EPOCH FROM started_at)::bigint::text AS started_at,
@@ -853,8 +910,10 @@ impl PostgresStore {
             .fetch_one(&mut **transaction)
             .await?;
             if hidden {
-                clear_session_pending(transaction, person_id, session_id).await?;
-                return Ok(None);
+                if close {
+                    clear_session_pending(transaction, person_id, session_id).await?;
+                }
+                return Ok((None, false));
             }
             let forgotten_source = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (SELECT 1 FROM cairn_forgotten_items f
@@ -869,8 +928,10 @@ impl PostgresStore {
                     .iter()
                     .any(|observation| !memory.source_event_ids.contains(&observation.event_id))
             {
-                clear_session_pending(transaction, person_id, session_id).await?;
-                return Ok(Some(memory));
+                if close {
+                    clear_session_pending(transaction, person_id, session_id).await?;
+                }
+                return Ok((Some(memory), false));
             }
             // The session id was reused after its summary, or a source was forgotten: derive
             // the summary again from what is retained.
@@ -897,8 +958,18 @@ impl PostgresStore {
                 memory.published_by = None;
             }
         }
+        let continuity = !close
+            || earlier
+                .as_ref()
+                .is_some_and(|memory| memory.fields.tags.iter().any(|tag| tag == "continuity"));
         if let Some(earlier) = &earlier {
             carry_summary_state(earlier, &mut memory);
+        }
+        if continuity {
+            memory.scope = MemoryScope::Personal;
+            if !memory.fields.tags.iter().any(|tag| tag == "continuity") {
+                memory.fields.tags.push("continuity".to_owned());
+            }
         }
         for mut note in distill_session_notes(&memory, &observations) {
             let hidden: bool = sqlx::query_scalar(&format!(
@@ -925,8 +996,10 @@ impl PostgresStore {
             insert_memory(transaction, person_id, &note).await?;
         }
         insert_memory(transaction, person_id, &memory).await?;
-        clear_session_pending(transaction, person_id, session_id).await?;
-        Ok(Some(memory))
+        if close {
+            clear_session_pending(transaction, person_id, session_id).await?;
+        }
+        Ok((Some(memory), true))
     }
 
     /// Finishes this person's sessions that have been pending (a capture the summary may not

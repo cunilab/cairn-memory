@@ -17,20 +17,33 @@ fn extraction_is_explicit_bounded_and_does_not_invent_fields() {
     )
     .unwrap();
     let notes = distill_session_notes(&summary, &[source]);
-    assert_eq!(notes.len(), 4);
-    let fact = &notes[1];
-    assert_eq!(fact.kind, MemoryKind::Fact);
+    assert!(notes.iter().all(|note| note.kind != MemoryKind::Handoff));
+    assert_eq!(notes.len(), 3);
+    let fact = notes
+        .iter()
+        .find(|note| note.kind == MemoryKind::Fact)
+        .unwrap();
     assert_eq!(fact.fields.statement.as_deref(), Some("a stated fact"));
     assert_eq!(fact.fields.source.as_deref(), Some("verified.rs"));
     assert!(fact.fields.reason.is_empty());
     assert_eq!(fact.fields.evidence, ["source"]);
     assert_eq!(fact.scope, MemoryScope::Personal);
     assert!(
-        notes[2].fields.rule.is_none(),
+        notes
+            .iter()
+            .find(|note| note.kind == MemoryKind::Rule)
+            .unwrap()
+            .fields
+            .rule
+            .is_none(),
         "a type prefix is not a typed field"
     );
-    assert_eq!(notes[3].fields.steps, ["cargo test"]);
-    assert_eq!(notes[3].fields.when.as_deref(), Some("after edits"));
+    let procedure = notes
+        .iter()
+        .find(|note| note.kind == MemoryKind::Procedure)
+        .unwrap();
+    assert_eq!(procedure.fields.steps, ["cargo test"]);
+    assert_eq!(procedure.fields.when.as_deref(), Some("after edits"));
 
     let many = normalize_observation(&observation_for(
         "distill",
@@ -39,7 +52,7 @@ fn extraction_is_explicit_bounded_and_does_not_invent_fields() {
     ))
     .unwrap();
     let notes = distill_session_notes(&summary, &[many]);
-    assert_eq!(notes.len(), MAX_TYPED_NOTES + 1);
+    assert_eq!(notes.len(), MAX_TYPED_NOTES);
     let ids: std::collections::HashSet<_> = notes.iter().map(|note| &note.memory_id).collect();
     assert_eq!(ids.len(), notes.len());
 }

@@ -288,17 +288,17 @@ fn build_tools() -> Vec<Tool> {
     vec![
         spec(
             "memory_save",
-            "Save verified reusable knowledge at decisions, corrections and task completion. Agent chooses scope: project (members), personal (private behaviour), global (all server users). Required: scope/title/summary/reason; fill known kind-specific fields and evidence. Avoid duplicates and secrets.",
+            "Cairn. Save verified reusable knowledge at decisions, corrections and task completion. Agent chooses scope: project (members), personal (private behaviour), global (all server users). Required: scope/title/summary/reason; fill known kind-specific fields and evidence. Avoid duplicates and secrets. The MCP result is memory_id, kind, scope, and status.",
             Post,
             "/remember",
             content_schema(),
         ),
         spec(
             "memory_recall",
-            "Recall a bounded context pack for a query.",
+            "Cairn. Recall a bounded context pack. Results default to short cards; set expanded true for recall fields without lifecycle, internal ids, or duplicated content.",
             Post,
             "/recall",
-            query_schema(),
+            card_query_schema(),
         ),
         spec(
             "memory_consolidate",
@@ -309,10 +309,10 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_smart_search",
-            "Search durable memories.",
+            "Cairn. Search durable memories. Returns short cards unless expanded is true.",
             Post,
             "/smart-search",
-            query_schema(),
+            card_query_schema(),
         ),
         spec(
             "memory_why_changed",
@@ -330,17 +330,17 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_lesson_save",
-            "Save a verified lesson after a correction or resolved failure. Required: scope/title/summary/reason. Defaults to gotcha: fill symptom/cause/fix and evidence when known. Agent chooses project, private personal behaviour or server-wide global scope; never invent causal fields.",
+            "Cairn. Save a verified lesson after a correction or resolved failure. Required: scope/title/summary/reason. Defaults to gotcha: fill symptom/cause/fix and evidence when known. Agent chooses project, private personal behaviour or server-wide global scope; never invent causal fields. The MCP result is memory_id, kind, scope, and status.",
             Post,
             "/remember",
             content_schema(),
         ),
         spec(
             "memory_reflect",
-            "Return retrieval candidates for reflection without invoking a model.",
+            "Cairn. Return retrieval candidates for reflection without invoking a model. Results default to short cards; set expanded true for recall fields without lifecycle, internal ids, or duplicated content.",
             Post,
             "/context",
-            query_schema(),
+            card_query_schema(),
         ),
         spec(
             "memory_session_start",
@@ -376,17 +376,17 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_search",
-            "Search durable memories by keyword.",
+            "Cairn. Search durable memories. Returns short cards unless expanded is true.",
             Post,
             "/search",
-            query_schema(),
+            card_query_schema(),
         ),
         spec(
             "memory_context",
-            "Assemble a bounded context pack for an agent.",
+            "Cairn. Assemble a bounded context pack. Results default to short cards; set expanded true for recall fields without lifecycle, internal ids, or duplicated content.",
             Post,
             "/context",
-            query_schema(),
+            card_query_schema(),
         ),
         spec(
             "memory_resume",
@@ -475,7 +475,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_get",
-            "Read every field of a visible memory.",
+            "Cairn. Read every field of a visible memory, including content, provenance, and lifecycle.",
             Get,
             "/memories/{memoryId}",
             object_schema(&[("memoryId", string_schema())], &["memoryId"]),
@@ -669,9 +669,34 @@ fn query_schema() -> Value {
             ("limit", json!({"type": "integer", "minimum": 1})),
             ("sessionId", string_schema()),
             ("context", json!({"type": "object"})),
+            ("includeCaptures", include_captures_schema()),
         ],
         &["query"],
     )
+}
+
+fn card_query_schema() -> Value {
+    object_schema(
+        &[
+            ("query", string_schema()),
+            ("limit", json!({"type": "integer", "minimum": 1})),
+            ("sessionId", string_schema()),
+            ("context", json!({"type": "object"})),
+            (
+                "expanded",
+                json!({"type": "boolean", "description": "When true, return useful recall fields instead of the short card. Omitted lifecycle, internal ids, and duplicated content stay on memory_get."}),
+            ),
+            ("includeCaptures", include_captures_schema()),
+        ],
+        &["query"],
+    )
+}
+
+fn include_captures_schema() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Include raw capture records. Default false. Search, recall, and context still apply the relevance floor. Resume and unresolved are unchanged.",
+    })
 }
 
 fn continuity_schema() -> Value {

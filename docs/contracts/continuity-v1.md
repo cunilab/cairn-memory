@@ -590,30 +590,112 @@ use the same authorized, retained memory set as memory listing: another person's
 private notes and projects without membership never become candidates. The
 endpoint does not join a project or initiate model inference.
 
-Shared `cairn_core::session_brief` builds four independently budgeted sections:
+Shared `cairn_core::session_brief` builds five independently budgeted sections:
 
-1. Personal behaviour notes, excluding raw captures, session notes, handoffs and
-   `work-note`-tagged automatic work notes.
+1. Personal behaviour notes, excluding raw captures, session notes, handoffs,
+   `work-note` automatic work notes, and notes tagged `identity`.
 2. The newest handoff matching the exact nonempty requested repository and
-   branch, plus project ID (or both absent for private work). Missing repository
-   or branch gives no handoff; other branches never supply one.
+   branch, plus project ID (or both absent for private work) and worktree. A
+   missing worktree matches only a handoff that also has none, which is how a
+   handoff saved before checkout ids were derived stays readable. A derived
+   checkout id never falls back to those rows. Missing repository or branch gives no handoff;
+   other branches never supply one.
 3. Rules/decisions in the requested project ID, with no branch or the matching
    branch. Missing project ID gives no project section.
 4. Global notes, excluding raw captures/session notes/handoffs.
+5. Identity: at most two active personal preferences or rules with durable
+   retention and the tag `identity`, under a 480-byte budget. Explicit saves
+   default to durable retention. Author one with `memory_save` or `cairn save`
+   (`scope: personal`, `kind: preference` or `rule`, tag `identity`). The
+   section adds no account email, name, or other invented identity. Notes with
+   that tag are omitted from personal behaviour.
 
 Only active records are included. Notes rank by pinned first, lifecycle
 importance descending, creation timestamp descending, then stable ID. Handoffs
 rank by newest creation then ID, regardless of pin. This is deterministic brief
 selection, separate from query-driven hybrid recall. At most three notes per
 section and one handoff are returned, under a 900-byte JSON budget per section.
+Identity uses two notes and 480 bytes.
 Fields include ID, title, summary and reason; handoffs also carry bounded next
 steps and unresolved work. Oversized records shrink to a compact ID/title/summary
 preview; complete records remain accessible through memory tools.
 
 `SESSION_BRIEF_MAX_BYTES=4096` bounds the complete UTF-8 text, including its data
-label and JSON code fence. Field cuts respect UTF-8 boundaries and JSON escape
+label and JSON code fence. After the per-section caps, notes are dropped from
+global, then project, then personal behaviour, then identity, then the handoff,
+until that whole text fits. Field cuts respect UTF-8 boundaries and JSON escape
 expansion. Backticks are escaped inside JSON so a stored string cannot terminate
 the fence. The label explicitly identifies memory as evidence/data, never agent
 instructions. No tokenization service or LLM is required. Every hook uses this
 single route and the same selection function on both storage adapters. Hook
 instruction and work-delivery limits live in [the hook contract](hook-v1.md#hook-output-and-work-tracking).
+
+## Client configuration constraint (v0.1.5)
+
+The CLI, stdio MCP, and hook take their server URL and device credential from the
+selected config file. Precedence and the HTTP 401 hint are owned by the
+[MCP contract](mcp-layer1.md) and the [hook contract](hook-v1.md). This does not
+change the client credential. v0.1.5 adds no server-side LLM. Distillation
+remains the rule-based session note, handoff, and typed notes specified above,
+with the capture-quality limits in the next sections.
+
+## Open-session checkpoint (v0.1.5)
+
+`POST /cairn-memory/session/checkpoint` accepts `{"sessionId":"..."}` and the
+same device or account bearer as session end. It derives the summary and
+handoff with the session-close rules and does not set `ended_at`. The body is
+`{"status":"stored"|"unchanged"|"empty"}`. `empty` means the session has no
+retained observations and nothing was deleted. `unchanged` means the summary
+already covers those observations, the session is already closed, or the person
+hid the summary. A stored checkpoint is personal, tagged `continuity`, and
+keeps project, repository, branch, and worktree. Session close does not retag
+that summary as project memory when its sources are unchanged. Both stores
+follow this rule. There is no server LLM.
+
+## Search hit kind and MCP cards (v0.1.5)
+
+Every hit built by `recall_result` (`crates/core/src/recall.rs`) includes the
+stored `kind`. The file ranker and PostgreSQL `hybrid_matches`, resume, and
+unresolved all use that constructor. REST and the CLI still return the full hit,
+including `kind`. MCP search, recall, and context cards, the `expanded` view,
+and the save receipt are owned by
+[the MCP contract](mcp-layer1.md#agent-facing-results-v015). Those views do not
+change authorization. Capture eligibility and the relevance floor below do
+change which rows search and context return.
+
+## Capture eligibility (v0.1.5)
+
+`POST /search`, `/smart-search`, `/recall`, `/context`, `/reflect`, and
+`/why-changed` omit `kind: capture` unless the body sets `includeCaptures` or
+`include_captures` to true. The file ranker and PostgreSQL `hybrid_matches`
+drop those rows before reciprocal-rank fusion and before `limit`. `GET
+/memories`, the graph, `GET /memories/{id}`, export, and project memory lists
+still return them. Resume and unresolved return session summaries and do not
+read this flag.
+
+Inferred keyword contradiction ids skip a capture on either side
+(`contradiction_ids` in `crates/core/src/recall.rs`). Declared links stay stored.
+
+## Relevance floor (v0.1.5)
+
+Search, smart search, recall, context, and reflect set `relevance_floor` on the
+shared filter. Why-changed, resume, and unresolved do not. The floor is
+`passes_relevance_floor`: exact entity or technical-token evidence, a
+distinctive title token, any distinctive token on a rule or decision, two
+distinct query terms, or one term of five or more characters on a note that is
+not a session summary or handoff. Repeated query words count once. A summary
+that only shares one ordinary word is omitted and stays on resume. Vector-only
+hits stay out; no cosine cutoff is added. It is
+not a fraction of the top fused score, so a weak candidate set is empty.
+Opt-in capture hits use the same test. The reason and the tradeoff are in
+[ADR 0014](../adr/0014-memory-scopes-distillation-and-hybrid-recall.md).
+
+## Distillation skips (v0.1.5)
+
+Session end still returns the summary and does not write a second copy when the
+summary is current. A handoff is written only when `next_steps` or
+`unresolved_work` is non-empty. Tool payloads, recognized by observation role
+or source, are left out of the summary text, those lists, and typed-note
+derivation. A tool role whose text is a JSON object or array counts, as does a
+tool name before JSON. Their event ids stay on the summary. Labeled prose with
+the legacy tool role still does.

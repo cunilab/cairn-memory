@@ -40,27 +40,40 @@ def fingerprint(session_id, content, source):
 
 def run_hook(url, payload, *, cwd=ROOT, **env):
     child = os.environ.copy()
-    child.pop("CAIRN_ACCOUNT_TOKEN", None)
-    child.pop("CAIRN_OUTBOX", None)
-    child["CAIRN_DEVICE_TOKEN"] = DEVICE
-    child["CAIRN_URL"] = url
+    for name in ("CAIRN_ACCOUNT_TOKEN", "CAIRN_OUTBOX", "CAIRN_URL", "CAIRN_DEVICE_TOKEN", "CAIRN_CONFIG"):
+        child.pop(name, None)
+    token = DEVICE
+    chosen_url = url
+    if "CAIRN_DEVICE_TOKEN" in env:
+        token = env.pop("CAIRN_DEVICE_TOKEN")
+    if "CAIRN_URL" in env:
+        override = env.pop("CAIRN_URL")
+        if override is not None:
+            chosen_url = override
     for key, value in env.items():
         if value is None:
             child.pop(key, None)
         else:
             child[key] = value
-    if not isinstance(payload, str):
-        payload = json.dumps(payload)
-    return subprocess.run(
-        [sys.executable, str(HOOK)],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=child,
-        cwd=cwd,
-        timeout=20,
-        check=False,
-    )
+    command = [sys.executable, str(HOOK)]
+    with tempfile.TemporaryDirectory() as directory:
+        child["XDG_CONFIG_HOME"] = directory
+        if isinstance(token, str):
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"url": chosen_url, "token": token}), encoding="utf-8")
+            command.extend(["--config", str(config)])
+        if not isinstance(payload, str):
+            payload = json.dumps(payload)
+        return subprocess.run(
+            command,
+            input=payload,
+            text=True,
+            capture_output=True,
+            env=child,
+            cwd=cwd,
+            timeout=20,
+            check=False,
+        )
 
 
 def make_repo(parent, name, remote=None, branch="feature/x"):
@@ -74,6 +87,12 @@ def make_repo(parent, name, remote=None, branch="feature/x"):
     if remote:
         subprocess.run(git + ["remote", "add", "origin", remote], check=True, env=env)
     return path
+
+
+def derived_worktree(checkout):
+    """Same id as git_context, computed here so the assertion is not that function."""
+    canonical = os.path.realpath(checkout)
+    return "wt-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -217,7 +236,8 @@ class StubHookTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(self.server.captured, [])
-            self.assertIn("CAIRN_DEVICE_TOKEN is required", result.stderr)
+            self.assertIn("cairn setup", result.stderr)
+            self.assertNotIn(DEVICE, result.stderr)
             self.assert_hidden(result, SECRET)
 
     def test_account_token_env_is_ignored_and_never_sent(self):
@@ -379,7 +399,14 @@ class StubHookTests(unittest.TestCase):
             repo = make_repo(tmp, "checkout-dir", "https://user:pw-secret@example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
             body = self._context_for(repo / "src")
-            self.assertEqual(body["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
+            self.assertEqual(
+                body["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "worktree": derived_worktree(repo),
+                },
+            )
             self.assertNotIn(tmp, json.dumps(body))
             self.assertNotIn("pw-secret", json.dumps(body))
             # No remote: fall back to the top-level directory name.
@@ -401,21 +428,38 @@ class StubHookTests(unittest.TestCase):
             explicit = dict(plain, cwd=str(repo), context={"repository": "mine", "commands": ["make"]})
             self.server.captured = []
             self.assertEqual(run_hook(self.url, explicit).returncode, 0)
-            self.assertEqual(json.loads(self.server.captured[0]["body"])["context"], {"repository": "mine", "commands": ["make"]})
+            worktree = derived_worktree(repo)
+            self.assertEqual(
+                json.loads(self.server.captured[0]["body"])["context"],
+                {"repository": "mine", "commands": ["make"], "worktree": worktree},
+            )
             # A context without a repository is completed from cwd.
             partial = dict(plain, cwd=str(repo), context={"commands": ["make"]})
             self.server.captured = []
             self.assertEqual(run_hook(self.url, partial).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "commands": ["make"]},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "commands": ["make"],
+                    "worktree": worktree,
+                },
             )
 
     def test_project_file_at_the_git_top_level_sends_the_project_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             (repo / "src").mkdir()
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc", "branch": "feature/x"})
+            worktree = derived_worktree(repo)
+            self.assertEqual(
+                self._context_for(repo)["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "worktree": worktree,
+                },
+            )
             (repo / ".cairn").mkdir()
             (repo / ".cairn" / "project.json").write_text(
                 json.dumps({"project_id": "project-abc", "repository": "example.test/acme/widget-svc"}), encoding="utf-8"
@@ -423,7 +467,12 @@ class StubHookTests(unittest.TestCase):
             # Read from a subdirectory: the file lives at the git top level.
             self.assertEqual(
                 self._context_for(repo / "src")["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "project_id": "project-abc",
+                    "worktree": worktree,
+                },
             )
             # v0.1.4 adds a display name; capture still uses only the stable id.
             (repo / ".cairn" / "project.json").write_text(
@@ -431,7 +480,12 @@ class StubHookTests(unittest.TestCase):
             )
             self.assertEqual(
                 self._context_for(repo / "src")["context"],
-                {"repository": "example.test/acme/widget-svc", "branch": "feature/x", "project_id": "project-abc"},
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "branch": "feature/x",
+                    "project_id": "project-abc",
+                    "worktree": worktree,
+                },
             )
             # An explicit project_id (and repository) in the input is kept.
             explicit = {
@@ -445,7 +499,7 @@ class StubHookTests(unittest.TestCase):
             self.assertEqual(run_hook(self.url, explicit).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "mine", "project_id": "project-mine"},
+                {"repository": "mine", "project_id": "project-mine", "worktree": worktree},
             )
             # An explicit repository still picks up the file's id.
             partial = dict(explicit, context={"repository": "mine"})
@@ -453,7 +507,7 @@ class StubHookTests(unittest.TestCase):
             self.assertEqual(run_hook(self.url, partial).returncode, 0)
             self.assertEqual(
                 json.loads(self.server.captured[0]["body"])["context"],
-                {"repository": "mine", "project_id": "project-abc"},
+                {"repository": "mine", "project_id": "project-abc", "worktree": worktree},
             )
             # Unreadable or empty files send no id and never fail the hook.
             for body in ("not json", "{}", '{"project_id": ""}', '{"project_id": 7}', "[]"):
@@ -473,7 +527,13 @@ class StubHookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp, "r", "https://example.test/acme/widget-svc.git")
             subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach"], check=True)
-            self.assertEqual(self._context_for(repo)["context"], {"repository": "example.test/acme/widget-svc"})
+            self.assertEqual(
+                self._context_for(repo)["context"],
+                {
+                    "repository": "example.test/acme/widget-svc",
+                    "worktree": derived_worktree(repo),
+                },
+            )
 
     def test_spaced_token_rejects_before_post(self):
         bad = "sk-not-a-header token"
@@ -620,13 +680,189 @@ class StubHookTests(unittest.TestCase):
         self.assert_hidden(result, DEVICE)
 
     def test_tool_use_id_keeps_identical_tool_results_apart(self):
-        base = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        base = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "mkdir hook-scratch"}}
         for tool_use_id in ("toolu_1", "toolu_2", "toolu_2", None):
             extra = {} if tool_use_id is None else {"tool_use_id": tool_use_id}
             self.assertEqual(run_hook(self.url, dict(base, **extra)).returncode, 0)
         ids = [json.loads(item["body"])["eventId"] for item in self.server.captured]
         self.assertEqual(len(set(ids[:2] + ids[3:])), 3)
         self.assertEqual(ids[1], ids[2])
+
+    def test_read_only_tools_are_not_delivered_and_mutating_commands_are(self):
+        skipped = (
+            {"tool_name": "Read", "tool_input": {"file_path": "src/lib.rs"}},
+            {"tool_name": "Bash", "tool_input": {"command": "ls src"}},
+            {"tool_name": "Bash", "tool_input": {"command": "git status --short"}},
+            {"tool_name": "Bash", "tool_input": {"command": "ls && rm -rf scratch"}},
+        )
+        # The last command is mutating because of `&&`; it must be delivered.
+        for index, extra in enumerate(skipped):
+            payload = {"session_id": "s", "hook_event_name": "PostToolUse", **extra}
+            self.assertEqual(run_hook(self.url, payload).returncode, 0)
+            if index < 3:
+                self.assertEqual(self.server.captured, [])
+            else:
+                self.assertEqual(len(self.server.captured), 1)
+            self.server.captured.clear()
+        ambiguous = {"session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "FOO=1 ls"}}
+        self.assertEqual(run_hook(self.url, ambiguous).returncode, 0)
+        self.assertEqual(len(self.server.captured), 1)
+
+    def test_tool_excerpt_is_redacted_before_the_two_kilobyte_clip(self):
+        secret = "sk-synthetic-hook-secret"
+        payload = {
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "mkdir hook-scratch"},
+            "tool_response": secret + " " + ("é" * 3000) + " tail-marker",
+        }
+        self.assertEqual(run_hook(self.url, payload).returncode, 0)
+        body = json.loads(self.server.captured[0]["body"])
+        self.assertNotIn(secret, body["content"])
+        self.assertIn("[redacted]", body["content"].lower())
+        self.assertLessEqual(len(body["content"].encode()), 2048)
+        self.assertTrue(body["content"].endswith("[truncated]"))
+        body["content"].encode("utf-8")
+
+    def test_nested_mutating_tool_is_capped_after_redaction_and_replays(self):
+        secret = "sk-synthetic-nested-secret"
+        payload = {
+            "session_id": "s",
+            "hook_event_name": "PostToolUse",
+            "payload": {
+                "tool_name": "Bash",
+                "tool_input": {"command": "mkdir nested-scratch"},
+                "tool_response": secret + " " + ("é" * 3000),
+            },
+        }
+        self.assertEqual(run_hook(self.url, payload).returncode, 0)
+        self.assertEqual(run_hook(self.url, payload).returncode, 0)
+        bodies = [json.loads(item["body"]) for item in self.server.captured]
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0]["eventId"], bodies[1]["eventId"])
+        content = bodies[0]["content"]
+        self.assertTrue(content.startswith("Bash {"))
+        self.assertNotIn(secret, content)
+        self.assertIn("[redacted]", content.lower())
+        self.assertLessEqual(len(content.encode()), 2048)
+        self.assertTrue(content.endswith("[truncated]"))
+        content.encode("utf-8")
+
+    def _invoke(self, payload, env, args):
+        child = os.environ.copy()
+        for name in ("CAIRN_ACCOUNT_TOKEN", "CAIRN_OUTBOX", "CAIRN_URL", "CAIRN_DEVICE_TOKEN", "CAIRN_CONFIG"):
+            child.pop(name, None)
+        child.update(env)
+        return subprocess.run(
+            [sys.executable, str(HOOK), *args],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=child,
+            cwd=ROOT,
+            timeout=20,
+            check=False,
+        )
+
+    def test_legacy_env_cannot_override_a_valid_config(self):
+        payload = {
+            "sessionId": "legacy",
+            "eventId": "legacy-event",
+            "content": "kept",
+            "role": "tool",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            good = Path(directory) / "good.json"
+            good.write_text(json.dumps({"url": self.url, "token": DEVICE}), encoding="utf-8")
+            cases = (
+                {"CAIRN_URL": "http://127.0.0.1:9", "CAIRN_DEVICE_TOKEN": "legacy-token-value"},
+                {"CAIRN_URL": "http://127.0.0.1:9"},
+                {"CAIRN_DEVICE_TOKEN": "legacy-token-value"},
+                {"CAIRN_URL": ""},
+                {"CAIRN_DEVICE_TOKEN": "   "},
+            )
+            for extra in cases:
+                with self.subTest(extra=tuple(extra)):
+                    self.server.captured = []
+                    result = self._invoke(payload, extra, ["--config", str(good)])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.server.captured[0]["authorization"], "Bearer " + DEVICE)
+                    self.assertIn("ignoring", result.stderr)
+                    self.assertNotIn("legacy-token-value", result.stdout + result.stderr)
+                    self.assertNotIn(DEVICE, result.stdout + result.stderr)
+                    self.assertNotIn("127.0.0.1:9", result.stderr)
+
+    def test_cairn_config_default_and_explicit_file_precedence(self):
+        payload = {
+            "sessionId": "select",
+            "eventId": "select-event",
+            "content": "kept",
+            "role": "tool",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "good.json"
+            decoy = root / "decoy.json"
+            default = root / "cairn" / "config.json"
+            default.parent.mkdir()
+            good.write_text(json.dumps({"url": self.url, "token": DEVICE}), encoding="utf-8")
+            decoy.write_text(
+                json.dumps({"url": "http://127.0.0.1:9", "token": "decoy-token-value"}),
+                encoding="utf-8",
+            )
+            default.write_text(
+                json.dumps({"url": "http://127.0.0.1:9", "token": "decoy-token-value"}),
+                encoding="utf-8",
+            )
+            selected = self._invoke(
+                payload,
+                {"CAIRN_CONFIG": str(good), "XDG_CONFIG_HOME": str(root)},
+                [],
+            )
+            self.assertEqual(selected.returncode, 0, selected.stderr)
+            self.assertEqual(self.server.captured[-1]["authorization"], "Bearer " + DEVICE)
+            explicit = self._invoke(
+                payload,
+                {"CAIRN_CONFIG": str(decoy), "XDG_CONFIG_HOME": str(root)},
+                ["--config", str(good)],
+            )
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
+            self.assertEqual(self.server.captured[-1]["authorization"], "Bearer " + DEVICE)
+            self.assertNotIn("decoy-token-value", explicit.stdout + explicit.stderr)
+            default.write_text(json.dumps({"url": self.url, "token": DEVICE}), encoding="utf-8")
+            plain = self._invoke(payload, {"XDG_CONFIG_HOME": str(root)}, [])
+            self.assertEqual(plain.returncode, 0, plain.stderr)
+            self.assertEqual(self.server.captured[-1]["authorization"], "Bearer " + DEVICE)
+            self.assertNotIn(DEVICE, plain.stdout + plain.stderr)
+
+    def test_http_401_names_the_config_and_leaves_stdout_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"url": self.url, "token": DEVICE}), encoding="utf-8")
+            self.server.reply = (401, json.dumps({"error": "rejected " + DEVICE}))
+            result = self._invoke(
+                {
+                    "sessionId": "denied",
+                    "eventId": "denied-event",
+                    "content": "kept",
+                    "role": "tool",
+                },
+                {
+                    "CAIRN_URL": "http://127.0.0.1:9",
+                    "CAIRN_DEVICE_TOKEN": "legacy-token-value",
+                },
+                ["--config", str(config)],
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("rejected hook payload (401)", result.stderr)
+            self.assertIn(str(config), result.stderr)
+            self.assertIn("cairn setup <server-url>", result.stderr)
+            self.assertIn("set CAIRN_CONFIG to that file", result.stderr)
+            self.assertIn("[REDACTED]", result.stderr)
+            self.assertNotIn(DEVICE, result.stdout + result.stderr)
+            self.assertNotIn("legacy-token-value", result.stdout + result.stderr)
 
 
 def free_port():
@@ -847,6 +1083,31 @@ class FileServerHookTests(unittest.TestCase):
         self.assertNotIn("hook7a-revoked", ids)
         if "hook-secret-value" in found.get("hook7a-device", ""):
             self.fail("device observation retained the raw secret")
+
+
+class ReadonlyClassificationTests(unittest.TestCase):
+    def test_shell_flags_stay_narrow_without_running_commands(self):
+        import cairn_hook
+
+        safe = (
+            "ls",
+            "ls src",
+            "git status --short",
+            "rg pattern",
+            "rg -n pattern src",
+            "date",
+        )
+        unsafe = (
+            "rg --pre=helper pattern",
+            "rg --pre helper pattern",
+            "git diff --ext-diff",
+            "date -s 2020-01-01",
+            "ls -la",
+        )
+        for command in safe:
+            self.assertTrue(cairn_hook.shell_command_is_readonly(command), command)
+        for command in unsafe:
+            self.assertFalse(cairn_hook.shell_command_is_readonly(command), command)
 
 
 if __name__ == "__main__":

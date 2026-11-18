@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod mcp;
+pub mod present;
 pub mod project;
 pub mod tools;
 pub mod update;
@@ -17,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ureq::http::Uri;
 
-const URL_ENV: &str = "CAIRN_URL";
-const TOKEN_ENV: &str = "CAIRN_DEVICE_TOKEN";
+const CONFIG_ENV: &str = "CAIRN_CONFIG";
+const LEGACY_ENVS: [&str; 2] = ["CAIRN_URL", "CAIRN_DEVICE_TOKEN"];
 /// Generous for an export bundle, finite so a hostile server cannot fill memory.
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -48,11 +49,13 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Server URL and device token. `Debug` hides the token.
+/// Server URL and device token from one selected config file. `Debug` hides the token.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     url: String,
     token: String,
+    /// File this config was loaded from. `new` has none until `save` plus `load`.
+    path: Option<PathBuf>,
 }
 
 impl fmt::Debug for Config {
@@ -60,6 +63,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("url", &self.url)
             .field("token", &"<redacted>")
+            .field("path", &self.path)
             .finish()
     }
 }
@@ -75,6 +79,7 @@ impl Config {
         Ok(Self {
             url: normalize_url(url)?,
             token: token.to_owned(),
+            path: None,
         })
     }
 
@@ -82,32 +87,18 @@ impl Config {
         &self.url
     }
 
-    /// `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace the config file. Either one
-    /// alone is an error: it would send the stored token to another server, or another
-    /// token to the stored one.
-    pub fn load() -> Result<Self, Error> {
-        let env = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        };
-        Self::load_from(&config_path()?, env(URL_ENV), env(TOKEN_ENV))
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
-    fn load_from(
-        path: &Path,
-        env_url: Option<String>,
-        env_token: Option<String>,
-    ) -> Result<Self, Error> {
-        match (env_url, env_token) {
-            (Some(url), Some(token)) => return Self::new(&url, &token),
-            (None, None) => {}
-            _ => {
-                return Err(Error::Config(format!(
-                    "set both {URL_ENV} and {TOKEN_ENV}, or neither"
-                )));
-            }
-        }
+    /// Loads the selected file. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored; a set
+    /// value produces one stderr warning and does not change the file that is read.
+    pub fn load() -> Result<Self, Error> {
+        warn_ignored_legacy_config();
+        Self::load_from(&selected_config_path()?)
+    }
+
+    fn load_from(path: &Path) -> Result<Self, Error> {
         let stored = match fs::read_to_string(path) {
             Ok(raw) => serde_json::from_str::<Value>(&raw)
                 .map_err(|_| Error::Config(format!("{} is not valid JSON", path.display())))?,
@@ -121,13 +112,14 @@ impl Config {
         };
         let field = |name: &str| stored.get(name).and_then(Value::as_str);
         let (Some(url), Some(token)) = (field("url"), field("token")) else {
-            return Err(Error::Config(
-                "not configured: run `cairn setup <server-url>` \
-                 or set CAIRN_URL and CAIRN_DEVICE_TOKEN"
-                    .to_owned(),
-            ));
+            return Err(Error::Config(format!(
+                "not configured: run `cairn setup <server-url>` (selected {})",
+                path.display()
+            )));
         };
-        Self::new(url, token)
+        let mut config = Self::new(url, token)?;
+        config.path = Some(path.to_path_buf());
+        Ok(config)
     }
 
     /// Writes the file with mode 0600 from the start, replacing it atomically. A directory
@@ -180,6 +172,33 @@ pub fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
         .inspect_err(|_| {
             let _ = fs::remove_file(&temporary);
         })
+}
+
+/// One stderr line when a legacy client variable is present, including an empty or
+/// whitespace-only export. The value is never read or printed.
+pub fn warn_ignored_legacy_config() {
+    let names: Vec<&str> = LEGACY_ENVS
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let listed = names.join(" and ");
+    eprintln!(
+        "cairn: ignoring {listed}; the selected config file supplies the server URL and device credential"
+    );
+}
+
+/// `CAIRN_CONFIG` when it is non-empty after trimming, otherwise [`config_path`].
+pub fn selected_config_path() -> Result<PathBuf, Error> {
+    if let Ok(value) = std::env::var(CONFIG_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    config_path()
 }
 
 /// `$XDG_CONFIG_HOME/cairn/config.json`, else `~/.config/cairn/config.json`, else `%APPDATA%`.
@@ -237,6 +256,7 @@ pub struct Client {
     agent: ureq::Agent,
     base: String,
     token: String,
+    config_path: Option<PathBuf>,
 }
 
 impl Client {
@@ -261,17 +281,18 @@ impl Client {
             agent: builder.build().into(),
             base: config.url,
             token: config.token,
+            config_path: config.path,
         }
     }
 
     pub fn get(&self, path: &str) -> Result<Value, Error> {
         let request = self.agent.get(format!("{}{path}", self.base));
-        read(request.header("authorization", self.bearer()).call())
+        self.read(request.header("authorization", self.bearer()).call())
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, Error> {
         let request = self.agent.post(format!("{}{path}", self.base));
-        read(
+        self.read(
             request
                 .header("authorization", self.bearer())
                 .send_json(body),
@@ -281,42 +302,65 @@ impl Client {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
-}
 
-fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Value, Error> {
-    let mut response =
-        response.map_err(|error| Error::Request(format!("request failed: {error}")))?;
-    let status = response.status().as_u16();
-    if (300..400).contains(&status) {
-        return Err(Error::Request(format!(
-            "server redirected (HTTP {status}); redirects are not followed"
-        )));
-    }
-    let text = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_RESPONSE_BYTES)
-        .read_to_string()
-        .map_err(|error| Error::Request(format!("cannot read response: {error}")))?;
-    if (200..300).contains(&status) {
-        return if text.trim().is_empty() {
-            Ok(Value::Null)
-        } else {
-            serde_json::from_str(&text)
-                .map_err(|_| Error::Request("server returned invalid JSON".to_owned()))
-        };
-    }
-    // The server's `{"error": ...}` text, or axum's plain-text rejection.
-    let message = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|value| {
+    fn read(
+        &self,
+        response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<Value, Error> {
+        let mut response =
+            response.map_err(|error| Error::Request(format!("request failed: {error}")))?;
+        let status = response.status().as_u16();
+        if (300..400).contains(&status) {
+            return Err(Error::Request(format!(
+                "server redirected (HTTP {status}); redirects are not followed"
+            )));
+        }
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_RESPONSE_BYTES)
+            .read_to_string()
+            .map_err(|error| Error::Request(format!("cannot read response: {error}")))?;
+        if (200..300).contains(&status) {
+            return if text.trim().is_empty() {
+                Ok(Value::Null)
+            } else {
+                serde_json::from_str(&text)
+                    .map_err(|_| Error::Request("server returned invalid JSON".to_owned()))
+            };
+        }
+        // The server's `{"error": ...}` text, or axum's plain-text rejection.
+        let parsed = serde_json::from_str::<Value>(&text).ok().and_then(|value| {
             value
                 .get("error")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-        })
-        .unwrap_or_else(|| text.trim().chars().take(300).collect());
-    Err(Error::Status { status, message })
+        });
+        let message = if status == 401 {
+            // Redact the whole body before the clip. A token that starts inside the
+            // 300-character window must not survive as a prefix.
+            let source = parsed.unwrap_or(text);
+            let redacted = source.replace(&self.token, "[REDACTED]");
+            let clipped: String = redacted.trim().chars().take(300).collect();
+            let hint = match &self.config_path {
+                Some(path) => format!(
+                    "check {} and refresh the device credential with `cairn setup <server-url>` (set CAIRN_CONFIG to that file)",
+                    path.display()
+                ),
+                None => "refresh the device credential with `cairn setup <server-url>`".to_owned(),
+            };
+            if clipped.is_empty() {
+                hint
+            } else {
+                format!("{clipped}; {hint}")
+            }
+        } else {
+            parsed
+                .unwrap_or_else(|| text.trim().chars().take(300).collect())
+                .replace(&self.token, "[REDACTED]")
+        };
+        Err(Error::Status { status, message })
+    }
 }
 
 #[cfg(test)]
@@ -380,57 +424,76 @@ mod tests {
             );
         }
         assert!(!path.with_extension("json.tmp").exists());
-        let loaded = Config::load_from(&path, None, None).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.url(), "https://cairn.example.test");
         assert_eq!(loaded.token, TOKEN);
+        assert_eq!(loaded.path(), Some(path.as_path()));
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 
     #[test]
-    fn environment_replaces_the_file_only_as_a_pair() {
-        let path = temp_dir("env").join("config.json");
-        Config::new("https://file.example.test", "file-token")
+    fn a_missing_config_file_names_setup_and_the_selected_path() {
+        let missing = temp_dir("env-none").join("config.json");
+        let error = Config::load_from(&missing).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("cairn setup"), "{text}");
+        assert!(text.contains(&missing.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn http_401_names_the_selected_config_and_hides_the_token() {
+        let path = temp_dir("unauthorized").join("config.json");
+        Config::new("https://cairn.example.test", TOKEN)
             .unwrap()
             .save(&path)
             .unwrap();
-        // One variable alone would aim the stored token at another server (or vice versa).
-        for (url, token) in [
-            (Some("https://env.example.test".to_owned()), None),
-            (None, Some("env-token".to_owned())),
-        ] {
-            let error = Config::load_from(&path, url, token).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("set both CAIRN_URL and CAIRN_DEVICE_TOKEN"),
-                "{error}"
-            );
-        }
-        let loaded = Config::load_from(&path, None, None).unwrap();
-        assert_eq!(
-            (loaded.url(), loaded.token.as_str()),
-            ("https://file.example.test", "file-token")
-        );
-        let loaded = Config::load_from(
-            &path,
-            Some("https://env.example.test".into()),
-            Some("env-token".into()),
-        )
-        .unwrap();
-        assert_eq!(
-            (loaded.url(), loaded.token.as_str()),
-            ("https://env.example.test", "env-token")
-        );
-        let missing = temp_dir("env-none").join("config.json");
-        let loaded = Config::load_from(
-            &missing,
-            Some("https://env.example.test".into()),
-            Some("env-token".into()),
-        )
-        .unwrap();
-        assert_eq!(loaded.token, "env-token");
-        let error = Config::load_from(&missing, None, None).unwrap_err();
-        assert!(error.to_string().contains("cairn setup"));
+        let body = format!(r#"{{"error":"rejected {TOKEN}"}}"#);
+        let (url, _) = serve_once(format!(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        let mut config = Config::load_from(&path).unwrap();
+        config.url = url;
+        let error = Client::new(config)
+            .get("/cairn-memory/auth/me")
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("HTTP 401"), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("cairn setup <server-url>"), "{text}");
+        assert!(!text.contains(TOKEN), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(text.contains("CAIRN_CONFIG"), "{text}");
+    }
+
+    #[test]
+    fn plain_text_401_redacts_a_token_that_crosses_the_clip() {
+        let path = temp_dir("unauthorized-plain").join("config.json");
+        Config::new("https://cairn.example.test", TOKEN)
+            .unwrap()
+            .save(&path)
+            .unwrap();
+        // The raw token crosses the 300-character clip, and the replacement still fits.
+        let filler = "x".repeat(285);
+        let body = format!("{filler}{TOKEN}TAIL");
+        let start = body.find(TOKEN).unwrap();
+        assert!(start < 300 && start + TOKEN.len() > 300, "{body}");
+        let (url, _) = serve_once(format!(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        let mut config = Config::load_from(&path).unwrap();
+        config.url = url;
+        let error = Client::new(config)
+            .get("/cairn-memory/auth/me")
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("HTTP 401"), "{text}");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("set CAIRN_CONFIG to that file"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+        assert!(!text.contains(TOKEN), "{text}");
+        assert!(!text.contains(&TOKEN[..8]), "{text}");
     }
 
     #[cfg(unix)]

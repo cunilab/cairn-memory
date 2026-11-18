@@ -194,8 +194,9 @@ are removed; see [project-layer4](project-layer4.md).
 
 The CLI (`cairn`) and the MCP server (`cairn mcp`) are network clients of the routes in the
 table above. `cairn setup <server-url>` (device token on stdin) stores the server URL and a device
-token, created in the web console, in `$XDG_CONFIG_HOME/cairn/config.json` (mode `0600`);
-`CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together override it (one alone is an error). Every command and tool sends that token
+token, created in the web console, in the selected config file (mode `0600`). File selection,
+the ignored `CAIRN_URL` / `CAIRN_DEVICE_TOKEN` inputs, and the HTTP 401 hint are owned by
+[mcp-layer1](mcp-layer1.md). Every command and tool sends that token
 as the bearer and nothing else; there is no account-token argument and no local-store mode.
 The URL must be `https`, or `http` for a loopback host only. The client never follows a
 redirect and never prints the token. A web-only route answers `403`, and the client shows

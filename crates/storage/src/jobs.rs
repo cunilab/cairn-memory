@@ -629,8 +629,9 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await?;
         let result = self
-            .finish_session_summary(&person_id, &session_id, &mut tx)
-            .await;
+            .finish_session_summary(&person_id, &session_id, &mut tx, true)
+            .await
+            .map(|(memory, _wrote)| memory);
         if result.is_err() {
             sqlx::query("ROLLBACK TO SAVEPOINT distill_summary")
                 .execute(&mut *tx)

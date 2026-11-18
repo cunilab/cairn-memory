@@ -154,6 +154,9 @@ impl PostgresStore {
         let mut memories = self.all_memories_for_person(&account.person_id).await?;
         let counts = contradiction_counts(&memories);
         memories.retain(|m| memory_matches_filter(m, filter));
+        if !filter.include_captures {
+            memories.retain(|memory| memory.kind != cairn_core::MemoryKind::Capture);
+        }
         let ids = memories
             .iter()
             .map(|m| m.memory_id.clone())
@@ -206,6 +209,13 @@ impl PostgresStore {
             .collect::<Vec<_>>();
         cairn_core::prefer_decision(&mut results, &memories);
         prefer_newer_contradiction(&mut results, &memories);
+        if filter.relevance_floor {
+            results.retain(|hit| {
+                by_id
+                    .get(hit.memory_id.as_str())
+                    .is_some_and(|memory| cairn_core::passes_relevance_floor(memory, query))
+            });
+        }
         Ok(results)
     }
 

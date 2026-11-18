@@ -207,7 +207,7 @@ everything else.
    `cairn mcp`; `cairn-server mcp --store` is removed.
 2. The only credential is a device token. `cairn setup <server-url>` reads
    the token from stdin and stores it and the URL in the user config directory with mode
-   `0600`; `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together override (one alone is an error). Local-file mode, store-path arguments, account-token
+   `0600`. The 2026-11-14 env-pair override is superseded by [ADR 0014](./0014-memory-scopes-distillation-and-hybrid-recall.md): the selected file is the only URL and device credential. Local-file mode, store-path arguments, account-token
    arguments (including the MCP `accountToken`), and local account bootstrap and
    registration are removed. This supersedes the sentences above that keep the `cairn`
    CLI and MCP on the unscoped store calls.

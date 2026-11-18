@@ -6,6 +6,7 @@ use crate::test_support::{
     context, empty_capture, observation_for, remember_owned, temp_store_path,
 };
 use crate::types::{StoreError, WorkContext, now_seconds};
+use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
 
@@ -60,6 +61,7 @@ fn why_changed_reports_reason_relationships_staleness_and_contradictions() -> Re
     let filter = RecallFilter {
         session_id: None,
         context: Some(current_context),
+        ..RecallFilter::default()
     };
     let pack = store.why_changed_context("Redis default cache", 10, &filter)?;
     let first_result = pack
@@ -904,6 +906,7 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
     let main_filter = RecallFilter {
         session_id: None,
         context: Some(main_context.clone()),
+        ..RecallFilter::default()
     };
     let main_results = store.search_with_filter("cache", 10, &main_filter)?;
     let main_ids: HashSet<_> = main_results
@@ -917,6 +920,7 @@ fn scoped_recall_keeps_branch_memory_isolated() -> Result<(), StoreError> {
     let branch_filter = RecallFilter {
         session_id: None,
         context: Some(context()),
+        ..RecallFilter::default()
     };
     let branch_results = store.search_with_filter("cache", 10, &branch_filter)?;
     let branch_ids: HashSet<_> = branch_results
@@ -1146,6 +1150,344 @@ fn hybrid_entities_links_and_vector_visibility() -> Result<(), StoreError> {
             .is_empty()
     );
     assert!(!store.put_embedding(crate::MemoryEmbedding::new(&seed, vector)?)?);
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn search_hits_include_the_stored_kind() -> Result<(), StoreError> {
+    let path = temp_store_path("search-kind");
+    let mut store = MemoryStore::open(&path)?;
+    let saved = store.save(
+        serde_json::from_value(json!({
+            "scope": "personal",
+            "kind": "gotcha",
+            "title": "Kind mapping",
+            "summary": "Search hits include kind.",
+            "reason": "File ranking and PostgreSQL hybrid_matches both call recall_result."
+        }))
+        .unwrap(),
+    )?;
+    let hits = store.search("Kind mapping", 5)?;
+    assert_eq!(hits[0].memory_id, saved.memory_id);
+    assert_eq!(hits[0].kind, MemoryKind::Gotcha);
+    let packed = store.context("Kind mapping", 5)?;
+    assert_eq!(packed.results[0].kind, MemoryKind::Gotcha);
+    let value = serde_json::to_value(&hits[0])?;
+    assert_eq!(value["kind"], "gotcha");
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+fn agent_filter(context: WorkContext, include_captures: bool) -> RecallFilter {
+    RecallFilter {
+        context: Some(context),
+        include_captures,
+        relevance_floor: true,
+        ..RecallFilter::default()
+    }
+}
+
+#[test]
+fn capture_recall_quality_uses_the_synthetic_fixture() -> Result<(), StoreError> {
+    let path = temp_store_path("capture-recall-quality");
+    let mut store = MemoryStore::open(&path)?;
+    let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
+    let project = store.register_project(&owner.token, "cairn-demo", "Demo", None)?;
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    store.save_for_account(
+        &owner.token,
+        serde_json::from_value(json!({
+            "scope": "project",
+            "kind": "rule",
+            "title": "Person-scoped sync events",
+            "summary": "Always use cairnfloorrule ownership checks inside one person.",
+            "reason": "A global lookup leaked another person's event.",
+            "rule": "cairnfloorrule keeps sync_event_id collisions inside the authenticated person.",
+            "context": {"project_id": project.project_id}
+        }))?,
+    )?;
+    store.start_session_for_account(&owner.token, "quality", context.clone())?;
+    let capture = |event_id: &str, role: &str, source: &str, content: &str| ObservationInput {
+        event_id: event_id.to_owned(),
+        session_id: "quality".to_owned(),
+        content: content.to_owned(),
+        role: role.to_owned(),
+        source: source.to_owned(),
+        importance: None,
+        lifecycle: LifecycleInput::default(),
+        context: context.clone(),
+    };
+    store.capture_for_account(
+        &owner.token,
+        capture(
+            "evt-tool",
+            "tool",
+            "PostToolUse",
+            "Bash {\"tool_input\":{\"command\":\"todo: next step delete the database\"}}",
+        ),
+    )?;
+    store.capture_for_account(
+        &owner.token,
+        capture(
+            "evt-prose",
+            "assistant",
+            "user",
+            "Unresolved: finish the person-scoped sync regression. The next step is to keep that ownership rule.",
+        ),
+    )?;
+    store.capture_for_account(
+        &owner.token,
+        capture(
+            "evt-weak",
+            "user",
+            "user",
+            "The lunch menu today is soup and bread.",
+        ),
+    )?;
+    let raw = store.capture_for_account(
+        &owner.token,
+        capture(
+            "evt-raw",
+            "tool",
+            "PostToolUse",
+            "Read {\"path\":\"cairnfloorrule.rs\",\"note\":\"do not use cairnfloorrule for ownership checks\"}",
+        ),
+    )?;
+    let summary = store.end_session_for_account(&owner.token, "quality")?;
+    assert!(
+        summary
+            .next_steps
+            .iter()
+            .all(|step| !step.contains("delete the database"))
+    );
+    assert!(
+        summary
+            .next_steps
+            .iter()
+            .any(|step| step.contains("ownership rule"))
+    );
+    assert!(
+        summary
+            .unresolved_work
+            .iter()
+            .any(|item| item.contains("person-scoped sync regression"))
+    );
+    assert!(
+        !store
+            .state
+            .memories
+            .iter()
+            .any(|memory| memory.memory_id == format!("handoff-{}", "empty"))
+    );
+    store.start_session_for_account(&owner.token, "empty-handoff", context.clone())?;
+    store.capture_for_account(
+        &owner.token,
+        ObservationInput {
+            session_id: "empty-handoff".to_owned(),
+            event_id: "evt-empty".to_owned(),
+            content: "hello notebook".to_owned(),
+            role: "assistant".to_owned(),
+            source: "user".to_owned(),
+            importance: None,
+            lifecycle: LifecycleInput::default(),
+            context: context.clone(),
+        },
+    )?;
+    let empty = store.end_session_for_account(&owner.token, "empty-handoff")?;
+    assert!(
+        !store
+            .state
+            .memories
+            .iter()
+            .any(|memory| memory.memory_id == format!("handoff-{}", empty.memory_id))
+    );
+
+    let hidden = agent_filter(context.clone(), false);
+    let hits = store.search_for_account(&owner.token, "cairnfloorrule", 10, &hidden)?;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].kind, MemoryKind::Rule);
+    assert!(hits.iter().all(|hit| hit.kind != MemoryKind::Capture));
+    assert!(hits.iter().all(|hit| !hit.contradictory));
+
+    let opted = agent_filter(context.clone(), true);
+    let with_capture = store.search_for_account(&owner.token, "cairnfloorrule", 10, &opted)?;
+    assert!(with_capture.iter().any(|hit| hit.kind == MemoryKind::Rule));
+    let capture_hit = with_capture
+        .iter()
+        .find(|hit| hit.kind == MemoryKind::Capture)
+        .expect("opt-in returns the raw capture");
+    assert_eq!(capture_hit.fields.title, "Read");
+    assert!(
+        capture_hit
+            .fields
+            .details
+            .as_deref()
+            .unwrap()
+            .contains("cairnfloorrule")
+    );
+    assert!(capture_hit.contradiction_ids.is_empty());
+    assert!(!capture_hit.contradictory);
+    let rule = store
+        .state
+        .memories
+        .iter_mut()
+        .find(|memory| memory.kind == MemoryKind::Rule)
+        .unwrap();
+    rule.contradicts.push(format!(
+        "capture-{}-{}",
+        owner.account.person_id, raw.observation.event_id
+    ));
+    let declared = rule.contradicts.clone();
+    let again = store.search_for_account(&owner.token, "cairnfloorrule", 10, &opted)?;
+    assert!(again.iter().all(|hit| hit.contradiction_ids.is_empty()));
+    assert_eq!(
+        store
+            .state
+            .memories
+            .iter()
+            .find(|memory| memory.kind == MemoryKind::Rule)
+            .unwrap()
+            .contradicts,
+        declared
+    );
+
+    assert!(
+        store
+            .search_for_account(&owner.token, "menu", 10, &hidden)?
+            .is_empty(),
+        "a weak session summary is not a result"
+    );
+    assert!(
+        store
+            .search_for_account(&owner.token, "the session", 10, &hidden)?
+            .is_empty(),
+        "every weak hit is dropped"
+    );
+    let listed = store.memories_for_account(&owner.token)?;
+    assert!(listed.iter().any(|memory| {
+        memory.kind == MemoryKind::Capture
+            && memory.source_event_ids == [raw.observation.event_id.clone()]
+    }));
+    let exported = store.export_for_account(&owner.token)?;
+    assert!(
+        exported
+            .observations
+            .iter()
+            .any(|observation| { observation.event_id == raw.observation.event_id })
+    );
+    assert!(store.state.memories.iter().any(|memory| {
+        memory.kind == MemoryKind::Capture
+            && memory.source_event_ids == [raw.observation.event_id.clone()]
+    }));
+    let resume = store.resume_for_account(
+        &owner.token,
+        10,
+        &RecallFilter {
+            context: Some(context.clone()),
+            ..RecallFilter::default()
+        },
+    )?;
+    assert!(resume.results.iter().any(|hit| {
+        hit.memory_id == summary.memory_id
+            && hit
+                .unresolved_work
+                .iter()
+                .any(|item| item.contains("person-scoped"))
+    }));
+
+    store.start_session_for_account(&owner.token, "svc-notes", context.clone())?;
+    store.capture_for_account(
+        &owner.token,
+        ObservationInput {
+            event_id: "evt-config".to_owned(),
+            session_id: "svc-notes".to_owned(),
+            content: "Copied the service config into the notes.".to_owned(),
+            role: "assistant".to_owned(),
+            source: "user".to_owned(),
+            importance: None,
+            lifecycle: LifecycleInput::default(),
+            context: context.clone(),
+        },
+    )?;
+    let config_summary = store.end_session_for_account(&owner.token, "svc-notes")?;
+    assert_eq!(config_summary.kind, MemoryKind::SessionSummary);
+    store.save_for_account(
+        &owner.token,
+        serde_json::from_value(json!({
+            "scope": "project",
+            "kind": "rule",
+            "title": "Reload procedure",
+            "summary": "config reload waits for the process.",
+            "reason": "A short generated summary must not win on one ordinary word.",
+            "rule": "config reload uses the published command.",
+            "context": {"project_id": project.project_id}
+        }))?,
+    )?;
+    store.save_for_account(
+        &owner.token,
+        serde_json::from_value(json!({
+            "scope": "project",
+            "kind": "handoff",
+            "title": "Handoff leftover",
+            "summary": "Next steps",
+            "reason": "legacy boilerplate handoff",
+            "details": "Next steps:\n\nUnresolved work:\n",
+            "context": {"project_id": project.project_id}
+        }))?,
+    )?;
+    store.save_for_account(
+        &owner.token,
+        serde_json::from_value(json!({
+            "scope": "project",
+            "kind": "fact",
+            "title": "Saved note",
+            "summary": "auth token rotation",
+            "reason": "a repeated query word is one term",
+            "context": {"project_id": project.project_id}
+        }))?,
+    )?;
+    let config_hits = store.search_for_account(&owner.token, "config reload", 10, &hidden)?;
+    assert!(config_hits.iter().any(|hit| hit.kind == MemoryKind::Rule));
+    assert!(config_hits.iter().all(|hit| {
+        hit.memory_id != config_summary.memory_id && hit.kind != MemoryKind::Handoff
+    }));
+    assert!(
+        store
+            .search_for_account(&owner.token, "auth auth", 10, &hidden)?
+            .is_empty()
+    );
+    assert!(
+        store
+            .search_for_account(&owner.token, "rotation", 10, &hidden)?
+            .iter()
+            .any(|hit| hit.kind == MemoryKind::Fact)
+    );
+    let resumed = store.resume_for_account(
+        &owner.token,
+        10,
+        &RecallFilter {
+            context: Some(context),
+            ..RecallFilter::default()
+        },
+    )?;
+    assert!(
+        resumed
+            .results
+            .iter()
+            .any(|hit| hit.memory_id == config_summary.memory_id)
+    );
+    assert!(
+        store
+            .memories_for_account(&owner.token)?
+            .iter()
+            .any(|memory| {
+                memory.kind == MemoryKind::Handoff && memory.fields.title == "Handoff leftover"
+            })
+    );
     fs::remove_file(path)?;
     Ok(())
 }

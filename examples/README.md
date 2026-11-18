@@ -40,17 +40,16 @@ capabilities, official references, work tracking and bounds.
    `.claude/settings.local.json` for one project. Merge with any existing
    `hooks` key instead of replacing it.
 6. If your config directory is not `~/.config/cairn`, change the script path in the
-   commands. Set `CAIRN_URL` (https, or http only for loopback; a reverse proxy path prefix such as
-   `https://cairn.example.test/agent` is allowed), `CAIRN_DEVICE_TOKEN`, and
-   `CAIRN_OUTBOX` as an absolute path. Do not commit a file that holds the
-   token. As an alternative to the `env` block, export the three variables in
-   the shell that starts `claude` and drop the `env` block.
+   commands. Run `cairn setup <server-url>` so the default config file holds the
+   server URL (https, or http only for loopback; a reverse proxy path prefix such as
+   `https://cairn.example.test/agent` is allowed) and the device credential.
+   Set `CAIRN_OUTBOX` as an absolute path. Do not commit a file that holds the
+   token. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored.
 7. Check the hook alone before relying on it:
 
    ```bash
    printf '%s' '{"session_id":"hook-check","hook_event_name":"UserPromptSubmit","prompt":"hook check"}' \
-     | CAIRN_URL=http://127.0.0.1:3111 CAIRN_DEVICE_TOKEN='<device-token>' \
-       python3 ~/.config/cairn/hook/cairn_hook.py
+     | python3 ~/.config/cairn/hook/cairn_hook.py
    ```
 
    It prints the server reply and exits 0.

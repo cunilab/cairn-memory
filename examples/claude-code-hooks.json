@@ -1,7 +1,5 @@
 {
   "env": {
-    "CAIRN_URL": "http://127.0.0.1:3111",
-    "CAIRN_DEVICE_TOKEN": "<device-token-from-the-web-console>",
     "CAIRN_OUTBOX": "/absolute/path/to/cairn-outbox.json"
   },
   "hooks": {

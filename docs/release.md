@@ -41,7 +41,7 @@ Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[w
 4. The `Release` workflow then:
    - fails unless the tag equals the workspace version, is `MAJOR.MINOR.PATCH` (no pre-release suffix), and points at a commit on `main`;
    - builds the CLI natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`; the server uses the same macOS/Windows targets and `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` on Linux, because ONNX Runtime requires glibc;
-   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
+   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, `cairn_instructions.txt`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
    - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-memory-server` and `ghcr.io/cunilab/cairn-memory-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (each platform is built natively, then merged into one multi-arch manifest). How to run them: [deploy](./deploy.md).
 5. A bad release is not edited in place: delete the release and tag, fix on a branch, and release the next patch version. Clients never install a version lower than their own.
 
@@ -72,6 +72,78 @@ Debian trixie and run on `debian:trixie-slim`, with the C++ runtime and local
 model included. Standalone servers provision the model using the pinned download
 script and `--embedding-model-dir` / `CAIRN_EMBEDDING_MODEL_DIR`; no model means
 lexical/entity/link fallback. See [hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014).
+
+## 0.1.5 upgrade notes
+
+Upgrade the server and CLI together. A 0.1.5 hook calls
+`POST /cairn-memory/session/checkpoint`, which a 0.1.4 server does not serve.
+Capture hiding and the relevance floor are server behavior; compact MCP cards
+are the CLI view of the same routes. REST and CLI commands still print server
+JSON.
+
+This release adds no SQL file and does not change `STORE_VERSION` or
+`EXPORT_VERSION`. Startup still applies the existing migrations, ending at
+`0018_memory_links.sql`. PostgreSQL still needs pgvector, and the glibc, ONNX,
+and MiniLM requirements in the 0.1.4 section above still apply. A store that
+already completed the 0.1.4 scope change does not need a reset. The pre-0.1.4
+fresh-store warning in that section still applies to anything older.
+
+`cairn setup <server-url>` writes `url` and `token` to the selected file. A
+non-empty `CAIRN_CONFIG` selects it for the CLI, stdio MCP, setup, and hooks.
+Otherwise the file is `$XDG_CONFIG_HOME/cairn/config.json`, else
+`~/.config/cairn/config.json`, else `%APPDATA%/cairn/config.json`. A 0.1.4 file
+with those two fields still loads. If `CAIRN_URL` or `CAIRN_DEVICE_TOKEN` is
+present, including an empty value, it is ignored and one stderr line names the
+variable, not the value. An HTTP 401 names the selected file and says to run
+`cairn setup <server-url>` with `CAIRN_CONFIG` set to that file.
+
+Refresh owned integrations with
+`cairn setup <server-url> --agent claude|codex|opencode`. That installs the
+hook and instruction files embedded in this binary and rewrites only the
+Cairn-owned hooks, MCP entry, and OpenCode `plugins/cairn/index.js`. URL-only
+setup still downloads the hook scripts of the matching published release.
+A script that differs from the recorded checksum is kept as `<name>.bak`.
+
+Default MCP search, smart search, recall, context, and reflect return short
+cards. `memory_save` and `memory_lesson_save` return `memory_id`, `kind`,
+`scope`, and `status`. `memory_get` and export stay full. Default agent search
+and the related recall routes omit raw captures until `includeCaptures` or
+`--include-captures`. A relevance floor can return no hits. Graph and
+similarity-review text is TOON; their structured content stays JSON. There is
+no server LLM.
+
+OpenCode 2.1.4 omits the MCP registry on the first prompt of a cold session.
+The second prompt in that warmed session advertises the Cairn tools. The
+2026-11-18 check did not treat a newer OpenCode build as the fix. Claude Code
+and Codex native probes in that pass did not emit a compaction event; their
+compaction check remains the fixture `SessionStart` with `source` `compact`.
+An earlier OpenCode 2.1.4 loopback session did compact and re-inject the brief.
+The record is [v0.1.5 release verification](evidence.md).
+
+Rollback to 0.1.4 does not rewrite server rows or roll the SQL schema back.
+The 0.1.4 init and rename behavior in the section above stays in force on that
+version. `cairn update` will not install an older version. Stop the agents
+that run Cairn hooks first. While the 0.1.5 CLI is still the one on `PATH`,
+remove each owned integration with
+`cairn setup <server-url> --agent claude|codex|opencode --remove`
+(`--agent` immediately after the URL, and `--remove` last). That command
+reads no token. The 0.1.4 hook accepts only `--agent claude|codex`, and 0.1.4
+setup does not delete the managed OpenCode file `plugins/cairn/index.js`.
+
+The 0.1.5 hook keeps `hook-state.sqlite3` beside the selected config file.
+Its `sessions` table has five columns, including `generation`, and inserts with
+`VALUES (?, ?, ?, ?, ?)`. The 0.1.4 hook uses that same file and
+`INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?)`, and `CREATE TABLE IF
+NOT EXISTS` leaves the newer table in place, so the restored hook fails on it.
+Move `hook-state.sqlite3` aside, with any `-journal`, `-wal`, or `-shm`
+sidecar present, or restore a 0.1.4 backup of that file. Leave the credential
+file and any outbox queue untouched.
+
+Then replace the matched 0.1.4 server, CLI, and hook scripts by hand, and
+reinstall the integrations you still want with that binary. The restored
+client makes `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace the config
+file, drops `CAIRN_CONFIG`, and brings back the previous MCP payloads, default
+capture visibility, relevance behavior, and Stop save-ask.
 
 ## How clients update
 

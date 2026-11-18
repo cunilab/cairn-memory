@@ -179,6 +179,7 @@ impl McpServer {
             },
             "serverInfo": {
                 "name": "cairn-memory",
+                "title": "Cairn",
                 "version": env!("CARGO_PKG_VERSION")
             },
             "instructions": crate::agents::INSTRUCTIONS
@@ -197,14 +198,18 @@ impl McpServer {
         let Some(tool) = tools::find(name) else {
             return rpc_error(id, -32602, format!("unknown tool: {name}"));
         };
-        let arguments = match params.get("arguments") {
+        let mut arguments = match params.get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
+        // MCP-only view switch. It is not a REST field.
+        let expanded = arguments
+            .remove("expanded")
+            .is_some_and(|value| value.as_bool() == Some(true));
 
         match tools::call(&self.client, tool, &arguments) {
-            Ok(value) => rpc_result(id, tool_success(value)),
+            Ok(value) => rpc_result(id, crate::present::present(tool.name, expanded, value)),
             Err(error) => rpc_result(id, tool_failure(error.to_string())),
         }
     }
@@ -212,15 +217,6 @@ impl McpServer {
 
 pub fn run_stdio(config: Config) -> Result<(), Error> {
     McpServer::new(config).run_stdio()
-}
-
-fn tool_success(value: Value) -> Value {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-    json!({
-        "isError": false,
-        "content": [{"type": "text", "text": text}],
-        "structuredContent": value
-    })
 }
 
 fn tool_failure(message: String) -> Value {
@@ -271,6 +267,12 @@ mod tests {
             json!({"protocolVersion": PROTOCOL_VERSION}),
         );
         assert_eq!(init["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(init["result"]["serverInfo"]["name"], "cairn-memory");
+        assert_eq!(init["result"]["serverInfo"]["title"], "Cairn");
+        let instructions = init["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("cairn-memory"));
+        assert!(instructions.contains("memory_save"));
+        assert!(instructions.contains("memory_get"));
         assert!(
             server
                 .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)

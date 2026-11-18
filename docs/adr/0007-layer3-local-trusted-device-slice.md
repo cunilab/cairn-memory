@@ -156,7 +156,8 @@ it difficult to prove the core behavior and would overstate the security model.
   the [Layer 3 sync contract](../contracts/sync-layer3.md#opportunistic-replay).
   This supersedes the earlier sentence that replay stays an explicit command.
 - Amendment, 2026-11-14: the hook is device-token only. It always posts
-  `sync/push` with `CAIRN_DEVICE_TOKEN`; the unauthenticated file observe
+  `sync/push` with the device credential. The 2026-11-14 `CAIRN_DEVICE_TOKEN`
+  input is superseded for configuration by [ADR 0014](./0014-memory-scopes-distillation-and-hybrid-recall.md). The unauthenticated file observe
   default and the `CAIRN_ACCOUNT_TOKEN` observe path are removed, and the
   hook's offline refusal text for observe goes with them. A file `sync_push`
   of a new observation now records the device's person as owner so account

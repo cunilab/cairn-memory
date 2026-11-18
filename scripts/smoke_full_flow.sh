@@ -2,7 +2,8 @@
 set -eu
 
 # A shell that points these at a real server would send this smoke's writes there.
-unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_OUTBOX
+# CAIRN_CONFIG would select a developer's credential file.
+unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_CONFIG CAIRN_OUTBOX
 
 store="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-store.XXXXXX")"
 restored="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-restored.XXXXXX")"
@@ -11,6 +12,7 @@ restored_log="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-restored-log.XXXXXX")"
 bundle="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-bundle.XXXXXX")"
 hook_first="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-hook-first.XXXXXX")"
 hook_duplicate="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-hook-duplicate.XXXXXX")"
+hook_config="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-hook-config.XXXXXX")"
 summary="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-summary.XXXXXX")"
 resume="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-resume.XXXXXX")"
 unresolved="$(mktemp "${TMPDIR:-/tmp}/cairn-full-flow-unresolved.XXXXXX")"
@@ -45,7 +47,7 @@ cleanup() {
     wait "$restored_pid" 2>/dev/null || true
   fi
   rm -f "$store" "$restored" "$log" "$restored_log" "$bundle" \
-    "$hook_first" "$hook_duplicate" "$summary" "$resume" "$unresolved" "$search_before" \
+    "$hook_first" "$hook_duplicate" "$hook_config" "$summary" "$resume" "$unresolved" "$search_before" \
     "$project_memory" "$branch_memory" "$preference_memory" "$scoped_main" "$scoped_branch" \
     "$search_after_restart" "$corrected" "$search_after_correction" \
     "$search_after_forget" "$import_result" "$search_restored"
@@ -118,12 +120,14 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"full-flow-session","context":{"repository":"cairn-demo","branch":"main"}}' >/dev/null
 
-CAIRN_DEVICE_TOKEN="$device" CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_first" <<'JSON'
-{"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"tool","source":"PostToolUse","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
+python3 -c 'import json,sys; json.dump({"url":sys.argv[1],"token":sys.argv[2]}, open(sys.argv[3],"w"))' "$base" "$device" "$hook_config"
+chmod 600 "$hook_config"
+CAIRN_CONFIG="$hook_config" python3 scripts/cairn_hook.py >"$hook_first" <<'JSON'
+{"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"user","source":"UserPromptSubmit","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
 JSON
 
-CAIRN_DEVICE_TOKEN="$device" CAIRN_URL="$base" python3 scripts/cairn_hook.py >"$hook_duplicate" <<'JSON'
-{"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"tool","source":"PostToolUse","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
+CAIRN_CONFIG="$hook_config" python3 scripts/cairn_hook.py >"$hook_duplicate" <<'JSON'
+{"eventId":"full-flow-event","sessionId":"full-flow-session","content":"The authentication decision passed after the signed cookie test. The next step is to add the missing signature regression test; the issue is not yet verified. api_key=full-flow-secret","role":"user","source":"UserPromptSubmit","importance":"high","context":{"repository":"cairn-demo","branch":"main"}}
 JSON
 
 FIRST_HOOK_JSON="$hook_first" DUPLICATE_HOOK_JSON="$hook_duplicate" python3 - <<'PY'
@@ -162,7 +166,7 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/remembe
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/sync/push" \
   -H 'Content-Type: application/json' \
-  -d '{"eventId":"full-flow-branch-event","sessionId":"full-flow-branch","role":"tool","source":"smoke","content":"The Redis cache experiment is branch-local and not yet verified.","context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >/dev/null
+  -d '{"eventId":"full-flow-branch-event","sessionId":"full-flow-branch","role":"user","source":"smoke","content":"The Redis cache experiment is branch-local and not yet verified. The next step is to keep the redis cache experiment on this branch.","context":{"repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >/dev/null
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/session/end" \
   -H 'Content-Type: application/json' \
   -d '{"sessionId":"full-flow-branch"}' >"$branch_memory"
@@ -177,7 +181,7 @@ curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/context" \
   -H 'Content-Type: application/json' \
-  -d '{"query":"cache","limit":2,"context":{"project_id":"'"$project_id"'","repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$scoped_branch"
+  -d '{"query":"redis cache","limit":2,"context":{"project_id":"'"$project_id"'","repository":"cairn-demo","branch":"experiment/redis-cache","worktree":"wt-cache"}}' >"$scoped_branch"
 
 curl -fsS -X POST -H "Authorization: Bearer $device" "$base/cairn-memory/search" \
   -H 'Content-Type: application/json' \

@@ -144,7 +144,7 @@ content, role, or source differs from the stored event or observation is a confl
 overwritten. `event already exists outside sync scope` is a file-store rule only. On PostgreSQL a device-token
 `POST /cairn-memory/observe` is this same push, so it behaves alike. Session start and end accept a web session or a
 device token. Sync accepts a device token only; a session token is `401`. The
-hook always posts `POST /cairn-memory/sync/push` with `CAIRN_DEVICE_TOKEN`.
+hook always posts `POST /cairn-memory/sync/push` with the device credential from its selected config file.
 That post is redacted with the outbox normalizer before it is sent. With
 `CAIRN_OUTBOX` unset, that post is not an enqueue and a failure is dropped.
 With it set, only a retryable failure is appended to the version 2
@@ -421,7 +421,7 @@ this file, and enqueue again into a new file with the new token. Do not point
 two credentials or two origins at one queue.
 
 The hook calls `enqueue_bound` only when `CAIRN_OUTBOX` is set,
-`CAIRN_DEVICE_TOKEN` is the only credential, and the one POST was retryable.
+the selected config file's device credential is the only credential, and the one POST was retryable.
 It passes the normalized payload explicitly, with `nonblocking` and without
 the enqueue report. `preflight_bound` is the check before that POST. It does
 not create a missing queue file. Neither call is a replay, and replay does

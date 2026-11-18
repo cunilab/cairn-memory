@@ -39,7 +39,7 @@ except ImportError:
 
 
 # Keep VERSION equal to [workspace.package] version in Cargo.toml (smoke_outbox.py checks it).
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 # urllib's default agent is blocked by Cloudflare (error 1010) in front of a deployed server.
 USER_AGENT = "cairn-hook/" + VERSION
 MAX_EVENTS = 256
@@ -415,7 +415,7 @@ def require_secure_url(base: str) -> None:
 
 
 def normalize_origin(base: str) -> str:
-    # CAIRN_URL is the server base the hook posts to after stripping trailing
+    # The selected config URL is the server base the hook posts to after stripping trailing
     # slashes: origin plus an optional path prefix (a reverse proxy mount such
     # as /agent). The prefix must not already name the API route, repeat a slash,
     # or hold dot segments or percent escapes, so the stored base maps to one

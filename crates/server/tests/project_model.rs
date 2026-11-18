@@ -559,12 +559,14 @@ async fn distillation_scenario(router: Router) {
                 .iter()
                 .find(|m| m["memory_id"] == summary["memory_id"])
                 .unwrap();
-            let current_handoff = retained
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["session_id"] == session && m["kind"] == "handoff")
-                .unwrap();
+            // The forgotten capture was the only next step, so no handoff is stored again.
+            assert!(
+                !retained
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["session_id"] == session && m["kind"] == "handoff")
+            );
             let late_id = format!("{session}-late");
             let current_fact = retained
                 .as_array()
@@ -572,7 +574,7 @@ async fn distillation_scenario(router: Router) {
                 .iter()
                 .find(|m| m["kind"] == "fact" && m["source_event_ids"] == json!([late_id]))
                 .unwrap();
-            for hidden in [current_handoff, current_summary] {
+            for hidden in [current_summary] {
                 ok(
                     &router,
                     "POST",
