@@ -18,5 +18,5 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 [dev-dependencies]
 axum.workspace = true
 cairn-server = { path = "../server" }
-cairn-storage = { path = "../storage" }
+cairn-store = { path = "../store", features = ["testing"] }
 tokio.workspace = true

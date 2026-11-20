@@ -185,7 +185,7 @@ version = "0.1.5"
 dependencies = [
  "axum",
  "cairn-server",
- "cairn-storage",
+ "cairn-store",
  "serde",
  "serde_json",
  "sha2",
@@ -210,23 +210,13 @@ version = "0.1.5"
 dependencies = [
  "axum",
  "cairn-core",
- "cairn-storage",
+ "cairn-store",
  "fastembed",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "cairn-storage"
-version = "0.1.5"
-dependencies = [
- "cairn-core",
- "serde_json",
- "sqlx",
- "tokio",
 ]
 
 [[package]]

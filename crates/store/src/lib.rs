@@ -1,5 +1,5 @@
 //! PostgreSQL persistence for the 0.1.6 memory model. Everything lives in one schema
-//! (`cairn` in production, `t_<random>` per test); see `migrations/foundation/`.
+//! (`cairn` in production, `t_<random>` per test); see `migrations/`.
 
 pub mod account;
 pub mod capture;
@@ -18,10 +18,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use std::str::FromStr;
 
-/// `migrations/foundation/NNNN_*.sql`, applied in order. Each runs in one transaction.
+/// `migrations/NNNN_*.sql`, applied in order. Each runs in one transaction.
 const MIGRATIONS: &[(&str, &str)] = &[(
     "0001_foundation",
-    include_str!("../../../migrations/foundation/0001_foundation.sql"),
+    include_str!("../../../migrations/0001_foundation.sql"),
 )];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

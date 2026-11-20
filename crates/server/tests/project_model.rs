@@ -1,728 +1,279 @@
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::Request,
-};
-use cairn_server::{AppState, app, postgres_app};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+//! The shared project model over HTTP: accounts, devices, membership and who sees what.
 
-async fn request(
-    router: &Router,
-    method: &str,
-    path: &str,
-    body: Value,
-    token: Option<&str>,
-) -> (u16, Value) {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(format!("/cairn-memory/{path}"))
-        .header("content-type", "application/json");
-    if let Some(token) = token {
-        builder = builder.header("authorization", format!("Bearer {token}"));
-    }
-    let response = router
-        .clone()
-        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = response.status().as_u16();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (
-        status,
-        if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap()
-        },
-    )
-}
-async fn ok(router: &Router, method: &str, path: &str, body: Value, token: Option<&str>) -> Value {
-    let (status, body) = request(router, method, path, body, token).await;
-    assert!(
-        (200..300).contains(&status),
-        "{method} {path}: {status} {body}"
-    );
-    body
-}
-async fn scenario(router: Router) {
-    let pw = "correct horse battery staple";
-    let admin = ok(
-        &router,
-        "POST",
-        "auth/bootstrap",
-        json!({"email":"admin@scope.test","password":pw}),
-        None,
-    )
-    .await;
-    let admin_token = admin["token"].as_str().unwrap();
-    let author = ok(
-        &router,
-        "POST",
-        "auth/register",
-        json!({"email":"author@scope.test","password":pw}),
-        Some(admin_token),
-    )
-    .await;
-    let stranger = ok(
-        &router,
-        "POST",
-        "auth/register",
-        json!({"email":"stranger@scope.test","password":pw}),
-        Some(admin_token),
-    )
-    .await;
-    let author_token = author["token"].as_str().unwrap();
-    let stranger_token = stranger["token"].as_str().unwrap();
-    let project = ok(
-        &router,
-        "POST",
-        "projects/init",
-        json!({"repository":"example.test/acme/scopes","name":"Scopes"}),
-        Some(admin_token),
-    )
-    .await;
-    let project_id = project["project_id"].as_str().unwrap();
-    ok(
-        &router,
-        "POST",
-        "projects/init",
-        json!({"repository":"example.test/acme/scopes","project_id":project_id}),
-        Some(author_token),
-    )
-    .await;
+mod common;
+use common::{App, PASSWORD, ids};
+use serde_json::json;
+
+#[tokio::test]
+async fn shared_project_model() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let author = app.member(&admin, "author").await;
+    let stranger = app.member(&admin, "stranger").await;
+    let author_device = app.device(&author, "author-laptop").await;
+    let stranger_device = app.device(&stranger, "stranger-laptop").await;
+
+    // A device token cannot manage accounts or devices; a stranger bearer is a plain 401.
+    let (status, body) = app
+        .send("GET", "devices", json!(null), Some(&author_device))
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["code"], "forbidden");
+    let (status, _) = app.send("GET", "devices", json!(null), Some("nope")).await;
+    assert_eq!(status, 401);
+    let (status, _) = app
+        .send("GET", "auth/accounts", json!(null), Some(&author))
+        .await;
+    assert_eq!(status, 403);
+
+    // init creates, then joins by the committed id; a differing name is refused for a member.
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/widgets", "name": "Widgets"}),
+            &author_device,
+        )
+        .await;
+    assert_eq!(project["created"], true);
+    let id = project["project_id"].as_str().unwrap();
+    let joined = app
+        .post(
+            "projects/init",
+            json!({"project_id": id, "repository": "x", "name": "Widgets"}),
+            &stranger_device,
+        )
+        .await;
+    assert_eq!(joined["created"], false);
+    let (status, _) = app
+        .send(
+            "POST",
+            "projects/init",
+            json!({"project_id": id, "repository": "x", "name": "Other"}),
+            Some(&stranger_device),
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    // Both are members; saving into the project uses the request context.
     let context =
-        json!({"project_id":project_id,"repository":"example.test/acme/scopes","branch":"feature"});
-    for missing in ["title", "summary", "reason", "scope"] {
-        let mut input = json!({"title":"scopecheck title","summary":"scopecheck summary","reason":"scopecheck reason","scope":"personal"});
-        input.as_object_mut().unwrap().remove(missing);
-        let (status, body) = request(&router, "POST", "remember", input, Some(author_token)).await;
-        assert_eq!(status, 400, "{missing}: {body}");
-        assert!(body["error"].as_str().unwrap().contains(missing), "{body}");
-    }
-    let note = ok(&router,"POST","remember",json!({"scope":"project","kind":"decision","title":"scopecheck decision","summary":"Choose bounded writes","reason":"Avoid races","context":context,"decision_context":"Concurrent capture","alternatives":["unbounded"],"consequences":"small transactions","details":"verified details"}),Some(author_token)).await;
-    let personal = ok(&router,"POST","remember",json!({"scope":"personal","kind":"preference","title":"scopecheck behaviour","summary":"Use concise answers","reason":"Save attention","preference":"concise","example":"one paragraph"}),Some(author_token)).await;
-    let global = ok(&router,"POST","remember",json!({"scope":"global","kind":"gotcha","title":"scopecheck global","summary":"Reuse locks","reason":"Serialize writes","symptom":"race","cause":"missing lock","fix":"transaction"}),Some(author_token)).await;
-    let device = ok(&router,"POST","devices/register",json!({"deviceId":"scope-device","personId":author["account"]["person_id"],"name":"Scope device"}),Some(author_token)).await;
-    ok(
-        &router,
-        "POST",
-        "session/start",
-        json!({"sessionId":"scope-session","context":context}),
-        Some(author_token),
-    )
-    .await;
-    let captured = ok(&router,"POST","observe",json!({"eventId":"scope-event","sessionId":"scope-session","content":"scopecheck raw capture","role":"user","source":"test","context":context}),Some(device["token"].as_str().unwrap())).await;
-    assert_eq!(captured["observation"]["scope"], "project");
-    let summary = ok(
-        &router,
-        "POST",
-        "session/end",
-        json!({"sessionId":"scope-session"}),
-        Some(author_token),
-    )
-    .await;
-    for token in [admin_token, author_token] {
-        let rows = ok(
-            &router,
-            "GET",
-            &format!("projects/{project_id}/memories"),
-            Value::Null,
-            Some(token),
+        json!({"project_id": id, "repository": "github.com/acme/widgets", "branch": "feature-x"});
+    let rule = app
+        .post(
+            "remember",
+            json!({"kind": "rule", "title": "Use cents", "summary": "Money is integer cents.", "reason": "float drift", "context": context}),
+            &author_device,
         )
         .await;
-        let rows = rows.as_array().unwrap();
-        assert!(rows.iter().any(|m| m["memory_id"] == note["memory_id"]));
-        assert!(
-            rows.iter()
-                .any(|m| m["kind"] == "capture" && m["summary"] == "scopecheck raw capture")
-        );
-        assert!(rows.iter().any(|m| m["memory_id"] == summary["memory_id"]));
-        let recalled = ok(
-            &router,
-            "POST",
-            "search",
-            json!({"query":"scopecheck","context":context}),
-            Some(token),
+    let rule_id = rule["id"].as_str().unwrap().to_owned();
+    assert_eq!(rule["deduplicated"], false);
+    let personal = app
+        .post(
+            "remember",
+            json!({"kind": "note", "title": "My scratch", "summary": "private", "scope": "personal"}),
+            &author_device,
         )
         .await;
-        assert!(
-            recalled
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == note["memory_id"])
-        );
-    }
-    for token in [admin_token, stranger_token] {
-        let rows = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        assert!(
-            rows.as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == global["memory_id"])
-        );
-        assert!(
-            !rows
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == personal["memory_id"])
-        );
-        let (status, _) = request(
-            &router,
-            "GET",
-            &format!("memories/{}", personal["memory_id"].as_str().unwrap()),
-            Value::Null,
-            Some(token),
+    let again = app
+        .post(
+            "remember",
+            json!({"kind": "rule", "title": "Use cents", "summary": "Money is integer cents.", "reason": "float drift", "context": context}),
+            &author_device,
         )
         .await;
-        assert!(!(200..300).contains(&status));
-    }
-    let rows = ok(
-        &router,
-        "GET",
-        "memories",
-        Value::Null,
-        Some(stranger_token),
-    )
-    .await;
-    assert!(
-        !rows
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["scope"] == "project")
+    assert_eq!(
+        (again["id"].as_str(), again["deduplicated"].as_bool()),
+        (Some(rule_id.as_str()), Some(true))
     );
-    for route in ["correct", "delete"] {
-        let body = if route == "correct" {
-            json!({"targetId":global["memory_id"],"content":"forbidden"})
-        } else {
-            json!({"id":global["memory_id"]})
-        };
-        let (status, _) = request(&router, "POST", route, body, Some(stranger_token)).await;
-        assert!(!(200..300).contains(&status));
-    }
-    let authored = ok(
-        &router,
-        "POST",
-        "correct",
-        json!({"targetId":global["memory_id"],"content":"scopecheck author corrected global"}),
-        Some(author_token),
-    )
-    .await;
-    assert_eq!(authored["author"], global["author"]);
-    let correction = ok(
-        &router,
-        "POST",
-        "correct",
-        json!({"targetId":authored["memory_id"],"content":"scopecheck corrected global"}),
-        Some(admin_token),
-    )
-    .await;
-    assert_eq!(correction["scope"], "global");
-    ok(
-        &router,
-        "POST",
-        "delete",
-        json!({"id":correction["memory_id"]}),
-        Some(admin_token),
-    )
-    .await;
-    for method in ["GET", "POST"] {
-        let (status, _) = request(&router, method, "promote", json!({}), Some(author_token)).await;
-        assert!(matches!(status, 404 | 405));
-        let (status, _) = request(
-            &router,
-            method,
-            &format!("projects/{project_id}/personal-memories"),
-            json!({}),
-            Some(author_token),
-        )
-        .await;
-        assert!(matches!(status, 404 | 405));
-    }
-}
 
-#[tokio::test]
-async fn file_http_shared_project_model() {
-    let path = std::env::temp_dir().join(format!("cairn-project-http-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    scenario(app(AppState::open(&path).unwrap())).await;
-    std::fs::remove_file(path).unwrap();
-}
+    let seen = app
+        .get(&format!("projects/{id}/memories"), &stranger_device)
+        .await;
+    let seen_ids: Vec<&str> = seen
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(seen_ids, vec![rule_id.as_str()]);
+    let (status, _) = app
+        .send(
+            "GET",
+            &format!("memories/{}", personal["id"].as_str().unwrap()),
+            json!(null),
+            Some(&stranger_device),
+        )
+        .await;
+    assert_eq!(status, 404, "another person's personal memory is not found");
+    let all = app.get("memories", &stranger).await;
+    assert_eq!(all.as_array().unwrap().len(), 1);
 
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_http_shared_project_model() {
-    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
-    scenario(postgres_app(
-        cairn_storage::PostgresStore::connect(&url).await.unwrap(),
-    ))
-    .await;
-}
+    // Branches are derived from the memories; a non-member sees no project.
+    let branches = app
+        .get(&format!("projects/{id}/branches"), &author_device)
+        .await;
+    assert_eq!(branches[0]["branch"], "feature-x");
+    let outsider = app.member(&admin, "outsider").await;
+    let (status, _) = app
+        .send(
+            "GET",
+            &format!("projects/{id}/memories"),
+            json!(null),
+            Some(&outsider),
+        )
+        .await;
+    assert_eq!(status, 404);
+    assert_eq!(app.get("projects", &outsider).await, json!([]));
 
-async fn distillation_scenario(router: Router) {
-    let account = ok(
-        &router,
+    // Conflicts come from `contradicts` links.
+    let other = app
+        .post("remember", json!({"kind": "rule", "title": "Use floats", "summary": "Money is a float.", "reason": "simple", "context": context, "contradicts": rule_id}), &stranger_device)
+        .await;
+    let conflicts = app
+        .get(&format!("projects/{id}/conflicts"), &author_device)
+        .await;
+    assert_eq!(conflicts[0]["memory_id"], other["id"]);
+    assert_eq!(conflicts[0]["contradicts_id"], rule_id);
+
+    // Ownership: only the owner (or an admin) transfers, and only to a member.
+    let members = app.get(&format!("projects/{id}/members"), &author).await;
+    let stranger_person = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| !m["is_owner"].as_bool().unwrap())
+        .unwrap()["person_id"]
+        .clone();
+    let (status, _) = app
+        .send(
+            "POST",
+            &format!("projects/{id}/ownership"),
+            json!({"personId": stranger_person}),
+            Some(&stranger),
+        )
+        .await;
+    assert_eq!(status, 403);
+    app.ok(
         "POST",
-        "auth/bootstrap",
-        json!({"email":"distill@example.test","password":"correct horse battery staple"}),
-        None,
+        &format!("projects/{id}/ownership"),
+        json!({"personId": stranger_person}),
+        Some(&author),
     )
     .await;
-    let token = account["token"].as_str().unwrap();
-    let device = ok(&router, "POST", "devices/register", json!({"deviceId":"distill-device","personId":account["account"]["person_id"],"name":"Distillation tests"}), Some(token)).await;
-    let device_token = device["token"].as_str().unwrap();
-    let other = ok(
-        &router,
-        "POST",
-        "auth/register",
-        json!({"email":"other@example.test","password":"correct horse battery staple"}),
-        Some(token),
-    )
-    .await;
-    let other_token = other["token"].as_str().unwrap();
-    let project = ok(
-        &router,
-        "POST",
-        "projects/init",
-        json!({"repository":"example.test/distill","name":"Distill"}),
-        Some(token),
-    )
-    .await;
-    let project_id = project["project_id"].as_str().unwrap();
-    for (session, context, scope) in [
-        (
-            "project-work",
-            json!({"project_id":project_id,"repository":"example.test/distill","files":["src/cache.rs"],"branch":"main"}),
-            "project",
-        ),
-        (
-            "private-work",
-            json!({"repository":"example.test/uninitialized","files":["src/cache.rs"],"branch":"main"}),
-            "personal",
-        ),
-        (
-            "project-work-handoff",
-            json!({"repository":"example.test/uninitialized","files":["src/cache.rs"],"branch":"main"}),
-            "personal",
-        ),
-    ] {
-        ok(
-            &router,
-            "POST",
-            "session/start",
-            json!({"sessionId":session,"context":context}),
-            Some(token),
+    let listed = app.get("projects", &stranger).await;
+    assert_eq!(listed[0]["role"], "owner");
+    let renamed = app
+        .post(
+            &format!("projects/{id}/rename"),
+            json!({"name": "Widgets 2"}),
+            &stranger_device,
         )
         .await;
-        let event = format!("{session}-event");
-        ok(&router, "POST", "sync/push", json!({"sessionId":session,"eventId":event,"role":"user","source":"test","context":context,"content":"Decision: Keep bounded writes\nReason: Reduce contention\nAlternatives: unbounded writes\nGotcha: Stale cache\nCause: missing invalidation\nFix: clear cache\nProcedure: Verify writes\nStep: cargo test cache\nRule: Scrub secrets\nExceptions: none\nFact: Cache has one writer\nStatement: one writer\nSource: src/cache.rs\nNext: verify restart\nUnresolved: restart untested\nAn ordinary fact is not a typed note."}), Some(device_token)).await;
-        let summary = ok(
-            &router,
+    assert_eq!(renamed["name"], "Widgets 2");
+    let (status, _) = app
+        .send(
             "POST",
-            "session/end",
-            json!({"sessionId":session}),
-            Some(token),
+            &format!("projects/{id}/rename"),
+            json!({"name": "no"}),
+            Some(&author_device),
         )
         .await;
-        assert_eq!(summary["kind"], "session_summary");
-        assert_eq!(summary["scope"], scope);
-        assert_eq!(summary["evidence"], json!([event]));
-        let rows = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        let notes: Vec<_> = rows
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|m| m["session_id"] == session && m["kind"] != "capture")
-            .cloned()
-            .collect();
-        assert_eq!(
-            notes.len(),
-            7,
-            "one session note, one handoff and five typed notes: {notes:?}"
-        );
-        for kind in [
-            "session_summary",
-            "handoff",
-            "decision",
-            "gotcha",
-            "procedure",
-            "rule",
-            "fact",
-        ] {
-            let note = notes.iter().find(|m| m["kind"] == kind).unwrap();
-            assert_eq!(note["scope"], scope);
-            assert_eq!(note["source_event_ids"], json!([event]));
-            assert_eq!(note["evidence"], json!([event]));
-            assert_eq!(note["applies_to"], json!(["src/cache.rs", "main"]));
-            assert!(
-                note["tags"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("work-note"))
-            );
-            assert!(!note["title"].as_str().unwrap().is_empty());
-        }
-        let decision = notes.iter().find(|m| m["kind"] == "decision").unwrap();
-        assert_eq!(decision["reason"], "Reduce contention");
-        assert_eq!(decision["alternatives"], json!(["unbounded writes"]));
-        assert!(decision["consequences"].is_null());
-        let gotcha = notes.iter().find(|m| m["kind"] == "gotcha").unwrap();
-        assert_eq!(gotcha["reason"], "");
-        assert_eq!(gotcha["cause"], "missing invalidation");
-        assert_eq!(gotcha["fix"], "clear cache");
-        assert!(gotcha["symptom"].is_null());
-        let procedure = notes.iter().find(|m| m["kind"] == "procedure").unwrap();
-        assert_eq!(procedure["steps"], json!(["cargo test cache"]));
-        let rule = notes.iter().find(|m| m["kind"] == "rule").unwrap();
-        assert!(rule["rule"].is_null());
-        assert_eq!(rule["exceptions"], "none");
-        let fact = notes.iter().find(|m| m["kind"] == "fact").unwrap();
-        assert_eq!(fact["statement"], "one writer");
-        assert_eq!(fact["source"], "src/cache.rs");
-        let handoff = notes.iter().find(|m| m["kind"] == "handoff").unwrap();
-        assert!(!handoff["next_steps"].as_array().unwrap().is_empty());
-        assert!(!handoff["unresolved_work"].as_array().unwrap().is_empty());
-        assert!(
-            !handoff["summary"]
-                .as_str()
-                .unwrap()
-                .contains("ordinary fact")
-        );
-        ok(
-            &router,
-            "POST",
-            "session/end",
-            json!({"sessionId":session}),
-            Some(token),
-        )
-        .await;
-        let again = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        let repeated: Vec<_> = again
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|m| m["session_id"] == session && m["kind"] != "capture")
-            .cloned()
-            .collect();
-        assert_eq!(
-            notes, repeated,
-            "repeat end must preserve IDs, records and timestamps"
-        );
-        for note in &notes {
-            let (status, _) = request(
-                &router,
-                "GET",
-                &format!("memories/{}", note["memory_id"].as_str().unwrap()),
-                Value::Null,
-                Some(other_token),
-            )
-            .await;
-            assert_eq!(
-                status, 400,
-                "unrelated person cannot read automatic work notes"
-            );
-        }
-        if scope == "project" {
-            ok(
-                &router,
-                "POST",
-                "projects/init",
-                json!({"project_id":project_id,"repository":"example.test/distill"}),
-                Some(other_token),
-            )
-            .await;
-            let shared = ok(
-                &router,
-                "GET",
-                &format!("projects/{project_id}/memories"),
-                Value::Null,
-                Some(other_token),
-            )
-            .await;
-            for note in &notes {
-                assert!(
-                    shared
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|m| m["memory_id"] == note["memory_id"])
-                );
-            }
-        }
-        // A correction hides the derived note without changing its source captures.
-        let corrected = ok(
-            &router,
-            "POST",
-            "correct",
-            json!({"targetId":decision["memory_id"],"content":"Use bounded transactions instead"}),
-            Some(token),
-        )
-        .await;
-        ok(&router, "POST", "sync/push", json!({"sessionId":session,"eventId":format!("{session}-late"),"role":"tool","source":"test","content":"Fact: restart verified","context":context}), Some(device_token)).await;
-        ok(
-            &router,
-            "POST",
-            "session/end",
-            json!({"sessionId":session}),
-            Some(token),
-        )
-        .await;
-        let refreshed = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        assert!(
-            !refreshed
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == decision["memory_id"])
-        );
-        assert!(
-            refreshed
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == corrected["memory_id"])
-        );
-        assert_eq!(
-            refreshed
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|m| m["session_id"] == session && m["kind"] == "handoff")
-                .count(),
-            1
-        );
-        // Project-note forgetting preserves shared captures and sibling knowledge.
-        ok(
-            &router,
+    assert_eq!(status, 403);
+
+    // The author can forget their own memory; it then vanishes for the member too.
+    let (status, _) = app
+        .send(
             "POST",
             "forget",
-            json!({"id":gotcha["memory_id"]}),
-            Some(token),
+            json!({"id": rule_id}),
+            Some(&stranger_device),
         )
         .await;
-        ok(
-            &router,
+    assert_eq!(status, 404, "only the owner of a memory forgets it");
+    let (status, _) = app
+        .send(
             "POST",
-            "session/end",
-            json!({"sessionId":session}),
-            Some(token),
+            "delete",
+            json!({"id": rule_id}),
+            Some(&author_device),
         )
         .await;
-        let retained = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        assert!(
-            !retained
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["memory_id"] == gotcha["memory_id"])
-        );
-        if scope == "project" {
-            assert!(
-                retained
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|m| m["memory_id"] == rule["memory_id"])
-            );
-            assert!(
-                retained
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|m| m["kind"] == "capture" && m["source_event_ids"] == json!([event]))
-            );
-        }
-        // Explicit source forgetting suppresses every derivation of that capture.
-        ok(&router, "POST", "forget", json!({"id":event}), Some(token)).await;
-        ok(
-            &router,
-            "POST",
-            "session/end",
-            json!({"sessionId":session}),
-            Some(token),
-        )
+    assert_eq!(status, 204);
+    let seen = app
+        .get(&format!("projects/{id}/memories"), &stranger_device)
         .await;
-        let retained = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-        assert!(!retained.as_array().unwrap().iter().any(|m| {
-            m["source_event_ids"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(event))
-        }));
-        if scope == "project" {
-            let current_summary = retained
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["memory_id"] == summary["memory_id"])
-                .unwrap();
-            // The forgotten capture was the only next step, so no handoff is stored again.
-            assert!(
-                !retained
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|m| m["session_id"] == session && m["kind"] == "handoff")
-            );
-            let late_id = format!("{session}-late");
-            let current_fact = retained
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["kind"] == "fact" && m["source_event_ids"] == json!([late_id]))
-                .unwrap();
-            for hidden in [current_summary] {
-                ok(
-                    &router,
-                    "POST",
-                    "forget",
-                    json!({"id":hidden["memory_id"]}),
-                    Some(token),
-                )
-                .await;
-                let rows = ok(&router, "GET", "memories", Value::Null, Some(token)).await;
-                assert!(
-                    !rows
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|m| m["memory_id"] == hidden["memory_id"])
-                );
-                assert!(
-                    rows.as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|m| m["memory_id"] == current_fact["memory_id"])
-                );
-                assert!(
-                    rows.as_array().unwrap().iter().any(
-                        |m| m["kind"] == "capture" && m["source_event_ids"] == json!([late_id])
-                    )
-                );
-            }
-        }
-    }
+    assert!(!ids(&json!({"results": seen})).contains(&rule_id));
+    let (status, body) = app
+        .send("POST", "remember", json!({"kind": "rule", "title": "Use cents", "summary": "Money is integer cents.", "reason": "float drift", "context": context}), Some(&author_device))
+        .await;
+    assert_eq!((status, body["code"].as_str()), (409, Some("conflict")));
+    let _ = PASSWORD;
+    app.finish().await;
 }
 
 #[tokio::test]
-async fn file_http_session_distillation() {
-    let path = std::env::temp_dir().join(format!("cairn-distill-http-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    distillation_scenario(app(AppState::open(&path).unwrap())).await;
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_http_session_distillation() {
-    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
-    distillation_scenario(postgres_app(
-        cairn_storage::PostgresStore::connect(&url).await.unwrap(),
-    ))
-    .await;
-}
-
-async fn brief_scenario(router: Router) {
-    let pw = "correct horse battery staple";
-    let admin = ok(
-        &router,
-        "POST",
-        "auth/bootstrap",
-        json!({"email":"brief-admin@example.test","password":pw}),
-        None,
-    )
-    .await;
-    let token = admin["token"].as_str().unwrap();
-    let other = ok(
-        &router,
-        "POST",
-        "auth/register",
-        json!({"email":"brief-other@example.test","password":pw}),
-        Some(token),
-    )
-    .await;
-    let other = other["token"].as_str().unwrap();
-    let project = ok(
-        &router,
-        "POST",
-        "projects/init",
-        json!({"repository":"brief-repo","name":"Brief"}),
-        Some(token),
-    )
-    .await;
-    let id = project["project_id"].as_str().unwrap();
-    let context = json!({"project_id":id,"repository":"brief-repo","branch":"feature"});
-    let device = ok(
-        &router,
-        "POST",
-        "devices/register",
-        json!({"name":"brief"}),
-        Some(token),
-    )
-    .await;
-    let device = device["token"].as_str().unwrap();
-    for (title, scope, kind, owner) in [
-        ("personal-visible", "personal", "preference", token),
-        ("private-hidden", "personal", "preference", other),
-        ("project-visible", "project", "rule", token),
-        ("global-visible", "global", "fact", other),
+async fn bad_save_input_is_a_400_with_a_message() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "d").await;
+    for (body, needle) in [
+        (
+            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "colour": "red"}),
+            "colour",
+        ),
+        (
+            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "fields": {"symptom": "x"}}),
+            "symptom",
+        ),
+        (
+            json!({"kind": "handoff", "title": "t", "summary": "s", "reason": "r"}),
+            "handoff",
+        ),
+        (
+            json!({"kind": "rule", "title": "t", "summary": "s"}),
+            "reason",
+        ),
+        (
+            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "scope": "project"}),
+            "project",
+        ),
     ] {
-        ok(&router, "POST", "remember", json!({"title":title,"summary":title,"reason":"evidence","scope":scope,"kind":kind,"context":context}), Some(owner)).await;
+        let (status, reply) = app.send("POST", "remember", body, Some(&device)).await;
+        assert_eq!(status, 400, "{reply}");
+        assert!(reply["error"].as_str().unwrap().contains(needle), "{reply}");
     }
-    let (status, _) = request(
-        &router,
-        "POST",
-        "session/brief",
-        json!({"context":context}),
-        None,
-    )
-    .await;
-    assert_eq!(status, 401);
-    let reply = ok(
-        &router,
-        "POST",
-        "session/brief",
-        json!({"context":context}),
-        Some(device),
-    )
-    .await;
-    let text = reply["brief"].as_str().unwrap();
-    assert!(text.len() <= reply["max_bytes"].as_u64().unwrap() as usize);
-    for title in ["personal-visible", "project-visible", "global-visible"] {
-        assert!(text.contains(title), "{text}");
-    }
-    assert!(!text.contains("private-hidden"));
-    let reply = ok(
-        &router,
-        "POST",
-        "session/brief",
-        json!({"context":context}),
-        Some(other),
-    )
-    .await;
-    let text = reply["brief"].as_str().unwrap();
-    assert!(!text.contains("project-visible"));
-    assert!(!text.contains("personal-visible"));
-    assert!(text.contains("global-visible"));
+    app.finish().await;
 }
 
 #[tokio::test]
-async fn file_http_session_brief() {
-    let path = std::env::temp_dir().join(format!("cairn-brief-http-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    brief_scenario(app(AppState::open(&path).unwrap())).await;
-    std::fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_http_session_brief() {
-    let url = std::env::var("CAIRN_TEST_DATABASE_URL").unwrap();
-    brief_scenario(postgres_app(
-        cairn_storage::PostgresStore::connect(&url).await.unwrap(),
-    ))
-    .await;
+async fn removed_routes_are_gone() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    for (method, path) in [
+        ("GET", "/viewer"),
+        ("POST", "/cairn-memory/correct"),
+        ("POST", "/cairn-memory/import"),
+        ("POST", "/cairn-memory/sync/pull"),
+        ("GET", "/cairn-memory/similarity-reviews"),
+        ("POST", "/cairn-memory/projects"),
+        ("POST", "/cairn-memory/projects/verify"),
+    ] {
+        let response = tower::ServiceExt::oneshot(
+            app.router.clone(),
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {admin}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(response.status().as_u16(), 404 | 405),
+            "{method} {path}: {}",
+            response.status()
+        );
+    }
+    app.finish().await;
 }

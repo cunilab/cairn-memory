@@ -1,276 +1,172 @@
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::Request,
-};
-use cairn_server::{AppState, LocalEmbeddings, app, postgres_app, postgres_app_with_embeddings};
-use serde_json::{Value, json};
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
-use tower::ServiceExt;
+//! The semantic channel and the consolidate job, with the real pinned MiniLM model.
+//! Needs `CAIRN_TEST_EMBEDDING_MODEL_DIR` (or `CAIRN_EMBEDDING_MODEL_DIR`); skipped without it
+//! unless `CAIRN_TEST_REQUIRE_DB=1`.
 
-async fn request(router: &Router, path: &str, body: Option<Value>, token: Option<&str>) -> Value {
-    let mut r = Request::builder()
-        .uri(format!("/cairn-memory/{path}"))
-        .method(if body.is_some() { "POST" } else { "GET" })
-        .header("content-type", "application/json");
-    if let Some(t) = token {
-        r = r.header("authorization", format!("Bearer {t}"));
-    }
-    let response = router
-        .clone()
-        .oneshot(
-            r.body(Body::from(body.map(|v| v.to_string()).unwrap_or_default()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert!(
-        status.is_success(),
-        "{path}: {status} {}",
-        String::from_utf8_lossy(&bytes)
-    );
-    if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap()
-    }
-}
-fn model() -> LocalEmbeddings {
-    let dir = PathBuf::from(
-        std::env::var("CAIRN_TEST_EMBEDDING_MODEL_DIR")
-            .expect("set CAIRN_TEST_EMBEDDING_MODEL_DIR to the pinned model directory"),
-    );
-    LocalEmbeddings::load(&dir).unwrap()
-}
-async fn seed(router: &Router) -> (String, String, String) {
-    assert_eq!(
-        request(router, "health", None, None).await["semantic_search"],
-        "disabled"
-    );
-    let a = request(
-        router,
-        "auth/bootstrap",
-        Some(json!({"email":"a@semantic.test","password":"correct horse battery staple"})),
-        None,
-    )
-    .await;
-    let token = a["token"].as_str().unwrap();
-    let other = request(
-        router,
-        "auth/register",
-        Some(json!({"email":"b@semantic.test","password":"correct horse battery staple"})),
-        Some(token),
-    )
-    .await;
-    let memory=request(router,"remember",Some(json!({"scope":"personal","title":"Vehicle maintenance","summary":"Service the engine regularly","reason":"Prevent mechanical faults"})),Some(token)).await;
-    request(router,"remember",Some(json!({"scope":"personal","title":"Vehicle maintenance","summary":"Service the engine regularly","reason":"Private knowledge"})),Some(other["token"].as_str().unwrap())).await;
-    let rows = request(
-        router,
-        "search",
-        Some(json!({"query":"automobile repairs"})),
-        Some(token),
-    )
-    .await;
-    assert!(rows.as_array().unwrap().is_empty());
-    (
-        token.to_owned(),
-        other["token"].as_str().unwrap().to_owned(),
-        memory["memory_id"].as_str().unwrap().to_owned(),
-    )
-}
-async fn wait_match(router: &Router, token: &str, id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let hits = request(
-            router,
-            "why-changed",
-            Some(json!({"query":"automobile repairs","limit":100})),
-            Some(token),
-        )
-        .await;
-        let rows = if hits.is_array() {
-            hits.as_array().unwrap()
-        } else {
-            hits["results"].as_array().unwrap()
-        };
-        if rows.iter().any(|r| r["memory_id"] == id) {
-            return;
-        }
+mod common;
+use cairn_server::LocalEmbeddings;
+use common::{App, ids};
+use serde_json::json;
+use std::path::PathBuf;
+
+fn model() -> Option<LocalEmbeddings> {
+    let dir = std::env::var("CAIRN_TEST_EMBEDDING_MODEL_DIR")
+        .or_else(|_| std::env::var("CAIRN_EMBEDDING_MODEL_DIR"));
+    let Ok(dir) = dir else {
         assert!(
-            Instant::now() < deadline,
-            "background embedding did not make {id} searchable"
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "CAIRN_TEST_REQUIRE_DB=1 but no embedding model directory is set"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+        println!("SKIP (no CAIRN_TEST_EMBEDDING_MODEL_DIR)");
+        return None;
+    };
+    Some(LocalEmbeddings::load(&PathBuf::from(dir)).expect("load the pinned model"))
 }
-async fn verify(router: &Router, token: &str, other: &str, id: &str) {
+
+#[tokio::test]
+async fn meaning_finds_memories_and_never_crosses_people() {
+    let Some(model) = model() else { return };
+    let Some(app) = App::with_model(Some(model)).await else {
+        return;
+    };
     assert_eq!(
-        request(router, "health", None, None).await["semantic_search"],
+        app.ok("GET", "health", json!(null), None).await["semantic_search"],
         "enabled"
     );
-    wait_match(router, token, id).await;
-    // A vector-only query does not pass the agent relevance floor. why-changed does not use it.
-    for route in ["search", "smart-search", "context", "recall"] {
-        for person in [token, other] {
-            let rows = request(
-                router,
-                route,
-                Some(json!({"query":"automobile repairs","limit":100})),
-                Some(person),
-            )
-            .await;
-            let hits = if rows.is_array() {
-                rows.as_array().unwrap()
-            } else {
-                rows["results"].as_array().unwrap()
-            };
-            assert!(hits.iter().all(|r| r["memory_id"] != id), "{route}: {rows}");
-        }
-    }
-    let rows = request(
-        router,
-        "why-changed",
-        Some(json!({"query":"automobile repairs","limit":100})),
-        Some(token),
-    )
-    .await;
-    let hits = rows["results"].as_array().unwrap();
-    assert_eq!(hits.len(), 1, "{rows}");
-    assert_eq!(hits[0]["memory_id"], id);
-    assert_eq!(hits[0]["source"], "personal");
-    let rows = request(
-        router,
-        "why-changed",
-        Some(json!({"query":"automobile repairs","limit":100})),
-        Some(other),
-    )
-    .await;
+    let alice = app.admin("alice").await;
+    let bob = app.member(&alice, "bob").await;
+    let mine = app
+        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal"}), &alice)
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.post("remember", json!({"kind": "fact", "title": "Release cadence", "summary": "We ship every second Tuesday.", "reason": "agreed", "scope": "personal"}), &alice).await;
+    app.settle().await;
+
+    // The vector channel finds the memory when no word of the query appears in it...
+    let paraphrase = "pdf bill shows empty sheet with unusual symbols";
+    let vector = app
+        .state
+        .embeddings
+        .as_ref()
+        .unwrap()
+        .query(paraphrase)
+        .await
+        .unwrap();
+    let person = |me: &serde_json::Value| me["person_id"].as_str().unwrap().to_owned();
+    let alice_id = person(&app.get("auth/me", &alice).await);
+    let bob_id = person(&app.get("auth/me", &bob).await);
+    let store = &app.db.store;
+    let candidates = store
+        .vector_candidates(&alice_id, &vector, 50)
+        .await
+        .unwrap();
+    assert_eq!(candidates.first().map(|(id, _)| id), Some(&mine));
+    // ...and the visibility rule is applied to what it returns: bob gets nothing of alice's.
     assert!(
-        rows["results"]
-            .as_array()
+        store
+            .vector_candidates(&bob_id, &vector, 50)
+            .await
             .unwrap()
-            .iter()
-            .all(|r| r["memory_id"] != id)
+            .is_empty()
     );
-    let project = request(
-        router,
-        "projects/init",
-        Some(json!({"repository":"semantic-project","name":"Semantic"})),
-        Some(token),
-    )
-    .await;
-    let project_id = project["project_id"].as_str().unwrap();
-    let note=request(router,"remember",Some(json!({"scope":"project","context":{"project_id":project_id},"title":"Automotive upkeep","summary":"Inspect the motor","reason":"Safe operation"})),Some(token)).await;
-    let note_id = note["memory_id"].as_str().unwrap();
-    wait_match(router, token, note_id).await;
-    let hits = request(
-        router,
-        "search",
-        Some(json!({"query":"automobile repairs","limit":100})),
-        Some(other),
-    )
-    .await;
+    // At step 2 the relevance floor still drops a hit that shares no word with the query
+    // (the baseline paraphrase hit@5 is 0.0 for the same reason); step 5 changes that.
     assert!(
-        hits.as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["memory_id"] != note_id)
+        ids(&app
+            .post("search", json!({"query": paraphrase}), &alice)
+            .await)
+        .is_empty()
     );
-    let filtered=request(router,"search",Some(json!({"query":"automobile repairs","context":{"project_id":"different-project"},"limit":100})),Some(token)).await;
-    assert!(
-        filtered
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["memory_id"] != note_id)
+    // A query that clears the floor finds it for alice and reaches nothing for bob.
+    let query = json!({"query": "invoices render blank page with emoji"});
+    assert_eq!(
+        ids(&app.post("search", query.clone(), &alice).await).first(),
+        Some(&mine)
     );
-    request(
-        router,
-        "projects/init",
-        Some(json!({"repository":"semantic-project","project_id":project_id})),
-        Some(other),
-    )
-    .await;
-    let hits = request(
-        router,
-        "why-changed",
-        Some(json!({"query":"automobile repairs","limit":100})),
-        Some(other),
-    )
-    .await;
-    assert!(
-        hits["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["memory_id"] == note_id && r["source"] == "project")
-    );
-    let hidden = request(
-        router,
-        "search",
-        Some(json!({"query":"automobile repairs","limit":100})),
-        Some(other),
-    )
-    .await;
-    assert!(
-        hidden
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["memory_id"] != note_id)
-    );
-    let next=request(router,"remember",Some(json!({"scope":"global","kind":"rule","title":"Motor servicing","summary":"Replace worn components","reason":"Durable transport"})),Some(token)).await;
-    wait_match(router, other, next["memory_id"].as_str().unwrap()).await;
-    request(router, "forget", Some(json!({"id":id})), Some(token)).await;
-    let hits = request(
-        router,
-        "search",
-        Some(json!({"query":"automobile repairs"})),
-        Some(token),
-    )
-    .await;
-    assert!(
-        hits.as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["memory_id"] != id)
-    );
+    assert!(ids(&app.post("search", query, &bob).await).is_empty());
+    let why = app
+        .post("why-changed", json!({"query": "invoice blank page"}), &bob)
+        .await;
+    assert!(ids(&why).is_empty(), "{why}");
+    app.finish().await;
 }
 
 #[tokio::test]
-#[ignore = "requires pinned model in CAIRN_TEST_EMBEDDING_MODEL_DIR"]
-async fn file_server_real_local_semantic_backfill_and_writes() {
-    let path = std::env::temp_dir().join(format!("cairn-semantic-{}.json", std::process::id()));
-    let state = AppState::open(&path).unwrap();
-    let off = app(state.clone());
-    let (token, other, id) = seed(&off).await;
-    drop(off);
-    let router = app(state.with_embeddings(model()));
-    verify(&router, &token, &other, &id).await;
-    std::fs::remove_file(path).unwrap();
-}
-#[tokio::test]
-#[ignore = "requires fresh PostgreSQL and pinned model"]
-async fn postgres_server_real_local_semantic_backfill_and_writes() {
-    let store =
-        cairn_storage::PostgresStore::connect(&std::env::var("CAIRN_TEST_DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-    let (token, other, id) = seed(&postgres_app(store.clone())).await;
-    let router = postgres_app_with_embeddings(store, Some(model()));
-    verify(&router, &token, &other, &id).await;
-}
-#[test]
-fn missing_or_untrusted_model_fails_closed() {
-    assert!(LocalEmbeddings::load(std::path::Path::new("/nonexistent/cairn-minilm")).is_err());
-    let dir = std::env::temp_dir().join(format!("cairn-bad-model-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("model.onnx"), b"untrusted model").unwrap();
-    assert!(LocalEmbeddings::load(&dir).is_err());
-    std::fs::remove_dir_all(dir).unwrap();
+async fn consolidate_supersedes_near_duplicates_and_links_related() {
+    let Some(model) = model() else { return };
+    let Some(app) = App::with_model(Some(model)).await else {
+        return;
+    };
+    let owner = app.admin("owner").await;
+    let save = |title: &str, summary: &str| {
+        app.post("remember", json!({"kind": "rule", "title": title, "summary": summary, "reason": "money", "scope": "personal"}), &owner)
+    };
+    let old = save(
+        "Store money as integer cents",
+        "Never store money as floats; use integer cents everywhere.",
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.settle().await;
+    let new = save(
+        "Store money as integer cents.",
+        "Never store money as floats; use integer cents everywhere!",
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let related = save(
+        "Keep money as integer cents in the database",
+        "Amounts are persisted as whole cents, never as floating point numbers.",
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    save(
+        "Prices are stored in minor currency units",
+        "Prices are kept as an integer number of minor currency units.",
+    )
+    .await;
+    save(
+        "Currency amounts use integer storage",
+        "Do not use float columns for currency amounts.",
+    )
+    .await;
+    app.settle().await;
+    let old_memory = app.get(&format!("memories/{old}"), &owner).await;
+    assert_eq!(old_memory["status"], "superseded", "{old_memory}");
+    let links = old_memory["links"].as_array().unwrap();
+    assert!(
+        links.iter().any(|l| l["relation"] == "supersedes"
+            && l["source"] == new.as_str()
+            && l["auto"] == true),
+        "{links:?}"
+    );
+    assert_eq!(
+        app.get(&format!("memories/{new}"), &owner).await["status"],
+        "active"
+    );
+    let near = app.get(&format!("memories/{related}"), &owner).await;
+    assert!(
+        near["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["relation"] == "relates" && l["auto"] == true),
+        "{near}"
+    );
+    // Another person's near-identical memory is left alone.
+    let other = app.member(&owner, "other").await;
+    app.post("remember", json!({"kind": "rule", "title": "Store money as integer cents", "summary": "Never store money as floats; use integer cents everywhere.", "reason": "money", "scope": "personal"}), &other).await;
+    app.settle().await;
+    assert_eq!(
+        app.get(&format!("memories/{new}"), &owner).await["status"],
+        "active"
+    );
+    app.finish().await;
 }
