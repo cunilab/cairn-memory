@@ -153,6 +153,7 @@ def main():
                         "CAIRN_TEST_EMBEDDING_MODEL_DIR, then ~/.cache/cairn-bench/minilm)")
     parser.add_argument("--lexical-only", action="store_true", help="do not load the embedding model")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--min-hit5", type=float, help="exit 1 when memory_search hit@5 is below this (a CI gate)")
     parser.add_argument("--dump-injected", help="also write the text each hook event injected to this file (contains random memory ids)")
     args = parser.parse_args()
 
@@ -433,6 +434,10 @@ def main():
         out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         print_table(result)
         print(f"\nwrote {out}")
+        hit5 = recall["memory_search"]["hit_at_5"]
+        if args.min_hit5 is not None and hit5 < args.min_hit5:
+            print(f"FAIL: memory_search hit@5 {hit5:.3f} is below --min-hit5 {args.min_hit5}", file=sys.stderr)
+            sys.exit(1)
     finally:
         if mcp:
             try:
