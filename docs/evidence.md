@@ -739,3 +739,41 @@ This MCP rerun did not compact. An earlier OpenCode 2.1.4 loopback session in
 step. Claude Code and Codex native probes in this point-5 pass did not emit a
 compaction event. Their compaction check remains the fixture `SessionStart`
 with `source` `compact`.
+
+## v0.1.6 point 2 — routine cleanup and explicit saves (2026-11-19)
+
+The console Memories page no longer requests the review queue on load. A
+`Show near-duplicates` control fetches open reviews on demand and filters to
+`band: near_duplicate`; the component and its explicit dismiss, contradict,
+and supersede actions are reused. The similarity scan publishes only
+`near_duplicate` pairs, so a 0.5 cosine pair creates no review. Historical
+`possible_conflict` rows remain in storage and the API.
+
+Explicit saves reuse one record for the same owner, scope, project, kind,
+lifecycle, context, `supersedes`, and meaning-bearing fields. Evidence is
+excluded from identity and merged; a no-op retry does not rewrite
+`changed_at`. The file store scans owned live records. PostgreSQL takes a
+transaction advisory lock keyed by owner and SHA-256 identity fingerprint,
+compares the same identity in Rust, and updates only the record, `changed_by`,
+and `changed_at`. No migration was added.
+
+Checks on this machine (Andress-MacBook-Air):
+
+- `cargo test --workspace --lib`: 239 passed (core 157, server 35).
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p cairn-core -p cairn-storage -p cairn-server --all-targets -- -D warnings`: passed.
+- `npm run typecheck` and `npm run lint` in `apps/web`: passed.
+- `./scripts/smoke_mcp.sh`: passed.
+- `./scripts/smoke_web.sh`: passed.
+- Disposable `pgvector/pgvector:pg17` container: all 56
+  `cairn-storage --test postgres` ignored tests passed in fresh databases,
+  including `postgres_identical_save_reuses_one_row_and_merges_evidence`,
+  `postgres_concurrent_identical_saves_keep_one_row_and_all_evidence`, and
+  `postgres_possible_conflict_cosine_publishes_no_review`; all 3
+  `cairn-server --test project_model` ignored tests passed.
+- The 2 `cairn-server --test semantic` ignored tests were not runnable:
+  `CAIRN_TEST_EMBEDDING_MODEL_DIR` is unset (`NotPresent`). They are not part
+  of this change's path.
+
+No browser automation was used. The point-1 edit in
+`scripts/cairn_instructions.txt` was left untouched.

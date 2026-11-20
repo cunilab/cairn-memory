@@ -4953,6 +4953,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_identical_remember_reuses_the_record_and_merges_evidence() {
+        let path = temp_store_path("remember-dedupe");
+        let router = app(AppState::open(&path).unwrap());
+        let (_, bootstrap) = json_request(
+            router.clone(),
+            "POST",
+            "/cairn-memory/auth/bootstrap",
+            serde_json::json!({
+                "email": "remember-owner@example.test",
+                "password": "correct horse battery staple"
+            }),
+        )
+        .await;
+        let token = bootstrap["token"].as_str().unwrap();
+        let body = serde_json::json!({
+            "scope": "personal",
+            "kind": "fact",
+            "title": "dedupe-note",
+            "summary": "dedupe-note",
+            "reason": "verified",
+            "statement": "dedupe-note",
+            "evidence": ["docs/a"]
+        });
+        let (status, first) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            body.clone(),
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut retry_body = body;
+        retry_body["evidence"] = serde_json::json!(["docs/b"]);
+        let (status, retry) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/remember",
+            retry_body,
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry["memory_id"], first["memory_id"]);
+        assert_eq!(retry["evidence"], serde_json::json!(["docs/a", "docs/b"]));
+        let (status, memories) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/memories",
+            Value::Null,
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(memories.as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn scoped_search_keeps_branch_memory_out_of_main_context() {
         let path = temp_store_path("scoped-search");
         let router = app(AppState::open(&path).unwrap());

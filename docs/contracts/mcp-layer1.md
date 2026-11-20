@@ -152,6 +152,11 @@ The text is compact JSON of the same object. Errors stay errors.
 {"memory_id":"mem-1","kind":"gotcha","scope":"personal","status":"active"}
 ```
 
+The receipt is unchanged by save deduplication. An identical explicit save
+from the same owner returns the existing `memory_id`; newly supplied evidence
+is merged, and a retry with no new evidence is a no-op. See
+[explicit-save identity](continuity-v1.md#explicit-save-identity-v016).
+
 `memory_get` returns the stored record, including content, provenance, and
 lifecycle, with empty fields left in place. `memory_export` is the same lossless
 bundle the REST route returns. Both use compact JSON text. The CLI still prints

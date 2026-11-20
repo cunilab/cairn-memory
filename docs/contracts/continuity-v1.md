@@ -317,13 +317,15 @@ With no current vectors it succeeds and does nothing. Each success schedules
 the next run 3600 seconds later. A run inspects the 60 coldest eligible
 memories (lowest `access_count`, then oldest `created_at`, then memory id)
 that have a current embedding, excluding captures, forgotten, expired, and
-superseded rows. It inserts at most 25 new open reviews for pairs in the same
-scope and project whose cosine is from 0.40 through 1.0. Cosine below 0.75 is
-`possible_conflict`; 0.75 and above is `near_duplicate`. Pairs already stored
-in any status, pairs linked by `supersedes` either way, and pairs linked by
-`contradicts` either way are skipped. Lease, attempts, backoff, and quarantine
-are the same as the other jobs. The worker ensures one pending row on each
-poll when none is active and none is quarantined.
+superseded rows. It inserts at most 25 new open `near_duplicate` reviews for
+pairs in the same scope and project whose cosine is 0.75 or above. Cosine
+below 0.75 never creates a review: `possible_conflict` stays in the stored and
+API shape for historical rows and compatibility, but cosine alone is not
+evidence of a conflict. Pairs already stored in any status, pairs linked by
+`supersedes` either way, and pairs linked by `contradicts` either way are
+skipped. Lease, attempts, backoff, and quarantine are the same as the other
+jobs. The worker ensures one pending row on each poll when none is active and
+none is quarantined.
 
 Search never enqueues a job and never waits for one. Startup and each embedding
 poll enqueue missing or stale vectors only when that memory has no active embed
@@ -446,7 +448,10 @@ tools are `memory_contradict`, `memory_supersede`, `memory_similarity_reviews`,
 `memory_review_dismiss`, `memory_review_contradict`, and
 `memory_review_supersede`. The CLI commands are `contradict`, `supersede`,
 `reviews`, `review-dismiss`, `review-contradict`, and `review-supersede`.
-The console Memories page lists open reviews for the signed-in viewer.
+The console Memories page does not load reviews by default. Its on-demand
+near-duplicate control lists open `near_duplicate` reviews for the signed-in
+viewer; historical `possible_conflict` rows stay available through the API but
+are not shown there.
 
 ## Memory link graph (v0.1.4)
 
@@ -699,3 +704,22 @@ or source, are left out of the summary text, those lists, and typed-note
 derivation. A tool role whose text is a JSON object or array counts, as does a
 tool name before JSON. Their event ids stay on the summary. Labeled prose with
 the legacy tool role still does.
+
+## Explicit-save identity (v0.1.6)
+
+`memory_save` and `memory_lesson_save` reuse one record only for the same
+authenticated owner, scope, project, kind, lifecycle, context, `supersedes`,
+and every meaning-bearing field after redaction. A temporary-retention expiry
+is normalized out because it is generated per save; a durable explicit expiry
+is compared. Evidence is excluded from the comparison and merged instead: new entries are appended once, old entries stay,
+and stored source event ids and provenance are preserved. A retry with no new
+evidence returns the same record without changing `changed_at`.
+
+Different text, typed fields, owners, kinds, scopes, context, lifecycle, or
+links create a separate record. A forgotten, expired, superseded, or
+live-successor-hidden record is never reused. The file store compares the
+caller's own live records. PostgreSQL serializes equal saves with a
+transaction advisory lock keyed by owner and a SHA-256 identity fingerprint,
+then compares the same identity in Rust; the evidence update changes only the
+record, `changed_by`, and `changed_at`. The MCP save receipt stays
+`memory_id`, `kind`, `scope`, and `status`.

@@ -3600,14 +3600,14 @@ async fn postgres_retention_and_feedback_match_the_file_store() {
     let fresh = store
         .save(
             &owner.token,
-            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+            serde_json::from_value(capture("decaytoken shared a", "capture")).unwrap(),
         )
         .await
         .unwrap();
     let old = store
         .save(
             &owner.token,
-            serde_json::from_value(capture("decaytoken shared", "capture")).unwrap(),
+            serde_json::from_value(capture("decaytoken shared b", "capture")).unwrap(),
         )
         .await
         .unwrap();
@@ -4881,8 +4881,8 @@ async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
                 .unwrap()
         }
     };
-    let target = save(&owner.token, "personal", "sharedtoken").await;
-    let source = save(&owner.token, "personal", "sharedtoken").await;
+    let target = save(&owner.token, "personal", "sharedtoken target").await;
+    let source = save(&owner.token, "personal", "sharedtoken source").await;
     let before = store
         .search(&owner.token, "sharedtoken", 5, &RecallFilter::default())
         .await
@@ -4970,7 +4970,7 @@ async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("author or project owner"));
-    let (low, high) = unit_pair(0.5);
+    let (low, high) = unit_pair(0.8);
     store
         .put_embedding(cairn_core::MemoryEmbedding::new(&left, low).unwrap())
         .await
@@ -5000,10 +5000,7 @@ async fn postgres_contradiction_shades_reviews_and_supersede_hides() {
     );
     let reviews = store.similarity_reviews(&owner.token).await.unwrap();
     assert_eq!(reviews.len(), 1);
-    assert_eq!(
-        reviews[0].band,
-        cairn_core::SimilarityBand::PossibleConflict
-    );
+    assert_eq!(reviews[0].band, cairn_core::SimilarityBand::NearDuplicate);
     assert!(
         store
             .similarity_reviews(&other.token)
@@ -6530,5 +6527,140 @@ async fn postgres_checkpoint_is_personal_to_the_worktree() {
             .await
             .expect("closed"),
         CheckpointStatus::Unchanged
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_identical_save_reuses_one_row_and_merges_evidence() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("dedupe@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let other = store
+        .register_account("dedupe-other@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+
+    let mut first_input = stage7_fact("personal", "dedupe-note", None);
+    first_input.fields.evidence = vec!["docs/a".to_owned()];
+    let first = store.save(&owner.token, first_input.clone()).await.unwrap();
+
+    let mut retry_input = first_input.clone();
+    retry_input.fields.evidence = vec!["docs/b".to_owned()];
+    let retry = store.save(&owner.token, retry_input).await.unwrap();
+    assert_eq!(retry.memory_id, first.memory_id);
+    assert_eq!(retry.fields.evidence, vec!["docs/a", "docs/b"]);
+    assert_eq!(retry.source_event_ids, first.source_event_ids);
+
+    let mut no_op_input = first_input.clone();
+    no_op_input.fields.evidence = vec!["docs/b".to_owned()];
+    let no_op = store.save(&owner.token, no_op_input).await.unwrap();
+    assert_eq!(no_op.memory_id, first.memory_id);
+    assert_eq!(no_op.changed_at, retry.changed_at);
+
+    let different_text = store
+        .save(
+            &owner.token,
+            serde_json::from_value(serde_json::json!({
+                "scope": "personal",
+                "kind": "fact",
+                "title": "dedupe-note",
+                "summary": "different summary",
+                "reason": "verified",
+                "statement": "dedupe-note"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(different_text.memory_id, first.memory_id);
+
+    let other_owner = store.save(&other.token, first_input).await.unwrap();
+    assert_ne!(other_owner.memory_id, first.memory_id);
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE person_id = $1")
+        .bind(&owner.account.person_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2, "the retry and the no-op reuse the first row");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_concurrent_identical_saves_keep_one_row_and_all_evidence() {
+    let (_pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("race@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let store = std::sync::Arc::new(store);
+
+    let mut left_input = stage7_fact("personal", "race-note", None);
+    left_input.fields.evidence = vec!["left".to_owned()];
+    let mut right_input = stage7_fact("personal", "race-note", None);
+    right_input.fields.evidence = vec!["right".to_owned()];
+    let (left, right) = tokio::join!(
+        store.save(&owner.token, left_input),
+        store.save(&owner.token, right_input)
+    );
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.memory_id, right.memory_id);
+
+    let rows = store.memories(&owner.token).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let mut evidence = rows[0].fields.evidence.clone();
+    evidence.sort();
+    assert_eq!(evidence, vec!["left", "right"]);
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_possible_conflict_cosine_publishes_no_review() {
+    let (_pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("band@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    assert_eq!(
+        cairn_core::similarity_band(0.5),
+        Some(cairn_core::SimilarityBand::PossibleConflict)
+    );
+    let left = store
+        .save(&owner.token, stage7_fact("personal", "band-left", None))
+        .await
+        .unwrap();
+    let right = store
+        .save(&owner.token, stage7_fact("personal", "band-right", None))
+        .await
+        .unwrap();
+    let (low, high) = unit_pair(0.5);
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&left, low).unwrap())
+        .await
+        .unwrap();
+    store
+        .put_embedding(cairn_core::MemoryEmbedding::new(&right, high).unwrap())
+        .await
+        .unwrap();
+    store.ensure_similarity_job(1_000).await.unwrap();
+    let claim = store
+        .poll_jobs(cairn_core::JobKind::Similarity, 1, 1_000)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        store.finish_similarity_scan(&claim, 1_000).await.unwrap(),
+        0
+    );
+    assert!(
+        store
+            .similarity_reviews(&owner.token)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

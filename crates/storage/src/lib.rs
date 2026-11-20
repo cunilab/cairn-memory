@@ -712,7 +712,15 @@ impl PostgresStore {
     ) -> Result<Memory, PostgresError> {
         let account = self.authenticate_account(token).await?;
         let memory = cairn_core::build_saved_memory(input, &account.person_id)?;
+        let identity = memory.save_identity();
+        let lock_key = format!("{}:{}", account.person_id, identity.fingerprint()?);
         let mut tx = self.pool.begin().await?;
+        // Serialize equal saves for this owner so two concurrent retries cannot
+        // both miss the row and insert duplicates.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
         if let Some(id) = memory.project_id.as_deref() {
             sqlx::query("SELECT project_id FROM cairn_projects WHERE project_id = $1 FOR SHARE")
                 .bind(id)
@@ -730,6 +738,30 @@ impl PostgresStore {
                     "supersedes must stay in the same scope and project".to_owned(),
                 ));
             }
+        }
+        if let Some(mut existing) =
+            identical_saved_memory_tx(&mut tx, &account.person_id, &identity).await?
+        {
+            if existing.merge_evidence(&memory.fields.evidence) == 0 {
+                tx.rollback().await?;
+                return Ok(existing);
+            }
+            existing.changed_by = Some(account.person_id.clone());
+            existing.changed_at = Some(cairn_core::now_seconds().to_string());
+            sqlx::query(
+                "UPDATE cairn_memories
+                 SET record = $3, changed_by = $4, changed_at = $5
+                 WHERE memory_id = $1 AND person_id = $2",
+            )
+            .bind(&existing.memory_id)
+            .bind(&account.person_id)
+            .bind(Json(&existing.fields))
+            .bind(&existing.changed_by)
+            .bind(&existing.changed_at)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(existing);
         }
         insert_memory(&mut tx, &account.person_id, &memory).await?;
         if let Some(id) = memory.project_id.as_deref() {
@@ -3535,6 +3567,43 @@ async fn record_audit(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+/// A saved row the caller still owns and can recall. The same identity is
+/// compared in Rust so both adapters share one definition. Candidate rows are
+/// locked so a concurrent edit cannot be overwritten by the evidence merge.
+async fn identical_saved_memory_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    identity: &cairn_core::SavedMemoryIdentity,
+) -> Result<Option<Memory>, PostgresError> {
+    let successor_sql = if identity.scope == cairn_core::MemoryScope::Project {
+        not_superseded_by_live_memory_sql(true)
+    } else {
+        not_superseded_by_live_memory_sql(false)
+    };
+    let query = format!(
+        "{} WHERE m.person_id = $1 AND m.kind = $2 AND m.scope = $3
+          AND m.project_id IS NOT DISTINCT FROM $4 AND {} AND {}
+          FOR UPDATE OF m",
+        memory_select_sql(),
+        live_memory_sql(),
+        successor_sql
+    );
+    let rows = sqlx::query(&query)
+        .bind(person_id)
+        .bind(memory_kind_name(&identity.kind))
+        .bind(scope_name(&identity.scope))
+        .bind(identity.project_id.as_deref())
+        .fetch_all(&mut **transaction)
+        .await?;
+    for row in &rows {
+        let existing = memory_from_row(row)?;
+        if existing.save_identity() == *identity {
+            return Ok(Some(existing));
+        }
+    }
+    Ok(None)
 }
 
 async fn insert_memory(

@@ -187,6 +187,11 @@ pub fn similarity_candidates(
             let Some(band) = similarity_band(value) else {
                 continue;
             };
+            // Cosine alone is not evidence of a conflict. Only a near-duplicate
+            // suggestion is published; the caller still decides what it means.
+            if band != SimilarityBand::NearDuplicate {
+                continue;
+            }
             found.push(SimilarityReview {
                 review_id: review_id(&pair_left, &pair_right),
                 left_id: pair_left,

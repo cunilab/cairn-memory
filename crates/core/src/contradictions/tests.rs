@@ -19,6 +19,7 @@ fn save(store: &mut MemoryStore, token: &str, scope: &str, title: &str) -> Memor
                 "kind": "fact",
                 "title": title,
                 "summary": title,
+                "details": format!("{title} {}", crate::types::timestamp_nanos()),
                 "reason": "verified",
                 "statement": title
             }))
@@ -238,12 +239,20 @@ fn scan_keeps_the_coldest_sixty_and_skips_stored_pairs_and_captures() {
         high[1] = (1.0 - 0.25_f32).sqrt();
         (low, high)
     };
-    separated.insert(memories[0].memory_id.clone(), left);
+    separated.insert(memories[0].memory_id.clone(), left.clone());
     separated.insert(memories[1].memory_id.clone(), right);
-    let band = similarity_candidates(&memories[..2], &separated, &HashSet::new(), now);
+    // Cosine in the possible-conflict range is not enough to publish a review.
+    assert!(similarity_candidates(&memories[..2], &separated, &HashSet::new(), now).is_empty());
+    let mut near = HashMap::new();
+    let mut high = vec![0.0; 4];
+    high[0] = 0.8;
+    high[1] = (1.0 - 0.64_f32).sqrt();
+    near.insert(memories[0].memory_id.clone(), left);
+    near.insert(memories[1].memory_id.clone(), high);
+    let band = similarity_candidates(&memories[..2], &near, &HashSet::new(), now);
     assert_eq!(band.len(), 1);
-    assert_eq!(band[0].band, SimilarityBand::PossibleConflict);
-    assert!((band[0].cosine - 0.5).abs() < 1e-5);
+    assert_eq!(band[0].band, SimilarityBand::NearDuplicate);
+    assert!((band[0].cosine - 0.8).abs() < 1e-5);
 }
 
 fn save_memory(index: usize) -> Memory {
@@ -412,7 +421,7 @@ fn project_edit_rights_gate_reviews_and_a_reader_cannot_see_a_hidden_pair() {
         .declare_contradiction(&member.token, &right.memory_id, &left.memory_id)
         .unwrap_err();
     assert!(refused.to_string().contains("author or project owner"));
-    let (low, high) = unit_pair(0.5);
+    let (low, high) = unit_pair(0.8);
     embed(&mut store, &left, low);
     embed(&mut store, &right, high);
     let mut capture = left.clone();
@@ -445,7 +454,7 @@ fn project_edit_rights_gate_reviews_and_a_reader_cannot_see_a_hidden_pair() {
     );
     let reviews = store.similarity_reviews_for_account(&owner.token).unwrap();
     assert_eq!(reviews.len(), 1);
-    assert_eq!(reviews[0].band, SimilarityBand::PossibleConflict);
+    assert_eq!(reviews[0].band, SimilarityBand::NearDuplicate);
     assert!(
         store
             .similarity_reviews_for_account(&outsider.token)

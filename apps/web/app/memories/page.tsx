@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
 import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { MemoryFeedback } from "@/components/memory-feedback";
@@ -21,15 +22,18 @@ export default function MemoriesPage() {
   const router = useRouter();
   const [memories, setMemories] = useState<ProjectMemory[]>([]);
   const [reviews, setReviews] = useState<SimilarityReview[]>([]);
+  const [reviewsOpen, setReviewsOpen] = useState(false);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
   const [detail, setDetail] = useState<ProjectMemory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
-  useResetOnHide(() => { setMemories([]); setReviews([]); setDetail(null); setError(null); });
+  const reviewsRequest = useRef(0);
+  useResetOnHide(() => { reviewsRequest.current += 1; setMemories([]); setReviews([]); setReviewsOpen(false); setReviewsLoading(false); setDetail(null); setError(null); });
   useEffect(() => {
     let cancelled = false;
-    Promise.all([cairn<ProjectMemory[]>("memories"), cairn<SimilarityReview[]>("similarity-reviews")])
-      .then(([rows, open]) => { if (!cancelled) { setMemories(rows); setReviews(open); } })
+    cairn<ProjectMemory[]>("memories")
+      .then((rows) => { if (!cancelled) setMemories(rows); })
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) router.replace("/");
@@ -38,6 +42,23 @@ export default function MemoriesPage() {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [router, reload]);
+  async function loadNearDuplicates() {
+    const request = ++reviewsRequest.current;
+    setReviewsLoading(true);
+    setError(null);
+    try {
+      const open = await cairn<SimilarityReview[]>("similarity-reviews");
+      if (request !== reviewsRequest.current) return;
+      setReviews(open.filter((review) => review.band === "near_duplicate"));
+      setReviewsOpen(true);
+    } catch (cause: unknown) {
+      if (request !== reviewsRequest.current) return;
+      if (cause instanceof SessionRequiredError) router.replace("/");
+      else setError(cause instanceof Error ? cause.message : "Could not load near-duplicates");
+    } finally {
+      if (request === reviewsRequest.current) setReviewsLoading(false);
+    }
+  }
   const columns = useMemo<ColumnDef<ProjectMemory>[]>(() => [
     {
       id: "memory", header: "Memory", accessorFn: (m) => `${m.title} ${m.summary}`,
@@ -52,7 +73,14 @@ export default function MemoriesPage() {
   return <ConsoleShell crumbs={[{ label: "Memories" }]}>
     <PageHeader title="Memories" description="Project knowledge, your private behaviour preferences, and global lessons shared across this server." />
     {error ? <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert> : null}
-    <SimilarityReviews reviews={reviews} memories={memories} onChanged={() => setReload((value) => value + 1)} />
+    <div className="flex flex-wrap items-center gap-2">
+      <Button type="button" variant="outline" size="sm" onClick={loadNearDuplicates} disabled={reviewsLoading}>
+        {reviewsLoading ? "Checking…" : reviewsOpen ? "Refresh near-duplicates" : "Show near-duplicates"}
+      </Button>
+      {reviewsOpen ? <Button type="button" variant="ghost" size="sm" onClick={() => { reviewsRequest.current += 1; setReviewsOpen(false); setReviews([]); setReviewsLoading(false); }} disabled={reviewsLoading}>Hide</Button> : null}
+      {reviewsOpen && !reviewsLoading && reviews.length === 0 ? <p className="text-sm text-muted-foreground">No near-duplicates found.</p> : null}
+    </div>
+    {reviewsOpen ? <SimilarityReviews reviews={reviews} memories={memories} onChanged={() => { setReload((value) => value + 1); void loadNearDuplicates(); }} /> : null}
     <DataTable label="memories" data={memories} columns={columns} getRowId={(m) => m.memory_id} filterPlaceholder="Filter memories" empty={<p className="p-6 text-sm text-muted-foreground">{loading ? "Loading memories…" : "No memories yet."}</p>} />
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent className="overflow-y-auto">

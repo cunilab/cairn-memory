@@ -36,11 +36,18 @@ Missing fields return a validation error naming the field. Fields are flat snake
 
 `alternatives`, `steps`, `applies_to`, `evidence`, `tags`, `entities` are string arrays. Other typed fields are optional strings. `kind` defaults to `explicit`; all typed fields are optional. Capture/session records may omit agent-authored rationale. `content` remains a derived lexical body including title, summary, details and reason. Title matches have the highest lexical weight in both stores. Recall stays lexical in this stage, with `source: project | personal | global`; no embeddings or distillation are added.
 
+An explicit save reuses its record only when the same owner supplies the same
+scope, project, kind, lifecycle, context, `supersedes`, and all meaning-bearing
+fields after redaction. Evidence is merged rather than compared, so a retry can
+add evidence without creating a second record. A different note, owner, kind,
+scope, lifecycle, context, or link stays separate. See
+[explicit-save identity](continuity-v1.md#explicit-save-identity-v016).
+
 ```json
 {"scope":"project","kind":"decision","title":"Serialize writes","summary":"Use a transaction for memory updates.","reason":"Prevent concurrent updates from losing data.","context":{"project_id":"project-…"},"decision_context":"Multiple agents write concurrently","alternatives":["independent writes"],"consequences":"short lock duration","evidence":["cargo test"],"pinned":true}
 ```
 
-`GET /cairn-memory/memories` lists all live records the caller may read; `GET /cairn-memory/memories/{id}` returns every field of a readable record. The console Memories page shows title, summary and scope; its detail sheet shows the full record. Project lists use the same record shape.
+`GET /cairn-memory/memories` lists all live records the caller may read; `GET /cairn-memory/memories/{id}` returns every field of a readable record. The console Memories page shows title, summary and scope; its detail sheet shows the full record. It loads reviews only from an explicit near-duplicate control, which lists open `near_duplicate` rows. Project lists use the same record shape.
 
 ## Init and membership
 

@@ -1,12 +1,13 @@
 use crate::capture::MAX_OBSERVATION_BYTES;
 use crate::lifecycle::{
-    Lifecycle, LifecycleInput, MemoryKind, MemoryScope, validate_lifecycle_input,
+    Lifecycle, LifecycleInput, MemoryKind, MemoryScope, Retention, validate_lifecycle_input,
 };
 use crate::privacy::{redact_sensitive_content, redact_work_context};
 use crate::sessions::memory_scope;
 use crate::store::MemoryStore;
 use crate::types::{StoreError, WorkContext, timestamp, timestamp_nanos};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub(crate) const MAX_MEMORY_BYTES: usize = 256 * 1024;
 
@@ -95,6 +96,61 @@ pub struct MemoryFields {
     pub source: Option<String>,
     pub preference: Option<String>,
     pub example: Option<String>,
+}
+
+/// The meaning-bearing identity of an explicit save. `evidence` is merged into
+/// an existing record, so it is excluded from the comparison.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SavedMemoryIdentity {
+    pub fields: MemoryFields,
+    pub kind: MemoryKind,
+    pub scope: MemoryScope,
+    pub project_id: Option<String>,
+    pub lifecycle: Lifecycle,
+    pub context: WorkContext,
+    pub supersedes: Option<String>,
+}
+
+impl SavedMemoryIdentity {
+    /// A stable digest for a transaction lock. It is not stored.
+    pub fn fingerprint(&self) -> Result<String, StoreError> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(format!("{:x}", Sha256::digest(&bytes)))
+    }
+}
+
+impl Memory {
+    /// Identity for an explicit save. A temporary expiry is generated at save
+    /// time, so a retry would otherwise miss the record it just wrote.
+    pub fn save_identity(&self) -> SavedMemoryIdentity {
+        let mut fields = self.fields.clone();
+        fields.evidence.clear();
+        let mut lifecycle = self.lifecycle.clone();
+        if lifecycle.retention == Retention::Temporary {
+            lifecycle.expires_at = None;
+        }
+        SavedMemoryIdentity {
+            fields,
+            kind: self.kind,
+            scope: self.scope.clone(),
+            project_id: self.project_id.clone(),
+            lifecycle,
+            context: self.context.clone(),
+            supersedes: self.supersedes.clone(),
+        }
+    }
+
+    /// Adds evidence not already present and returns how many entries were new.
+    pub fn merge_evidence(&mut self, evidence: &[String]) -> usize {
+        let mut added = 0;
+        for item in evidence {
+            if !self.fields.evidence.contains(item) {
+                self.fields.evidence.push(item.clone());
+                added += 1;
+            }
+        }
+        added
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +372,25 @@ impl MemoryStore {
                 ));
             }
         }
+        if let Some(mut existing) =
+            self.identical_saved_memory(&account.person_id, &memory.save_identity())
+        {
+            if existing.merge_evidence(&memory.fields.evidence) == 0 {
+                return Ok(existing);
+            }
+            existing.changed_by = Some(account.person_id.clone());
+            existing.changed_at = Some(timestamp());
+            if let Some(row) = self
+                .state
+                .memories
+                .iter_mut()
+                .find(|row| row.memory_id == existing.memory_id)
+            {
+                *row = existing.clone();
+            }
+            self.persist()?;
+            return Ok(existing);
+        }
         let entities_before = self.state.project_entities.len();
         self.state.memories.push(memory.clone());
         self.record_memory_owner(&account.person_id, &memory.memory_id);
@@ -329,6 +404,23 @@ impl MemoryStore {
             return Err(error);
         }
         Ok(memory)
+    }
+
+    /// Only the caller's own live record can be reused. A forgotten, expired,
+    /// superseded, or live-successor-hidden row is not a duplicate target.
+    fn identical_saved_memory(
+        &self,
+        person_id: &str,
+        identity: &SavedMemoryIdentity,
+    ) -> Option<Memory> {
+        let hidden = self.live_superseded_targets();
+        self.state
+            .memories
+            .iter()
+            .filter(|memory| self.memory_owned_by(&memory.memory_id, person_id))
+            .filter(|memory| self.memory_is_recalled(memory, &hidden))
+            .find(|memory| memory.save_identity() == *identity)
+            .cloned()
     }
 
     pub fn remember(

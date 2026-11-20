@@ -97,7 +97,7 @@ fn recall_reinforces_only_returned_hits_and_never_deletes() -> Result<(), StoreE
     let account = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
     let now = now_seconds();
     let mut ids = Vec::new();
-    for _ in 0..2 {
+    for index in 0..2 {
         let saved = store.save_for_account(
             &account.token,
             serde_json::from_value(json!({
@@ -105,6 +105,7 @@ fn recall_reinforces_only_returned_hits_and_never_deletes() -> Result<(), StoreE
                 "kind": "capture",
                 "title": "decaytoken shared",
                 "summary": "decaytoken shared",
+                "details": format!("decaytoken {index}"),
                 "reason": "verified"
             }))?,
         )?;
@@ -203,7 +204,7 @@ fn aged_rules_keep_stage3_weight_and_feedback_reorders_without_hiding() -> Resul
     let owner = store.bootstrap_account("owner@example.test", "correct horse battery staple")?;
     let now = now_seconds();
     let mut rule_ids = Vec::new();
-    for _ in 0..2 {
+    for index in 0..2 {
         let saved = store.save_for_account(
             &owner.token,
             serde_json::from_value(json!({
@@ -211,6 +212,7 @@ fn aged_rules_keep_stage3_weight_and_feedback_reorders_without_hiding() -> Resul
                 "kind": "rule",
                 "title": "ruletoken shared",
                 "summary": "ruletoken shared",
+                "details": format!("ruletoken {index}"),
                 "reason": "verified",
                 "rule": "keep"
             }))?,
@@ -233,7 +235,7 @@ fn aged_rules_keep_stage3_weight_and_feedback_reorders_without_hiding() -> Resul
     assert!(high / low < 1.2, "aged rule decayed: {high} / {low}");
 
     let mut twins = Vec::new();
-    for _ in 0..2 {
+    for index in 0..2 {
         let saved = store.save_for_account(
             &owner.token,
             serde_json::from_value(json!({
@@ -241,6 +243,7 @@ fn aged_rules_keep_stage3_weight_and_feedback_reorders_without_hiding() -> Resul
                 "kind": "capture",
                 "title": "feedtoken shared",
                 "summary": "feedtoken shared",
+                "details": format!("feedtoken {index}"),
                 "reason": "verified"
             }))?,
         )?;

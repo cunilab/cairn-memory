@@ -57,8 +57,8 @@ pub use links::{
     build_memory_graph, graph_node_cap, link_is_readable, sanitize_imported_links,
 };
 pub use memories::{
-    Memory, MemoryFields, MemoryStatus, SaveMemoryInput, build_explicit_memory_record,
-    build_saved_memory, capture_memory,
+    Memory, MemoryFields, MemoryStatus, SaveMemoryInput, SavedMemoryIdentity,
+    build_explicit_memory_record, build_saved_memory, capture_memory,
 };
 pub use privacy::{redact_memory_metadata, redact_sensitive_content, redact_work_context};
 pub use projects::{

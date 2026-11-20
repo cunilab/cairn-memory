@@ -35,10 +35,10 @@ export function SimilarityReviews({
     return null;
   }
   return (
-    <section className="space-y-3" aria-label="Similarity reviews">
-      <h2 className="text-sm font-medium">Possible conflicts and near-duplicates</h2>
+    <section className="space-y-3" aria-label="Near-duplicate memories">
+      <h2 className="text-sm font-medium">Near-duplicate memories</h2>
       <p className="text-sm text-muted-foreground">
-        These pairs look similar. Nothing changes until you dismiss, mark a contradiction, or supersede.
+        These saved notes look alike. Nothing changes until you dismiss, mark a contradiction, or supersede.
       </p>
       {reviews.map((review) => (
         <article key={review.review_id} className="space-y-2 rounded-md border p-3">
