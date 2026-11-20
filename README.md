@@ -195,9 +195,8 @@ Lookup stops at the Git root, or filesystem root outside Git. Skips make no
 network or outbox writes. The hook scrubs secrets before truncating content;
 see the [hook contract](docs/contracts/hook-v1.md#capture-hygiene-v014).
 
-Session end (including idle close) saves an evidence-linked session note,
-separate handoff and explicitly labelled decision/gotcha/procedure/rule/fact
-notes, without an LLM. Re-ending does not duplicate them. Project captures
+Session end (including idle close) saves one handoff and explicitly labelled
+decision/gotcha/procedure/rule/fact notes, without an LLM. Re-ending does not duplicate them. Project captures
 produce project notes; unattached or mixed work stays private. The exact
 [distillation grammar and limits](docs/contracts/continuity-v1.md#session-end-distillation-v014)
 explain which fields the rules can fill without guessing.
@@ -206,7 +205,7 @@ The tests and smokes need a PostgreSQL database with pgvector, for example
 `docker run -d -p 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD=pw pgvector/pgvector:pg17`:
 
 ```bash
-export CAIRN_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55432/postgres
+export CAIRN_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55432/postgres   # or: ./scripts/dev_up.sh && source scripts/dev_env.sh
 cargo test --workspace            # each test gets its own schema; set CAIRN_TEST_REQUIRE_DB=1 to fail instead of skip
 ./scripts/smoke_mcp.sh
 ./scripts/smoke_web.sh
@@ -230,7 +229,7 @@ has been run (otherwise pass `--lexical-only`).
 python3 scripts/bench.py --out bench/result.json --label my-change
 ```
 
-The committed baseline is `bench/baseline-0.1.6-pre.json`; see `docs/evidence.md` (2026-11-21).
+`--min-hit5 0.68` exits 1 when `memory_search` hit@5 is below the floor; CI runs it as the `Bench` job. The pre-rewrite baseline is `bench/baseline-0.1.6-pre.json` and the 0.1.6 step 2 reference is `bench/after-0.1.6-step2.json` (hit@5 0.72, zero-hit 4/5); see `docs/evidence.md` (2026-11-21).
 
 ## Reference
 

@@ -53,8 +53,8 @@ This is **not** evidence that the complete Cairn runtime is implemented. It is e
 | Classify interfaces | Compatibility categories and inventory table in [CM-CONTRACT-001](contracts/agentmemory-baseline.md) | Complete for the initial baseline; full tool/schema diff remains a Layer 1 gate |
 | Define vocabulary | [Product model](product.md#product-model), [Policy](policy.md) | Complete for Phase 0 |
 | Define automatic capture, retention, correction, privacy, and sharing behavior | [Cairn Memory Autopilot and Sharing Policy](policy.md) | Complete as a proposed product policy |
-| Build representative fixtures | [`fixtures/phase-0/`](fixtures/phase-0/) | Complete as redacted contract fixtures |
-| Create a versioned golden corpus | [`fixtures/phase-0/golden-corpus/v0.1/cases.json`](fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
+| Build representative fixtures | [`docs/fixtures/phase-0/`](fixtures/phase-0/) | Complete as redacted contract fixtures |
+| Create a versioned golden corpus | [`docs/fixtures/phase-0/golden-corpus/v0.1/cases.json`](fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
 | Record unresolved decisions in ADRs | [ADR 0005](adr/0005-phase-0-product-boundaries.md) and [collaborative memory open questions](specs/collaborative-memory.md#open-questions) | Complete; unresolved items remain intentionally open |
 
 ## Source snapshot
