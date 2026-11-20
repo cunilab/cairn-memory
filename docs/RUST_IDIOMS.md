@@ -1,3 +1,9 @@
+---
+id: CM-STD-002
+title: "Cairn Rust Idioms and Review Rules"
+status: accepted
+---
+
 # Cairn Rust Idioms and Review Rules
 
 This is a repository instruction for every agent and contributor changing Rust

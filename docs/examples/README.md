@@ -1,8 +1,14 @@
+---
+id: CM-GUIDE-002
+title: "Capture Claude Code activity into Cairn"
+status: accepted
+---
+
 # Capture Claude Code activity into Cairn
 
 `claude-code-hooks.json` wires five Claude Code hook events to
 `cairn_hook.py`. Field mapping and limits are in the
-[hook contract](../docs/contracts/hook-v1.md#claude-code-hook-input).
+[hook contract](../contracts/hook-v1.md#claude-code-hook-input).
 
 | Event | Captured as |
 | --- | --- |
@@ -15,7 +21,7 @@
 Automatic installation is `cairn setup <url> --agent claude` with the device
 token on stdin; it installs hooks plus MCP and preserves unrelated config.
 The manual example below is for a custom project-only integration. The
-[hook contract](../docs/contracts/hook-v1.md#verified-agent-capabilities) owns
+[hook contract](../contracts/hook-v1.md#verified-agent-capabilities) owns
 capabilities, official references, work tracking and bounds.
 
 ## Setup
@@ -23,7 +29,7 @@ capabilities, official references, work tracking and bounds.
 1. Start the Cairn server and sign in to the web console.
 2. On the Devices page, create a device for this machine and copy its token.
    It is shown once. Use a device token, not an account or web session token.
-   Install the `cairn` CLI from a [release](../docs/release.md) and run
+   Install the `cairn` CLI from a [release](../release.md) and run
    `cairn setup <server-url>` with the token on stdin. Besides the config it
    installs `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` into the `hook/` directory next to
    `config.json` (`~/.config/cairn/hook/`, or under `$XDG_CONFIG_HOME` /

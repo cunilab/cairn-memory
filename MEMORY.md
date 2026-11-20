@@ -11,6 +11,7 @@ replacement for the project documentation.
 - Keep entries short and link to the authoritative source.
 - Update or supersede an existing entry when the project changes.
 - Treat current code and `docs/` as authoritative if anything conflicts here.
+- Entries dated before 0.1.6 describe the retired file store, viewer, sync pull and import. Contracts and audits they cite now live in `docs/archive/`; the 0.1.6 design is `docs/specs/0.1.6-foundation.md`.
 - Never store secrets, tokens, private payloads, or temporary task progress.
 
 ## Durable project context
@@ -249,9 +250,9 @@ should include the reason they matter and the evidence that supports them.
 
 - **Type:** workflow rule
 - **Status:** active
-- **Summary:** Rust changes must follow the self-contained `RUST_IDIOMS.md` rule, which covers ownership, borrowing, error handling, API design, state transitions, async/database safety, privacy, documentation, rustfmt, and Clippy verification. OpenCode loads it automatically with `MEMORY.md`.
+- **Summary:** Rust changes must follow the self-contained `docs/RUST_IDIOMS.md` rule, which covers ownership, borrowing, error handling, API design, state transitions, async/database safety, privacy, documentation, rustfmt, and Clippy verification. OpenCode loads it automatically with `MEMORY.md`.
 - **Reason:** The project needs one durable, agent-visible Rust standard rather than relying on an external reading list or inconsistent local style decisions.
-- **Evidence:** `RUST_IDIOMS.md`; `AGENTS.md`; `opencode.jsonc`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- **Evidence:** `docs/RUST_IDIOMS.md`; `AGENTS.md`; `opencode.jsonc`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 
 ### 2026-11-12 — Hook transport uses one explicit credential
 

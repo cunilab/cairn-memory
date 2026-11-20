@@ -1,3 +1,9 @@
+---
+id: CM-GUIDE-003
+title: "Cairn Phase 0 Fixtures"
+status: accepted
+---
+
 # Cairn Phase 0 Fixtures
 
 These fixtures are small, redacted contract fixtures for Phase 0. They are intended to exercise the memory policy and retrieval expectations before the Rust runtime exists. They are not yet the final wire format.

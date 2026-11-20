@@ -20,9 +20,9 @@ This note answers two selection questions left open by [CM-AUDIT-009](./2026-11-
 
 ## What the contracts say
 
-[CM-CONTRACT-006](../contracts/continuity-v1.md) matches `global` on any scoped query so personal guidance stays available, and it keeps branch and worktree rows narrow. [CM-ADR-0006](../adr/0006-layer2-branch-aware-retrieval.md) says an explicit memory with no repository is user-global. A project fact must not be promoted into global memory ([CM-SPEC-002](../specs/memory-context-and-promotion.md)); `remember` without a repository still stores `global` by `memory_scope`.
+[CM-CONTRACT-006](../../contracts/continuity-v1.md) matches `global` on any scoped query so personal guidance stays available, and it keeps branch and worktree rows narrow. [CM-ADR-0006](../../adr/0006-layer2-branch-aware-retrieval.md) says an explicit memory with no repository is user-global. A project fact must not be promoted into global memory ([CM-SPEC-002](../../specs/memory-context-and-promotion.md)); `remember` without a repository still stores `global` by `memory_scope`.
 
-A contradiction signal is same-scope text with opposite negation and at least two shared topic terms ([CM-CONTRACT-006](../contracts/continuity-v1.md)). [CM-CONTRACT-004](../contracts/lifecycle-v1.md) and [CM-ADR-0010](../adr/0010-correction-keeps-linked-history.md) exclude expired, forgotten, and superseded rows from normal recall. The predecessor stays in storage and export through `supersedes`. The signal has no separate provenance field: `contradictory` is true exactly when `contradiction_ids` is non-empty.
+A contradiction signal is same-scope text with opposite negation and at least two shared topic terms ([CM-CONTRACT-006](../../contracts/continuity-v1.md)). [CM-CONTRACT-004](../contracts/lifecycle-v1.md) and [CM-ADR-0010](../../adr/0010-correction-keeps-linked-history.md) exclude expired, forgotten, and superseded rows from normal recall. The predecessor stays in storage and export through `supersedes`. The signal has no separate provenance field: `contradictory` is true exactly when `contradiction_ids` is non-empty.
 
 ## Filter behavior
 

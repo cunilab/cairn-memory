@@ -26,7 +26,7 @@ Only a signed-in web session creates a device. The body needs `name`.
 `personId` is optional and defaults to the session's person. A different
 `personId` is rejected with `account does not own the requested person`. A
 device token calling this route gets `403` (see the permission table in the
-[authentication contract](auth-layer3.md#device-tokens-are-agent-credentials)).
+[authentication contract](../../contracts/auth-layer3.md#device-tokens-are-agent-credentials)).
 The response contains a device record and an opaque device token. That response
 is the only time the token is shown: no list or read route returns it. The
 device token is supplied as:
@@ -99,7 +99,7 @@ does not copy a row with no `person_id` or another person's row.
 
 After a new push is acknowledged, both adapters register the context's project and
 branch for the device's person and finish that person's idle sessions, as the account
-`observe` does; see [continuity](continuity-v1.md#automatic-session-close). The file store
+`observe` does; see [continuity](../../contracts/continuity-v1.md#automatic-session-close). The file store
 used to do neither on a push. A new file-backed push also creates the device person's
 `(person_id, session_id)` row, with the pushed context, when none exists (the hook never
 starts a session, and PostgreSQL does the same); a push or a session start with a real
@@ -151,7 +151,7 @@ With it set, only a retryable failure is appended to the version 2
 queue below. After a delivered
 device event, the hook makes one bounded, nonblocking replay pass over that
 queue (see Opportunistic replay below); the explicit `cairn_outbox.py replay`
-command is unchanged. The client rule is the [hook contract](./hook-v1.md).
+command is unchanged. The client rule is the [hook contract](../../contracts/hook-v1.md).
 
 An empty PostgreSQL push is a context equal to `WorkContext::default()`. When
 this person's `(person_id, session_id)` row already exists, the push copies
@@ -304,7 +304,7 @@ new queue file is created mode `0600`. If `fcntl` cannot be imported, or
 refusing to update the queue unlocked` and does not write the queue. This
 spool does not lock on Windows and does not write unlocked there. Windows
 remains a packaging target for the server, CLI, and edge spool
-([architecture](../architecture.md)). CLI `enqueue`, `replay`, and `purge`
+([architecture](../../architecture.md)). CLI `enqueue`, `replay`, and `purge`
 still take a blocking lock. Replay still holds that lock across its socket
 calls. The hook's preflight and append use `LOCK_EX|LOCK_NB` on the same
 lock and do not wait. A busy lock is `outbox queue is busy`. The hook exits
@@ -315,7 +315,7 @@ unretained until a later hook run saves it.
 
 ### Opportunistic replay
 
-Decision of 2026-11-14 ([ADR 0007](../adr/0007-layer3-local-trusted-device-slice.md)):
+Decision of 2026-11-14 ([ADR 0007](../../adr/0007-layer3-local-trusted-device-slice.md)):
 queued events otherwise wait for a manual command. With `CAIRN_OUTBOX` set,
 after the hook's own event returns 2xx, the hook tries `LOCK_EX|LOCK_NB` on
 the queue lock. A busy lock skips the pass silently. With the lock, it

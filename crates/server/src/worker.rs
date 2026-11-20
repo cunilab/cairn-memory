@@ -29,7 +29,7 @@ impl LocalEmbeddings {
     /// Verifies every local artifact against the manifest before loading; no network loader.
     pub fn load(directory: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../../models/minilm.json"))?;
+            serde_json::from_str(include_str!("../assets/minilm/minilm.json"))?;
         let mut files = HashMap::new();
         for (name, hash) in manifest["files"]
             .as_object()

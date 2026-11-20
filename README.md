@@ -53,7 +53,7 @@ cairn update --check   # report only
 cairn update           # install the latest release and refresh the hook scripts
 ```
 
-`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` of the release that matches the installed binary into `hook/` beside the config file (see [examples](examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` of the release that matches the installed binary into `hook/` beside the config file (see [examples](docs/examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
 
 ## Agent CLI and MCP
 
@@ -187,7 +187,7 @@ printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"too
   | python3 scripts/cairn_hook.py
 ```
 
-The adapter reads the server URL and device token from the selected config file. An unmanaged hook uses `--config`, else `CAIRN_CONFIG`, else the default file. An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise its setup-time `--config`. It posts `sync/push` there. An optional path prefix such as `https://host/agent` is kept. Cairn handles redaction, lifecycle classification, persistence, and duplicate delivery. A reused event id with different content is a `409`.
+The adapter reads the server URL and device token from the selected config file. An unmanaged hook uses `--config`, else `CAIRN_CONFIG`, else the default file. An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise its setup-time `--config`. It posts `sync/push` there. An optional path prefix such as `https://host/agent` is kept. Cairn handles redaction, persistence, and duplicate delivery. A reused event id with different content is a `409`.
 
 Assistant text is skipped by default; opt in with `CAIRN_CAPTURE_ASSISTANT=1`.
 Place a regular `.cairnignore` file in a folder to skip it and its descendants.
@@ -220,7 +220,7 @@ without `--embedding-model-dir` the server keeps lexical, entity, and link recal
 ## Benchmark harness
 
 `scripts/bench.py` measures the agent-facing token cost and recall quality against a disposable
-`pgvector/pgvector:pg17` container and a synthetic corpus (`fixtures/bench/`, no real memories). It
+`pgvector/pgvector:pg17` container and a synthetic corpus (`bench/fixtures/`, no real memories). It
 reports MCP surface size, bytes injected by the hooks in a scripted session, recall@5 and MRR, bytes
 per call, and zero-hit behaviour. Needs Docker, Python 3 and a built workspace; the semantic channel
 uses the pinned MiniLM model when `scripts/download_embedding_model.py ~/.cache/cairn-bench/minilm`

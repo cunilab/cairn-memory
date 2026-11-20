@@ -1,4 +1,4 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": ["MEMORY.md", "RUST_IDIOMS.md"]
+  "instructions": ["MEMORY.md", "docs/RUST_IDIOMS.md"]
 }

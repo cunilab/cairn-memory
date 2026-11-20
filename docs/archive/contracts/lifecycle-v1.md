@@ -102,7 +102,7 @@ that lifecycle and redact the same metadata fields. Source rows stay as stored.
 
 - Recall results include their lifecycle classification.
 - Memories also carry a `kind`: `session_summary`, `handoff`, `explicit`, `lesson`,
-  `correction`, `decision`, `rule`, `gotcha`, `procedure`, `fact`, `preference`, or `capture`. Structured fields and scopes are defined in [the scope contract](project-layer4.md#memory-scopes-and-record).
+  `correction`, `decision`, `rule`, `gotcha`, `procedure`, `fact`, `preference`, or `capture`. Structured fields and scopes are defined in [the scope contract](../../contracts/project-layer4.md#memory-scopes-and-record).
 - Session-derived memories aggregate the highest importance and sensitivity,
   average confidence, and durable retention from their source observations.
 - `GET /cairn-memory/diagnose` reports temporary observations, durable memories,
@@ -114,7 +114,7 @@ that lifecycle and redact the same metadata fields. Source rows stay as stored.
   decision remains open. The local Layer 1 policy uses a 30-day default for
   temporary raw observations, while explicit `expiresAt` values are honored.
 
-Corrections retain the old record and create a live successor with `supersedes`, keeping the target's scope, typed fields and author and recording the actor. Only authorized same-scope successors suppress a target. Project author/owner and global author/admin checks apply. A successor's deletion may reveal its predecessor. The correction's confidence is `100`. See [ADR 0010](../adr/0010-correction-keeps-linked-history.md).
+Corrections retain the old record and create a live successor with `supersedes`, keeping the target's scope, typed fields and author and recording the actor. Only authorized same-scope successors suppress a target. Project author/owner and global author/admin checks apply. A successor's deletion may reveal its predecessor. The correction's confidence is `100`. See [ADR 0010](../../adr/0010-correction-keeps-linked-history.md).
 
 ## Forgetting shared knowledge
 

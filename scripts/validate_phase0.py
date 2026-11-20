@@ -60,7 +60,7 @@ def validate_markdown(root: Path) -> list[str]:
 
 def validate_fixtures(root: Path) -> list[str]:
     errors: list[str] = []
-    fixture_dir = root / "fixtures" / "phase-0"
+    fixture_dir = root / "docs" / "fixtures" / "phase-0"
     count = 0
 
     for path in sorted(fixture_dir.rglob("*.jsonl")):

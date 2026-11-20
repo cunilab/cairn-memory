@@ -36,7 +36,7 @@ The session, observation, and memory entries use the serialized domain types.
 Row fields are snake_case (`session_id`, `source_event_ids`), except that a
 row's `lifecycle` object uses `expiresAt`. The envelope keys are camelCase
 (`exportedAt`, `forgottenIds`). Memory and recall-related entries may include the
-additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entries include the structured common and per-type fields from [the scope contract](project-layer4.md#memory-scopes-and-record), lifecycle, `kind`, `next_steps`,
+additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entries include the structured common and per-type fields from [the scope contract](../../contracts/project-layer4.md#memory-scopes-and-record), lifecycle, `kind`, `next_steps`,
 `unresolved_work`, `project_id`, `promoted_from`, `promotion_reason`,
 `verified_commit`, `source_event_ids`, and optional `supersedes` fields.
 `forgottenIds` is the authoritative suppression set for imported state.
@@ -48,7 +48,7 @@ additive Layer 2 `scope` field (`project`, `personal`, or `global`). Memory entr
   `(person_id, session_id)`. A missing `person_id` is the unscoped row, which
   is the key older bundles already used. File-store account import rejects a different
   `person_id` and binds a missing one to the caller. That trust rule is in
-  [the Layer 3 auth contract](auth-layer3.md). Unscoped import keeps the
+  [the Layer 3 auth contract](../../contracts/auth-layer3.md). Unscoped import keeps the
   `person_id` from the bundle.
 - Re-importing an identical bundle is a no-op and returns zero imported items.
 - A same-ID, different-content conflict fails the complete import rather than
@@ -151,7 +151,7 @@ database errors return HTTP 500.
 This remains a personal-memory format. Project publication and governance are
 outside its backup and restore boundary. File-store account import rejects a session
 `person_id` that is not the caller's, as the
-[Layer 3 auth contract](auth-layer3.md) states. An account export, file or
+[Layer 3 auth contract](../../contracts/auth-layer3.md) states. An account export, file or
 PostgreSQL, holds the memories and observations that person owns and the sessions
 with that `person_id`; file tombstones follow the export rule above. The trusted
 unscoped export (the library call, and the REST route on a file store with no

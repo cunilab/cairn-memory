@@ -2,7 +2,7 @@
 """Cairn token and recall benchmark harness.
 
 Starts a disposable pgvector Postgres in Docker and a real cairn-server on it, loads the
-synthetic corpus in fixtures/bench, then measures the agent-facing surface through the real
+synthetic corpus in bench/fixtures, then measures the agent-facing surface through the real
 `cairn mcp` binary and the real hook script. Prints a short table and writes JSON.
 
     python3 scripts/bench.py --out bench/result.json [--label NAME] [--lexical-only]
@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "fixtures" / "bench"
+FIXTURES = ROOT / "bench" / "fixtures"
 IMAGE = "pgvector/pgvector:pg17"
 PASSWORD = "correct horse battery staple"
 DEFAULT_MODEL_DIR = Path.home() / ".cache" / "cairn-bench" / "minilm"

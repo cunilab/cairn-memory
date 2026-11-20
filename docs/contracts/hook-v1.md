@@ -8,7 +8,7 @@ status: draft
 
 `scripts/cairn_hook.py` is the portable hook boundary for local integrations.
 It lets an agent hook send one JSON object without knowing Cairn's internal
-storage or lifecycle rules.
+storage rules.
 
 ## Invocation
 
@@ -61,7 +61,7 @@ CAIRN_OUTBOX=/path/to/device-queue.json \
 ```
 
 Generic capture posts `POST /cairn-memory/sync/push`, which is the capture
-route on both the file store and PostgreSQL. This adapter does not register a
+route (device token only). This adapter does not register a
 device or start a session. A device token also starts and ends sessions (the
 server accepts it on every agent route); see the
 [authentication contract](auth-layer3.md#device-tokens-are-agent-credentials).
@@ -75,9 +75,9 @@ The adapter accepts top-level or nested `payload` values for:
 - `content`, `text`, or `message`
 - `role`
 - `source`, `hook`, or `type` (top level), and `source` or `type` (nested)
-- `importance`
+- `importance` (sent by the hook, ignored by the 0.1.6 server)
 - `context`
-- `lifecycle`
+- `lifecycle` (sent by the hook, ignored by the 0.1.6 server)
 
 If none of `content`, `text`, or `message` is present, the whole input object
 becomes the content as compact sorted JSON. `role` defaults to `tool` and the
@@ -128,7 +128,7 @@ best-effort; markers are the way to exclude a sensitive folder altogether.
 Claude Code runs a hook command with one JSON object on stdin
 ([hooks reference](https://code.claude.com/docs/en/hooks)). The adapter reads
 these fields directly, so a settings entry needs no wrapper script. Setup is in
-[`examples/README.md`](../../examples/README.md).
+[`docs/examples/README.md`](../examples/README.md).
 
 | Claude Code field | Cairn field | Rule |
 | --- | --- | --- |
@@ -241,7 +241,7 @@ it never changes the hook's exit status or output. The hook's own event is
 not sent twice, and the hook starts no background process or thread. It uses
 the replay code of `cairn_outbox.py`, so the binding check, redirect block,
 and attempt counters are the explicit `replay` rules in the
-[sync contract](./sync-layer3.md#opportunistic-replay). A queue that is not
+[sync contract](../archive/contracts/sync-layer3.md#opportunistic-replay). A queue that is not
 bound to this origin and token fails the preflight before any POST. A busy
 lock at preflight is not fatal: the hook still posts, and the append rechecks
 the binding. Only if that post then needs a retry does the busy lock make the
@@ -273,13 +273,11 @@ The process does not print the credential, put it in the URL, or store it in
 the payload. It does not infer a server or try another route after a 401. A
 revoked credential is a `401` and nothing is queued.
 
-Cairn still performs lifecycle classification, retention, persistence, and
-validation. The hook runs `cairn_outbox.normalize` before the request. That
-redacts `content` and the seven `WorkContext` string lists, and it keeps the
-64 KiB content limit. The server then classifies that redacted text. The event
-fingerprint is still taken from the input session, source, and content before
-that redaction. There is no PostgreSQL `/cairn-memory/observe` route, and the
-hook does not use the file `/observe` route.
+The server still performs retention, persistence, and validation. The hook runs `cairn_outbox.normalize`
+before the request. That redacts `content` and the seven `WorkContext` string lists, and it keeps the
+64 KiB content limit. The server redacts again. The event fingerprint is still taken from the input session,
+source, and content before that redaction. The hook posts `sync/push`; `/cairn-memory/observe` is the same
+capture for the CLI and MCP and takes a device token too.
 
 ## Change record
 

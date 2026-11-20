@@ -8,7 +8,7 @@ status: draft
 
 | Field | Value |
 | --- | --- |
-| Status | Draft survey. This is a record of source reading. It is not an accepted design, and it does not change [CM-CONTRACT-004](../contracts/lifecycle-v1.md). |
+| Status | Draft survey. This is a record of source reading. It is not an accepted design, and it does not change [CM-CONTRACT-004](../archive/contracts/lifecycle-v1.md). |
 | Read on | 2026-11-11 |
 | Question | How do other memory systems score confidence, decide that a memory is related or unrelated, and keep or replace an old record when it is corrected? |
 | Cairn today | Confidence is stored as `0..100`. Observations default to `50`. Explicit memories default to `80`. `correct` writes a new memory with `supersedes`, keeps the old record, and copies `project_id` when the target has one. Normal recall hides the old record while the correction is live. The exportable record remains. Forget, not correction, writes the tombstone. |
@@ -26,7 +26,7 @@ Where the two passes describe the same AgentMemory function, the formula matches
 
 ## What Cairn already stores
 
-[CM-CONTRACT-004](../contracts/lifecycle-v1.md) keeps these dimensions separate:
+[CM-CONTRACT-004](../archive/contracts/lifecycle-v1.md) keeps these dimensions separate:
 
 | Dimension | Range in the contract | Default recorded there |
 | --- | --- | --- |
@@ -249,4 +249,4 @@ These limits were recorded by the cross-check and are part of the survey:
 - Zep facts docs: <https://help.getzep.com/facts> and <https://help.getzep.com/v2/facts.md>
 - Letta `0.16.8` passage schema, core-memory tools, and ORM base
 - Graphify v8 `docs/how-it-works.md` and `graphify-core` `confidence.rs`
-- Cairn [CM-CONTRACT-004](../contracts/lifecycle-v1.md), [CM-SPEC-002](../specs/memory-context-and-promotion.md), and [CM-SPEC-003](../specs/graph-assisted-retrieval.md)
+- Cairn [CM-CONTRACT-004](../archive/contracts/lifecycle-v1.md), [CM-SPEC-002](../specs/memory-context-and-promotion.md), and [CM-SPEC-003](../specs/graph-assisted-retrieval.md)

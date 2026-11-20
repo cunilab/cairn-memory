@@ -126,12 +126,12 @@ defines the bounded grammar.
   and sibling notes on both stores. Explicit source-event forgetting suppresses
   every derivation. This implements the owner's rule that hiding one item
   must not silently remove other shared knowledge; see the
-  [lifecycle contract](../contracts/lifecycle-v1.md#forgetting-shared-knowledge).
+  [lifecycle contract](../archive/contracts/lifecycle-v1.md#forgetting-shared-knowledge).
 
 ### Stage 3 contract decisions (2026-11-17)
 
 The owner approved `fastembed` 7.7.1 with minimal CPU ONNX features and the
-SHA-verified FP32 MiniLM artifact pinned in `models/minilm.json` (Apache-2.0).
+SHA-verified FP32 MiniLM artifact pinned in `crates/server/assets/minilm/minilm.json` (Apache-2.0).
 The production image bakes it in; standalone servers load a provisioned directory.
 Runtime model downloads/external embedding APIs are disabled. Model load failure
 preserves lexical/entity/link recall and reports semantic search disabled.
@@ -222,7 +222,7 @@ and replacing its votes so concurrent voters cannot overwrite each other.
 Summary regeneration locks and carries the same memory's reinforcement and
 feedback state into the replacement. Imports clear votes and recompute their
 counts in both stores: a backup cannot authenticate a voter. The
-[export contract](../contracts/export-v1.md#import-behavior) owns that rule.
+[export contract](../archive/contracts/export-v1.md#import-behavior) owns that rule.
 
 ### Stage 6 contract decisions (2026-11-17)
 

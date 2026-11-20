@@ -6,8 +6,8 @@ status: superseded
 
 # Layer 5 Explicit Project Memory Share
 
-Superseded on 2026-11-16 by [the project contract](project-layer4.md) and
-[ADR 0013](../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
+Superseded on 2026-11-16 by [the project contract](../../contracts/project-layer4.md) and
+[ADR 0013](../../adr/0013-shared-project-decisions-and-personal-memory-scopes.md).
 
 There are no individual grants, revocations, share policies, dismissals, separate
 shared lists or team spaces. Every member reads every live published project

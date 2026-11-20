@@ -8,7 +8,7 @@ import urllib.request
 
 
 def download(directory):
-    manifest = json.loads((pathlib.Path(__file__).resolve().parent.parent / "models/minilm.json").read_text())
+    manifest = json.loads((pathlib.Path(__file__).resolve().parent.parent / "crates/server/assets/minilm/minilm.json").read_text())
     directory.mkdir(parents=True, exist_ok=True)
     for name, digest in manifest["files"].items():
         target = directory / name

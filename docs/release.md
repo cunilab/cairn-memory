@@ -13,16 +13,16 @@ How changes reach `main`, how a release is cut, and how installed clients update
 - `main` is the trunk and is always releasable. Nobody pushes to it directly.
 - Work happens on a short-lived branch named `feat/`, `fix/`, `docs/`, or `chore/` plus a short name (for example `fix/CM-123-outbox-retry`), merged by pull request and then deleted.
 - A pull request needs every required check green. The required checks are the CI job names:
-  - `Rust format and clippy`
-  - `Rust tests`
-  - `PostgreSQL tests` (each ignored test runs against its own fresh PostgreSQL 17 database with pgvector, see `scripts/ci_postgres_tests.sh`)
+  - `Rust format and clippy` (also checks that `cairn-core` has no `sqlx`, `tokio`, `axum` or `reqwest` dependency)
+  - `Rust tests` (a `pgvector/pgvector:pg17` service and the pinned MiniLM model; `CAIRN_TEST_REQUIRE_DB=1`, so a missing database fails instead of skipping)
   - `Build on macos-15` and `Build on windows-latest`
   - `Web console typecheck, lint, build`
   - `Python hook and outbox tests`
   - `Documentation validation`
-  - `Acceptance smokes` (`scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, `scripts/smoke_postgres.sh`, and `scripts/smoke_web.sh`)
+  - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
+  - `Bench` (`scripts/bench.py --min-hit5 0.68`; uploads the result JSON)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
-- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the PostgreSQL tests job.
+- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
 
 ## Cut a release
 
@@ -144,6 +144,15 @@ reinstall the integrations you still want with that binary. The restored
 client makes `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace the config
 file, drops `CAIRN_CONFIG`, and brings back the previous MCP payloads, default
 capture visibility, relevance behavior, and Stop save-ask.
+
+## 0.1.6 upgrade notes
+
+0.1.6 replaces the storage and the memory model; see the [0.1.6 foundation specification](specs/0.1.6-foundation.md).
+There is no migration from 0.1.5. The server uses PostgreSQL only, with one migration (`migrations/0001_foundation.sql`)
+in the schema `cairn`. A database that still has the old `public.cairn_memories` table is refused at startup with
+`pre-0.1.6 database; recreate it`; the server never drops data itself. The file store, `--store`, the embedded
+`/viewer`, `/import`, `/sync/pull` and the similarity-review routes and tools are gone. Upgrade the server and the
+CLI together: the MCP tool set and the shape of `memory_save` changed.
 
 ## How clients update
 

@@ -53,8 +53,8 @@ This is **not** evidence that the complete Cairn runtime is implemented. It is e
 | Classify interfaces | Compatibility categories and inventory table in [CM-CONTRACT-001](contracts/agentmemory-baseline.md) | Complete for the initial baseline; full tool/schema diff remains a Layer 1 gate |
 | Define vocabulary | [Product model](product.md#product-model), [Policy](policy.md) | Complete for Phase 0 |
 | Define automatic capture, retention, correction, privacy, and sharing behavior | [Cairn Memory Autopilot and Sharing Policy](policy.md) | Complete as a proposed product policy |
-| Build representative fixtures | [`fixtures/phase-0/`](../fixtures/phase-0/) | Complete as redacted contract fixtures |
-| Create a versioned golden corpus | [`fixtures/phase-0/golden-corpus/v0.1/cases.json`](../fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
+| Build representative fixtures | [`fixtures/phase-0/`](fixtures/phase-0/) | Complete as redacted contract fixtures |
+| Create a versioned golden corpus | [`fixtures/phase-0/golden-corpus/v0.1/cases.json`](fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
 | Record unresolved decisions in ADRs | [ADR 0005](adr/0005-phase-0-product-boundaries.md) and [collaborative memory open questions](specs/collaborative-memory.md#open-questions) | Complete; unresolved items remain intentionally open |
 
 ## Source snapshot
@@ -121,7 +121,7 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - The embedded viewer is a dependency-free local HTML surface served by `cairn-server`; `apps/web` is the first Next.js console and the viewer remains.
 - The CLI and MCP no longer open a store file or take an account token. `cargo test -p cairn-client` passed on 2026-11-15 (15 unit tests and 5 integration tests in `crates/client/tests/agent_flow.rs`, which run the real `cairn` binary and `cairn mcp` against the file-store router; the PostgreSQL case is ignored without `CAIRN_TEST_DATABASE_URL`). The credential rules are in [CM-CONTRACT-008](contracts/auth-layer3.md) and the tool table in [CM-CONTRACT-002](contracts/mcp-layer1.md).
 - The MCP adapter covers the Layer 1 compatibility set and direct capture aliases, not the upstream full registry or modern protocol-era discovery.
-- The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](contracts/export-v1.md).
+- The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](archive/contracts/export-v1.md).
 - The golden corpus defines expected behavior but has not been scored against a running implementation.
 - Retention durations and the future encrypted-cache implementation remain policy-configurable follow-up work; the Layer 3 policy forbids unencrypted response caches and defines tombstone/revocation purge behavior. The first authentication model is resolved by ADR 0008.
 - Project maintenance and cross-person membership are implemented: the maintenance report lists stale and superseded project memories, and a teammate joins a project through the committed `.cairn/project.json`, an owner can share a promoted memory with that member, and keep a project team. The promotion and merge boundary is defined in [CM-CONTRACT-009](contracts/project-layer4.md) and [ADR 0009](adr/0009-explicit-project-promotion.md). Offline purge of a device that never syncs again, encryption, and federation remain unimplemented.
@@ -835,12 +835,12 @@ below are the "before". No product code changed in this step.
 
 **What it is.** `scripts/bench.py` starts a disposable `pgvector/pgvector:pg17` container and the
 real `cairn-server` on it, creates an account, a device token and a git checkout with a committed
-`.cairn/project.json` (`cairn init`), loads `fixtures/bench/corpus.json` through `/remember`, then
+`.cairn/project.json` (`cairn init`), loads `bench/fixtures/corpus.json` through `/remember`, then
 measures through the real `cairn mcp` binary and the real `scripts/cairn_hook.py`. It needs Docker,
 Python 3 and a build of `cairn-server` and `cairn-client`; it needs no network and no LLM. The corpus
 is 70 synthetic memories about a fictional order-fulfilment project (12 decisions, 10 rules, 12
 gotchas, 8 procedures, 10 facts, 4 handoffs, 4 session summaries, 6 near-duplicates of existing
-memories, 4 off-topic distractors). `fixtures/bench/questions.json` has 25 questions with gold
+memories, 4 off-topic distractors). `bench/fixtures/questions.json` has 25 questions with gold
 memory ids (13 direct, 7 paraphrases that share no content word with the gold memory, 5 whose gold
 is a near-duplicate pair; the harness fails if a paraphrase shares a word) and 5 weak queries that
 should return nothing. Token figures are `bytes / 4`, an estimate, not a tokenizer count.

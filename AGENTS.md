@@ -3,7 +3,7 @@
 These instructions apply to work in this project. Read `MEMORY.md` before
 substantive work; OpenCode loads it through `opencode.jsonc`.
 
-Before changing Rust, also read `RUST_IDIOMS.md`. It is the repository's
+Before changing Rust, also read `docs/RUST_IDIOMS.md`. It is the repository's
 self-contained Rust quality rule and is loaded automatically by OpenCode.
 
 ## Working rules

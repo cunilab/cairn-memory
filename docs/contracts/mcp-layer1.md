@@ -67,53 +67,47 @@ configuration is the only credential, and the server scopes every call to its ac
 
 | Tool | Route | Behavior |
 | --- | --- | --- |
-| `memory_save` | `POST /remember` | Save a scoped structured record; scope, title, summary and reason required |
+| `memory_save` | `POST /remember` | Save a typed memory (`kind`, `title`, `summary`, `reason`, per-kind `fields`, `evidence`, `supersedes`, `contradicts`, optional `scope`) |
 | `memory_list`, `memory_get` | `GET /memories`, `GET /memories/{id}` | List readable records or get every field |
 | `memory_recall` | `POST /recall` | Return a bounded context pack |
-| `memory_consolidate` | `POST /session/end` | End a session and create its evidence-backed memory |
+| `memory_consolidate` | `POST /session/end` | End a session; the server distills a handoff note |
 | `memory_smart_search` | `POST /smart-search` | Search durable memories |
 | `memory_why_changed` | `POST /why-changed` | Return decisions, reasons, evidence, relationships, and conflict signals |
-| `memory_diagnose` | `GET /diagnose` | Report the account's lifecycle counts |
-| `memory_lesson_save` | `POST /remember` | Save a scoped record; defaults to gotcha unless kind is explicit |
+| `memory_diagnose` | `GET /diagnose` | Report counts by kind, status and scope, and job counts |
+| `memory_lesson_save` | `POST /remember` | Same as `memory_save`; `kind` defaults to `gotcha` |
+| `memory_feedback` | `POST /feedback` | Vote a memory `helpful` or `wrong` |
 | `memory_reflect` | `POST /context` | Return hybrid retrieval candidates; local embeddings when enabled |
 | `memory_session_start` | `POST /session/start` | Start or resume a session |
 | `memory_observe` | `POST /observe` | Capture one bounded, idempotent observation |
 | `memory_session_end` | `POST /session/end` | Alias for session consolidation |
 | `memory_search` | `POST /search` | Hybrid search |
 | `memory_context` | `POST /context` | Bounded context assembly |
-| `memory_resume` | `POST /resume` | Recover recent session summaries for current work context |
-| `memory_unresolved` | `POST /unresolved` | Recover session summaries with unresolved work |
-| `memory_forget` | `POST /forget` | Persist forget suppression for an event or memory |
-| `memory_export` | `POST /export` | Return a versioned portable memory bundle |
-| `memory_import` | `POST /import` | Merge a versioned bundle idempotently |
-| `memory_correct` | `POST /correct` | Supersede a memory or observation with a corrected durable memory |
+| `memory_resume` | `POST /resume` | Recover the caller's recent handoffs for current work context |
+| `memory_unresolved` | `POST /unresolved` | Recover handoffs with open questions and open contradictions |
+| `memory_forget` | `POST /forget` | Forget a memory: its text is erased and it cannot be saved again |
+| `memory_export` | `POST /export` | Return the caller's visible memories and links |
 | `memory_contradict` | `POST /contradict` | Declare that one visible memory contradicts another |
 | `memory_supersede` | `POST /supersede` | Set `supersedes` on an existing memory |
-| `memory_similarity_reviews` | `GET /similarity-reviews` | List open reviews the caller can read on both sides |
-| `memory_review_dismiss` | `POST /similarity-reviews/dismiss` | Dismiss one open review |
-| `memory_review_contradict` | `POST /similarity-reviews/contradict` | Declare a contradiction from a review |
-| `memory_review_supersede` | `POST /similarity-reviews/supersede` | Supersede one side of a review |
 | `memory_link` | `POST /links` | Add one typed link; edit rights on the source |
 | `memory_unlink` | `POST /links/remove` | Remove one typed link |
-| `memory_graph` | `GET /graph` | Readable memory link graph, with optional scope, project, relation, and cap |
+| `memory_graph` | `GET /graph` | Visible memory link graph, with optional scope, project, relation, and cap |
 
 Project tools run the same routes as the web console, with the same
 account scope. Their behavior is owned by the contract named here:
 
 | Tool | Owner |
 | --- | --- |
-| `memory_project_list`, `memory_project_register`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
-| `memory_project_members`, `memory_project_verify`, `memory_delete` | [CM-CONTRACT-009](project-layer4.md) |
+| `memory_project_list`, `memory_project_register`, `memory_project_memories` | [CM-CONTRACT-009](project-layer4.md) |
+| `memory_project_members`, `memory_delete` (an alias of forget) | [CM-CONTRACT-009](project-layer4.md) |
 
-Removed with the local-store mode: `memory_sessions` (it listed the file store's unscoped
+Removed in 0.1.6 with their routes: `memory_import`, `memory_correct` (a correction is a save with `supersedes`), `memory_similarity_reviews`, `memory_review_dismiss`, `memory_review_contradict`, `memory_review_supersede`, `memory_project_verify` and `memory_project_freshness`. Removed earlier with the local-store mode: `memory_sessions` (it listed the file store's unscoped
 sessions), `memory_account_bootstrap` and `memory_account_register` (account creation is a
 web action), and `memory_project_team_remove` (member removal is web-only; a device token is
 `403`, so the tool would only invite retries). Since 2026-11-16 there is no invite, team
 member add or member removal at all, so `memory_project_invite` and
 `memory_project_team_add` are gone too; a teammate joins a project by capturing in a checkout
 whose `.cairn/project.json` names it ([project-layer4](project-layer4.md)). `cairn init`, which
-writes that file, is a CLI command only. `memory_diagnose` returns the lifecycle
-summary of `GET /diagnose`, not the earlier local storage counts. `memory_project_list` is
+writes that file, is a CLI command only. `memory_project_list` is
 new: an agent needs a project id before saving project memory. Argument names are the
 camelCase names of the REST bodies; path ids (`projectId`, `memoryId`) are percent-encoded
 into the route.
@@ -133,8 +127,6 @@ is wrapped, including when the array is empty:
 | `memory_list`, `memory_project_memories` | `memories` |
 | `memory_project_list` | `projects` |
 | `memory_project_members` | `members` |
-| `memory_project_freshness` | `freshness` |
-| `memory_similarity_reviews` | `reviews` |
 | `memory_search`, `memory_smart_search` | `results` |
 
 `initialize.serverInfo` is `name: cairn-memory`, `title: Cairn`. The shared
@@ -145,84 +137,58 @@ server key is `cairn`, so the host calls `cairn_memory_save`. Renaming the
 protocol tools is not required. The MCP schema requires `structuredContent` to
 be an object ([SEP-2106](https://modelcontextprotocol.io/seps/2106-json-schema-2020-12)).
 
-`memory_save` and `memory_lesson_save` return this receipt on both channels.
-The text is compact JSON of the same object. Errors stay errors.
+`memory_save` and `memory_lesson_save` return this receipt on both channels. The text is compact JSON of the
+same object. Errors stay errors.
 
 ```json
-{"memory_id":"mem-1","kind":"gotcha","scope":"personal","status":"active"}
+{"id":"mem-1","status":"active","deduplicated":false}
 ```
 
-`memory_consolidate` and `memory_session_end` return the summary memory. A session
-with no retained observations is a normal close and returns `{"status":"empty"}`
-as a non-error result. See
-[empty-session close](continuity-v1.md#empty-session-close-v016).
-
-The receipt is unchanged by save deduplication. An identical explicit save
-from the same owner returns the existing `memory_id`; newly supplied evidence
-is merged, and a retry with no new evidence is a no-op. See
+An identical explicit save from the same owner returns the existing `id` with `deduplicated: true`; newly
+supplied evidence is merged. A save matching a forgotten memory is an error (`forgotten`). See
 [explicit-save identity](continuity-v1.md#explicit-save-identity-v016).
 
-`memory_get` returns the stored record, including content, provenance, and
-lifecycle, with empty fields left in place. `memory_export` is the same lossless
-bundle the REST route returns. Both use compact JSON text. The CLI still prints
-pretty server JSON for every command, including save, search, and export.
+`memory_consolidate` and `memory_session_end` return `{"status":"queued"}` when the server will distill a
+handoff, or `{"status":"empty"}` for a session with no retained observations, which is a normal close. See
+[empty-session close](continuity-v1.md#empty-session-close-v016).
 
-`memory_search`, `memory_smart_search`, `memory_recall`, `memory_context`, and
-`memory_reflect` default to short cards on both channels. A search array becomes
-`{"results":[...]}`. A context pack keeps `query`, `results`, `omitted_count`,
-`omitted_memory_ids`, and `recovery_hint` (null when there is no hint). Reflect
-still adds `mode` and `note` and still drops the two omission fields it already
-dropped. On a default card, `title` is at most 120 UTF-8 bytes and `summary` at
-most 240. A longer value is cut on a character boundary and ends with `…`, and
-that mark counts toward the cap. `expanded`, `memory_get`, REST, and the CLI
-keep the stored text.
+`memory_get` and `memory_export` return the server JSON unchanged as compact text. The CLI prints pretty
+server JSON for every command.
+
+`memory_search`, `memory_smart_search`, `memory_recall`, `memory_context` and `memory_reflect` default to short
+cards on both channels: `id`, `kind`, `scope`, `title`, `summary`, `score`. The result keeps `query`, `results`
+and `more` (the number of hits left out by the budget); reflect also keeps `mode` and `note`. On a card `title`
+is at most 120 UTF-8 bytes and `summary` at most 240; a longer value is cut on a character boundary and ends
+with `…`.
 
 ```json
-{"results":[{"memory_id":"mem-1","kind":"gotcha","scope":"project","title":"Hook auth","summary":"401 names the config file.","score":0.5}]}
+{"query":"hook auth","results":[{"id":"mem-1","kind":"gotcha","scope":"project","title":"Hook auth","summary":"401 names the config file.","score":0.5}],"more":0}
 ```
 
-`expanded: true` is the only wider option. It is removed before the REST call.
-Each hit then keeps useful recall fields: the card, `project_id`, `status`,
-`pinned`, `importance`, `reason`, `details`, typed fields, `evidence`,
-relationships, and the stale and contradiction signals. It omits `lifecycle`,
-`source_event_ids`, the scope-copied `source`, and `content`. An empty array or
-empty object on that hit is omitted (`applies_to`, `tags`, `entities`,
-`alternatives`, `steps`, and the other optional lists). False, zero, and a
-non-empty collection stay. Required empty collections stay elsewhere: `results`,
-`omitted_memory_ids`, and graph `nodes` and `edges`. `memory_why_changed`,
-`memory_resume`, and `memory_unresolved` keep full hits, including an empty
-relationship list. Authorization is unchanged. Search and context also apply
-the capture filter and relevance floor in
-[CM-CONTRACT-006](continuity-v1.md#capture-eligibility-v015).
+`expanded: true` is the only wider option; it is removed before the REST call. Each hit then also carries
+`project_id`, `status`, `reason`, `fields`, `evidence`, `entities`, `links` and `context`, with empty arrays and
+objects omitted. `memory_why_changed`, `memory_resume` and `memory_unresolved` return their hits with empty values
+omitted. Authorization is unchanged. Search and context apply the relevance floor in
+[CM-CONTRACT-006](continuity-v1.md).
 
-Other MCP objects use compact JSON and omit nulls and empty strings on both
-channels. They keep false, zero, empty arrays and objects, `status`, and flags
-such as `truncated`, `accepted`, and `duplicate`.
-
-`memory_graph` and `memory_similarity_reviews` keep JSON `structuredContent`,
-with those empty values omitted. Their text is tab-delimited TOON
-([spec 4.4](https://github.com/toon-format/spec/blob/main/SPEC.md)). Null
-`project_id` and other null columns stay in that text so the table stays
-rectangular. An empty review list is `reviews: []`. This encoder is only those
-two shapes. `scripts/cairn_instructions.txt` and the session brief are unchanged
-apart from the Cairn name sentence.
-
-Capture and explicit-save tools accept the nested Layer 1 `lifecycle` object
-defined in [CM-CONTRACT-004](lifecycle-v1.md).
+Other MCP objects use compact JSON and omit nulls and empty strings on both channels. They keep false, zero and
+flags such as `accepted` and `duplicate`. Lists are wrapped: `memories`, `projects`, `members`, `results`.
+`memory_graph` keeps JSON `structuredContent`; its text is tab-delimited TOON
+([spec 4.4](https://github.com/toon-format/spec/blob/main/SPEC.md)), the only shape that encoder supports.
 
 ## Scoped records and CLI
 
-The flat common and per-type fields, visibility and authority rules are defined in [the scope contract](project-layer4.md#memory-scopes-and-record). MCP `memory_save` and `memory_lesson_save` expose every field and require `scope`, `title`, `summary`, `reason`. The lesson alias defaults `kind` to `gotcha`; an explicit kind is preserved. Project saves in an initialized checkout fill `context.project_id` from its committed file when absent. Scope is always explicit.
+The record shape, visibility and default scope rules are defined in [the scope contract](project-layer4.md#memory-scopes-and-record). MCP `memory_save` and `memory_lesson_save` take `kind`, `title`, `summary`, `reason`, a per-kind `fields` object, `evidence`, `supersedes`, `contradicts` and an optional `scope`. The lesson alias defaults `kind` to `gotcha`. Saves in an initialized checkout fill `context.project_id` from its committed file, which makes the default scope `project`.
 
-CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same fields, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. The CLI prints the server's fields. MCP shapes are in [Agent-facing results](#agent-facing-results-v015).
+CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same record, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. The CLI prints the server's fields. MCP shapes are in [Agent-facing results](#agent-facing-results-v015).
 
 ```sh
-cairn save '{"scope":"personal","kind":"preference","title":"Concise replies","summary":"Answer in one paragraph.","reason":"Reduce reading time.","preference":"concise","example":"one paragraph"}'
+cairn save '{"kind":"preference","title":"Concise replies","summary":"Answer in one paragraph.","reason":"Reduce reading time.","fields":{"example":"one paragraph"}}'
 cairn memories
 cairn memory memory-id
 ```
 
-Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `contradict`, `supersede`, `reviews`, `review-dismiss`, `review-contradict`, `review-supersede`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
+Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `contradict`, `supersede`, `export`, `project-list`, `project-members`, `project-memories`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` lists live project memories. Only the author can forget a memory.
 
 All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v014); no external model API is used.
 
@@ -240,9 +206,8 @@ take `--include-captures` for the same opt-in.
 
 - The client needs a running server and a device token created in the web console; there is
   no offline or local-file mode, and the CLI and MCP no longer create accounts.
-- `memory_observe` on the PostgreSQL server is a device-token sync push (it records a sync
-  event); on the file store it accepts either credential. Both return the same
-  `{accepted, duplicate, observation}` shape.
+- `memory_observe` is a device-token capture; a web session is refused with `401`. It returns
+  `{accepted, duplicate, observation, project_attachment}`.
 - `memory_reflect` is retrieval-only until a provider-backed reflection
   lifecycle exists.
 - The adapter supports the compatibility handshake used by the current Layer 1
@@ -258,12 +223,9 @@ take `--include-captures` for the same opt-in.
   (file mode, environment override, loopback-only `http`, redirect refusal, token never in
   output or errors).
 - `crates/client/tests/agent_flow.rs` runs the real `cairn` binary and `cairn mcp` against
-  the file-store router (capture, recall, session, scoped save, a `403` on web-only
-  routes, revocation) and, as an ignored test with `CAIRN_TEST_DATABASE_URL`, against the
-  PostgreSQL router.
+  the server router on a `TestDb` schema (capture, recall, session, scoped save, a `403` on
+  web-only routes, revocation); it needs `CAIRN_TEST_DATABASE_URL`.
 - `scripts/smoke_mcp.sh` drives `cairn mcp` against a spawned `cairn-server`.
-  `scripts/smoke_full_flow.sh` drives the CLI, including capture, scoped save,
-  project visibility, and same-account export/import, against the same kind of server.
 
 ## Agent guidance (v0.1.4)
 

@@ -8,7 +8,7 @@ status: draft
 
 - **Date:** 2026-10-26
 - **Milestone:** Layer 3 — Personal Cross-Device Memory
-- **Related:** [Roadmap](../roadmap.md), [Collaborative memory](../specs/collaborative-memory.md), [Layer 3 sync contract](../contracts/sync-layer3.md), [ADR 0002](0002-collaborative-sync-model.md)
+- **Related:** [Roadmap](../roadmap.md), [Collaborative memory](../specs/collaborative-memory.md), [Layer 3 sync contract](../archive/contracts/sync-layer3.md), [ADR 0002](0002-collaborative-sync-model.md)
 
 ## Context
 
@@ -117,7 +117,7 @@ it difficult to prove the core behavior and would overstate the security model.
   closed the same way. Command output and the stored error omit the Location
   URL and the response body, including a non-http scheme, a missing Location,
   and a body that is short or still open. Replay closes that response without
-  reading it. The rule is the [Layer 3 sync contract](../contracts/sync-layer3.md).
+  reading it. The rule is the [Layer 3 sync contract](../archive/contracts/sync-layer3.md).
 - Version 1 `enqueue`, `replay`, and `purge` share one sibling `<queue>.lock`
   and hold `fcntl.flock` across the whole read, modify, and replace. `replay`
   keeps that lock during its socket calls. Dropping it early would let an
@@ -127,7 +127,7 @@ it difficult to prove the core behavior and would overstate the security model.
   directory and one replace. A failed replace keeps the previous queue. If
   `fcntl.flock` is unavailable the command does not write. This spool does not
   claim Windows locking. The behavior is the
-  [Layer 3 sync contract](../contracts/sync-layer3.md).
+  [Layer 3 sync contract](../archive/contracts/sync-layer3.md).
 - Version 2 is an explicit device-bound queue, created only by `enqueue_bound`
   when the file is missing. It stores `route: sync/push`, a normalized server
   origin, and a SHA-256 fingerprint of a fixed prefix plus the raw device
@@ -141,7 +141,7 @@ it difficult to prove the core behavior and would overstate the security model.
   `CAIRN_OUTBOX` is set. That preflight and append use `LOCK_NB` and do not
   wait while replay holds this lock across a socket call. A busy lock exits
   nonzero and does not retain the capture. The rule is the
-  [Layer 3 sync contract](../contracts/sync-layer3.md).
+  [Layer 3 sync contract](../archive/contracts/sync-layer3.md).
 - Amendment, 2026-11-14: the hook replays opportunistically. Reason: queued
   events otherwise wait for a manual `cairn_outbox.py replay`. After the
   hook's own event returns 2xx, it takes the queue lock with `LOCK_NB` and
@@ -153,7 +153,7 @@ it difficult to prove the core behavior and would overstate the security model.
   hook still starts no process or thread, never sends its own event twice,
   and a replay failure never changes its exit status or output. Explicit
   `replay` is unchanged, and the server deduplicates by event id. The rule is
-  the [Layer 3 sync contract](../contracts/sync-layer3.md#opportunistic-replay).
+  the [Layer 3 sync contract](../archive/contracts/sync-layer3.md#opportunistic-replay).
   This supersedes the earlier sentence that replay stays an explicit command.
 - Amendment, 2026-11-14: the hook is device-token only. It always posts
   `sync/push` with the device credential. The 2026-11-14 `CAIRN_DEVICE_TOKEN`
@@ -210,5 +210,5 @@ rejected on the file store; PostgreSQL keeps a separate row per person. Rule 3's
 with no owner.
 
 The wire-level rules, status text, and examples are in the
-[Layer 3 sync contract](../contracts/sync-layer3.md). This ADR keeps its `draft`
+[Layer 3 sync contract](../archive/contracts/sync-layer3.md). This ADR keeps its `draft`
 status.
