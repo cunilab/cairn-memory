@@ -19,7 +19,8 @@ use std::time::Duration;
 
 /// How often idle sessions and expired rows are swept.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
-/// Memories queued for embedding at start, for rows saved while no model was loaded.
+/// Memories queued per round at start, for rows saved while no model was loaded. Rounds repeat
+/// until none is left.
 const RECONCILE_BATCH: i64 = 512;
 
 #[derive(Clone)]
@@ -111,20 +112,12 @@ pub fn spawn(state: &AppState) {
         if reconcile.embeddings.is_none() {
             return;
         }
-        match reconcile.store.pending_embeddings(RECONCILE_BATCH).await {
-            Ok(items) => {
-                for item in items {
-                    if let Err(error) = reconcile
-                        .store
-                        .enqueue_job(JobKind::Embed, &item.memory_id)
-                        .await
-                    {
-                        eprintln!("embedding reconcile failed: {error}");
-                        break;
-                    }
-                }
-            }
-            Err(error) => eprintln!("embedding reconcile failed: {error}"),
+        if let Err(error) = reconcile
+            .store
+            .enqueue_missing_embeddings(RECONCILE_BATCH)
+            .await
+        {
+            eprintln!("embedding reconcile failed: {error}");
         }
     });
     let jobs = state.clone();

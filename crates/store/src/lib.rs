@@ -145,20 +145,22 @@ impl Store {
                 .bind(MIGRATION_LOCK)
                 .execute(&mut *tx)
                 .await?;
-            let has_table: bool =
-                sqlx::query_scalar("SELECT to_regclass('schema_version') IS NOT NULL")
-                    .fetch_one(&mut *tx)
-                    .await?;
+            // Qualified: an unqualified name could resolve to `public.schema_version`.
+            let table = format!("{}.schema_version", self.schema);
+            let has_table: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(&table)
+                .fetch_one(&mut *tx)
+                .await?;
             let applied = has_table
-                && sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM schema_version WHERE version = $1)",
-                )
+                && sqlx::query_scalar::<_, bool>(&format!(
+                    "SELECT EXISTS (SELECT 1 FROM {table} WHERE version = $1)"
+                ))
                 .bind(version)
                 .fetch_one(&mut *tx)
                 .await?;
             if !applied {
                 sqlx::raw_sql(sql).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+                sqlx::query(&format!("INSERT INTO {table} (version) VALUES ($1)"))
                     .bind(version)
                     .execute(&mut *tx)
                     .await?;

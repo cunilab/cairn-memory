@@ -15,13 +15,23 @@ pub struct Consolidated {
 
 impl Store {
     /// The `consolidate` job body. Takes the 20 nearest neighbours with the same owner, scope,
-    /// project and kind (filtered before the window). Cosine >= 0.92: the newer supersedes the
-    /// older, evidence is unioned onto the newer, and the older stays in history as `superseded`.
-    /// 0.75..0.92: an automatic `relates` link. A declared `contradicts` link between two
-    /// memories is never overridden.
+    /// project and kind (the cohort is selected first, then ranked exactly). Cosine >= 0.92: the
+    /// newer supersedes the older, evidence is unioned onto the newer, and the older stays in
+    /// history as `superseded`. 0.75..0.92: an automatic `relates` link. A declared `contradicts`
+    /// link between two memories is never overridden.
     pub async fn consolidate_memory(&self, memory_id: &str) -> Result<Consolidated> {
         let mut out = Consolidated::default();
         let mut tx = self.pool.begin().await?;
+        // One consolidation per cohort at a time: two jobs on a mutual near-duplicate pair each
+        // update the other's row and would deadlock.
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                        concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0))
+               FROM memories WHERE memory_id = $1",
+        )
+        .bind(memory_id)
+        .execute(&mut *tx)
+        .await?;
         let subject = sqlx::query(
             "SELECT m.owner_id, m.scope, m.project_id, m.kind, m.status, e.embedding::text AS embedding
                FROM memories m JOIN memory_embeddings e USING (memory_id)
@@ -39,16 +49,19 @@ impl Store {
             return Ok(out);
         }
         let vector: String = subject.try_get("embedding")?;
+        // The cohort is materialised before the distance sort, so no hnsw scan can cut the
+        // window to other people's nearest vectors first.
         let neighbours = sqlx::query(
-            "SELECT m.memory_id, 1 - (e.embedding <=> $1::vector) AS cosine,
-                    (m.created_at, m.memory_id) > (s.created_at, s.memory_id) AS neighbour_newer
-               FROM memories m
-               JOIN memory_embeddings e ON e.memory_id = m.memory_id
-               JOIN memories s ON s.memory_id = $6
-              WHERE m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
-                AND m.memory_id <> $6 AND m.status IN ('active','stale')
-                AND (m.expires_at IS NULL OR m.expires_at > now())
-              ORDER BY e.embedding <=> $1::vector, m.memory_id LIMIT $7",
+            "WITH cohort AS MATERIALIZED (
+                 SELECT m.memory_id, m.created_at, e.embedding
+                   FROM memories m JOIN memory_embeddings e ON e.memory_id = m.memory_id
+                  WHERE m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
+                    AND m.memory_id <> $6 AND m.status IN ('active','stale')
+                    AND (m.expires_at IS NULL OR m.expires_at > now()))
+             SELECT c.memory_id, 1 - (c.embedding <=> $1::vector) AS cosine,
+                    (c.created_at, c.memory_id) > (s.created_at, s.memory_id) AS neighbour_newer
+               FROM cohort c JOIN memories s ON s.memory_id = $6
+              ORDER BY c.embedding <=> $1::vector, c.memory_id LIMIT $7",
         )
         .bind(&vector)
         .bind(subject.try_get::<String, _>("owner_id")?)

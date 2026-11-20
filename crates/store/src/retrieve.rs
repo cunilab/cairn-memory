@@ -1,5 +1,5 @@
 use crate::embed::vector_text;
-use crate::memory::{ListFilter, MEMORY_SELECT, memory_from_row, visible};
+use crate::memory::{MEMORY_SELECT, memory_from_row, visible};
 use crate::{Result, Store};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Fields, Kind, Memory, Status};
@@ -27,7 +27,7 @@ pub enum Mode {
     WhyChanged,
 }
 
-/// Counts for `GET /diagnose`: what the person can see, and the job queue.
+/// Counts for `GET /diagnose`: what the person can see, and their own share of the job queue.
 #[derive(Clone, Debug, Serialize)]
 pub struct Diagnostics {
     pub memories: i64,
@@ -333,33 +333,36 @@ impl Store {
     }
 
     async fn handoffs(&self, person_id: &str, filter: &Filter) -> Result<Vec<Memory>> {
-        let page = self
-            .list(
-                person_id,
-                &ListFilter {
-                    kind: Some(Kind::Handoff),
-                    statuses: vec![Status::Active],
-                    limit: Some(200),
-                    ..ListFilter::default()
-                },
-            )
-            .await?;
-        Ok(page
-            .memories
-            .into_iter()
-            .filter(|m| m.owner == person_id && matches(m, filter))
-            .collect())
+        let rows = sqlx::query(&format!(
+            "{MEMORY_SELECT}
+              WHERE m.owner_id = $1 AND m.kind = 'handoff' AND m.status = 'active' AND {}
+              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 200",
+            visible("m", "$1")
+        ))
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut memories = rows
+            .iter()
+            .map(memory_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        self.attach(person_id, &mut memories).await?;
+        memories.retain(|m| matches(m, filter));
+        Ok(memories)
     }
 
     /// The fenced brief a hook injects at session start.
     pub async fn brief(&self, person_id: &str, context: &WorkContext) -> Result<String> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND m.kind IN ('rule','decision','preference','handoff')
+              WHERE {} AND m.status = 'active'
+                AND ((m.kind IN ('rule','decision') AND m.scope = 'project' AND m.project_id = $2)
+                     OR (m.kind IN ('preference','handoff') AND m.owner_id = $1))
               ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 500",
             visible("m", "$1")
         ))
         .bind(person_id)
+        .bind(&context.project_id)
         .fetch_all(&self.pool)
         .await?;
         let memories = rows
@@ -409,10 +412,8 @@ impl Store {
             }
         }
         out.memories = out.by_status.values().sum();
-        let jobs = self.job_snapshot().await?;
-        out.jobs_pending = jobs.pending;
-        out.jobs_running = jobs.running;
-        out.jobs_quarantined = jobs.quarantined;
+        (out.jobs_pending, out.jobs_running, out.jobs_quarantined) =
+            self.person_job_counts(person_id).await?;
         Ok(out)
     }
 }

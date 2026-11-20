@@ -182,6 +182,27 @@ impl Store {
         Ok(())
     }
 
+    /// Pending, running and quarantined jobs that belong to one person: embed and consolidate jobs
+    /// of their own memories, and their distill jobs.
+    pub async fn person_job_counts(&self, person_id: &str) -> Result<(i64, i64, i64)> {
+        let counts = sqlx::query(
+            "SELECT count(*) FILTER (WHERE j.status = 'pending') AS pending,
+                    count(*) FILTER (WHERE j.status = 'running') AS running,
+                    count(*) FILTER (WHERE j.status = 'quarantined') AS quarantined
+               FROM jobs j
+              WHERE (j.kind = 'distill' AND starts_with(j.job_key, length($1)::text || ':' || $1))
+                 OR (j.kind <> 'distill' AND j.job_key IN (SELECT memory_id FROM memories WHERE owner_id = $1))",
+        )
+        .bind(person_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((
+            counts.try_get("pending")?,
+            counts.try_get("running")?,
+            counts.try_get("quarantined")?,
+        ))
+    }
+
     pub async fn job_snapshot(&self) -> Result<JobSnapshot> {
         let counts = sqlx::query(
             "SELECT count(*) FILTER (WHERE status = 'pending') AS pending,

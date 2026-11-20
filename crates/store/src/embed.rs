@@ -36,6 +36,33 @@ impl Store {
         self.embed_items_from(&rows).await
     }
 
+    /// Queues an embed job for every live memory that has no vector and no pending or running
+    /// job, `batch` at a time until none is left. Returns how many it queued.
+    pub async fn enqueue_missing_embeddings(&self, batch: i64) -> Result<usize> {
+        let mut queued = 0;
+        loop {
+            let ids: Vec<String> = sqlx::query_scalar(
+                "SELECT m.memory_id FROM memories m
+                  WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+                    AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.memory_id)
+                    AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'embed' AND j.job_key = m.memory_id
+                                       AND j.status IN ('pending', 'running'))
+                  ORDER BY m.created_at, m.memory_id LIMIT $1",
+            )
+            .bind(batch)
+            .fetch_all(&self.pool)
+            .await?;
+            let mut added = 0;
+            for id in &ids {
+                added += usize::from(self.enqueue_job(JobKind::Embed, id).await?);
+            }
+            if added == 0 {
+                return Ok(queued);
+            }
+            queued += added;
+        }
+    }
+
     /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten or
     /// expired memory has no item.
     pub async fn embed_items(&self, ids: &[String]) -> Result<Vec<EmbedItem>> {

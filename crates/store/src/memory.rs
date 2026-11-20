@@ -224,7 +224,16 @@ impl Store {
         .bind(cursor_id)
         .bind(limit + 1)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(|error| match &error {
+            // 22007/22008/22P02: the cursor's timestamp does not parse.
+            sqlx::Error::Database(e)
+                if matches!(e.code().as_deref(), Some("22007" | "22008" | "22P02")) =>
+            {
+                StoreError::Validation("invalid cursor".into())
+            }
+            _ => error.into(),
+        })?;
         let more = rows.len() as i64 > limit;
         let rows = &rows[..rows.len().min(limit as usize)];
         let next_cursor = match (more, rows.last()) {
@@ -312,6 +321,10 @@ impl Store {
         for memory in memories {
             memory.entities = entities.remove(&memory.id).unwrap_or_default();
             memory.links = links.remove(&memory.id).unwrap_or_default();
+            // A local path is the owner's business; members and global readers do not get it.
+            if memory.owner != person_id {
+                memory.context.worktree = None;
+            }
         }
         Ok(())
     }
@@ -546,8 +559,8 @@ pub(crate) async fn link_tx(
 }
 
 /// Inserts a derived memory with its entities, usage row, agent links and embed job. An identical
-/// memory (same owner, scope, project and identity hash) returns as a duplicate; a forgotten one
-/// is a 409. `fixed_id` is for the deterministic handoff id.
+/// memory (same owner, scope, project and identity hash) returns as a duplicate, or is revived when
+/// it had expired; a forgotten one is a 409. `fixed_id` is for the deterministic handoff id.
 pub(crate) async fn insert_memory(
     tx: &mut PgConnection,
     person_id: &str,
@@ -591,7 +604,7 @@ pub(crate) async fn insert_memory(
     .await?;
     let Some(id) = inserted else {
         let existing = sqlx::query(
-            "SELECT memory_id, status FROM memories
+            "SELECT memory_id, status, coalesce(expires_at <= now(), false) AS expired FROM memories
               WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '') AND identity_hash = $4",
         )
         .bind(person_id)
@@ -604,10 +617,25 @@ pub(crate) async fn insert_memory(
         if status == Status::Forgotten {
             return Err(StoreError::Conflict("forgotten".into()));
         }
+        let id: String = existing.try_get("memory_id")?;
+        // Saving again after expiry gives the same memory a new life; until the sweep deletes the
+        // row it would otherwise stay hidden while the save reported success.
+        let revived: bool = existing.try_get("expired")?;
+        if revived {
+            sqlx::query(
+                "UPDATE memories SET expires_at = to_timestamp($2), updated_at = now() WHERE memory_id = $1",
+            )
+            .bind(&id)
+            .bind(new.expires_at.map(|t| t as f64))
+            .execute(&mut *tx)
+            .await?;
+            enqueue_tx(tx, JobKind::Embed, &id).await?;
+        }
+        save_links(tx, person_id, &id, project_id, new).await?;
         return Ok(Saved {
-            id: existing.try_get("memory_id")?,
+            id,
             status,
-            deduplicated: true,
+            deduplicated: !revived,
         });
     };
     let (kinds, names): (Vec<&str>, Vec<&str>) = new
@@ -625,34 +653,30 @@ pub(crate) async fn insert_memory(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    if let Some(target) = &new.supersedes {
-        link_tx(
-            tx,
-            person_id,
-            &id,
-            new.scope,
-            project_id,
-            target,
-            Relation::Supersedes,
-        )
-        .await?;
-    }
-    if let Some(target) = &new.contradicts {
-        link_tx(
-            tx,
-            person_id,
-            &id,
-            new.scope,
-            project_id,
-            target,
-            Relation::Contradicts,
-        )
-        .await?;
-    }
+    save_links(tx, person_id, &id, project_id, new).await?;
     enqueue_tx(tx, JobKind::Embed, &id).await?;
     Ok(Saved {
         id,
         status: Status::Active,
         deduplicated: false,
     })
+}
+
+/// The `supersedes` and `contradicts` links a save carries; a duplicate save adds any it lacks.
+async fn save_links(
+    tx: &mut PgConnection,
+    person_id: &str,
+    id: &str,
+    project_id: Option<&str>,
+    new: &NewMemory,
+) -> Result<()> {
+    for (target, relation) in [
+        (&new.supersedes, Relation::Supersedes),
+        (&new.contradicts, Relation::Contradicts),
+    ] {
+        if let Some(target) = target {
+            link_tx(tx, person_id, id, new.scope, project_id, target, relation).await?;
+        }
+    }
+    Ok(())
 }

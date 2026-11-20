@@ -556,3 +556,146 @@ fn unit(index: usize) -> Vec<f32> {
     v[index] = 1.0;
     v
 }
+
+#[tokio::test]
+async fn saving_an_expired_note_again_makes_it_live() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let note = save_input(serde_json::json!({
+        "kind": "note", "title": "Session note", "summary": "Looked at the pool.", "reason": "context"
+    }));
+    let work = WorkContext::default();
+    let first = db.store.save(&me, note.clone(), &work).await.unwrap();
+    sqlx::query("UPDATE memories SET expires_at = now() - interval '1 day' WHERE memory_id = $1")
+        .bind(&first.id)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.store.get(&me, &first.id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    let again = db.store.save(&me, note, &work).await.unwrap();
+    assert!(!again.deduplicated, "a new life, not a hidden duplicate");
+    let memory = db.store.get(&me, &again.id).await.expect("live again");
+    assert!(memory.expires_at.unwrap() > cairn_core::id::now_seconds());
+    assert_eq!(
+        db.store
+            .list(&me, &ListFilter::default())
+            .await
+            .unwrap()
+            .memories
+            .len(),
+        1
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_duplicate_save_still_adds_its_links() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let old = db
+        .store
+        .save(&me, rule("old rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let new = db.store.save(&me, rule("new rule"), &work).await.unwrap();
+    let mut again = rule("new rule");
+    again.supersedes = Some(old.clone());
+    let saved = db.store.save(&me, again, &work).await.unwrap();
+    assert!(saved.deduplicated);
+    assert_eq!(saved.id, new.id);
+    assert_eq!(
+        db.store.get(&me, &old).await.unwrap().status,
+        Status::Superseded
+    );
+    let links = db.store.get(&me, &new.id).await.unwrap().links;
+    assert!(
+        links
+            .iter()
+            .any(|l| l.relation == Relation::Supersedes && l.target == old)
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn other_peoples_worktree_paths_are_not_returned() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("owner").await;
+    let member = db.person("member").await;
+    let (project, _) = db
+        .store
+        .init_project(&owner, "github.com/acme/cairn", None)
+        .await
+        .unwrap();
+    db.store
+        .join_project(&member, &project.project_id, None)
+        .await
+        .unwrap();
+    let work = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        worktree: Some("/Users/owner/code/cairn".into()),
+        ..WorkContext::default()
+    };
+    let id = db
+        .store
+        .save(&owner, rule("shared"), &work)
+        .await
+        .unwrap()
+        .id;
+    let mine = db.store.get(&owner, &id).await.unwrap();
+    assert_eq!(
+        mine.context.worktree.as_deref(),
+        Some("/Users/owner/code/cairn")
+    );
+    assert!(
+        db.store
+            .get(&member, &id)
+            .await
+            .unwrap()
+            .context
+            .worktree
+            .is_none()
+    );
+    let listed = db
+        .store
+        .list(&member, &ListFilter::default())
+        .await
+        .unwrap();
+    assert!(listed.memories[0].context.worktree.is_none());
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_malformed_cursor_is_a_validation_error() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    for cursor in ["not a time|mem_1", "2026-13-45T00:00:00Z|mem_1", "|"] {
+        let result = db
+            .store
+            .list(
+                &me,
+                &ListFilter {
+                    cursor: Some(cursor.into()),
+                    ..ListFilter::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(StoreError::Validation(_))),
+            "{cursor}: {result:?}"
+        );
+    }
+    db.finish().await;
+}
