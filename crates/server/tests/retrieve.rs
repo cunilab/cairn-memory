@@ -61,6 +61,16 @@ async fn session_distills_into_notes_and_a_handoff() {
     )
     .await;
 
+    // A console session is not an agent: captures take a device token only.
+    let (status, _) = app
+        .send(
+            "POST",
+            "observe",
+            event("e9", "from the console"),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 401);
     // Raw captures are never recalled.
     let nothing = app
         .post("search", json!({"query": "retry path untested"}), &device)

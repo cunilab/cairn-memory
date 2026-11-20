@@ -1,9 +1,9 @@
 use crate::AppState;
-use crate::auth::Agent;
-use crate::error::{ApiError, ApiResult};
+use crate::auth::{Agent, Device};
+use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
-use cairn_core::capture::{CaptureResult, ObservationInput, WorkContext};
+use cairn_core::capture::{ObservationInput, WorkContext};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -35,11 +35,14 @@ pub struct SessionRef {
     session_id: String,
 }
 
+/// `project_attachment.status` is `attached` when the capture's project id names a project the
+/// person belongs to, else `personal`. The hook and the CLI print a warning for a broken file.
 pub async fn observe(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    Device(account): Device,
     Json(body): Json<Observation>,
-) -> ApiResult<CaptureResult> {
+) -> Result<Json<Value>, ApiError> {
+    let project_id = body.context.project_id.clone();
     let input = ObservationInput {
         event_id: body.event_id,
         session_id: body.session_id,
@@ -48,7 +51,17 @@ pub async fn observe(
         source: body.source,
         context: body.context,
     };
-    Ok(Json(state.store.capture(&account.person_id, input).await?))
+    let result = state.store.capture(&account.person_id, input).await?;
+    let attached = match project_id {
+        Some(id) => state.store.is_member(&account.person_id, &id).await?,
+        None => false,
+    };
+    Ok(Json(json!({
+        "accepted": result.accepted,
+        "duplicate": result.duplicate,
+        "event_id": result.event_id,
+        "project_attachment": {"status": if attached { "attached" } else { "personal" }},
+    })))
 }
 
 pub async fn start(

@@ -140,7 +140,7 @@ async fn shared_project_model() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| !m["is_owner"].as_bool().unwrap())
+        .find(|m| m["role"] == "member")
         .unwrap()["person_id"]
         .clone();
     let (status, _) = app
@@ -249,11 +249,8 @@ async fn removed_routes_are_gone() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     for (method, path) in [
-        ("GET", "/viewer"),
         ("POST", "/cairn-memory/correct"),
         ("POST", "/cairn-memory/import"),
-        ("POST", "/cairn-memory/sync/pull"),
-        ("GET", "/cairn-memory/similarity-reviews"),
         ("POST", "/cairn-memory/projects"),
         ("POST", "/cairn-memory/projects/verify"),
     ] {
@@ -275,5 +272,63 @@ async fn removed_routes_are_gone() {
             response.status()
         );
     }
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn account_errors_use_the_texts_the_console_expects() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let user = app.member(&admin, "user").await;
+    let (status, body) = app
+        .send(
+            "POST",
+            "auth/login",
+            json!({"email": "user@example.test", "password": "wrong password!"}),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid account credentials"))
+    );
+    let (status, body) = app
+        .send("POST", "auth/password", json!({"current_password": "not the password", "new_password": "changed horse battery staple"}), Some(&user))
+        .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("invalid account credentials"))
+    );
+    let (status, body) = app.send("GET", "projects", json!(null), None).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("Bearer token is required"))
+    );
+    let (status, _) = app
+        .send(
+            "POST",
+            "auth/register",
+            json!({"email": "x@example.test", "password": PASSWORD}),
+            Some(&user),
+        )
+        .await;
+    assert_eq!(status, 403, "only the admin creates accounts");
+    // A password reset by the admin signs the user out; logout revokes the session.
+    let person = app.get("auth/me", &user).await["person_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.ok(
+        "POST",
+        &format!("auth/accounts/{person}/password"),
+        json!({"password": "reset horse battery staple"}),
+        Some(&admin),
+    )
+    .await;
+    let (status, body) = app.send("GET", "projects", json!(null), Some(&user)).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (401, Some("account session is expired or revoked"))
+    );
     app.finish().await;
 }

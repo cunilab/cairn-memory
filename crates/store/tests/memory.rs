@@ -390,7 +390,7 @@ async fn visibility_matrix() {
     );
     assert!(store.get(&owner, &expiring.id).await.is_err());
 
-    // Links never reveal a memory the viewer cannot see.
+    // Links never reveal a memory the reader cannot see.
     let mut pointer = rule("member note");
     pointer.scope = Some(Scope::Personal);
     let project_rule = store

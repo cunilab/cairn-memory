@@ -15,7 +15,7 @@ use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
 
 /// The visibility rule, reused by every read: not forgotten, not expired, and owned, global, or
-/// in a project the viewer belongs to. `alias` is the memories table alias, `me` a bind like `$1`.
+/// in a project the reader belongs to. `alias` is the memories table alias, `me` a bind like `$1`.
 pub(crate) fn visible(alias: &str, me: &str) -> String {
     format!(
         "({a}.status <> 'forgotten' AND ({a}.expires_at IS NULL OR {a}.expires_at > now())
@@ -246,7 +246,7 @@ impl Store {
         })
     }
 
-    /// Fills `entities` and `links` (outgoing and incoming). A link whose other end the viewer
+    /// Fills `entities` and `links` (outgoing and incoming). A link whose other end the reader
     /// cannot see is left out, so links never reveal a hidden memory.
     pub(crate) async fn attach(&self, person_id: &str, memories: &mut [Memory]) -> Result<()> {
         if memories.is_empty() {

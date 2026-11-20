@@ -557,7 +557,6 @@ fn scenario(url: &str, label: &str) {
         "memory_project_team_create",
         "memory_correct",
         "memory_import",
-        "memory_similarity_reviews",
         "memory_review_dismiss",
         "memory_review_contradict",
         "memory_review_supersede",

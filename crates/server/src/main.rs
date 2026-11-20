@@ -4,8 +4,9 @@ use std::env;
 use std::net::SocketAddr;
 use std::process;
 
-/// The production schema; tests use their own.
-const SCHEMA: &str = "cairn";
+/// The production schema. `--schema` (or `CAIRN_SCHEMA`) picks another one in the same database,
+/// which is how the smoke scripts share one disposable database.
+const DEFAULT_SCHEMA: &str = "cairn";
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +25,7 @@ async fn main() {
         .unwrap_or_else(|| {
             eprintln!("missing --database-url <url> or CAIRN_DATABASE_URL");
             eprintln!(
-                "Usage: cairn-server --database-url <postgres-url> [--bind 127.0.0.1:3111] [--embedding-model-dir <path>]"
+                "Usage: cairn-server --database-url <postgres-url> [--bind 127.0.0.1:3111] [--schema cairn] [--embedding-model-dir <path>]"
             );
             process::exit(2);
         });
@@ -42,7 +43,10 @@ async fn main() {
                 }
             },
         );
-    let store = Store::open(&database_url, SCHEMA)
+    let schema = option_value(&args, "--schema")
+        .or_else(|| env::var("CAIRN_SCHEMA").ok())
+        .unwrap_or_else(|| DEFAULT_SCHEMA.to_owned());
+    let store = Store::open(&database_url, &schema)
         .await
         .unwrap_or_else(|error| {
             eprintln!("failed to open Cairn PostgreSQL storage: {error}");

@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// The console treats this 401 text as "sign in again".
+const EXPIRED_SESSION: &str = "account session is expired or revoked";
 const ATTEMPT_LIMIT: u32 = 10;
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const PRUNE_AT: usize = 1024;
@@ -54,7 +56,7 @@ pub fn optional_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 pub fn token(headers: &HeaderMap) -> Result<&str, ApiError> {
-    optional_token(headers).ok_or_else(|| ApiError::unauthorized("authentication failed"))
+    optional_token(headers).ok_or_else(|| ApiError::unauthorized("Bearer token is required"))
 }
 
 impl AppState {
@@ -66,6 +68,21 @@ impl AppState {
         }
         match self.store.authenticate_device(token).await {
             Ok((_, account)) => Ok(account),
+            Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
+                Err(ApiError::unauthorized("device is revoked"))
+            }
+            Err(_) => Err(ApiError::unauthorized(EXPIRED_SESSION)),
+        }
+    }
+
+    /// An active device token only: captures come from agents, never from a console session.
+    pub async fn device(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
+        let token = token(headers)?;
+        match self.store.authenticate_device(token).await {
+            Ok((_, account)) => Ok(account),
+            Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
+                Err(ApiError::unauthorized("device is revoked"))
+            }
             Err(_) => Err(ApiError::unauthorized("authentication failed")),
         }
     }
@@ -78,7 +95,7 @@ impl AppState {
             Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
                 Err(ApiError::forbidden(WEB_ONLY_ERROR))
             }
-            Err(_) => Err(ApiError::unauthorized("authentication failed")),
+            Err(_) => Err(ApiError::unauthorized(EXPIRED_SESSION)),
         }
     }
 
@@ -112,6 +129,8 @@ impl AppState {
 
 /// Handler argument: the caller as an account, by web session or device token.
 pub struct Agent(pub Account);
+/// Handler argument: the caller as an account, by device token only.
+pub struct Device(pub Account);
 /// Handler argument: the caller as an account, by web session only.
 pub struct Web(pub Account);
 /// Handler argument: the admin account, by web session only.
@@ -131,6 +150,7 @@ macro_rules! extractor {
     };
 }
 extractor!(Agent, agent);
+extractor!(Device, device);
 extractor!(Web, web);
 extractor!(Admin, admin);
 

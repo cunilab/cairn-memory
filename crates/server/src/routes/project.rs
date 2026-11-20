@@ -9,7 +9,7 @@ use cairn_core::memory::{Scope, Status};
 use cairn_core::project::Project;
 use cairn_store::StoreError;
 use cairn_store::memory::ListFilter;
-use cairn_store::project::{BranchSummary, Conflict, Member};
+use cairn_store::project::{BranchSummary, Conflict};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -17,6 +17,15 @@ pub struct Listed {
     #[serde(flatten)]
     project: Project,
     role: &'static str,
+}
+
+/// A roster row; the console reads `role`.
+#[derive(Serialize)]
+pub struct MemberRow {
+    person_id: String,
+    email: String,
+    role: &'static str,
+    joined_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -192,12 +201,21 @@ pub async fn members(
     State(state): State<AppState>,
     Agent(account): Agent,
     Path(project_id): Path<String>,
-) -> ApiResult<Vec<Member>> {
+) -> ApiResult<Vec<MemberRow>> {
+    let members = state
+        .store
+        .project_members(&account.person_id, &project_id)
+        .await?;
     Ok(Json(
-        state
-            .store
-            .project_members(&account.person_id, &project_id)
-            .await?,
+        members
+            .into_iter()
+            .map(|m| MemberRow {
+                person_id: m.person_id,
+                email: m.email,
+                role: if m.is_owner { "owner" } else { "member" },
+                joined_at: m.joined_at,
+            })
+            .collect(),
     ))
 }
 

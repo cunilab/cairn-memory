@@ -137,13 +137,18 @@ pub async fn change_password(
 ) -> Result<StatusCode, ApiError> {
     // Authentication came first, so a caller without a session cannot use up an email's quota.
     state.throttle("password", &account.email)?;
-    state
+    match state
         .store
         .change_password(
             &account.person_id,
             &body.current_password,
             &body.new_password,
         )
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+        .await
+    {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        // The password dialog shows this exact text for a wrong current password.
+        Err(StoreError::Forbidden(_)) => Err(ApiError::unauthorized("invalid account credentials")),
+        Err(error) => Err(error.into()),
+    }
 }

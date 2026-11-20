@@ -7,17 +7,17 @@ pub struct Viewer<'a> {
 }
 
 /// The Rust twin of the store's visibility SQL fragment:
-/// not forgotten, not expired, and owned, global, or in one of the viewer's projects.
-pub fn is_visible(memory: &Memory, viewer: &Viewer<'_>, now: i64) -> bool {
+/// not forgotten, not expired, and owned, global, or in one of the reader's projects.
+pub fn is_visible(memory: &Memory, reader: &Viewer<'_>, now: i64) -> bool {
     memory.status != Status::Forgotten
         && memory.expires_at.is_none_or(|expires| expires > now)
-        && (memory.owner == viewer.person_id
+        && (memory.owner == reader.person_id
             || memory.scope == Scope::Global
             || (memory.scope == Scope::Project
                 && memory
                     .project_id
                     .as_ref()
-                    .is_some_and(|id| viewer.project_ids.contains(id))))
+                    .is_some_and(|id| reader.project_ids.contains(id))))
 }
 
 #[cfg(test)]
