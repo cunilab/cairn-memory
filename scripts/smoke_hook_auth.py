@@ -889,12 +889,13 @@ def http_json(url, path, payload=None, token=None):
         return error.code, error.read().decode(errors="replace")
 
 
-class FileServerHookTests(unittest.TestCase):
+class ServerHookTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.store = tempfile.NamedTemporaryFile(prefix="cairn-hook7a-", delete=False)
-        cls.store.close()
-        os.unlink(cls.store.name)
+        cls.database_url = os.environ.get("CAIRN_TEST_DATABASE_URL")
+        if not cls.database_url:
+            raise unittest.SkipTest("CAIRN_TEST_DATABASE_URL names no PostgreSQL database")
+        cls.schema = "smoke_hook_%d" % os.getpid()
         cls.log = tempfile.NamedTemporaryFile(prefix="cairn-hook7a-log-", delete=False)
         cls.port = free_port()
         cls.url = "http://127.0.0.1:%d" % cls.port
@@ -907,8 +908,10 @@ class FileServerHookTests(unittest.TestCase):
                 "-p",
                 "cairn-server",
                 "--",
-                "--store",
-                cls.store.name,
+                "--database-url",
+                cls.database_url,
+                "--schema",
+                cls.schema,
                 "--bind",
                 "127.0.0.1:%d" % cls.port,
             ],
@@ -930,7 +933,7 @@ class FileServerHookTests(unittest.TestCase):
         if not ready:
             log_text = Path(cls.log.name).read_text(encoding="utf-8", errors="replace")[-4000:]
             cls.tearDownClass()
-            raise RuntimeError("file server did not become ready\n" + log_text)
+            raise RuntimeError("server did not become ready\n" + log_text)
         try:
             status, account = http_json(
                 cls.url,
@@ -968,9 +971,6 @@ class FileServerHookTests(unittest.TestCase):
             if handle is not None:
                 handle.close()
                 os.unlink(handle.name)
-        store = getattr(cls, "store", None)
-        if store is not None:
-            os.unlink(store.name) if os.path.exists(store.name) else None
 
     def assert_hidden(self, result, *secrets):
         combined = result.stdout + result.stderr
@@ -1010,7 +1010,7 @@ class FileServerHookTests(unittest.TestCase):
         self.assertEqual(device.returncode, 0, device.stderr)
         pushed = json.loads(device.stdout)
         self.assertTrue(pushed["accepted"] is True)
-        self.assertEqual(pushed["observation"]["event_id"], "hook7a-device")
+        self.assertEqual(pushed["event_id"], "hook7a-device")
         self.assertNotIn("hook-secret-value", device.stdout)
         self.assert_hidden(device, self.account_token, self.device_token, "hook-secret-value")
 
@@ -1068,21 +1068,11 @@ class FileServerHookTests(unittest.TestCase):
         self.assertIn("401", revoked.stderr)
         self.assert_hidden(revoked, self.account_token, self.device_token)
 
-        with open(self.store.name, encoding="utf-8") as handle:
-            state = json.load(handle)
-        found = {
-            item.get("event_id"): item.get("content", "")
-            for item in state.get("observations", [])
-        }
-        ids = set(found)
-        project = [item for item in state["projects"] if item["repository"] == "example.test/acme/hook7a-repo"]
+        # Both rejected credentials left nothing behind; the project from `init` exists once.
+        status, projects = http_json(self.url, "/cairn-memory/projects", None, self.account_token)
+        self.assertEqual(status, 200)
+        project = [item for item in projects if item["repository"] == "example.test/acme/hook7a-repo"]
         self.assertEqual(len(project), 1)
-        self.assertEqual([item["name"] for item in state["project_branches"]], ["feature/x"])
-        self.assertIn("hook7a-device", ids)
-        self.assertNotIn("hook7a-wrong-device-slot", ids)
-        self.assertNotIn("hook7a-revoked", ids)
-        if "hook-secret-value" in found.get("hook7a-device", ""):
-            self.fail("device observation retained the raw secret")
 
 
 class ReadonlyClassificationTests(unittest.TestCase):

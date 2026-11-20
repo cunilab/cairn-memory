@@ -684,7 +684,7 @@ class OutboxRedactionCheck(unittest.TestCase):
         }
         ordinary = {
             "files": "src/lib.rs",
-            "symbols": "MemoryStore::open",
+            "symbols": "ProjectIndex::open",
             "commands": "cargo test cache",
             "tests": "cache_reads_are_consistent",
             "services": "cairn",

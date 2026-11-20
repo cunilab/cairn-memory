@@ -60,7 +60,7 @@ cairn update           # install the latest release and refresh the hook scripts
 People use the web console. Agents use the `cairn` CLI, the hooks, and `cairn mcp`, all of which call the server's REST API with a device token. Start a server, create the first account and a device token in the web console, then:
 
 ```bash
-cargo run -p cairn-server -- --store /tmp/cairn-memory.json --bind 127.0.0.1:3111
+cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --bind 127.0.0.1:3111
 printf %s "<device-token>" | cargo run -p cairn-client --bin cairn -- setup http://127.0.0.1:3111
 cargo run -p cairn-client --bin cairn -- start session-1
 cargo run -p cairn-client --bin cairn -- capture session-1 event-1 "The session middleware validates the signed cookie before loading the user."
@@ -108,7 +108,7 @@ Repositories without the file create no project: captures and automatic work
 notes remain private under `personal`, marked as work notes rather than personal
 behaviour preferences. Broken/unknown files warn while private capture continues.
 
-Memories have three explicit scopes: **project** (all members, including initialized-repository captures and summaries), **personal** (private behaviour and preferences), and **global** (all server users; author/admin edits). There is no personal-per-repository scope or promote step. Redaction runs before storage; project members can read raw captures.
+Memories have three explicit scopes: **project** (all members, including initialized-repository captures and summaries), **personal** (private behaviour and preferences), and **global** (all server users; author/admin edits). There is no personal-per-repository scope or promote step. Redaction runs before storage; raw captures are kept for 30 days for distillation and are never recalled or shown.
 
 Agents save a structured record with required title, summary, reason and scope:
 
@@ -119,7 +119,7 @@ cairn memories
 cairn memory memory-id
 ```
 
-Common fields and typed decision/rule/gotcha/procedure/fact/preference fields are available through CLI, MCP and REST, and visible in the console's Memories list/detail. See [the record contract](docs/contracts/project-layer4.md#memory-scopes-and-record). Existing lexical recall searches title, summary, details and reason; later ADR 0014 stages are still planned. Project owners/admins can transfer ownership to a member. Project identity and shared records are read online; personal export/import is not a project backup. Development stores require a reset for this pre-release schema.
+Common fields and typed decision/rule/gotcha/procedure/fact/preference fields are available through CLI, MCP and REST, and visible in the console's Memories list/detail. See [the record contract](docs/contracts/project-layer4.md#memory-scopes-and-record). Existing lexical recall searches title, summary, details and reason; later ADR 0014 stages are still planned. Project owners/admins can transfer ownership to a member. Project identity and shared records are read online; export is not a project backup. Development stores require a reset for this pre-release schema.
 
 **Joining trusts possession of the project ID.** Any admin-created account on the
 configured server with a copied/leaked ID can join permanently, read all decisions
@@ -128,26 +128,17 @@ or the file does not remove membership. Keep the server configuration consistent
 and revoke device credentials separately from web-session password resets. See
 [ADR 0013](docs/adr/0013-shared-project-decisions-and-personal-memory-scopes.md) and
 [the project contract](docs/contracts/project-layer4.md) for the trust boundary and
-current routes. Branch status is personal bookkeeping; the console says "Record merge".
+current routes. The branch list is derived from the branch each project memory was saved on.
 
-The first REST compatibility server is:
-
-```bash
-cargo run -p cairn-server -- --store /tmp/cairn-memory.json --bind 127.0.0.1:3111
-```
-
-The server-authoritative PostgreSQL Layer 3 boundary can be started with:
+The server runs on PostgreSQL with pgvector only. `CAIRN_DATABASE_URL` is a database the server may
+migrate; everything lives in its schema `cairn` (`--schema` picks another one). The server applies
+`migrations/` on start and refuses a database left by 0.1.5 (`pre-0.1.6 database; recreate it`).
 
 ```bash
 cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --bind 127.0.0.1:3111
 ```
 
-This mode runs account, trusted-device, authenticated sync, session summary,
-explicit memory, corrections, context retrieval, lifecycle diagnostics,
-export/import, audit history, and hybrid search routes from `cairn-storage`.
-It applies the Layer 3 migrations on startup.
-
-It serves health, readiness, self-hosted account bootstrap/login/logout/current-account, account-authorized device registration, project registration, branch/worktree registration, scoped memory saves, merge confirmation, branch closure, project verification, session lifecycle, observation capture, search, context, resume, unresolved-work, why-changed, forget, smart-search, recall, explicit remember, correction, helpful/stale feedback, declared contradictions, similarity reviews, explicit supersede, typed memory links, the readable memory graph, export/import, and lifecycle diagnostics under `/cairn-memory/`. It currently proves bounded capture, secret redaction, idempotent event capture, lifecycle classification, deterministic session compression, lessons, corrections, retention sweep, usage retention scoring, evidence-backed session summaries, branch-aware scopes, structured code context, deterministic code relationships, stale and contradiction signals, hybrid recall, context packing, forget suppression, export/import, restart persistence, and account/device ownership checks.
+It serves health, self-hosted accounts, trusted devices, projects (init, rename, ownership, members, derived branches and conflicts), session capture, typed memory saves (`/remember`: a decision, rule, gotcha, procedure, fact, preference or note with per-kind `fields`, `supersedes` and `contradicts`), search, context, resume, unresolved-work, why-changed, helpful/wrong feedback, forget, typed links, the readable memory graph, export, diagnostics and the admin job queue under `/cairn-memory/`. Background jobs distill sessions into notes and a handoff, embed memories, and consolidate near-duplicates automatically (cosine 0.92 or more supersedes the older memory; 0.75 to 0.92 adds a `relates` link). A correction is a save with `supersedes`.
 
 Hybrid recall combines full text, code entities, one-hop evidence and typed memory links, and local
 MiniLM embeddings with reciprocal-rank fusion, type weights and pinned boosts.
@@ -174,21 +165,13 @@ quarantined counts at `GET /cairn-memory/admin/jobs`. See the
 [jobs contract](docs/contracts/continuity-v1.md#durable-jobs-v014) and the
 [retrieval contract](docs/contracts/continuity-v1.md#hybrid-recall-v014).
 
-The local viewer is available at:
-
-```text
-http://127.0.0.1:3111/viewer
-```
-
-The embedded viewer inspects personal memory; project actions are in the web console.
-
 The MCP server runs over stdio as a proxy to the same REST API, using the configured device token:
 
 ```bash
 cargo run -p cairn-client --bin cairn -- mcp
 ```
 
-It supports the Layer 1/2 memory tools over newline-delimited JSON-RPC, including session capture, consolidation, recall, resume, unresolved-work, why-changed, explicit save, lifecycle diagnostics, forget, correction, export, and import. The export format is versioned and idempotently restorable. The first Next.js console is `apps/web`. The embedded viewer at `/viewer` remains.
+It supports the memory tools over newline-delimited JSON-RPC, including session capture, recall, resume, unresolved-work, why-changed, explicit save, diagnostics, forget, and export. The Next.js console is `apps/web`.
 
 ```bash
 cd apps/web
@@ -219,41 +202,20 @@ produce project notes; unattached or mixed work stays private. The exact
 [distillation grammar and limits](docs/contracts/continuity-v1.md#session-end-distillation-v014)
 explain which fields the rules can fill without guessing.
 
-To verify the complete local application flow with real server processes and temporary stores:
+The tests and smokes need a PostgreSQL database with pgvector, for example
+`docker run -d -p 127.0.0.1:55432:5432 -e POSTGRES_PASSWORD=pw pgvector/pgvector:pg17`:
 
 ```bash
-./scripts/smoke_full_flow.sh
+export CAIRN_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55432/postgres
+cargo test --workspace            # each test gets its own schema; set CAIRN_TEST_REQUIRE_DB=1 to fail instead of skip
 ./scripts/smoke_mcp.sh
 ./scripts/smoke_web.sh
+python3 scripts/smoke_hook_auth.py
 ```
 
-`smoke_full_flow.sh` simulates hook capture, duplicate delivery, session
-consolidation, secret redaction, restart recovery, correction, forget,
-export/import, and the embedded viewer. It also runs the CLI capture, recall,
-three-scope project flow, distillation, links, a declared contradiction,
-feedback, and the admin job queue. It does not require PostgreSQL or an
-embedding model: without `--embedding-model-dir` the server keeps lexical,
-entity, and link recall.
-
-The same flow verifies that a project memory and a personal preference stay in
-an unrelated `main` context while a branch-local capture stays out of it, and
-that resume and unresolved-work retrieval return the session summary. Stale and
-lexical contradiction signals are covered by
-`why_changed_reports_reason_relationships_staleness_and_contradictions` in
-`crates/core/src/recall/tests.rs`.
-
-PostgreSQL adapter execution requires a fresh database and can be checked with:
-
-```bash
-CAIRN_TEST_DATABASE_URL="$CAIRN_DATABASE_URL" \
-  cargo test -p cairn-storage --test postgres -- --ignored --nocapture
-```
-
-The HTTP boundary can be exercised against the same kind of fresh database with:
-
-```bash
-CAIRN_DATABASE_URL="$CAIRN_DATABASE_URL" ./scripts/smoke_postgres.sh
-```
+Add `CAIRN_TEST_EMBEDDING_MODEL_DIR=<pinned MiniLM directory>` to run the semantic tests. The smoke
+scripts start real server processes, each in a schema of its own, and do not load the embedding model:
+without `--embedding-model-dir` the server keeps lexical, entity, and link recall.
 
 ## Benchmark harness
 

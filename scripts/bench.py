@@ -58,6 +58,16 @@ def words(text):
     return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in STOPWORDS}
 
 
+def searchable(memory):
+    """Every text the memory carries, `fields` included, except its fixture key."""
+    parts = []
+    for k, v in memory.items():
+        if k == "key":
+            continue
+        parts.append(searchable(v) if isinstance(v, dict) else " ".join(map(str, v)) if isinstance(v, list) else str(v))
+    return " ".join(parts)
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -132,7 +142,7 @@ def stats(values):
 
 def result_ids(structured):
     rows = (structured or {}).get("results") or []
-    return [row["memory_id"] for row in rows if isinstance(row, dict) and "memory_id" in row]
+    return [row["id"] for row in rows if isinstance(row, dict) and "id" in row]
 
 
 def main():
@@ -157,7 +167,7 @@ def main():
             assert key in by_key, f"{q['id']}: unknown gold {key}"
         if q["kind"] == "paraphrase":
             for key in q["gold"]:
-                shared = words(q["query"]) & words(" ".join(str(v) for k, v in by_key[key].items() if k != "key" and isinstance(v, (str, list))).replace("[", " "))
+                shared = words(q["query"]) & words(searchable(by_key[key]))
                 assert not shared, f"{q['id']} shares words with {key}: {sorted(shared)}"
 
     model_dir = None
@@ -245,19 +255,15 @@ def main():
         # Load the corpus through the same /remember route the save tools use.
         ids = {}
         for memory in corpus:
-            body = {k: v for k, v in memory.items() if k not in ("key", "tags", "entities")}
+            body = {k: v for k, v in memory.items() if k != "key"}
             body.update(scope="project", context=context)
-            if memory.get("tags"):
-                body["concepts"] = memory["tags"]
-            if memory.get("entities"):
-                body["entities"] = memory["entities"]
             if memory["kind"] in ("rule", "decision"):
                 # created_at has one-second resolution and the session brief ranks rules and decisions by it
                 # (ties fall back to id). Without a boundary between saves, which ones the brief shows would
                 # depend on where the wall-clock second changes during the load.
                 time.sleep(1.0 - (time.time() % 1.0) + 0.02)
             reply = http.call("/remember", body, device)
-            ids[memory["key"]] = reply["memory_id"]
+            ids[memory["key"]] = reply["id"]
         assert len(set(ids.values())) == len(corpus), "a corpus memory was merged into another on save"
 
         def settle():
@@ -266,7 +272,7 @@ def main():
             if not model_dir:
                 return
             for _ in range(240):
-                if int(sql("select count(*) from cairn_memories m left join cairn_memory_embeddings e using (memory_id) where e.memory_id is null") or 0) == 0:
+                if int(sql("select count(*) from cairn.memories m left join cairn.memory_embeddings e using (memory_id) where e.memory_id is null") or 0) == 0:
                     return
                 time.sleep(0.25)
             raise RuntimeError("embeddings were not produced")
@@ -356,7 +362,7 @@ def main():
         for key in ("dec-queue-postgres", "got-migration-lock", "proc-release", "sess-typst"):
             shaped, wire, text = mcp.tool("memory_get", memoryId=ids[key])
             get.append(wire)
-        calls["memory_get"] = dict(stats(get), note="decision, gotcha, procedure, session summary")
+        calls["memory_get"] = dict(stats(get), note="decision, gotcha, procedure, note")
         shaped, wire, text = mcp.tool("memory_context", query="payments and idempotency", limit=5)
         calls["memory_context"] = {"limit": 5, "bytes": wire, "tokens_est": est_tokens(wire)}
         mcp.close()

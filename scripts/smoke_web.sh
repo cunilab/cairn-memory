@@ -3,10 +3,15 @@ set -eu
 
 unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_CONFIG CAIRN_OUTBOX
 
+if [ -z "${CAIRN_TEST_DATABASE_URL:-}" ]; then
+  printf '%s\n' "CAIRN_TEST_DATABASE_URL must name a PostgreSQL database with pgvector" >&2
+  exit 1
+fi
+
 cd "$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 
 workdir="$(mktemp -d "${TMPDIR:-/tmp}/cairn-web.XXXXXX")"
-store="$workdir/store.json"
+schema="smoke_web_$$"
 api_log="$workdir/api.log"
 web_log="$workdir/web.log"
 api_pid=""
@@ -122,11 +127,11 @@ node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON -
 import { deleteDecisionImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
 
 const deleted = deleteDecisionImpact("memory-1");
-if (!deleted.includes("memory-1") || !deleted.includes("retained delete") || !deleted.includes("keeps the stored record")) {
-  throw new Error("delete copy must describe a retained hide");
+if (!deleted.includes("memory-1") || !deleted.includes("forgets") || !deleted.includes("text is erased")) {
+  throw new Error("delete copy must describe that forgetting erases the text");
 }
-if (/permanently|erase|purged|undo button/i.test(deleted)) {
-  throw new Error("delete copy must not promise erasure or an undo control");
+if (/permanently|purged|undo button/i.test(deleted)) {
+  throw new Error("delete copy must not promise an undo control");
 }
 const rotated = rotateDeviceImpact("laptop");
 if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
@@ -193,7 +198,7 @@ if [ ! -d apps/web/node_modules/next ]; then
   npm install --prefix apps/web
 fi
 
-cargo run -q -p cairn-server -- --store "$store" --bind "127.0.0.1:${api_port}" >"$api_log" 2>&1 &
+cargo run -q -p cairn-server -- --database-url "$CAIRN_TEST_DATABASE_URL" --schema "$schema" --bind "127.0.0.1:${api_port}" >"$api_log" 2>&1 &
 api_pid=$!
 
 ready=0
@@ -250,19 +255,12 @@ project_json="$(curl -fsS -H 'content-type: application/json' \
   "${api}/cairn-memory/projects/init")"
 project_id="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project_id"])')"
 
-curl -fsS -H 'content-type: application/json' \
-  -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-private","context":{}}' \
-  "${api}/cairn-memory/session/start" >/dev/null
-curl -fsS -H 'content-type: application/json' \
-  -H "authorization: Bearer ${device_token}" \
-  -d '{"event_id":"evt-private","session_id":"web-private","content":"private observation stays on the owner account","role":"agent","source":"hook"}' \
-  "${api}/cairn-memory/observe" >/dev/null
+# A personal note stays on the owner account; a captured session distills in the background.
 private_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-private"}' \
-  "${api}/cairn-memory/session/end")"
-private_id="$(printf '%s' "$private_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+  -d '{"kind":"note","scope":"personal","title":"Private note","summary":"private observation stays on the owner account","reason":"web smoke"}' \
+  "${api}/cairn-memory/remember")"
+private_id="$(printf '%s' "$private_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
@@ -272,17 +270,16 @@ curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
   -d '{"event_id":"evt-project","session_id":"web-project","content":"repository cache decision is ready for the project","role":"agent","source":"hook"}' \
   "${api}/cairn-memory/observe" >/dev/null
-ended_json="$(curl -fsS -H 'content-type: application/json' \
+curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
   -d '{"session_id":"web-project"}' \
-  "${api}/cairn-memory/session/end")"
-source_id="$(printf '%s' "$ended_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+  "${api}/cairn-memory/session/end" >/dev/null
 
 promoted_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
   -d "{\"scope\":\"project\",\"kind\":\"decision\",\"title\":\"Cache decision\",\"summary\":\"repository cache decision is ready for the project\",\"reason\":\"Verified by web smoke\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\"}}" \
   "${api}/cairn-memory/remember")"
-promoted_id="$(printf '%s' "$promoted_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+promoted_id="$(printf '%s' "$promoted_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 
 # Membership is automatic: capturing with the project id in the context joins the project.
 member_login="$(curl -fsS -H 'content-type: application/json' \
@@ -548,7 +545,8 @@ if [ "$old_code" != "401" ] || [ "$new_code" != "200" ]; then
   exit 1
 fi
 
-# Owner controls through the web session: policy, promote, verify, branch merge and close.
+# Owner controls through the web session: saving a project memory, and the read-only branch list
+# derived from the branch each memory was saved on.
 owner_ok() {
   owner_code="$(curl -sS -o "$workdir/owner-post.body" -b "$owner_jar" -w '%{http_code}' \
     -H 'content-type: application/json' -d "$3" "${web}/api/cairn/$2")"
@@ -558,43 +556,27 @@ owner_ok() {
     exit 1
   fi
 }
-curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-console-promote","context":{"repository":"cairn-demo","commit":"abc1234"}}' \
-  "${api}/cairn-memory/session/start" >/dev/null
-curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"event_id":"evt-console-promote","session_id":"web-console-promote","content":"decision promoted from the console","role":"agent","source":"hook"}' \
-  "${api}/cairn-memory/observe" >/dev/null
-console_source="$(curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-console-promote"}' "${api}/cairn-memory/session/end" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
-owner_ok "save project memory" remember "{\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Save from console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\"}}"
-console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["memory_id"])' "$workdir/owner-post.body")"
-owner_ok "verify" projects/verify "{\"project_id\":\"${project_id}\",\"memory_id\":\"${console_promoted}\",\"commit\":\"abc1234\"}"
-for branch in feature-merge feature-close; do
-  curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-    -d "{\"name\":\"${branch}\"}" "${api}/cairn-memory/projects/${project_id}/branches" >/dev/null
-done
-curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d "{\"session_id\":\"web-branch\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\",\"commit\":\"def5678\"}}" \
-  "${api}/cairn-memory/session/start" >/dev/null
-curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"event_id":"evt-branch","session_id":"web-branch","content":"branch decision ready to merge","role":"agent","source":"hook"}' \
-  "${api}/cairn-memory/observe" >/dev/null
-branch_memory="$(curl -fsS -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-branch"}' "${api}/cairn-memory/session/end" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_id"])')"
+owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Save from console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
+console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$workdir/owner-post.body")"
 branches_body="$workdir/branches.body"
-curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
-merge_branch_id="$(BRANCHES="$branches_body" python3 -c 'import json,os; print(next(b["branch_id"] for b in json.load(open(os.environ["BRANCHES"])) if b["name"]=="feature-merge"))')"
-close_branch_id="$(BRANCHES="$branches_body" python3 -c 'import json,os; print(next(b["branch_id"] for b in json.load(open(os.environ["BRANCHES"])) if b["name"]=="feature-close"))')"
-owner_ok "branch merge" "projects/${project_id}/branches/${merge_branch_id}/merge" "{\"memory_id\":\"${branch_memory}\",\"commit\":\"def5678\",\"reason\":\"Console merge\"}"
-owner_ok "branch close" "projects/${project_id}/branches/${close_branch_id}/close" '{"reason":"Console close"}'
 curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
 BRANCHES="$branches_body" python3 - <<'PY'
 import json, os
-status = {b["name"]: b["status"] for b in json.load(open(os.environ["BRANCHES"]))}
-assert status["feature-merge"] == "merged" and status["feature-close"] == "closed", status
+rows = json.load(open(os.environ["BRANCHES"]))
+assert [row["branch"] for row in rows] == ["feature-merge"], rows
+assert rows[0]["memories"] == 1, rows
 PY
+for removed in "POST projects/verify" "POST projects/${project_id}/branches" "POST correct" "POST import"; do
+  removed_code="$(curl -sS -o /dev/null -w '%{http_code}' -X "${removed%% *}" -b "$owner_jar" \
+    -H 'content-type: application/json' -d '{}' "${web}/api/cairn/${removed#* }")"
+  case "$removed_code" in
+    404 | 405) ;;
+    *)
+      printf '%s\n' "removed route ${removed} answered ${removed_code}" >&2
+      exit 1
+      ;;
+  esac
+done
 for page in accounts jobs memories "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
@@ -608,7 +590,7 @@ if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
   exit 1
 fi
 
-for report in diagnose "projects/${project_id}/conflicts" "projects/${project_id}/freshness"; do
+for report in diagnose "projects/${project_id}/conflicts" graph; do
   report_code="$(curl -sS -o "$workdir/report.body" -b "$owner_jar" -w '%{http_code}' \
     "${web}/api/cairn/${report}")"
   if [ "$report_code" != "200" ]; then
@@ -730,7 +712,7 @@ SHARED_BODY="$shared_body" PROMOTED_ID="$promoted_id" PRIVATE_ID="$private_id" p
 import json
 import os
 memories = json.load(open(os.environ["SHARED_BODY"], encoding="utf-8"))
-ids = [memory["memory_id"] for memory in memories]
+ids = [memory["id"] for memory in memories]
 assert os.environ["PROMOTED_ID"] in ids
 assert os.environ["PRIVATE_ID"] not in ids
 blob = json.dumps(memories)

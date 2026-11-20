@@ -1,4 +1,5 @@
-# Sourced by the agent smoke scripts (CLI and MCP). Starts a file-store server, creates accounts
+# Sourced by the agent smoke scripts (CLI and MCP). Starts a server on PostgreSQL (a schema of its
+# own in CAIRN_TEST_DATABASE_URL, e.g. the CI service database), creates accounts
 # and device tokens through the web API as the web console does, and points `cairn` at it with
 # a device token. The agent side never holds an account session.
 
@@ -6,6 +7,11 @@
 # CAIRN_DEVICE_TOKEN are ignored and warn. CAIRN_CONFIG would select a
 # developer's file, so this smoke unsets that too, plus CAIRN_OUTBOX.
 unset CAIRN_URL CAIRN_DEVICE_TOKEN CAIRN_CONFIG CAIRN_OUTBOX
+
+if [ -z "${CAIRN_TEST_DATABASE_URL:-}" ]; then
+  printf '%s\n' "CAIRN_TEST_DATABASE_URL must name a PostgreSQL database with pgvector" >&2
+  exit 1
+fi
 
 repo="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$repo"
@@ -32,7 +38,8 @@ json_field() {
 # start_server <port>: the server also serves the web API used for account setup.
 start_server() {
   base="http://127.0.0.1:$1"
-  "$bin_dir/cairn-server" --store "$smoke_dir/store.json" --bind "127.0.0.1:$1" >"$smoke_dir/server.log" 2>&1 &
+  "$bin_dir/cairn-server" --database-url "$CAIRN_TEST_DATABASE_URL" --schema "smoke_$$_$1" \
+    --bind "127.0.0.1:$1" >"$smoke_dir/server.log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 100); do
     if curl -fsS "$base/cairn-memory/health" >/dev/null 2>&1; then

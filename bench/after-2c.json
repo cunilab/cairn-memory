@@ -1,0 +1,747 @@
+{
+  "call_bytes": {
+    "memory_context": {
+      "bytes": 2126,
+      "limit": 5,
+      "tokens_est": 532
+    },
+    "memory_get": {
+      "calls": 4,
+      "max_bytes": 1874,
+      "mean_bytes": 1812,
+      "mean_tokens_est": 453,
+      "min_bytes": 1682,
+      "note": "decision, gotcha, procedure, note"
+    },
+    "memory_resume": {
+      "bytes": 144,
+      "limit": 2,
+      "results": 0,
+      "text_channel_bytes": 31,
+      "tokens_est": 36
+    },
+    "memory_search": {
+      "calls": 25,
+      "max_bytes": 3306,
+      "mean_bytes": 2433,
+      "mean_tokens_est": 608,
+      "min_bytes": 246,
+      "note": "limit 5, mean over the gold questions"
+    },
+    "memory_why_changed": {
+      "calls": 3,
+      "limit": 3,
+      "max_bytes": 4720,
+      "mean_bytes": 4559,
+      "mean_tokens_est": 1140,
+      "min_bytes": 4464,
+      "note": "3 queries"
+    }
+  },
+  "corpus": {
+    "memories": 70,
+    "questions": 25,
+    "weak_queries": 5
+  },
+  "fixed_session_cost": {
+    "deferred_hosts_bytes": 8938,
+    "deferred_hosts_tokens_est": 2234,
+    "eager_hosts_bytes": 20509,
+    "eager_hosts_tokens_est": 5127,
+    "note": "tools/list (or just names) + initialize.instructions + scripted-session hook injection; excludes retrieval calls"
+  },
+  "label": "after-2c (0.1.6 step 2c)",
+  "mcp_surface": {
+    "initialize_instructions_bytes": 1896,
+    "initialize_instructions_tokens_est": 474,
+    "largest_tools": [
+      [
+        1323,
+        "memory_save"
+      ],
+      [
+        1166,
+        "memory_lesson_save"
+      ],
+      [
+        648,
+        "memory_reflect"
+      ]
+    ],
+    "tool_count": 30,
+    "tool_names_bytes": 496,
+    "tools_list_bytes": 12067,
+    "tools_list_tokens_est": 3017
+  },
+  "per_question_memory_search": [
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-queue-postgres"
+      ],
+      "gold_in_top5": [
+        "dec-queue-postgres"
+      ],
+      "id": "q01",
+      "kind": "direct",
+      "top5": [
+        "dec-queue-postgres"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-api-versioning-header"
+      ],
+      "gold_in_top5": [
+        "dec-api-versioning-header"
+      ],
+      "id": "q02",
+      "kind": "direct",
+      "top5": [
+        "dec-api-versioning-header",
+        "dec-auth-sessions-cookies",
+        "dup-migration-expand-contract",
+        "fact-pg-version",
+        "dec-deploy-rolling-drain"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-cors-preflight"
+      ],
+      "gold_in_top5": [
+        "got-cors-preflight"
+      ],
+      "id": "q03",
+      "kind": "direct",
+      "top5": [
+        "got-cors-preflight",
+        "dec-frontend-spa",
+        "dec-feature-flags-db",
+        "proc-release",
+        "fact-service-ports"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "proc-release"
+      ],
+      "gold_in_top5": [
+        "proc-release"
+      ],
+      "id": "q04",
+      "kind": "direct",
+      "top5": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract",
+        "proc-release",
+        "proc-add-migration",
+        "hand-onboarding-wizard"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "fact-max-upload"
+      ],
+      "gold_in_top5": [
+        "fact-max-upload"
+      ],
+      "id": "q05",
+      "kind": "direct",
+      "top5": [
+        "rule-rate-limits-public",
+        "fact-max-upload",
+        "got-upload-clock-skew"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-pr-small"
+      ],
+      "gold_in_top5": [
+        "rule-pr-small"
+      ],
+      "id": "q06",
+      "kind": "direct",
+      "top5": [
+        "rule-pr-small",
+        "dup-idempotency-header",
+        "rule-no-unwrap-handlers",
+        "dec-api-versioning-header",
+        "rule-log-no-pii"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-timezone-report"
+      ],
+      "gold_in_top5": [
+        "got-timezone-report"
+      ],
+      "id": "q07",
+      "kind": "direct",
+      "top5": [
+        "got-timezone-report",
+        "got-timeout-pool"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "fact-payment-provider"
+      ],
+      "gold_in_top5": [
+        "fact-payment-provider"
+      ],
+      "id": "q08",
+      "kind": "direct",
+      "top5": [
+        "rule-log-no-pii",
+        "dup-log-pii",
+        "fact-payment-provider",
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-tokio-blocking"
+      ],
+      "gold_in_top5": [
+        "got-tokio-blocking"
+      ],
+      "id": "q09",
+      "kind": "direct",
+      "top5": [
+        "got-tokio-blocking",
+        "rule-rate-limits-public",
+        "dup-pool-exhaustion",
+        "dec-frontend-spa",
+        "proc-incident-rollback"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "proc-restore-backup"
+      ],
+      "gold_in_top5": [
+        "proc-restore-backup"
+      ],
+      "id": "q10",
+      "kind": "direct",
+      "top5": [
+        "proc-restore-backup",
+        "rule-test-db-isolated",
+        "proc-add-migration",
+        "proc-rotate-db-password",
+        "fact-prod-region"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "hand-refund-api"
+      ],
+      "gold_in_top5": [
+        "hand-refund-api"
+      ],
+      "id": "q11",
+      "kind": "direct",
+      "top5": [
+        "hand-refund-api",
+        "rule-idempotency-keys",
+        "dup-idempotency-header",
+        "fact-payment-provider",
+        "proc-onboard-merchant"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "sess-typst"
+      ],
+      "gold_in_top5": [
+        "sess-typst"
+      ],
+      "id": "q12",
+      "kind": "direct",
+      "top5": [
+        "sess-typst",
+        "dec-pdf-typst",
+        "dec-money-integer-cents",
+        "got-tokio-blocking"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-feature-flag-cleanup"
+      ],
+      "gold_in_top5": [
+        "rule-feature-flag-cleanup"
+      ],
+      "id": "q13",
+      "kind": "direct",
+      "top5": [
+        "rule-feature-flag-cleanup",
+        "dec-feature-flags-db",
+        "rule-migrations-additive",
+        "dec-deploy-rolling-drain",
+        "dec-timestamps-utc"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ],
+      "gold_in_top5": [],
+      "id": "q14",
+      "kind": "paraphrase",
+      "top5": [
+        "dec-feature-flags-db",
+        "dec-auth-sessions-cookies",
+        "got-tokio-blocking",
+        "dec-observability-otel"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-money-integer-cents",
+        "dup-money-minor-units"
+      ],
+      "gold_in_top5": [],
+      "id": "q15",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-prod-region"
+      ],
+      "gold_in_top5": [],
+      "id": "q16",
+      "kind": "paraphrase",
+      "top5": [
+        "fact-pg-version",
+        "fact-ci-runtime"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-oncall"
+      ],
+      "gold_in_top5": [],
+      "id": "q17",
+      "kind": "paraphrase",
+      "top5": [
+        "got-pagination-ties",
+        "got-cors-preflight"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-migration-lock"
+      ],
+      "gold_in_top5": [],
+      "id": "q18",
+      "kind": "paraphrase",
+      "top5": [
+        "rule-feature-flag-cleanup"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-json-bigint"
+      ],
+      "gold_in_top5": [],
+      "id": "q19",
+      "kind": "paraphrase",
+      "top5": [
+        "dec-money-integer-cents",
+        "dec-auth-sessions-cookies",
+        "dec-timestamps-utc",
+        "dec-pdf-typst",
+        "rule-secrets-env"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-vat-sync"
+      ],
+      "gold_in_top5": [],
+      "id": "q20",
+      "kind": "paraphrase",
+      "top5": [
+        "dec-api-versioning-header",
+        "rule-test-db-isolated"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header"
+      ],
+      "gold_in_top5": [
+        "dup-idempotency-header",
+        "rule-idempotency-keys"
+      ],
+      "id": "q21",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header",
+        "fact-payment-provider",
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-log-no-pii",
+        "dup-log-pii"
+      ],
+      "gold_in_top5": [
+        "dup-log-pii",
+        "rule-log-no-pii"
+      ],
+      "id": "q22",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-log-no-pii",
+        "dup-log-pii",
+        "dec-email-postmark",
+        "dec-queue-postgres",
+        "dec-api-versioning-header"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract"
+      ],
+      "gold_in_top5": [
+        "dup-migration-expand-contract",
+        "rule-migrations-additive"
+      ],
+      "id": "q23",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract",
+        "rule-feature-flag-cleanup",
+        "rule-pr-small",
+        "proc-release"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-timeout-pool",
+        "dup-pool-exhaustion"
+      ],
+      "gold_in_top5": [
+        "dup-pool-exhaustion",
+        "got-timeout-pool"
+      ],
+      "id": "q24",
+      "kind": "near_duplicate",
+      "top5": [
+        "got-timeout-pool",
+        "dup-pool-exhaustion",
+        "dec-deploy-rolling-drain",
+        "rule-no-unwrap-handlers",
+        "got-timezone-report"
+      ]
+    },
+    {
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ],
+      "gold_in_top5": [
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ],
+      "id": "q25",
+      "kind": "near_duplicate",
+      "top5": [
+        "got-webhook-duplicates",
+        "dup-idempotency-header",
+        "rule-idempotency-keys",
+        "dup-webhook-replay",
+        "proc-onboard-merchant"
+      ]
+    }
+  ],
+  "recall": {
+    "memory_recall": {
+      "by_kind": {
+        "direct": {
+          "hit5": 1.0,
+          "recall5": 1.0,
+          "rr": 0.859
+        },
+        "near_duplicate": {
+          "hit5": 1.0,
+          "recall5": 1.0,
+          "rr": 1.0
+        },
+        "paraphrase": {
+          "hit5": 0.0,
+          "recall5": 0.0,
+          "rr": 0.0
+        }
+      },
+      "bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 3306,
+        "mean_bytes": 2433,
+        "mean_tokens_est": 608,
+        "min_bytes": 246
+      },
+      "hit_at_5": 0.72,
+      "mrr_at_10": 0.6467,
+      "questions": 25,
+      "recall_at_5": 0.72,
+      "text_channel_bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 1556,
+        "mean_bytes": 1133,
+        "mean_tokens_est": 283,
+        "min_bytes": 82
+      }
+    },
+    "memory_search": {
+      "by_kind": {
+        "direct": {
+          "hit5": 1.0,
+          "recall5": 1.0,
+          "rr": 0.859
+        },
+        "near_duplicate": {
+          "hit5": 1.0,
+          "recall5": 1.0,
+          "rr": 1.0
+        },
+        "paraphrase": {
+          "hit5": 0.0,
+          "recall5": 0.0,
+          "rr": 0.0
+        }
+      },
+      "bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 3306,
+        "mean_bytes": 2433,
+        "mean_tokens_est": 608,
+        "min_bytes": 246
+      },
+      "hit_at_5": 0.72,
+      "mrr_at_10": 0.6467,
+      "questions": 25,
+      "recall_at_5": 0.72,
+      "text_channel_bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 1556,
+        "mean_bytes": 1133,
+        "mean_tokens_est": 283,
+        "min_bytes": 82
+      }
+    }
+  },
+  "semantic_channel": {
+    "embedding_model": "pinned all-MiniLM-L6-v2",
+    "mode": "hybrid (lexical + entity + semantic)",
+    "server_health": "enabled"
+  },
+  "session_injection": {
+    "events": [
+      {
+        "event": "SessionStart",
+        "injected_bytes": 836,
+        "injected_tokens_est": 209,
+        "stdout_bytes": 960
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/jobs/queue.rs",
+        "injected_bytes": 2305,
+        "injected_tokens_est": 576,
+        "stdout_bytes": 2405
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/billing/money.rs",
+        "injected_bytes": 418,
+        "injected_tokens_est": 104,
+        "stdout_bytes": 512
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/api/handlers/refund.rs",
+        "injected_bytes": 480,
+        "injected_tokens_est": 120,
+        "stdout_bytes": 574
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/orders/list.rs",
+        "injected_bytes": 409,
+        "injected_tokens_est": 102,
+        "stdout_bytes": 503
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/telemetry.rs",
+        "injected_bytes": 228,
+        "injected_tokens_est": 57,
+        "stdout_bytes": 320
+      },
+      {
+        "event": "PostToolUse",
+        "file": "templates/invoice.typ",
+        "injected_bytes": 398,
+        "injected_tokens_est": 100,
+        "stdout_bytes": 492
+      },
+      {
+        "event": "PostToolUse",
+        "file": "migrations/0042_add_tax_column.sql",
+        "injected_bytes": 430,
+        "injected_tokens_est": 108,
+        "stdout_bytes": 524
+      },
+      {
+        "event": "PostToolUse",
+        "file": "console/src/App.tsx",
+        "injected_bytes": 384,
+        "injected_tokens_est": 96,
+        "stdout_bytes": 478
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/payments/webhooks.rs",
+        "injected_bytes": 380,
+        "injected_tokens_est": 95,
+        "stdout_bytes": 474
+      },
+      {
+        "event": "PostToolUse",
+        "file": "docs/README.md",
+        "injected_bytes": 278,
+        "injected_tokens_est": 70,
+        "stdout_bytes": 370
+      },
+      {
+        "event": "Stop",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      }
+    ],
+    "note": "SessionStart + 10 Edit PostToolUse on distinct files + Stop, bytes of additionalContext",
+    "post_tool_use_bytes": 5710,
+    "session_start_bytes": 836,
+    "total_injected_bytes": 6546,
+    "total_injected_tokens_est": 1636
+  },
+  "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
+  "zero_hit": {
+    "memory_recall": {
+      "correct_zero_hit": 4,
+      "queries": 5,
+      "rows": [
+        {
+          "bytes": 214,
+          "hits": 0,
+          "id": "w1",
+          "top": []
+        },
+        {
+          "bytes": 198,
+          "hits": 0,
+          "id": "w2",
+          "top": []
+        },
+        {
+          "bytes": 176,
+          "hits": 0,
+          "id": "w3",
+          "top": []
+        },
+        {
+          "bytes": 204,
+          "hits": 0,
+          "id": "w4",
+          "top": []
+        },
+        {
+          "bytes": 850,
+          "hits": 1,
+          "id": "w5",
+          "top": [
+            "rule-migrations-additive"
+          ]
+        }
+      ]
+    },
+    "memory_search": {
+      "correct_zero_hit": 4,
+      "queries": 5,
+      "rows": [
+        {
+          "bytes": 214,
+          "hits": 0,
+          "id": "w1",
+          "top": []
+        },
+        {
+          "bytes": 198,
+          "hits": 0,
+          "id": "w2",
+          "top": []
+        },
+        {
+          "bytes": 176,
+          "hits": 0,
+          "id": "w3",
+          "top": []
+        },
+        {
+          "bytes": 204,
+          "hits": 0,
+          "id": "w4",
+          "top": []
+        },
+        {
+          "bytes": 850,
+          "hits": 1,
+          "id": "w5",
+          "top": [
+            "rule-migrations-additive"
+          ]
+        }
+      ]
+    }
+  }
+}
