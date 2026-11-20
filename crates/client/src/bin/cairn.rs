@@ -8,7 +8,6 @@ use cairn_client::{
 };
 use serde_json::{Map, Value, json};
 use std::env;
-use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::Path;
 use std::process;
@@ -111,25 +110,10 @@ const COMMANDS: &[Command] = &[
         &["scope", "projectId", "relation", "cap"],
         0,
     ),
-    command("reviews", "memory_similarity_reviews", &[], 0),
-    command("review-dismiss", "memory_review_dismiss", &["reviewId"], 1),
-    command(
-        "review-contradict",
-        "memory_review_contradict",
-        &["reviewId", "contradictedId"],
-        2,
-    ),
-    command(
-        "review-supersede",
-        "memory_review_supersede",
-        &["reviewId", "successorId"],
-        2,
-    ),
-    command("correct", "memory_correct", &["targetId", "content"], 2),
     command(
         "project-register",
         "memory_project_register",
-        &["repository", "name", "defaultBranch"],
+        &["repository", "name"],
         2,
     ),
     command("project-list", "memory_project_list", &[], 0),
@@ -140,26 +124,13 @@ const COMMANDS: &[Command] = &[
         1,
     ),
     command(
-        "project-freshness",
-        "memory_project_freshness",
-        &["projectId"],
-        1,
-    ),
-    command(
         "project-members",
         "memory_project_members",
         &["projectId"],
         1,
     ),
-    command(
-        "project-verify",
-        "memory_project_verify",
-        &["projectId", "memoryId", "commit"],
-        3,
-    ),
     command("delete-memory", "memory_delete", &["id"], 1),
     command("export", "memory_export", &["output"], 1),
-    command("import", "memory_import", &["input"], 1),
 ];
 
 const CONTEXT_KEYS: [&str; 4] = ["repository", "branch", "worktree", "commit"];
@@ -176,33 +147,25 @@ fn print_usage() {
   cairn start <session-id> [repository] [branch] [worktree] [commit]\n\
   cairn capture <session-id> <event-id> <content> [role] [source]\n\
   cairn end <session-id>\n\
-  cairn search <query> [limit] [repository] [branch] [worktree] [commit] [--include-captures]\n\
-  cairn context <query> [limit] [repository] [branch] [worktree] [commit] [--include-captures]\n\
+  cairn search <query> [limit] [repository] [branch] [worktree] [commit]\n\
+  cairn context <query> [limit] [repository] [branch] [worktree] [commit]\n\
   cairn why-changed <query> [limit] [repository] [branch] [worktree] [commit]\n\
   cairn resume [limit] [repository] [branch] [worktree] [commit]\n\
   cairn unresolved [limit] [repository] [branch] [worktree] [commit]\n\
   cairn forget <memory-or-event-id>\n\
   cairn save|lesson [JSON-record] (or stdin)\n\
   cairn memories | memory <memory-id>\n\
-  cairn feedback <memory-id> helpful|stale\n\
+  cairn feedback <memory-id> helpful|wrong\n\
   cairn contradict <contradicting-id> <contradicted-id>\n\
   cairn supersede <successor-id> <target-id>\n\
   cairn link <source-id> <relation> <target-id>\n\
   cairn unlink <source-id> <relation> <target-id>\n\
   cairn graph [scope] [project-id] [relation] [cap]\n\
-  cairn reviews\n\
-  cairn review-dismiss <review-id>\n\
-  cairn review-contradict <review-id> <contradicted-id>\n\
-  cairn review-supersede <review-id> <successor-id>\n\
-  cairn correct <memory-or-event-id> <content>\n\
   cairn export <output>\n\
-  cairn import <input>\n\
-  cairn project-register <repository> <name> [default-branch]\n\
+  cairn project-register <repository> <name>\n\
   cairn project-list\n\
   cairn project-members <project-id>\n\
-  cairn project-verify <project-id> <memory-id> <commit>\n\
   cairn project-memories <project-id>\n\
-  cairn project-freshness <project-id>\n\
   cairn delete-memory <memory-id>\n\
 Create the device token in the web console; it is an agent credential. Account and device\n\
 management stay in the web console."
@@ -235,11 +198,6 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             || (index == 1 && args[0] == "init" && value == "--rename")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
-        if value == "--include-captures"
-            && matches!(args.first().map(String::as_str), Some("search" | "context"))
-        {
-            continue;
-        }
         if value.starts_with('-') && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -504,13 +462,6 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
             .cloned()
             .ok_or_else(|| Error::Input("memory record must be a JSON object".to_owned()));
     }
-    let include_captures = matches!(command.name, "search" | "context")
-        && args.iter().any(|arg| arg == "--include-captures");
-    let args = args
-        .iter()
-        .filter(|arg| *arg != "--include-captures")
-        .cloned()
-        .collect::<Vec<_>>();
     let present = |index: usize| args.get(index).filter(|value| !value.is_empty());
     let mut arguments = Map::new();
     for (index, key) in command.args.iter().enumerate() {
@@ -538,19 +489,6 @@ fn tool_arguments(command: &Command, args: &[String]) -> Result<Map<String, Valu
         if !context.is_empty() {
             arguments.insert("context".to_owned(), Value::Object(context));
         }
-    }
-    if include_captures {
-        arguments.insert("includeCaptures".to_owned(), json!(true));
-    }
-    if command.name == "import" {
-        let input = arguments
-            .remove("input")
-            .and_then(|value| value.as_str().map(str::to_owned));
-        let raw = fs::read_to_string(input.as_deref().unwrap_or_default())
-            .map_err(|error| Error::Input(format!("cannot read import file: {error}")))?;
-        let bundle = serde_json::from_str::<Value>(&raw)
-            .map_err(|error| Error::Input(format!("import file is not valid JSON: {error}")))?;
-        arguments.insert("bundle".to_owned(), bundle);
     }
     Ok(arguments)
 }

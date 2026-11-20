@@ -9,26 +9,13 @@ fn structured(result: &Value) -> &Value {
 }
 
 #[test]
-fn save_receipt_is_four_fields_in_both_channels() {
+fn save_receipt_is_three_fields_in_both_channels() {
     let result = present(
         "memory_save",
         false,
-        json!({
-            "memory_id": "mem-1",
-            "kind": "gotcha",
-            "scope": "personal",
-            "status": "active",
-            "title": "Hook auth",
-            "content": "full body",
-            "lifecycle": {"retention": "durable"}
-        }),
+        json!({"id": "mem-1", "status": "active", "deduplicated": false, "title": "Hook auth"}),
     );
-    let receipt = json!({
-        "memory_id": "mem-1",
-        "kind": "gotcha",
-        "scope": "personal",
-        "status": "active"
-    });
+    let receipt = json!({"id": "mem-1", "status": "active", "deduplicated": false});
     assert_eq!(structured(&result), &receipt);
     assert_eq!(text_of(&result), compact(&receipt));
 }
@@ -36,7 +23,8 @@ fn save_receipt_is_four_fields_in_both_channels() {
 #[test]
 fn search_defaults_to_cards_and_expanded_drops_internals() {
     let hit = json!({
-        "memory_id": "mem-1",
+        "id": "mem-1",
+        "owner": "person-1",
         "kind": "gotcha",
         "scope": "project",
         "project_id": "proj-1",
@@ -44,25 +32,21 @@ fn search_defaults_to_cards_and_expanded_drops_internals() {
         "summary": "401 names the config file.",
         "score": 0.5,
         "status": "active",
-        "pinned": false,
-        "importance": 0,
         "reason": "Agents must see the file path.",
+        "fields": {"symptom": "401", "fix": "name the file"},
         "evidence": ["crates/client/src/lib.rs"],
-        "details": "",
-        "content": "Hook auth\n401 names the config file.",
-        "lifecycle": {"retention": "durable", "importance": 0},
-        "source_event_ids": ["evt-1"],
-        "source": "project",
-        "applies_to": [],
-        "stale": false,
-        "contradictory": false,
-        "contradiction_ids": []
+        "evidence_count": 1,
+        "entities": [],
+        "links": [],
+        "context": {},
+        "created_at": 1,
+        "updated_at": 2
     });
     let card = present("memory_search", false, json!([hit.clone()]));
     assert_eq!(
         structured(&card)["results"][0],
         json!({
-            "memory_id": "mem-1",
+            "id": "mem-1",
             "kind": "gotcha",
             "scope": "project",
             "title": "Hook auth",
@@ -79,34 +63,28 @@ fn search_defaults_to_cards_and_expanded_drops_internals() {
     let pack = present(
         "memory_recall",
         false,
-        json!({
-            "query": "auth",
-            "results": [hit.clone()],
-            "omitted_count": 0,
-            "omitted_memory_ids": [],
-            "recovery_hint": null
-        }),
+        json!({"query": "auth", "results": [hit.clone()], "more": 2}),
     );
-    assert_eq!(structured(&pack)["omitted_count"], 0);
-    assert_eq!(structured(&pack)["omitted_memory_ids"], json!([]));
-    assert!(structured(&pack)["recovery_hint"].is_null());
+    assert_eq!(structured(&pack)["more"], 2);
     assert_eq!(structured(&pack)["results"][0]["kind"], "gotcha");
     assert_eq!(text_of(&pack), compact(structured(&pack)));
 
     let expanded = present("memory_context", true, json!([hit]));
     let row = &structured(&expanded)["results"][0];
     assert_eq!(row["reason"], "Agents must see the file path.");
+    assert_eq!(row["fields"]["fix"], "name the file");
     assert_eq!(row["evidence"], json!(["crates/client/src/lib.rs"]));
-    assert_eq!(row["pinned"], false);
-    assert_eq!(row["importance"], 0);
-    assert!(row.get("applies_to").is_none());
-    assert!(row.get("contradiction_ids").is_none());
     assert_eq!(row["project_id"], "proj-1");
-    assert!(row.get("content").is_none());
-    assert!(row.get("lifecycle").is_none());
-    assert!(row.get("source_event_ids").is_none());
-    assert!(row.get("source").is_none());
-    assert!(row.get("details").is_none());
+    for key in [
+        "owner",
+        "evidence_count",
+        "created_at",
+        "entities",
+        "links",
+        "context",
+    ] {
+        assert!(row.get(key).is_none(), "{key}");
+    }
     assert_eq!(text_of(&expanded), compact(structured(&expanded)));
 }
 
@@ -122,8 +100,8 @@ fn default_cards_clip_utf8_and_get_keeps_the_text() {
     assert_eq!(title.len(), 121);
     let summary = snow;
     let hit = json!({
-        "memory_id": "mem-1",
-        "kind": "capture",
+        "id": "mem-1",
+        "kind": "note",
         "scope": "project",
         "title": title,
         "summary": summary,
@@ -148,9 +126,8 @@ fn default_cards_clip_utf8_and_get_keeps_the_text() {
     assert_eq!(structured(&expanded)["results"][0]["score"], 0);
 
     let mut record = hit;
-    record["content"] = json!("full body");
+    record["fields"] = json!({"source": "docs"});
     record["evidence"] = json!([]);
-    record["lifecycle"] = json!({"retention": "durable"});
     let loaded = present("memory_get", false, record.clone());
     assert_eq!(structured(&loaded)["title"], title);
     assert_eq!(structured(&loaded)["summary"], summary);
@@ -159,87 +136,57 @@ fn default_cards_clip_utf8_and_get_keeps_the_text() {
 }
 
 #[test]
-fn expanded_omits_empty_optional_lists_and_keeps_required_empties() {
+fn expanded_omits_empty_lists_and_objects_but_keeps_empty_results() {
     let hit = json!({
-        "memory_id": "mem-1",
+        "id": "mem-1",
         "kind": "rule",
         "scope": "project",
         "title": "Short",
         "summary": "Kept.",
         "score": 1,
-        "pinned": false,
-        "importance": 0,
-        "applies_to": [],
-        "tags": [],
+        "fields": {},
         "entities": [],
-        "alternatives": [],
-        "steps": [],
-        "evidence": ["crates/client/src/present.rs"],
-        "stale": false
+        "links": [],
+        "evidence": ["crates/client/src/present.rs"]
     });
     let expanded = present(
         "memory_context",
         true,
-        json!({
-            "query": "short",
-            "results": [hit],
-            "omitted_count": 0,
-            "omitted_memory_ids": [],
-            "recovery_hint": null
-        }),
+        json!({"query": "short", "results": [hit]}),
     );
     let row = &structured(&expanded)["results"][0];
-    for key in ["applies_to", "tags", "entities", "alternatives", "steps"] {
+    for key in ["fields", "entities", "links"] {
         assert!(row.get(key).is_none(), "{key}");
     }
     assert_eq!(row["evidence"], json!(["crates/client/src/present.rs"]));
-    assert_eq!(row["pinned"], false);
-    assert_eq!(row["importance"], 0);
-    assert_eq!(row["stale"], false);
-    assert_eq!(structured(&expanded)["omitted_memory_ids"], json!([]));
-    assert_eq!(
-        structured(&expanded)["results"].as_array().unwrap().len(),
-        1
-    );
     assert_eq!(text_of(&expanded), compact(structured(&expanded)));
+    let none = present(
+        "memory_context",
+        false,
+        json!({"query": "x", "results": []}),
+    );
+    assert_eq!(structured(&none)["results"], json!([]));
 
     let why = present(
         "memory_why_changed",
         false,
-        json!({
-            "query": "short",
-            "results": [{
-                "memory_id": "mem-1",
-                "relationships": [],
-                "context": {"files": [], "repository": "cairn"}
-            }],
-            "omitted_count": 0,
-            "omitted_memory_ids": []
-        }),
+        json!({"query": "short", "results": [{"id": "mem-1", "links": [], "context": {"branch": "main"}}]}),
     );
-    assert_eq!(structured(&why)["results"][0]["relationships"], json!([]));
-    assert_eq!(
-        structured(&why)["results"][0]["context"]["files"],
-        json!([])
-    );
+    assert!(structured(&why)["results"][0].get("links").is_none());
+    assert_eq!(structured(&why)["results"][0]["context"]["branch"], "main");
 }
 
 #[test]
 fn lists_wrap_empty_arrays_and_get_stays_complete() {
     let listed = present("memory_list", false, json!([]));
     assert_eq!(structured(&listed), &json!({"memories": []}));
-    assert_eq!(
-        structured(&present("memory_project_freshness", false, json!([]))),
-        &json!({"freshness": []})
-    );
     let record = json!({
-        "memory_id": "mem-1",
+        "id": "mem-1",
         "kind": "fact",
-        "content": "kept",
-        "lifecycle": {"retention": "durable"},
-        "source_event_ids": ["evt-1"],
-        "symptom": null,
-        "details": ""
+        "fields": {"source": "docs"},
+        "evidence": [],
+        "links": [],
+        "reason": ""
     });
     let loaded = present("memory_get", false, record.clone());
     assert_eq!(structured(&loaded), &record);
@@ -262,7 +209,7 @@ fn ordinary_json_is_compact_and_drops_only_empty_optionals() {
 }
 
 #[test]
-fn graph_and_reviews_use_toon_text_and_json_objects() {
+fn graph_uses_toon_text_and_json_objects() {
     let graph = json!({
         "nodes": [{
             "memory_id": "mem-1",
@@ -308,44 +255,6 @@ fn graph_and_reviews_use_toon_text_and_json_objects() {
         json!([{"relation": "fixes \"a\"\n雪", "source_id": "mem-1", "target_id": "mem-2"}])
     );
     assert_eq!(structured(&presented)["node_cap"], 120);
-
-    let empty = present("memory_similarity_reviews", false, json!([]));
-    assert_eq!(text_of(&empty), "reviews: []");
-    assert_eq!(structured(&empty), &json!({"reviews": []}));
-
-    let reviews = present(
-        "memory_similarity_reviews",
-        false,
-        json!([{
-            "review_id": "rev \"1\"\n雪",
-            "left_id": "mem-1",
-            "right_id": "mem-2",
-            "scope": "global",
-            "project_id": null,
-            "cosine": 0.75,
-            "band": "near_duplicate",
-            "status": "open",
-            "created_at": 10,
-            "resolved_at": null,
-            "resolved_by": ""
-        }]),
-    );
-    assert!(text_of(&reviews).starts_with("reviews[1\t]{"));
-    assert!(text_of(&reviews).contains("null"));
-    assert!(text_of(&reviews).contains("\"\""));
-    assert!(text_of(&reviews).contains("0.75"));
-    assert!(
-        structured(&reviews)["reviews"][0]
-            .get("project_id")
-            .is_none()
-    );
-    assert!(
-        structured(&reviews)["reviews"][0]
-            .get("resolved_at")
-            .is_none()
-    );
-    assert_eq!(structured(&reviews)["reviews"][0]["status"], "open");
-    assert_eq!(structured(&reviews)["reviews"][0]["cosine"], 0.75);
 }
 
 #[test]

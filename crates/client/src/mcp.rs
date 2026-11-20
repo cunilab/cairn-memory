@@ -319,7 +319,7 @@ mod tests {
             missing["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("scope")
+                .contains("kind")
         );
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));

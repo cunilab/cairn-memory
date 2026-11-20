@@ -1,14 +1,11 @@
-//! Runs the real `cairn` binary (CLI and `cairn mcp`) against in-process Cairn servers. The same
-//! scenario runs on the file-store router and, when `CAIRN_TEST_DATABASE_URL` names a fresh
-//! database, on the PostgreSQL router. Web-side setup (accounts, devices) uses a session token,
-//! as the web console does; the agent side only ever holds a device token.
+//! Runs the real `cairn` binary (CLI and `cairn mcp`) against an in-process Cairn server on a
+//! `TestDb` schema. Web-side setup (accounts, devices) uses a session token, as the web console
+//! does; the agent side only ever holds a device token.
 
-use axum::Router;
 use cairn_client::{Client, Config, Error};
-use cairn_server::{AppState, app, postgres_app};
-use cairn_storage::PostgresStore;
+use cairn_server::{AppState, router};
+use cairn_store::testing::TestDb;
 use serde_json::{Value, json};
-use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
@@ -17,22 +14,61 @@ use std::thread;
 
 const PASSWORD: &str = "correct horse battery staple";
 
-fn serve<F, Fut>(make_router: F) -> String
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Router>,
-{
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async {
-            let router = make_router().await;
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            sender.send(listener.local_addr().unwrap()).unwrap();
-            axum::serve(listener, router).await.unwrap();
+/// A server on a random port over a fresh test schema. Dropping it stops the server and drops
+/// the schema.
+struct Server {
+    url: String,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Server {
+    /// `None` when no test database is configured (the test is skipped).
+    fn start() -> Option<Self> {
+        let (sender, receiver) = mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let Some(db) = TestDb::new().await else {
+                    sender.send(None).unwrap();
+                    return;
+                };
+                let app = router(AppState::new(db.store.clone(), None));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                sender.send(Some(listener.local_addr().unwrap())).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+                db.finish().await;
+            });
         });
-    });
-    format!("http://{}", receiver.recv().unwrap())
+        match receiver.recv().unwrap() {
+            Some(addr) => Some(Self {
+                url: format!("http://{addr}"),
+                stop: Some(stop),
+                thread: Some(thread),
+            }),
+            None => {
+                thread.join().unwrap();
+                None
+            }
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -182,6 +218,20 @@ fn device_token(web: &Client, name: &str) -> (String, String) {
     )
 }
 
+/// The name the server holds for one of the agent's projects (the list is newest first).
+fn project_name(agent: &Agent, project_id: &str) -> String {
+    agent
+        .json(&["project-list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["project_id"] == project_id)
+        .unwrap()["name"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
 fn scenario(url: &str, label: &str) {
     // Web side: first account, a second account, and one device token each.
     let anonymous = web(url, "none");
@@ -193,9 +243,15 @@ fn scenario(url: &str, label: &str) {
         .unwrap();
     let owner_web = web(url, owner["token"].as_str().unwrap());
     // Only the admin session creates accounts.
-    let member = owner_web
+    owner_web
         .post(
             "/cairn-memory/auth/register",
+            &json!({"email": "member@example.test", "password": PASSWORD}),
+        )
+        .unwrap();
+    let member = anonymous
+        .post(
+            "/cairn-memory/auth/login",
             &json!({"email": "member@example.test", "password": PASSWORD}),
         )
         .unwrap();
@@ -220,13 +276,9 @@ fn scenario(url: &str, label: &str) {
         "project-register",
         "example.test/acme/cairn-demo",
         "Cairn Demo",
-        "main",
     ]);
     let project_id = project["project_id"].as_str().unwrap().to_owned();
-    assert_eq!(
-        agent.json(&["project-list"])[0]["project_id"],
-        project_id.as_str()
-    );
+    assert_eq!(project_name(&agent, &project_id), "Cairn Demo");
 
     agent.json(&["start", "private-session"]);
     agent.json(&[
@@ -236,7 +288,15 @@ fn scenario(url: &str, label: &str) {
         "private observation stays on the owner account",
     ]);
     let private = agent.json(&["end", "private-session"]);
-    let private_id = private["memory_id"].as_str().unwrap().to_owned();
+    assert_eq!(private["status"], "queued");
+    // The raw capture is never recalled, only what is distilled from it later.
+    let private_id = agent.json(&[
+        "save",
+        r#"{"scope":"personal","kind":"note","title":"Private note","summary":"stays on the owner account","reason":"flow"}"#,
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     agent.json(&[
         "start",
@@ -261,10 +321,15 @@ fn scenario(url: &str, label: &str) {
     ]);
     assert_eq!(replay["duplicate"], true);
     let ended = agent.json(&["end", "shared-session"]);
-    assert_eq!(
-        ended["context"]["repository"],
-        "example.test/acme/cairn-demo"
-    );
+    assert_eq!(ended["status"], "queued");
+    let lesson = agent.json(&["lesson", r#"{"scope":"personal","title":"Credential handling","summary":"Keep device tokens out of logs.","reason":"Avoid exposure","fields":{"fix":"redact"}}"#]);
+    let lesson_id = lesson["id"].as_str().unwrap().to_owned();
+    assert_eq!(agent.json(&["memory", &lesson_id])["kind"], "gotcha");
+
+    let record = json!({"scope":"project","kind":"decision","title":"repository cache decision","summary":"Ready for the project","reason":"Agent flow verification","context":{"project_id":project_id,"repository":"example.test/acme/cairn-demo"}}).to_string();
+    let promoted = agent.json(&["save", &record]);
+    let promoted_id = promoted["id"].as_str().unwrap().to_owned();
+    assert_eq!(agent.json(&["memory", &promoted_id])["scope"], "project");
     let context = agent.json(&[
         "context",
         "cache decision",
@@ -272,13 +337,13 @@ fn scenario(url: &str, label: &str) {
         "example.test/acme/cairn-demo",
     ]);
     assert!(context.to_string().contains("cache decision"));
-    let lesson = agent.json(&["lesson", r#"{"scope":"personal","title":"Credential handling","summary":"Keep device tokens out of logs.","reason":"Avoid exposure","kind":"gotcha","fix":"redact"}"#]);
-    assert_eq!(lesson["kind"], "gotcha");
-
-    let record = json!({"scope":"project","kind":"decision","title":"repository cache decision","summary":"Ready for the project","reason":"Agent flow verification","context":{"project_id":project_id,"repository":"example.test/acme/cairn-demo"}}).to_string();
-    let promoted = agent.json(&["save", &record]);
-    assert_eq!(promoted["scope"], "project");
-    let promoted_id = promoted["memory_id"].as_str().unwrap().to_owned();
+    // An unknown key is a clear 400, not a silent drop.
+    let bad = agent.run(&[
+        "save",
+        r#"{"kind":"rule","title":"t","summary":"s","reason":"r","colour":"red"}"#,
+    ]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("colour"));
     // Membership comes from the committed project file: the owner runs `cairn init` in the
     // checkout, the teammate's first capture there joins the project. There is no invite.
     let checkout = temp_dir(&format!("{label}-checkout"));
@@ -351,7 +416,7 @@ fn scenario(url: &str, label: &str) {
             .status
             .success()
     );
-    assert_eq!(agent.json(&["project-list"])[0]["name"], "Cairn Demo");
+    assert_eq!(project_name(&agent, &project_id), "Cairn Demo");
     assert!(
         owner_web
             .get("/cairn-memory/auth/audit")
@@ -388,7 +453,7 @@ fn scenario(url: &str, label: &str) {
     .unwrap();
     let refused = agent.run_in(&checkout, &["init"]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("unknown project"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("project not found"));
     assert!(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -398,7 +463,7 @@ fn scenario(url: &str, label: &str) {
     assert_eq!(teammate.json(&["project-list"]), json!([]));
     let refused = teammate.run_in(&checkout, &["init", "--rename", "Outsider rename"]);
     assert!(!refused.status.success());
-    assert_eq!(agent.json(&["project-list"])[0]["name"], "Cairn Demo");
+    assert_eq!(project_name(&agent, &project_id), "Cairn Demo");
 
     let joined = teammate.run_in(
         &checkout,
@@ -430,7 +495,7 @@ fn scenario(url: &str, label: &str) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|memory| memory["memory_id"].clone())
+        .map(|memory| memory["id"].clone())
         .collect();
     assert!(ids.contains(&json!(promoted_id)));
     assert!(!shared.to_string().contains(&private_id));
@@ -440,23 +505,37 @@ fn scenario(url: &str, label: &str) {
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
 
     // The member's device cannot act as the owner.
     let refused = teammate.run(&["project-team-create", &project_id, "Other"]);
     assert!(!refused.status.success());
 
-    // Export, forget, and import round-trip through files.
+    // Export writes a file; forget blanks the memory, which then leaves the export.
     let bundle = agent.home.join("bundle.json");
     agent.json(&["export", bundle.to_str().unwrap()]);
+    let exported = std::fs::read_to_string(&bundle).unwrap();
+    assert!(exported.contains("repository cache decision") && exported.contains("Private note"));
+    agent.json(&["forget", &private_id]);
+    agent.json(&["export", bundle.to_str().unwrap()]);
     assert!(
-        std::fs::read_to_string(&bundle)
+        !std::fs::read_to_string(&bundle)
             .unwrap()
-            .contains("repository cache decision")
+            .contains("Private note")
     );
-    agent.json(&["forget", "evt-private"]);
-    agent.json(&["import", bundle.to_str().unwrap()]);
+    assert!(
+        !agent
+            .run(&["import", bundle.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(
+        !agent
+            .run(&["correct", &promoted_id, "text"])
+            .status
+            .success()
+    );
 
     // MCP proxies the same calls with the same device token.
     let mut mcp = agent.mcp();
@@ -476,6 +555,14 @@ fn scenario(url: &str, label: &str) {
         "memory_project_revoke",
         "memory_project_team",
         "memory_project_team_create",
+        "memory_correct",
+        "memory_import",
+        "memory_similarity_reviews",
+        "memory_review_dismiss",
+        "memory_review_contradict",
+        "memory_review_supersede",
+        "memory_project_verify",
+        "memory_project_freshness",
     ] {
         assert!(!names.contains(&removed), "{removed}");
     }
@@ -490,8 +577,23 @@ fn scenario(url: &str, label: &str) {
     assert_eq!(observed["structuredContent"]["accepted"], true);
     let ended = mcp.tool("memory_session_end", json!({"sessionId": "mcp-session"}));
     assert_eq!(ended["isError"], false);
-    let recalled = mcp.tool("memory_recall", json!({"query": "proxied observation"}));
-    assert!(recalled["structuredContent"]["results"].is_array());
+    let saved = mcp.tool(
+        "memory_save",
+        json!({"kind": "fact", "scope": "personal", "title": "Proxied fact", "summary": "The proxy keeps the device token.", "reason": "mcp flow", "fields": {"source": "agent_flow"}}),
+    );
+    assert_eq!(saved["structuredContent"]["status"], "active", "{saved}");
+    let saved_id = saved["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let recalled = mcp.tool(
+        "memory_recall",
+        json!({"query": "proxied fact device token"}),
+    );
+    assert_eq!(
+        recalled["structuredContent"]["results"][0]["id"],
+        saved_id.as_str()
+    );
     assert!(
         recalled["structuredContent"]["results"][0]["kind"]
             .as_str()
@@ -499,27 +601,25 @@ fn scenario(url: &str, label: &str) {
     );
     let expanded = mcp.tool(
         "memory_recall",
-        json!({"query": "proxied observation", "expanded": true}),
+        json!({"query": "proxied fact device token", "expanded": true}),
     );
     let expanded_text = expanded["content"][0]["text"].as_str().unwrap();
-    assert!(
-        expanded_text.contains("proxied observation"),
-        "{expanded_text}"
-    );
-    assert!(
-        expanded["structuredContent"]["results"][0]
-            .get("lifecycle")
-            .is_none()
-    );
-    assert!(
-        expanded["structuredContent"]["results"][0]
-            .get("content")
-            .is_none()
-    );
+    assert!(expanded_text.contains("agent_flow"), "{expanded_text}");
+    for key in ["usage", "evidence_hash", "identity_hash", "owner"] {
+        assert!(
+            expanded["structuredContent"]["results"][0]
+                .get(key)
+                .is_none(),
+            "{key}"
+        );
+    }
     let listed = mcp.tool("memory_project_list", json!({}));
-    assert_eq!(
-        listed["structuredContent"]["projects"][0]["project_id"],
-        project_id.as_str()
+    assert!(
+        listed["structuredContent"]["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["project_id"] == project_id.as_str())
     );
     let missing = mcp.tool("memory_save", json!({"scope":"project"}));
     assert_eq!(missing["isError"], true);
@@ -580,21 +680,11 @@ fn scenario(url: &str, label: &str) {
 }
 
 #[test]
-fn agent_flow_on_the_file_store_server() {
-    let path = temp_dir("file-store").join("store.json");
-    let url = serve(move || async move { app(AppState::open(path).unwrap()) });
-    scenario(&url, "file");
-}
-
-#[test]
-#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
 fn agent_flow_on_the_postgres_server() {
-    let database_url = std::env::var("CAIRN_TEST_DATABASE_URL")
-        .expect("CAIRN_TEST_DATABASE_URL must point to a fresh PostgreSQL database");
-    let url = serve(move || async move {
-        postgres_app(PostgresStore::connect(&database_url).await.unwrap())
-    });
-    scenario(&url, "postgres");
+    let Some(server) = Server::start() else {
+        return;
+    };
+    scenario(&server.url, "postgres");
 }
 
 #[test]
@@ -881,8 +971,10 @@ fn selected_config_file_wins_over_legacy_env_for_cli_and_mcp() {
 #[test]
 fn export_is_private_and_replaces_a_symlink_instead_of_following_it() {
     use std::os::unix::fs::{PermissionsExt, symlink};
-    let path = temp_dir("export").join("store.json");
-    let url = serve(move || async move { app(AppState::open(path).unwrap()) });
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let url = server.url.clone();
     let anonymous = web(&url, "none");
     let owner = anonymous
         .post(
@@ -998,19 +1090,15 @@ fn help_and_flag_errors_never_make_a_request() {
         "unresolved",
         "forget",
         "lesson",
-        "correct",
         "project-register",
         "project-list",
         "save",
         "memories",
         "memory",
         "project-members",
-        "project-verify",
         "project-memories",
-        "project-freshness",
         "delete-memory",
         "export",
-        "import",
     ];
     let invoke = |args: &[&str]| {
         command(&home)

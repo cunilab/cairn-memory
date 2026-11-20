@@ -114,8 +114,9 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
             }
         }
     }
+    // The server defaults a save to project scope when the context names a project.
     if matches!(tool.name, "memory_save" | "memory_lesson_save")
-        && body.get("scope").and_then(Value::as_str) == Some("project")
+        && body.get("scope").and_then(Value::as_str) != Some("global")
         && let Ok(cwd) = std::env::current_dir()
         && let Some(id) = crate::project::project_id(&cwd)
     {
@@ -144,7 +145,7 @@ pub fn call(client: &Client, tool: &Tool, args: &Map<String, Value>) -> Result<V
         return Ok(json!({
             "query": result["query"],
             "results": result["results"],
-            "omitted_count": result["omitted_count"],
+            "more": result["more"],
             "mode": "retrieval-only",
             "note": "No model-generated reflection is performed."
         }));
@@ -221,60 +222,35 @@ fn encode_byte(byte: u8) -> String {
 }
 
 fn build_tools() -> Vec<Tool> {
-    let content_schema = || {
-        let mut properties = vec![
-            (
-                "scope",
-                json!({"type":"string", "enum":["project", "personal", "global"]}),
-            ),
+    // The `SaveInput` shape: the server derives everything else and rejects unknown keys.
+    let save_schema = |kind_required: bool| {
+        let properties = [
             (
                 "kind",
-                json!({"type":"string", "enum":["decision","rule","gotcha","procedure","fact","preference","explicit","lesson"]}),
+                json!({"type":"string", "enum":["decision","rule","gotcha","procedure","fact","preference","note"]}),
             ),
-            ("lifecycle", lifecycle_schema()),
+            ("title", string_schema()),
+            ("summary", string_schema()),
+            ("reason", string_schema()),
+            (
+                "fields",
+                json!({"type":"object", "description": FIELDS_HELP}),
+            ),
+            ("evidence", array_schema()),
+            ("supersedes", string_schema()),
+            ("contradicts", string_schema()),
+            (
+                "scope",
+                json!({"type":"string", "enum":["project", "personal", "global"], "description": "Optional. Default: project in an initialized repository, else personal. A preference is always personal."}),
+            ),
             ("context", json!({"type":"object"})),
-            ("pinned", json!({"type":"boolean"})),
-            (
-                "importance",
-                json!({"type":"integer", "minimum":0, "maximum":100}),
-            ),
-            (
-                "status",
-                json!({"type":"string", "enum":["active","stale","superseded"]}),
-            ),
         ];
-        for field in [
-            "title",
-            "summary",
-            "details",
-            "reason",
-            "supersedes",
-            "decision_context",
-            "consequences",
-            "rule",
-            "exceptions",
-            "symptom",
-            "cause",
-            "fix",
-            "when",
-            "statement",
-            "source",
-            "preference",
-            "example",
-        ] {
-            properties.push((field, string_schema()));
-        }
-        for field in [
-            "applies_to",
-            "evidence",
-            "tags",
-            "entities",
-            "alternatives",
-            "steps",
-        ] {
-            properties.push((field, array_schema()));
-        }
-        object_schema(&properties, &["scope", "title", "summary", "reason"])
+        let required: &[&str] = if kind_required {
+            &["kind", "title", "summary", "reason"]
+        } else {
+            &["title", "summary", "reason"]
+        };
+        object_schema(&properties, required)
     };
     let project_schema = || object_schema(&[("projectId", string_schema())], &["projectId"]);
     use Method::{Get, Post};
@@ -288,10 +264,10 @@ fn build_tools() -> Vec<Tool> {
     vec![
         spec(
             "memory_save",
-            "Cairn. Save verified reusable knowledge at decisions, corrections and task completion. Agent chooses scope: project (members), personal (private behaviour), global (all server users). Required: scope/title/summary/reason; fill known kind-specific fields and evidence. Avoid duplicates and secrets. The MCP result is memory_id, kind, scope, and status.",
+            "Cairn. Save verified reusable knowledge at decisions, corrections and task completion. Required: kind/title/summary (<=240 chars)/reason. Scope defaults to project in an initialized repository, else personal; global is visible to every server user. Fill the kind's fields and evidence when known; a correction is a save with supersedes. Avoid duplicates and secrets. The MCP result is id, status and deduplicated.",
             Post,
             "/remember",
-            content_schema(),
+            save_schema(true),
         ),
         spec(
             "memory_recall",
@@ -316,24 +292,24 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_why_changed",
-            "Recover decisions, reasons, evidence, relationships, and stale or contradictory signals.",
+            "Recover decisions, reasons, evidence and links, including what replaced or contradicts what.",
             Post,
             "/why-changed",
             query_schema(),
         ),
         spec(
             "memory_diagnose",
-            "Report memory lifecycle counts for the account.",
+            "Report memory counts by kind, status and scope, and the job queue.",
             Get,
             "/diagnose",
             object_schema(&[], &[]),
         ),
         spec(
             "memory_lesson_save",
-            "Cairn. Save a verified lesson after a correction or resolved failure. Required: scope/title/summary/reason. Defaults to gotcha: fill symptom/cause/fix and evidence when known. Agent chooses project, private personal behaviour or server-wide global scope; never invent causal fields. The MCP result is memory_id, kind, scope, and status.",
+            "Cairn. Save a verified lesson after a correction or resolved failure. Required: title/summary/reason. Kind defaults to gotcha: fill fields symptom/cause/fix and evidence when known; never invent causal fields. The MCP result is id, status and deduplicated.",
             Post,
             "/remember",
-            content_schema(),
+            save_schema(false),
         ),
         spec(
             "memory_reflect",
@@ -361,15 +337,13 @@ fn build_tools() -> Vec<Tool> {
                     ("content", string_schema()),
                     ("role", string_schema()),
                     ("source", string_schema()),
-                    ("importance", string_schema()),
-                    ("lifecycle", lifecycle_schema()),
                 ],
                 &["eventId", "sessionId", "content", "role", "source"],
             ),
         ),
         spec(
             "memory_session_end",
-            "Finalize a capture session and create its summary memory.",
+            "Finalize a capture session; its notes and handoff are derived in the background.",
             Post,
             "/session/end",
             session_schema(),
@@ -390,21 +364,21 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_resume",
-            "Recover recent session summaries for the current work context.",
+            "Recover recent handoffs for the current work context.",
             Post,
             "/resume",
             continuity_schema(),
         ),
         spec(
             "memory_unresolved",
-            "Recover recent session summaries with unresolved work.",
+            "Recover recent handoffs with next steps or open questions.",
             Post,
             "/unresolved",
             continuity_schema(),
         ),
         spec(
             "memory_forget",
-            "Forget an observation or derived memory and suppress future recall.",
+            "Forget a memory you own: its text is erased and future recall is suppressed.",
             Post,
             "/forget",
             object_schema(
@@ -418,32 +392,10 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_export",
-            "Export the account's memory as a versioned portable bundle.",
+            "Export the memories and links the account can see.",
             Post,
             "/export",
             object_schema(&[], &[]),
-        ),
-        spec(
-            "memory_import",
-            "Import a versioned portable memory bundle idempotently.",
-            Post,
-            "/import",
-            object_schema(&[("bundle", json!({"type": "object"}))], &["bundle"]),
-        ),
-        spec(
-            "memory_correct",
-            "Create a corrected durable memory while preserving the superseded item and trail.",
-            Post,
-            "/correct",
-            object_schema(
-                &[
-                    ("targetId", string_schema()),
-                    ("content", string_schema()),
-                    ("concepts", array_schema()),
-                    ("lifecycle", lifecycle_schema()),
-                ],
-                &["targetId", "content"],
-            ),
         ),
         spec(
             "memory_project_list",
@@ -456,13 +408,9 @@ fn build_tools() -> Vec<Tool> {
             "memory_project_register",
             "Initialize a shared project for a repository.",
             Post,
-            "/projects",
+            "/projects/init",
             object_schema(
-                &[
-                    ("repository", string_schema()),
-                    ("name", string_schema()),
-                    ("defaultBranch", string_schema()),
-                ],
+                &[("repository", string_schema()), ("name", string_schema())],
                 &["repository", "name"],
             ),
         ),
@@ -475,14 +423,14 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_get",
-            "Cairn. Read every field of a visible memory, including content, provenance, and lifecycle.",
+            "Cairn. Read every field of a visible memory, including fields, evidence, entities and links.",
             Get,
             "/memories/{memoryId}",
             object_schema(&[("memoryId", string_schema())], &["memoryId"]),
         ),
         spec(
             "memory_contradict",
-            "Declare that one visible memory contradicts another. The contradicted memory ranks lower and stays visible. Same scope and project. Project: author of the contradicted memory or the project owner. Personal: the author. Global: the author or an administrator.",
+            "Declare that one visible memory contradicts another. Both stay visible and the project shows the conflict.",
             Post,
             "/contradict",
             object_schema(
@@ -495,7 +443,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_supersede",
-            "Mark an existing memory as superseding another in the same scope and project. The older memory leaves normal recall and stays in history. Requires edit rights on both.",
+            "Mark one memory as superseding another. The older memory leaves normal recall and stays in history. You must own the older one, or both must be in your project.",
             Post,
             "/supersede",
             object_schema(
@@ -507,48 +455,8 @@ fn build_tools() -> Vec<Tool> {
             ),
         ),
         spec(
-            "memory_similarity_reviews",
-            "List open similarity reviews whose memories the caller can both read.",
-            Get,
-            "/similarity-reviews",
-            object_schema(&[], &[]),
-        ),
-        spec(
-            "memory_review_dismiss",
-            "Dismiss an open similarity review without changing the memories. Requires edit rights on both memories.",
-            Post,
-            "/similarity-reviews/dismiss",
-            object_schema(&[("reviewId", string_schema())], &["reviewId"]),
-        ),
-        spec(
-            "memory_review_contradict",
-            "From an open review, declare that the other memory contradicts contradictedId.",
-            Post,
-            "/similarity-reviews/contradict",
-            object_schema(
-                &[
-                    ("reviewId", string_schema()),
-                    ("contradictedId", string_schema()),
-                ],
-                &["reviewId", "contradictedId"],
-            ),
-        ),
-        spec(
-            "memory_review_supersede",
-            "From an open review, mark successorId as superseding the other memory.",
-            Post,
-            "/similarity-reviews/supersede",
-            object_schema(
-                &[
-                    ("reviewId", string_schema()),
-                    ("successorId", string_schema()),
-                ],
-                &["reviewId", "successorId"],
-            ),
-        ),
-        spec(
             "memory_link",
-            "Link two visible memories in the same scope and project. Relations: relates, causes, fixes, depends_on. Requires edit rights on the source memory.",
+            "Link two visible memories. Relations: relates, causes, fixes, depends_on. You must own the source memory.",
             Post,
             "/links",
             object_schema(
@@ -565,7 +473,7 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_unlink",
-            "Remove one typed link. Same visibility and edit rule as memory_link.",
+            "Remove one typed link. Same rule as memory_link.",
             Post,
             "/links/remove",
             object_schema(
@@ -603,13 +511,13 @@ fn build_tools() -> Vec<Tool> {
         ),
         spec(
             "memory_feedback",
-            "Mark a visible memory helpful or stale. One vote per person; repeating replaces it. Project votes change ranking for every member, global votes for every user, and personal votes are owner-only.",
+            "Mark a visible memory helpful or wrong. Votes change ranking for everyone who sees it; a wrong vote from the owner marks it stale.",
             Post,
             "/feedback",
             object_schema(
                 &[
                     ("memoryId", string_schema()),
-                    ("vote", json!({"type":"string","enum":["helpful","stale"]})),
+                    ("vote", json!({"type":"string","enum":["helpful","wrong"]})),
                 ],
                 &["memoryId", "vote"],
             ),
@@ -622,13 +530,6 @@ fn build_tools() -> Vec<Tool> {
             project_schema(),
         ),
         spec(
-            "memory_project_freshness",
-            "Read project freshness history.",
-            Get,
-            "/projects/{projectId}/freshness",
-            project_schema(),
-        ),
-        spec(
             "memory_project_members",
             "List the project roster, visible to all members.",
             Get,
@@ -636,22 +537,8 @@ fn build_tools() -> Vec<Tool> {
             project_schema(),
         ),
         spec(
-            "memory_project_verify",
-            "Verify a decision you authored or a project you own.",
-            Post,
-            "/projects/verify",
-            object_schema(
-                &[
-                    ("projectId", string_schema()),
-                    ("memoryId", string_schema()),
-                    ("commit", string_schema()),
-                ],
-                &["projectId", "memoryId", "commit"],
-            ),
-        ),
-        spec(
             "memory_delete",
-            "Hide a memory from normal recall while keeping it in storage and export. Owner only.",
+            "Forget a memory you own (same as memory_forget).",
             Post,
             "/delete",
             object_schema(
@@ -662,6 +549,9 @@ fn build_tools() -> Vec<Tool> {
     ]
 }
 
+/// The per-kind keys of `fields`; anything else is rejected.
+const FIELDS_HELP: &str = "Per-kind keys. decision: context, alternatives[], consequences. rule: exceptions. gotcha: symptom, cause, fix. procedure: steps[] (ordered), when. fact: source. preference: example. note: none.";
+
 fn query_schema() -> Value {
     object_schema(
         &[
@@ -669,7 +559,6 @@ fn query_schema() -> Value {
             ("limit", json!({"type": "integer", "minimum": 1})),
             ("sessionId", string_schema()),
             ("context", json!({"type": "object"})),
-            ("includeCaptures", include_captures_schema()),
         ],
         &["query"],
     )
@@ -686,17 +575,9 @@ fn card_query_schema() -> Value {
                 "expanded",
                 json!({"type": "boolean", "description": "When true, return useful recall fields instead of the short card. Omitted lifecycle, internal ids, and duplicated content stay on memory_get."}),
             ),
-            ("includeCaptures", include_captures_schema()),
         ],
         &["query"],
     )
-}
-
-fn include_captures_schema() -> Value {
-    json!({
-        "type": "boolean",
-        "description": "Include raw capture records. Default false. Search, recall, and context still apply the relevance floor. Resume and unresolved are unchanged.",
-    })
 }
 
 fn continuity_schema() -> Value {
@@ -733,35 +614,6 @@ fn string_schema() -> Value {
 
 fn array_schema() -> Value {
     json!({ "type": "array", "items": { "type": "string" } })
-}
-
-fn lifecycle_schema() -> Value {
-    object_schema(
-        &[
-            (
-                "importance",
-                json!({"type": "integer", "minimum": 0, "maximum": 100}),
-            ),
-            (
-                "sensitivity",
-                json!({"type": "string", "enum": ["public", "private", "sensitive", "secret"]}),
-            ),
-            (
-                "confidence",
-                json!({"type": "integer", "minimum": 0, "maximum": 100}),
-            ),
-            (
-                "freshness",
-                json!({"type": "integer", "minimum": 0, "maximum": 100}),
-            ),
-            (
-                "retention",
-                json!({"type": "string", "enum": ["temporary", "durable"]}),
-            ),
-            ("expiresAt", string_schema()),
-        ],
-        &[],
-    )
 }
 
 #[cfg(test)]

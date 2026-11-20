@@ -1,22 +1,23 @@
 //! Agent-facing MCP results. REST and the CLI keep the server JSON; only `tools/call`
 //! uses this module.
 //!
-//! TOON text is limited to the graph and similarity-review tools (TOON spec 4.4, tab
+//! TOON text is limited to the graph tool (TOON spec 4.4, tab
 //! delimiter). It is not a general encoder: a shape it does not support falls back to
 //! compact JSON.
 
 use serde_json::{Map, Value, json};
 
-const CARD_KEYS: &[&str] = &["memory_id", "kind", "scope", "title", "summary", "score"];
+const CARD_KEYS: &[&str] = &["id", "kind", "scope", "title", "summary", "score"];
 /// A label, the same width as a capture's 120-character first line for ASCII.
 const CARD_TITLE_MAX_BYTES: usize = 120;
 /// About two short sentences, far below a capture body.
 const CARD_SUMMARY_MAX_BYTES: usize = 240;
 const CARD_ELLIPSIS: &str = "…";
 
-/// Useful recall fields. Lifecycle, internal ids, and the duplicated `content` body are absent.
+/// Useful recall fields. The per-kind `fields`, `entities` and `links` ride along; internal
+/// usage counters and the hashes never leave the server.
 const EXPANDED_KEYS: &[&str] = &[
-    "memory_id",
+    "id",
     "kind",
     "scope",
     "project_id",
@@ -24,49 +25,15 @@ const EXPANDED_KEYS: &[&str] = &[
     "summary",
     "score",
     "status",
-    "pinned",
-    "importance",
-    "details",
     "reason",
-    "applies_to",
+    "fields",
     "evidence",
-    "tags",
     "entities",
-    "decision_context",
-    "alternatives",
-    "consequences",
-    "rule",
-    "exceptions",
-    "symptom",
-    "cause",
-    "fix",
-    "steps",
-    "when",
-    "statement",
-    "preference",
-    "example",
-    "next_steps",
-    "unresolved_work",
-    "decision_reason",
-    "relationships",
-    "stale",
-    "stale_reason",
-    "contradictory",
-    "contradiction_ids",
-    "supersedes",
-    "promotion_reason",
-    "verified_commit",
+    "links",
+    "context",
 ];
 
-const PACK_KEYS: &[&str] = &[
-    "query",
-    "results",
-    "omitted_count",
-    "omitted_memory_ids",
-    "recovery_hint",
-    "mode",
-    "note",
-];
+const PACK_KEYS: &[&str] = &["query", "results", "more", "mode", "note"];
 
 pub fn present(name: &str, expanded: bool, value: Value) -> Value {
     match name {
@@ -81,11 +48,9 @@ pub fn present(name: &str, expanded: bool, value: Value) -> Value {
             same(shape_hits_with(value, |row| omit_empty(row.clone())))
         }
         "memory_graph" => toon_channels(value),
-        "memory_similarity_reviews" => toon_channels(wrap("reviews", value)),
-        "memory_list" | "memory_project_memories" => same(omit_empty(wrap("memories", value))),
-        "memory_project_list" => same(omit_empty(wrap("projects", value))),
-        "memory_project_members" => same(omit_empty(wrap("members", value))),
-        "memory_project_freshness" => same(omit_empty(wrap("freshness", value))),
+        "memory_list" | "memory_project_memories" => same(wrap("memories", omit_empty(value))),
+        "memory_project_list" => same(wrap("projects", omit_empty(value))),
+        "memory_project_members" => same(wrap("members", omit_empty(value))),
         _ => same(omit_empty(value)),
     }
 }
@@ -113,10 +78,9 @@ fn compact(value: &Value) -> String {
 
 fn receipt(value: &Value) -> Value {
     json!({
-        "memory_id": field(value, "memory_id"),
-        "kind": field(value, "kind"),
-        "scope": field(value, "scope"),
+        "id": field(value, "id"),
         "status": field(value, "status"),
+        "deduplicated": field(value, "deduplicated"),
     })
 }
 
@@ -224,7 +188,14 @@ fn omit_empty(value: Value) -> Value {
                 if empty_optional(&child) {
                     continue;
                 }
-                out.insert(key, omit_empty(child));
+                let child = omit_empty(child);
+                // `[]` and `{}` carry nothing; a child cleaned down to one is dropped too.
+                if child.as_array().is_some_and(Vec::is_empty)
+                    || child.as_object().is_some_and(Map::is_empty)
+                {
+                    continue;
+                }
+                out.insert(key, child);
             }
             Value::Object(out)
         }
