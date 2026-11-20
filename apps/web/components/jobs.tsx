@@ -71,14 +71,14 @@ export function Jobs() {
   const columns = useMemo<ColumnDef<QuarantinedJob>[]>(
     () => [
       {
-        accessorKey: "label",
+        accessorKey: "kind",
         header: "Job",
         cell: ({ row }) => (
           <div className="min-w-0">
-            <div className="font-medium">{row.original.label}</div>
+            <div className="font-medium">{row.original.kind} · {row.original.key}</div>
             <div className="text-xs text-muted-foreground">
               {row.original.attempts} {row.original.attempts === 1 ? "attempt" : "attempts"} ·{" "}
-              {formatTime(String(row.original.quarantined_at))}
+              {formatTime(row.original.updated_at)}
             </div>
           </div>
         ),
@@ -88,7 +88,7 @@ export function Jobs() {
         header: "Last error",
         meta: { className: "hidden md:table-cell" },
         cell: ({ row }) => (
-          <span className="block max-w-md truncate text-muted-foreground" title={row.original.last_error}>
+          <span className="block max-w-md truncate text-muted-foreground" title={row.original.last_error ?? undefined}>
             {row.original.last_error}
           </span>
         ),

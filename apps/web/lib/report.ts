@@ -1,12 +1,12 @@
-/** The server stamps records with epoch seconds as a string. */
-export function formatTime(value: string | null | undefined): string {
+/** The server stamps records with epoch seconds. */
+export function formatTime(value: string | number | null | undefined): string {
   const seconds = Number(value);
-  if (!value || !Number.isFinite(seconds)) {
-    return value || "—";
+  if (value === null || value === undefined || value === "" || !Number.isFinite(seconds)) {
+    return value ? String(value) : "—";
   }
   return new Date(seconds * 1000).toLocaleString();
 }
 
-export function newestFirst<T extends { created_at?: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0));
+export function newestFirst<T extends { created_at?: number }>(items: T[]): T[] {
+  return [...items].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
 }

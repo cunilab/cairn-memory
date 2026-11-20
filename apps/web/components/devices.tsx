@@ -58,7 +58,7 @@ import type { Device, DeviceRegistration } from "@/lib/types";
 
 /** Registration and last use share a stamp until the device is first used. */
 function lastUsed(device: Device): string {
-  return device.last_seen_at === device.registered_at
+  return device.last_seen_at === device.created_at
     ? "Never"
     : formatTime(device.last_seen_at);
 }
@@ -268,12 +268,12 @@ export function Devices() {
         cell: ({ row }) => <DeviceStatusBadge status={row.original.status} />,
       },
       {
-        accessorKey: "registered_at",
+        accessorKey: "created_at",
         header: "Created",
-        sortingFn: (a, b) => Number(a.original.registered_at) - Number(b.original.registered_at),
+        sortingFn: (a, b) => a.original.created_at - b.original.created_at,
         cell: ({ row }) => (
           <span className="text-xs whitespace-nowrap text-muted-foreground">
-            {formatTime(row.original.registered_at)}
+            {formatTime(row.original.created_at)}
           </span>
         ),
         meta: { className: "hidden md:table-cell" },
@@ -408,7 +408,7 @@ export function Devices() {
           columns={columns}
           getRowId={(device) => device.device_id}
           filterPlaceholder="Filter devices"
-          initialSort={[{ id: "registered_at", desc: true }]}
+          initialSort={[{ id: "created_at", desc: true }]}
           empty={
             <Empty className="border-0 p-6">
               <EmptyHeader>

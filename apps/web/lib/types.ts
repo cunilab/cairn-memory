@@ -3,18 +3,17 @@ export type ListedProject = {
   repository: string;
   name: string;
   default_branch?: string | null;
-  created_at: string;
-  updated_at: string;
+  owner_id: string;
+  created_at: number;
+  updated_at: number;
   role: string;
 };
 
+/** Derived from the branch each project memory was saved on; there is no branch record. */
 export type ProjectBranch = {
-  branch_id: string;
-  name: string;
-  status: string;
-  status_reason?: string | null;
-  merge_commit?: string | null;
-  head_commit?: string | null;
+  branch: string;
+  memories: number;
+  last_updated: number;
 };
 
 export type Account = {
@@ -23,18 +22,17 @@ export type Account = {
   is_admin?: boolean;
 };
 
-export type AccountRow = Required<Account> & { created_at: string };
+export type AccountRow = Required<Account> & { created_at: number; status: string };
 
 export type QuarantinedJob = {
   job_id: string;
   kind: string;
   key: string;
-  label: string;
+  status: string;
   attempts: number;
-  last_error: string;
+  last_error: string | null;
   created_at: number;
-  failed_at: number;
-  quarantined_at: number;
+  updated_at: number;
 };
 
 export type JobQueue = {
@@ -44,50 +42,33 @@ export type JobQueue = {
   quarantine: QuarantinedJob[];
 };
 
+export type MemoryLink = {
+  relation: string;
+  source: string;
+  target: string;
+  auto: boolean;
+};
+
+/** A memory as the server returns it. `fields` holds the keys of the memory's kind. */
 export type ProjectMemory = {
-  memory_id: string;
+  id: string;
+  owner: string;
+  project_id?: string | null;
+  scope: "project" | "personal" | "global";
+  kind: string;
   title: string;
   summary: string;
-  details?: string | null;
-  reason: string;
-  applies_to: string[];
-  evidence: string[];
-  tags: string[];
-  entities: string[];
-  status: "active" | "stale" | "superseded";
-  pinned: boolean;
-  importance?: number | null;
-  author?: string | null;
-  decision_context?: string | null;
-  alternatives: string[];
-  consequences?: string | null;
-  rule?: string | null;
-  exceptions?: string | null;
-  symptom?: string | null;
-  cause?: string | null;
-  fix?: string | null;
-  steps: string[];
-  when?: string | null;
-  statement?: string | null;
-  source?: string | null;
-  preference?: string | null;
-  example?: string | null;
-  content: string;
-  kind?: string;
-  scope: "project" | "personal" | "global";
-  verified_commit?: string | null;
-  supersedes?: string | null;
-  project_id?: string | null;
-  context?: { branch?: string | null; repository?: string | null };
-  lifecycle?: { freshness?: number; sensitivity?: string; importance?: number };
-  published_by?: string | null;
-  changed_by?: string | null;
-  changed_at?: string | null;
-  created_at?: string;
-  access_count?: number;
-  last_accessed_at?: string | null;
-  helpful_count?: number;
-  stale_count?: number;
+  reason?: string;
+  fields?: Record<string, string | string[]>;
+  evidence?: string[];
+  evidence_count: number;
+  context: { repo?: string | null; branch?: string | null; worktree?: string | null; commit?: string | null };
+  entities?: { kind: string; name: string }[];
+  links?: MemoryLink[];
+  status: "active" | "stale" | "superseded" | "forgotten";
+  expires_at?: number | null;
+  created_at: number;
+  updated_at: number;
 };
 
 export type PersonalMemory = ProjectMemory;
@@ -113,51 +94,33 @@ export type MemoryGraph = {
   node_cap: number;
 };
 
-export type SimilarityReview = {
-  review_id: string;
-  left_id: string;
-  right_id: string;
-  scope: "project" | "personal" | "global";
-  project_id?: string | null;
-  cosine: number;
-  band: "possible_conflict" | "near_duplicate";
-  status: "open" | "dismissed" | "contradicted" | "superseded";
-  created_at: number;
-};
-
 export type ProjectMember = {
   person_id: string;
   email: string;
   role: "owner" | "member";
-  /** Unix seconds as a string. */
-  joined_at: string;
+  joined_at: number;
 };
 
-export type LifecycleSummary = {
-  temporary_observations: number;
-  durable_memories: number;
-  sensitive_items: number;
-  expired_items: number;
+/** Counts of the memories the account can see, and the background job queue. */
+export type Diagnostics = {
+  memories: number;
+  by_kind: Record<string, number>;
+  by_status: Record<string, number>;
+  by_scope: Record<string, number>;
+  jobs_pending: number;
+  jobs_running: number;
+  jobs_quarantined: number;
 };
 
-export type ProjectConflict = { memory_ids: string[] };
-
-export type ProjectFreshnessEvent = {
-  event_id: string;
-  memory_id: string;
-  previous_commit?: string | null;
-  commit: string;
-  action: string;
-  reason?: string | null;
-  created_at: string;
-};
+/** Two live project memories joined by a `contradicts` link. */
+export type ProjectConflict = { memory_id: string; contradicts_id: string };
 
 export type Device = {
   device_id: string;
   name: string;
   status: string;
-  registered_at: string;
-  last_seen_at: string;
+  created_at: number;
+  last_seen_at: number;
 };
 
 export type DeviceRegistration = {

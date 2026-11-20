@@ -34,11 +34,10 @@ import { memoryReadPath } from "@/lib/memory-path";
 import { formatTime, newestFirst } from "@/lib/report";
 import { SessionRequiredError } from "@/lib/session";
 import type {
-  LifecycleSummary,
+  Diagnostics,
   ListedProject,
   PersonalMemory,
   ProjectConflict,
-  ProjectFreshnessEvent,
   ProjectMemory,
 } from "@/lib/types";
 
@@ -151,13 +150,12 @@ function LoadingOverview() {
 export function Overview() {
   const router = useRouter();
   const [projects, setProjects] = useState<ListedProject[]>([]);
-  const [summary, setSummary] = useState<LifecycleSummary | null>(null);
+  const [summary, setSummary] = useState<Diagnostics | null>(null);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   // Read once the data arrives: Date.now() cannot run while the page is prerendered.
   const [clock, setClock] = useState<{ now: number; today: number } | null>(null);
   const [captured, setCaptured] = useState<PersonalMemory[]>([]);
   const [conflicts, setConflicts] = useState<number | null>(null);
-  const [staleEvents, setStaleEvents] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -170,7 +168,6 @@ export function Overview() {
     setCaptured([]);
     setClock(null);
     setConflicts(null);
-    setStaleEvents(null);
     setError(null);
     setLoading(true);
     setLoadFailed(false);
@@ -181,27 +178,21 @@ export function Overview() {
     let cancelled = false;
     async function load() {
       const listed = await cairn<ListedProject[]>("projects");
-      // Conflicts and freshness are owner reports; members do not get them.
+      // Conflicts are an owner report; members do not get it.
       const owned = listed.filter((project) => project.role === "owner");
       // shortcut: export returns every memory of the account, fine while personal stores are small.
       const [diagnosis, exported, ...rest] = await Promise.allSettled([
-        cairn<LifecycleSummary>("diagnose"),
-        cairn<{ memories: PersonalMemory[]; forgottenIds?: string[] }>("export", { method: "POST" }),
+        cairn<Diagnostics>("diagnose"),
+        cairn<{ memories: PersonalMemory[] }>("export", { method: "POST" }),
         ...listed.map((project) =>
           cairn<ProjectMemory[]>(memoryReadPath(project.project_id)),
         ),
         ...owned.map((project) =>
           cairn<ProjectConflict[]>(`projects/${encodeURIComponent(project.project_id)}/conflicts`),
         ),
-        ...owned.map((project) =>
-          cairn<ProjectFreshnessEvent[]>(
-            `projects/${encodeURIComponent(project.project_id)}/freshness`,
-          ),
-        ),
       ]);
       const reads = rest.slice(0, listed.length);
       const conflictReads = rest.slice(listed.length, listed.length + owned.length);
-      const freshnessReads = rest.slice(listed.length + owned.length);
       const failed = [diagnosis, exported, ...rest].find((result) => result.status === "rejected");
       if (failed?.status === "rejected" && failed.reason instanceof SessionRequiredError) {
         throw failed.reason;
@@ -210,8 +201,7 @@ export function Overview() {
       let partial = diagnosis.status === "rejected" || exported.status === "rejected";
       let memories: PersonalMemory[] = [];
       if (exported.status === "fulfilled") {
-        const forgotten = new Set(exported.value.forgottenIds ?? []);
-        memories = exported.value.memories.filter((memory) => !forgotten.has(memory.memory_id));
+        memories = exported.value.memories;
       }
       reads.forEach((result, index) => {
         if (result.status === "rejected") {
@@ -235,19 +225,10 @@ export function Overview() {
         }
         conflictCount = (conflictCount ?? 0) + (result.value as ProjectConflict[]).length;
       }
-      let freshnessCount: number | null = owned.length === 0 ? null : 0;
-      for (const result of freshnessReads) {
-        if (result.status === "rejected") {
-          partial = true;
-          freshnessCount = null;
-          break;
-        }
-        freshnessCount = (freshnessCount ?? 0) + (result.value as ProjectFreshnessEvent[]).length;
-      }
-      return { listed, loaded, partial, diagnosis, memories, conflictCount, freshnessCount };
+      return { listed, loaded, partial, diagnosis, memories, conflictCount };
     }
     load()
-      .then(({ listed, loaded, partial, diagnosis, memories, conflictCount, freshnessCount }) => {
+      .then(({ listed, loaded, partial, diagnosis, memories, conflictCount }) => {
         if (cancelled) {
           return;
         }
@@ -259,7 +240,6 @@ export function Overview() {
         setClock({ now: Math.floor(Date.now() / 1000), today: Math.floor(midnight.getTime() / 1000) });
         setSummary(diagnosis.status === "fulfilled" ? diagnosis.value : null);
         setConflicts(conflictCount);
-        setStaleEvents(freshnessCount);
         setError(partial ? "Some figures could not be loaded and are left out." : null);
       })
       .catch((cause: unknown) => {
@@ -297,7 +277,7 @@ export function Overview() {
       };
     });
     for (const memory of captured) {
-      const created = Number(memory.created_at);
+      const created = memory.created_at;
       const bucket = activity.find((item) => created >= item.start && created < item.start + DAY);
       if (bucket) {
         // Project-scoped rows are decisions; everything else was captured on a device.
@@ -317,8 +297,8 @@ export function Overview() {
         count,
         fill: `var(--chart-${(index % 5) + 1})`,
       }));
-    const verified = decisions.filter((decision) => decision.verified_commit).length;
-    const week = decisions.filter((decision) => Number(decision.created_at) >= now - 7 * DAY).length;
+    const verified = decisions.filter((decision) => decision.context?.commit).length;
+    const week = decisions.filter((decision) => decision.created_at >= now - 7 * DAY).length;
     const perProject = projects
       .map((project) => ({
         id: project.project_id,
@@ -340,10 +320,9 @@ export function Overview() {
   const recent = newestFirst(decisions).slice(0, 6);
   const stateData = summary
     ? [
-        { state: "Durable memories", count: summary.durable_memories },
-        { state: "Temporary observations", count: summary.temporary_observations },
-        { state: "Sensitive items", count: summary.sensitive_items },
-        { state: "Expired items", count: summary.expired_items },
+        { state: "Active", count: summary.by_status.active ?? 0 },
+        { state: "Stale", count: summary.by_status.stale ?? 0 },
+        { state: "Superseded", count: summary.by_status.superseded ?? 0 },
       ]
     : [];
   const projectChartHeight = Math.max(160, figures.perProject.length * 40 + 24);
@@ -422,7 +401,7 @@ export function Overview() {
               hint={
                 conflicts === null
                   ? "Owner reports unavailable"
-                  : `${staleEvents ?? 0} freshness ${staleEvents === 1 ? "event" : "events"}`
+                  : `${summary?.by_status.stale ?? 0} stale ${summary?.by_status.stale === 1 ? "memory" : "memories"}`
               }
             />
           </section>
@@ -600,11 +579,11 @@ export function Overview() {
               <ul className="divide-y overflow-hidden rounded-lg border bg-card">
                 {recent.map((decision) => (
                   <li
-                    key={`${decision.projectId}/${decision.memory_id}`}
+                    key={`${decision.projectId}/${decision.id}`}
                     className="flex min-w-0 flex-col gap-1.5 px-4 py-3 sm:flex-row sm:items-start sm:gap-4"
                   >
                     <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <p className="line-clamp-2 text-sm [overflow-wrap:anywhere]">{decision.content}</p>
+                      <p className="line-clamp-2 text-sm [overflow-wrap:anywhere]">{decision.title}</p>
                       <p className="text-xs text-muted-foreground">
                         <Link
                           href={`/projects/${decision.projectId}`}
@@ -617,7 +596,7 @@ export function Overview() {
                         {formatTime(decision.created_at)}
                       </p>
                     </div>
-                    {decision.verified_commit ? <Badge variant="success">Verified</Badge> : null}
+                    {decision.context?.commit ? <Badge variant="success">Commit</Badge> : null}
                   </li>
                 ))}
               </ul>

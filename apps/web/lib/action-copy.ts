@@ -1,5 +1,5 @@
 export function deleteDecisionImpact(memoryId: string): string {
-  return `This hides ${memoryId} from the project. Cairn keeps the stored record and records a retained delete. The decision leaves this page and every member’s project view. This console cannot undo it.`;
+  return `This forgets ${memoryId}. Its text is erased for every member and Cairn will not accept the same memory again. This console cannot undo it.`;
 }
 
 export function revokeDeviceImpact(name: string): string {
@@ -8,12 +8,4 @@ export function revokeDeviceImpact(name: string): string {
 
 export function rotateDeviceImpact(name: string): string {
   return `Rotate the token for ${name}. The old token stops working at once, so any agent still using it can no longer read or write memory until you give it the new token. The new token is shown once and cannot be retrieved later.`;
-}
-
-export function closeBranchImpact(name: string): string {
-  return `Close your branch ${name}. Your personal memories stay on your account, and other members’ branch records stay as they are.`;
-}
-
-export function mergeBranchImpact(name: string): string {
-  return `Record the merge of your branch ${name}. The selected project memory is verified at the merge commit; only your branch and worktree records change.`;
 }

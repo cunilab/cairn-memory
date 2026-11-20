@@ -8,4 +8,4 @@ npm install
 CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
 ```
 
-`npm run typecheck` runs `tsc --noEmit`. The embedded Rust viewer at `/viewer` is unchanged.
+`npm run typecheck` runs `tsc --noEmit`.

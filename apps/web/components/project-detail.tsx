@@ -19,9 +19,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Field, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Sheet,
   SheetContent,
@@ -39,7 +36,7 @@ import { SessionRequiredError } from "@/lib/session";
 import { MemoryFeedback } from "@/components/memory-feedback";
 import type { ListedProject, ProjectBranch, ProjectMember, ProjectMemory } from "@/lib/types";
 
-type Action = { kind: "verify" | "correct" | "delete"; memory: ProjectMemory };
+type Action = { kind: "delete"; memory: ProjectMemory };
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -143,7 +140,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       {
         id: "decision",
         header: "Memory",
-        accessorFn: (m) => `${m.memory_id} ${m.title} ${m.summary}`,
+        accessorFn: (m) => `${m.id} ${m.title} ${m.summary}`,
         enableSorting: false,
         cell: ({ row }) => (
           <div className="flex min-w-0 flex-col gap-1.5">
@@ -157,32 +154,26 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             </button>
             <p className="line-clamp-2 text-sm text-muted-foreground">{row.original.summary}</p>
             <span className="text-xs text-muted-foreground">Project</span>
-            <IdText id={row.original.memory_id} />
+            <IdText id={row.original.id} />
           </div>
         ),
       },
       {
         id: "author",
         header: "Author",
-        accessorFn: (m) => nameOf(m.author),
+        accessorFn: (m) => nameOf(m.owner),
         meta: { className: "hidden md:table-cell" },
       },
       {
-        id: "changed",
-        header: "Last changed by",
-        accessorFn: (m) => nameOf(m.changed_by),
-        meta: { className: "hidden lg:table-cell" },
-      },
-      {
-        id: "verified",
-        header: "Verified at",
-        accessorFn: (m) => m.verified_commit ?? "—",
+        id: "status",
+        header: "Status",
+        accessorFn: (m) => m.status,
         meta: { className: "hidden lg:table-cell" },
       },
       {
         id: "created",
         header: "Published",
-        accessorFn: (m) => Number(m.created_at ?? 0),
+        accessorFn: (m) => m.created_at,
         cell: ({ row }) => (
           <span className="text-xs text-muted-foreground">
             {formatTime(row.original.created_at)}
@@ -196,7 +187,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         enableSorting: false,
         cell: ({ row }) => {
           const memory = row.original;
-          if (!owner && memory.author !== account?.person_id) return null;
+          // Forgetting erases the text for every member, so only the memory's author may.
+          if (memory.owner !== account?.person_id) return null;
           return (
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -205,24 +197,18 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    aria-label={`Actions for ${memory.memory_id}`}
+                    aria-label={`Actions for ${memory.id}`}
                   />
                 }
               >
                 <MoreHorizontalIcon />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setAction({ kind: "verify", memory })}>
-                  Verify
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => setAction({ kind: "correct", memory })}>
-                  Correct
-                </DropdownMenuItem>
                 <DropdownMenuItem
                   variant="destructive"
                   onClick={() => setAction({ kind: "delete", memory })}
                 >
-                  Delete
+                  Forget
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -230,7 +216,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         },
       },
     ],
-    [account?.person_id, owner, nameOf],
+    [account?.person_id, nameOf],
   );
 
   const memberColumns = useMemo<ColumnDef<ProjectMember>[]>(
@@ -286,7 +272,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               label="memories"
               data={decisions}
               columns={columns}
-              getRowId={(m) => m.memory_id}
+              getRowId={(m) => m.id}
               filterPlaceholder="Filter memories"
               empty={
                 <p className="p-6 text-sm text-muted-foreground">
@@ -296,12 +282,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             />
           </TabsContent>
           <TabsContent value="memories">
-            <ProjectBranches
-              projectId={projectId}
-              branches={branches}
-              submit={submit}
-              onSessionRequired={requireSignIn}
-            />
+            <ProjectBranches branches={branches} />
           </TabsContent>
           <TabsContent value="members">
             <DataTable
@@ -318,57 +299,29 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       <FormDialog
         open={action !== null}
         onOpenChange={(open) => !open && setAction(null)}
-        title={
-          action?.kind === "verify"
-            ? "Verify decision"
-            : action?.kind === "correct"
-              ? "Correct decision"
-              : "Delete decision"
-        }
+        title="Forget memory"
         description={
           <>
-            {action?.kind === "delete"
-              ? deleteDecisionImpact(action.memory.memory_id)
-              : "The author and project owner can update this decision for every member. Changes record your identity."}
-            <span className="mt-2 block font-mono text-xs break-all">
-              {action?.memory.memory_id}
-            </span>
+            {action ? deleteDecisionImpact(action.memory.id) : ""}
+            <span className="mt-2 block font-mono text-xs break-all">{action?.memory.id}</span>
           </>
         }
-        submitLabel={action?.kind === "delete" ? "Delete decision" : "Save"}
-        onSubmit={async (data) => {
+        submitLabel="Forget memory"
+        onSubmit={async () => {
           if (!action) return;
-          const { kind, memory } = action;
-          const route =
-            kind === "verify" ? "projects/verify" : kind === "correct" ? "correct" : "delete";
-          const body =
-            kind === "verify"
-              ? { projectId, memoryId: memory.memory_id, commit: String(data.get("commit")) }
-              : kind === "correct"
-                ? { targetId: memory.memory_id, content: String(data.get("content")) }
-                : { id: memory.memory_id };
           await submit(
-            () => cairn(route, { method: "POST", body: JSON.stringify(body) }),
-            "Decision updated.",
+            () =>
+              cairn("delete", {
+                method: "POST",
+                body: JSON.stringify({ id: action.memory.id }),
+              }),
+            "Memory forgotten.",
           );
         }}
       >
-        {action?.kind === "verify" ? (
-          <Field>
-            <FieldLabel htmlFor="verify-commit">Commit</FieldLabel>
-            <Input id="verify-commit" name="commit" required />
-          </Field>
-        ) : action?.kind === "correct" ? (
-          <Field>
-            <FieldLabel htmlFor="correction">Corrected decision</FieldLabel>
-            <Textarea
-              id="correction"
-              name="content"
-              defaultValue={action.memory.content}
-              required
-            />
-          </Field>
-        ) : null}
+        <p className="text-sm text-muted-foreground">
+          To correct a memory, ask the agent to save the corrected version; it supersedes this one.
+        </p>
       </FormDialog>
       <FormDialog
         open={transfer !== null}
@@ -396,12 +349,12 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
             <SheetTitle>{detail?.title ?? "Project memory"}</SheetTitle>
-            <SheetDescription>{detail?.memory_id}</SheetDescription>
+            <SheetDescription>{detail?.id}</SheetDescription>
           </SheetHeader>
           <div className="space-y-4 p-4">
             {detail ? <MemoryFeedback memory={detail} onUpdated={(updated) => {
               setDetail(updated);
-              setDecisions((rows) => rows.map((row) => row.memory_id === updated.memory_id ? updated : row));
+              setDecisions((rows) => rows.map((row) => row.id === updated.id ? updated : row));
             }} /> : null}
             {detail ? Object.entries(detail).map(([field, value]) => (
               <div key={field}>
