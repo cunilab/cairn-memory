@@ -33,6 +33,24 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
+        self.embed_items_from(&rows).await
+    }
+
+    /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten or
+    /// expired memory has no item.
+    pub async fn embed_items(&self, ids: &[String]) -> Result<Vec<EmbedItem>> {
+        let rows = sqlx::query(&format!(
+            "{MEMORY_SELECT}
+              WHERE m.memory_id = ANY($1) AND m.status <> 'forgotten'
+                AND (m.expires_at IS NULL OR m.expires_at > now())"
+        ))
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        self.embed_items_from(&rows).await
+    }
+
+    async fn embed_items_from(&self, rows: &[sqlx::postgres::PgRow]) -> Result<Vec<EmbedItem>> {
         let mut memories = rows
             .iter()
             .map(memory_from_row)

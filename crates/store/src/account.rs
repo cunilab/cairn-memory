@@ -56,6 +56,13 @@ impl Store {
         Ok(session)
     }
 
+    /// False until the first account exists; the web console then offers first-account setup.
+    pub async fn has_accounts(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM accounts)")
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
     /// A normal account. The caller (the server) decides that only an admin may call this.
     pub async fn register(&self, email: &str, password: &str) -> Result<Account> {
         let email = normalize_email(email)?;

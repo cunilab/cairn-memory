@@ -8,7 +8,7 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 
 /// A device credential: the token is shown once and stored hashed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct DeviceRegistration {
     pub device: Device,
     pub token: String,
