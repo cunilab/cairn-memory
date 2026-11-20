@@ -777,3 +777,53 @@ Checks on this machine (Andress-MacBook-Air):
 
 No browser automation was used. The point-1 edit in
 `scripts/cairn_instructions.txt` was left untouched.
+
+## v0.1.6 point 3 — empty-session close is not an error (2026-11-21)
+
+Root cause: `distill_job_end` (`crates/core/src/jobs.rs`) classified the
+`session has no retained observations` validation error as a permanent failure.
+An auto-close of a session with nothing retained therefore quarantined its
+distill job, logged `automatic session close failed`, and the `SessionEnd` hook
+reported an unavailable close from the HTTP 400. On PostgreSQL the quarantine
+also cleared `pending_since` by capture time (`clear_covered_pending`).
+
+The empty case is now success. `is_empty_session` is a strict prefix match (also
+through PostgreSQL's `core validation error:` wrapper, so a session id cannot
+pass for it). `POST session/end` answers `200 {"status":"empty"}` on both
+stores; no summary, handoff, or note is written and `ended_at` stays unset. On
+PostgreSQL `execute_claimed_distill` clears `pending_since` after the savepoint
+rollback, under `SELECT … FOR UPDATE` on the session row and only when a
+re-check finds no retained observation, so a capture that committed first keeps
+the marker and one that commits later sets it again. The file store has no
+marker; its idle sweep only reads sessions with retained observations.
+Unknown sessions, forgotten or superseded summaries, store and database errors,
+and malformed job keys are unchanged. No migration was added.
+
+Reproduced first: the core test `an_empty_session_close_is_a_normal_outcome_…`
+and the classification assertion failed (one quarantine row), as did the server
+test `ending_an_empty_session_is_an_empty_status_without_quarantine` (HTTP 400)
+and the PostgreSQL test
+`postgres_empty_session_close_is_a_normal_outcome_and_clears_pending`.
+`postgres_empty_close_keeps_a_concurrent_captures_pending_marker` blocks the
+settlement write, pushes a capture, and checks the marker survives and the
+capture is distilled by the next sweep. It does not reach the narrower window
+between the empty read and the row lock; that ordering rests on the lock.
+Two PostgreSQL tests that asserted the old quarantine were updated
+(`postgres_idle_sweep_…_closes_an_empty_one_quietly`) or removed
+(`postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker`, replaced
+by the new race test). The admin job-discard server test now makes its
+quarantine with an unknown session.
+
+Checks on this machine (Andress-MacBook-Air):
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p cairn-core -p cairn-storage -p cairn-server -p cairn-client --all-targets -- -D warnings`: passed.
+- `cargo test --workspace --lib`: passed (core 157, server 36, client 45).
+- `scripts/validate_phase0.py`, `test_agent_hooks.py`, `test_agent_setup.py`,
+  `test_download_embedding_model.py`, `./scripts/smoke_mcp.sh`: passed.
+- Disposable `pgvector/pgvector:pg17` container, each ignored test in a fresh
+  database: all 62 ignored tests passed across `cairn-storage --test postgres`
+  (57), `cairn-storage --test jobs`, `cairn-client --test agent_flow`, and
+  `cairn-server --test project_model`. The two tests changed after the first
+  full run were rerun alone and passed.
+- `cairn-server --test semantic` was not run (no embedding model directory).

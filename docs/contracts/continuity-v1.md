@@ -304,13 +304,33 @@ session until a newer observation arrives, so automatic close does not spin or
 restart the quarantined key. A forgotten or superseded summary completes the job and the
 explicit end still returns its validation error.
 
+### Empty-session close (v0.1.6)
+
+A session with no retained observations (none captured, or all forgotten or
+expired) has nothing to distill. Closing it is a normal outcome, not a
+failure. `POST session/end` returns `200` with `{"status":"empty"}` instead of
+a summary. No summary, handoff, or note is written and `ended_at` stays unset.
+The distill job settles as succeeded; it is not retried, not quarantined, and
+nothing is logged. The idle sweep and the poller follow the same rule.
+
+PostgreSQL clears `pending_since` in the same transaction, after taking the
+session row lock and checking that no retained observation exists. A capture
+that committed first keeps the marker. A capture that commits later sets the
+marker again, so the next sweep or end distills it. The file store has no
+marker: its idle sweep only considers sessions with retained observations, so
+a newer capture is picked up the same way.
+
+Genuine failures are unchanged: an unknown session, a forgotten or superseded
+summary, store IO and database errors, and a malformed job key still retry or
+quarantine and still return their error.
+
 Transient failures retry: store IO, JSON encoding, PostgreSQL connection and pool
 errors, embedding inference failure, embedding worker-task failure, and a
 poisoned model lock. Permanent failures quarantine immediately: a vector that is
 not a finite normalized 384-vector, an embedding batch-length mismatch, an
-unknown or empty session, a session with no retained observations, and a store
-conflict. Publishing an embedding that no longer matches, or finding a summary
-already current, is success.
+unknown session and a store conflict. A session with no retained observations
+is success, not a failure (see Empty-session close). Publishing an embedding
+that no longer matches, or finding a summary already current, is success.
 
 The similarity job uses stored embeddings only. It does not call the model.
 With no current vectors it succeeds and does nothing. Each success schedules
@@ -372,7 +392,8 @@ summary memory:
   Only this idle rule closes a session. A session start does not close another
   open session, because a parallel agent of the same person on the same
   repository and branch must keep its own.
-- A session with no retained observations is skipped, without an error.
+- A session with no retained observations is skipped, without an error and without a
+  quarantined job (see Empty-session close, v0.1.6).
 - An ended session whose id received observations the summary does not cover (the
   agent reused the id), or whose summary has a forgotten source, gets a new
   summary: the next sweep, and an explicit end, derive it again from what is

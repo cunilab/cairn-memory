@@ -2324,7 +2324,7 @@ async fn postgres_rederived_summary_keeps_state_and_respects_hidden_summaries() 
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empty_one() {
+async fn postgres_idle_sweep_reads_only_pending_sessions_and_closes_an_empty_one_quietly() {
     let (pool, store) = pool_and_store().await;
     let account = store
         .bootstrap_account("sweep@example.test", "correct horse battery staple")
@@ -2356,8 +2356,9 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empt
         .expect("end");
     assert_eq!(pending("done").await, None);
 
-    // A session whose only observation was forgotten cannot be summarised. The distill job
-    // is quarantined and leaves the pending index, so the next sweep does not spin.
+    // A session whose only observation was forgotten has nothing to summarise. The distill job
+    // succeeds without a quarantine row and the session leaves the pending index, so the next
+    // sweep does not spin.
     push_in(&store, &dev, "bad", "bad-1", WorkContext::default()).await;
     store.forget(&account.token, "bad-1").await.expect("forget");
     sqlx::query("UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE person_id = $1 AND session_id = 'bad'")
@@ -2370,7 +2371,7 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empt
     assert_eq!(
         pending("bad").await,
         None,
-        "quarantine clears the pending mark"
+        "an empty close clears the pending mark"
     );
     assert!(!session_ended(&pool, &person, "bad").await);
     let quarantined: i64 = sqlx::query_scalar(
@@ -2380,7 +2381,15 @@ async fn postgres_idle_sweep_reads_only_pending_sessions_and_quarantines_an_empt
     .fetch_one(&pool)
     .await
     .expect("quarantine count");
-    assert_eq!(quarantined, 1);
+    assert_eq!(quarantined, 0);
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded AND job_key LIKE '%' || $1",
+    )
+    .bind("bad")
+    .fetch_one(&pool)
+    .await
+    .expect("succeeded count");
+    assert_eq!(succeeded, 1);
 }
 
 #[tokio::test]
@@ -4499,28 +4508,112 @@ async fn postgres_expired_distill_quarantine_is_not_restarted_by_the_idle_sweep(
 
 #[tokio::test]
 #[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
-async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
+async fn postgres_empty_session_close_is_a_normal_outcome_and_clears_pending() {
     let (pool, store) = pool_and_store().await;
     let owner = store
-        .bootstrap_account("race-owner@example.test", "correct horse battery staple")
+        .bootstrap_account("empty-owner@example.test", "correct horse battery staple")
         .await
         .unwrap();
     let device = store
         .register_device(
             &owner.token,
-            "race-device",
+            "empty-device",
             &owner.account.person_id,
             None,
-            "Race device",
+            "Empty device",
+        )
+        .await
+        .unwrap();
+    store
+        .start_session(&owner.token, "empty-close", WorkContext::default())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'empty-close'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let error = store
+        .end_session(&owner.token, "empty-close")
+        .await
+        .unwrap_err();
+    assert!(cairn_core::is_empty_session(&error.to_string()));
+    let snapshot = store.job_snapshot(cairn_core::now_seconds()).await.unwrap();
+    assert_eq!(snapshot.quarantined, 0);
+    let succeeded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM cairn_jobs WHERE kind = 'distill' AND succeeded = true",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(succeeded, 1);
+    let pending: bool = sqlx::query_scalar(
+        "SELECT pending_since IS NOT NULL FROM cairn_sessions WHERE session_id = 'empty-close'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!pending, "an empty close clears the pending marker");
+    let ended: bool = sqlx::query_scalar(
+        "SELECT ended_at IS NOT NULL FROM cairn_sessions WHERE session_id = 'empty-close'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!ended, "an empty close leaves the session open");
+    store.sweep_idle_sessions().await;
+    assert_eq!(
+        store
+            .job_snapshot(cairn_core::now_seconds())
+            .await
+            .unwrap()
+            .quarantined,
+        0
+    );
+    store
+        .sync_push(&device.token, review_note("empty-close", "later-capture"))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'empty-close'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.sweep_idle_sessions().await;
+    let summaries: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'empty-close'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(summaries >= 1, "a later capture is still distilled");
+}
+
+#[tokio::test]
+#[ignore = "requires a fresh PostgreSQL database in CAIRN_TEST_DATABASE_URL"]
+async fn postgres_empty_close_keeps_a_concurrent_captures_pending_marker() {
+    let (pool, store) = pool_and_store().await;
+    let owner = store
+        .bootstrap_account("empty-race@example.test", "correct horse battery staple")
+        .await
+        .unwrap();
+    let device = store
+        .register_device(
+            &owner.token,
+            "empty-race-device",
+            &owner.account.person_id,
+            None,
+            "Empty race device",
         )
         .await
         .unwrap();
     let now = cairn_core::now_seconds();
     store
-        .start_session(&owner.token, "pending-race", WorkContext::default())
+        .start_session(&owner.token, "empty-race", WorkContext::default())
         .await
         .unwrap();
-    let key = cairn_core::distill_key(Some(&owner.account.person_id), "pending-race");
+    let key = cairn_core::distill_key(Some(&owner.account.person_id), "empty-race");
     store
         .enqueue_job(cairn_core::JobKind::Distill, &key, now, true)
         .await
@@ -4530,8 +4623,10 @@ async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
         .await
         .unwrap()
         .remove(0);
+    // SHARE mode lets the distill transaction read an empty session and lock the session row,
+    // but blocks its settlement write.
     let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE cairn_job_quarantine IN EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE cairn_jobs IN SHARE MODE")
         .execute(&mut *blocker)
         .await
         .unwrap();
@@ -4545,7 +4640,7 @@ async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
                      WHERE datname = current_database()
                        AND pid <> pg_backend_pid()
                        AND wait_event_type = 'Lock'
-                       AND query ILIKE '%cairn_job_quarantine%'
+                       AND query ILIKE '%cairn_jobs%'
                  )",
             )
             .fetch_one(&pool)
@@ -4559,51 +4654,48 @@ async fn postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker() {
     };
     tokio::time::timeout(std::time::Duration::from_secs(15), wait)
         .await
-        .expect("distill settlement did not wait on the quarantine lock");
+        .expect("distill settlement did not wait on the job lock");
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    store
-        .sync_push(&device.token, review_note("pending-race", "racing-capture"))
-        .await
-        .unwrap();
+    let pusher = store.clone();
+    let device_token = device.token.clone();
+    let push = tokio::spawn(async move {
+        pusher
+            .sync_push(&device_token, review_note("empty-race", "racing-capture"))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     blocker.commit().await.unwrap();
     let error = task.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("no retained observations"));
+    assert!(cairn_core::is_empty_session(&error.to_string()));
+    push.await.unwrap().unwrap();
     let pending: bool = sqlx::query_scalar(
-        "SELECT pending_since IS NOT NULL FROM cairn_sessions WHERE session_id = 'pending-race'",
+        "SELECT pending_since IS NOT NULL FROM cairn_sessions WHERE session_id = 'empty-race'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    let observations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM cairn_observations WHERE session_id = 'pending-race'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let summaries: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
-            .fetch_one(&pool)
+    assert!(pending, "the newer capture is still pending distillation");
+    assert_eq!(
+        store
+            .job_snapshot(cairn_core::now_seconds())
             .await
-            .unwrap();
-    assert!(pending);
-    assert_eq!(observations, 1);
-    assert_eq!(summaries, 0);
+            .unwrap()
+            .quarantined,
+        0
+    );
     sqlx::query(
-        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'pending-race'",
+        "UPDATE cairn_sessions SET pending_since = now() - interval '31 minutes' WHERE session_id = 'empty-race'",
     )
     .execute(&pool)
     .await
     .unwrap();
     store.sweep_idle_sessions().await;
     let summaries: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'pending-race'")
+        sqlx::query_scalar("SELECT count(*) FROM cairn_memories WHERE session_id = 'empty-race'")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(
-        summaries, 2,
-        "a Decision capture with no next step derives the summary and that note, not a handoff"
-    );
+    assert!(summaries >= 1, "the racing capture is distilled");
 }
 
 #[tokio::test]

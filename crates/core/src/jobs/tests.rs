@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{observation_for, temp_store_path};
-use crate::{MemoryStore, WorkContext};
+use crate::{MemoryStore, WorkContext, now_seconds};
 
 fn book_with(kind: JobKind, key: &str, now: u64) -> (JobBook, BackgroundJob) {
     let mut book = JobBook::default();
@@ -196,6 +196,10 @@ fn distill_keys_round_trip_and_errors_are_classified() {
     );
     assert!(matches!(
         distill_job_end("validation error: session summary was forgotten or superseded: memory-1"),
+        JobEnd::Succeeded
+    ));
+    assert!(matches!(
+        distill_job_end("validation error: session has no retained observations: sess-1"),
         JobEnd::Succeeded
     ));
     assert!(matches!(
@@ -494,7 +498,7 @@ fn file_jobs_survive_a_crash_and_session_end_still_returns_the_summary() {
 }
 
 #[test]
-fn an_empty_session_is_quarantined_and_a_later_observation_can_run() {
+fn an_empty_session_close_is_a_normal_outcome_and_a_later_observation_can_run() {
     let path = temp_store_path("jobs-empty");
     let mut store = MemoryStore::open(&path).unwrap();
     store
@@ -502,7 +506,22 @@ fn an_empty_session_is_quarantined_and_a_later_observation_can_run() {
         .unwrap();
     let error = store.end_session("sess-empty").unwrap_err();
     assert!(error.to_string().contains("no retained observations"));
-    assert_eq!(store.state.job_quarantine.len(), 1);
-    assert!(store.state.job_quarantine[0].attempts >= 1);
+    assert!(store.state.job_quarantine.is_empty());
+    let snapshot = store.job_snapshot(now_seconds());
+    assert_eq!(
+        (snapshot.pending, snapshot.running, snapshot.quarantined),
+        (0, 0, 0)
+    );
+    assert!(store.state.jobs.iter().all(|job| job.succeeded));
+    assert!(store.state.memories.is_empty());
+    store
+        .capture_observation(observation_for(
+            "sess-empty",
+            "evt-empty-later",
+            "Decision: a later capture is still distilled.",
+        ))
+        .unwrap();
+    assert!(store.end_session("sess-empty").is_ok());
+    assert!(store.state.job_quarantine.is_empty());
     let _ = std::fs::remove_file(path);
 }

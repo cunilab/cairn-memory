@@ -90,8 +90,8 @@ pub use hybrid::{SEMANTIC_CANDIDATES, hybrid_rank};
 pub use jobs::{
     BackgroundJob, EMBED_BATCH, JOB_ATTEMPT_CAP, JOB_BACKOFF_SECONDS, JOB_LEASE_SECONDS,
     JOB_POLL_SECONDS, JOB_SUCCEEDED_RETENTION_SECONDS, JobBook, JobEnd, JobKind, JobOpError,
-    JobSnapshot, QuarantinedJob, distill_job_end, distill_key, embed_job_end, job_label,
-    parse_distill_key,
+    JobSnapshot, QuarantinedJob, distill_job_end, distill_key, embed_job_end, is_empty_session,
+    job_label, parse_distill_key,
 };
 pub use retention::{
     ACCESS_SATURATION, ACCESS_WEIGHT, AGE_HALF_LIFE_DAYS, AGE_WEIGHT, BELOW_THRESHOLD_FLOOR,

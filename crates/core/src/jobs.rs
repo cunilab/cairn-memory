@@ -129,10 +129,22 @@ pub fn embed_job_end(message: &str) -> JobEnd {
     }
 }
 
-/// A forgotten or already-current summary is success. IO retries. Other distill errors quarantine.
-/// The session id is the suffix of a validation error, so classification uses the stable prefix.
+/// A session with nothing retained has nothing to distill. That is a normal close, not a failure.
+/// The prefix is strict so a session id cannot pass for it; PostgreSQL wraps the core error.
+pub fn is_empty_session(message: &str) -> bool {
+    message
+        .strip_prefix("core validation error: ")
+        .unwrap_or(message)
+        .starts_with("validation error: session has no retained observations")
+}
+
+/// A forgotten, already-current, or empty session is success. IO retries. Other distill errors
+/// quarantine. The session id is the suffix of a validation error, so classification uses the
+/// stable prefix.
 pub fn distill_job_end(message: &str) -> JobEnd {
-    if message.starts_with("validation error: session summary was forgotten or superseded") {
+    if message.starts_with("validation error: session summary was forgotten or superseded")
+        || is_empty_session(message)
+    {
         JobEnd::Succeeded
     } else if message.starts_with("database error:")
         || message.starts_with("storage error:")

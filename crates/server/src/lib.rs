@@ -1367,13 +1367,13 @@ async fn postgres_end_session(
     State(state): State<PostgresAppState>,
     headers: HeaderMap,
     Json(request): Json<SessionEndRequest>,
-) -> Result<Json<Memory>, PostgresApiError> {
-    Ok(Json(
+) -> Result<Json<serde_json::Value>, PostgresApiError> {
+    Ok(end_reply(
         state
             .store
             .end_session(postgres_token(&headers)?, &request.session_id)
-            .await?,
-    ))
+            .await,
+    )?)
 }
 
 async fn postgres_checkpoint_session(
@@ -2548,19 +2548,29 @@ async fn checkpoint_session(
     Ok(Json(serde_json::json!({"status": status})))
 }
 
+/// A session with nothing retained closes normally: `{"status":"empty"}`, no summary.
+fn end_reply<E: std::fmt::Display>(ended: Result<Memory, E>) -> Result<Json<serde_json::Value>, E> {
+    match ended {
+        Ok(memory) => Ok(Json(
+            serde_json::to_value(memory).expect("a memory serializes"),
+        )),
+        Err(error) if cairn_core::is_empty_session(&error.to_string()) => {
+            Ok(Json(serde_json::json!({"status": "empty"})))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn end_session(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<SessionEndRequest>,
-) -> Result<Json<Memory>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let mut store = state.store.lock().await;
     match file_bearer(&store, &headers)? {
-        Some(token) => Ok(Json(
-            store
-                .end_session_for_account(token, &request.session_id)
-                .map_err(account_api_error)?,
-        )),
-        None => Ok(Json(store.end_session(&request.session_id)?)),
+        Some(token) => end_reply(store.end_session_for_account(token, &request.session_id))
+            .map_err(account_api_error),
+        None => Ok(end_reply(store.end_session(&request.session_id))?),
     }
 }
 
@@ -3418,20 +3428,12 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, started) = json_request_auth(
-            router.clone(),
-            "POST",
-            "/cairn-memory/session/start",
-            serde_json::json!({"sessionId": "empty-job"}),
-            &admin,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{started}");
+        // An unknown session is a genuine failure and quarantines; an empty one does not.
         let (status, ended) = json_request_auth(
             router.clone(),
             "POST",
             "/cairn-memory/session/end",
-            serde_json::json!({"sessionId": "empty-job"}),
+            serde_json::json!({"sessionId": "unknown-job"}),
             &admin,
         )
         .await;
@@ -3457,6 +3459,47 @@ mod tests {
         let (status, _) =
             json_request_auth(router.clone(), "POST", &discard, Value::Null, &admin).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, queue) = json_request_auth(
+            router.clone(),
+            "GET",
+            "/cairn-memory/admin/jobs",
+            Value::Null,
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{queue}");
+        assert_eq!(queue["quarantined"], 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ending_an_empty_session_is_an_empty_status_without_quarantine() {
+        let path = temp_store_path("empty-end");
+        let router = app(AppState::open(&path).unwrap());
+        let (admin, _, _) = bootstrap_and_register(
+            &router,
+            ["empty-admin@example.test", "empty-user@example.test"],
+        )
+        .await;
+        let (status, started) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/start",
+            serde_json::json!({"sessionId": "empty-end"}),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let (status, ended) = json_request_auth(
+            router.clone(),
+            "POST",
+            "/cairn-memory/session/end",
+            serde_json::json!({"sessionId": "empty-end"}),
+            &admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{ended}");
+        assert_eq!(ended, serde_json::json!({"status": "empty"}));
         let (status, queue) = json_request_auth(
             router.clone(),
             "GET",

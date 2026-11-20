@@ -362,6 +362,40 @@ async fn clear_covered_pending(
     Ok(())
 }
 
+/// An empty close has nothing to cover, so the pending marker clears. The session row lock
+/// orders it against captures: one already committed is seen by the recheck and keeps the
+/// marker, and one that commits later sets the marker again after this transaction.
+async fn clear_pending_if_empty(
+    tx: &mut Transaction<'_, Postgres>,
+    person_id: &str,
+    session_id: &str,
+) -> Result<(), PostgresError> {
+    sqlx::query("SELECT 1 FROM cairn_sessions WHERE person_id = $1 AND session_id = $2 FOR UPDATE")
+        .bind(person_id)
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE cairn_sessions SET pending_since = NULL
+         WHERE person_id = $1 AND session_id = $2
+           AND NOT EXISTS (
+               SELECT 1 FROM cairn_observations o
+               WHERE o.person_id = $1 AND o.session_id = $2
+                 AND NOT EXISTS (
+                     SELECT 1 FROM cairn_forgotten_items f
+                     WHERE f.person_id = o.person_id AND f.item_id = o.event_id
+                 )
+                 AND (o.lifecycle->>'expiresAt' IS NULL OR
+                      (o.lifecycle->>'expiresAt')::bigint > EXTRACT(EPOCH FROM now())::bigint)
+           )",
+    )
+    .bind(person_id)
+    .bind(session_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn claim_is_held(
     tx: &mut Transaction<'_, Postgres>,
     job_id: &str,
@@ -636,6 +670,11 @@ impl PostgresStore {
             sqlx::query("ROLLBACK TO SAVEPOINT distill_summary")
                 .execute(&mut *tx)
                 .await?;
+        }
+        if let Err(error) = &result
+            && cairn_core::is_empty_session(&error.to_string())
+        {
+            clear_pending_if_empty(&mut tx, &person_id, &session_id).await?;
         }
         let end = match &result {
             Ok(_) => JobEnd::Succeeded,

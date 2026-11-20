@@ -152,6 +152,11 @@ The text is compact JSON of the same object. Errors stay errors.
 {"memory_id":"mem-1","kind":"gotcha","scope":"personal","status":"active"}
 ```
 
+`memory_consolidate` and `memory_session_end` return the summary memory. A session
+with no retained observations is a normal close and returns `{"status":"empty"}`
+as a non-error result. See
+[empty-session close](continuity-v1.md#empty-session-close-v016).
+
 The receipt is unchanged by save deduplication. An identical explicit save
 from the same owner returns the existing `memory_id`; newly supplied evidence
 is merged, and a retry with no new evidence is a no-op. See

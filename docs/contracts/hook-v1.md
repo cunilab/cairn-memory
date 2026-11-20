@@ -398,7 +398,9 @@ being injected. Existing capture/outbox behavior remains bounded and device-only
   that host does not load it.
 - **SessionEnd:** best-effort explicit rule-based distillation for a session that
   did work, then removes its delivery flags. It never asks an agent to continue.
-  An unavailable close leaves ordinary idle distillation as fallback.
+  An unavailable close leaves ordinary idle distillation as fallback. A session with
+  no retained observations answers `{"status":"empty"}`; that is success, so the
+  hook prints nothing and no job is quarantined.
 
 `scripts/cairn_instructions.txt` is the shared compact instruction source for
 hooks, the OpenCode block and MCP initialization: three explicit scopes and

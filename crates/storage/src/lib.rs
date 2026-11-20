@@ -99,15 +99,6 @@ impl fmt::Display for PostgresError {
     }
 }
 
-fn empty_checkpoint(error: &PostgresError) -> bool {
-    let message = match error {
-        PostgresError::Validation(message) => message.as_str(),
-        PostgresError::Core(cairn_core::StoreError::Validation(message)) => message.as_str(),
-        _ => return false,
-    };
-    message.contains("no retained observations")
-}
-
 impl std::error::Error for PostgresError {}
 
 impl From<sqlx::Error> for PostgresError {
@@ -824,7 +815,7 @@ impl PostgresStore {
                 tx.commit().await?;
                 Ok(CheckpointStatus::Unchanged)
             }
-            Err(error) if empty_checkpoint(&error) => {
+            Err(error) if cairn_core::is_empty_session(&error.to_string()) => {
                 tx.rollback().await?;
                 Ok(CheckpointStatus::Empty)
             }
