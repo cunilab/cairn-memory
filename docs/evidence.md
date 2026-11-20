@@ -827,3 +827,96 @@ Checks on this machine (Andress-MacBook-Air):
   `cairn-server --test project_model`. The two tests changed after the first
   full run were rerun alone and passed.
 - `cairn-server --test semantic` was not run (no embedding model directory).
+
+## v0.1.6 step 1 — benchmark harness and baseline (2026-11-21)
+
+Every later 0.1.6 token-diet or retrieval step reports against this harness, so the numbers
+below are the "before". No product code changed in this step.
+
+**What it is.** `scripts/bench.py` starts a disposable `pgvector/pgvector:pg17` container and the
+real `cairn-server` on it, creates an account, a device token and a git checkout with a committed
+`.cairn/project.json` (`cairn init`), loads `fixtures/bench/corpus.json` through `/remember`, then
+measures through the real `cairn mcp` binary and the real `scripts/cairn_hook.py`. It needs Docker,
+Python 3 and a build of `cairn-server` and `cairn-client`; it needs no network and no LLM. The corpus
+is 70 synthetic memories about a fictional order-fulfilment project (12 decisions, 10 rules, 12
+gotchas, 8 procedures, 10 facts, 4 handoffs, 4 session summaries, 6 near-duplicates of existing
+memories, 4 off-topic distractors). `fixtures/bench/questions.json` has 25 questions with gold
+memory ids (13 direct, 7 paraphrases that share no content word with the gold memory, 5 whose gold
+is a near-duplicate pair; the harness fails if a paraphrase shares a word) and 5 weak queries that
+should return nothing. Token figures are `bytes / 4`, an estimate, not a tokenizer count.
+
+```bash
+python3 scripts/download_embedding_model.py ~/.cache/cairn-bench/minilm   # once; pinned, checksummed
+python3 scripts/bench.py --out bench/result.json --label my-change         # about 80 s
+python3 scripts/bench.py --out bench/lexical.json --lexical-only           # no embedding model
+```
+
+The model directory is `--model-dir`, `CAIRN_BENCH_EMBEDDING_MODEL_DIR`,
+`CAIRN_TEST_EMBEDDING_MODEL_DIR`, then `~/.cache/cairn-bench/minilm`. If none holds a model the run
+is lexical-only and `semantic_channel.mode` in the JSON says so. `--dump-injected FILE` also writes the
+text each hook event injected. Metrics: (a) tool count, `tools/list` bytes, `initialize.instructions`
+bytes; (b) `additionalContext` bytes for SessionStart, 10 `Edit` PostToolUse events on distinct files
+and Stop; (c) recall@5 (fraction of gold found in the top 5), hit@5 (any gold in the top 5) and MRR@10
+for `memory_search` and `memory_recall`; (d) bytes per call for search, resume, why_changed, get and
+context (full MCP result, plus the text channel alone); (e) how many weak queries return zero hits.
+
+**Determinism.** Four consecutive full runs produced byte-identical JSON. Three sources of
+non-determinism were found and handled in the harness, not in the product:
+
+- `LocalEmbeddings::query` uses `try_lock`; while a background embedding job holds the model, a search
+  silently falls back to lexical-only. The scripted session creates captures that trigger embedding
+  jobs, so the harness waits until every memory has its vector before each hook event.
+- `created_at` has one-second resolution and the session brief ranks rules and decisions by it, with
+  ties broken by id. The harness aligns each rule/decision save to a wall-clock second boundary
+  (about 22 s of the run) so the brief does not depend on where a second ticks during the load.
+- Recall increments access counts, which feed ranking, so the query order is part of the definition.
+
+**Baseline** (`bench/baseline-0.1.6-pre.json`, code at `2ea9479`, hybrid lexical + entity + semantic
+with the pinned MiniLM model):
+
+| Metric | Value |
+|---|---|
+| MCP tools | 38 |
+| `tools/list` | 18,356 B (~4,589 tokens est) |
+| `initialize.instructions` | 1,896 B (~474 tokens est) |
+| Hook injection, scripted session (start + 10 edits + stop) | 6,803 B (~1,701 tokens est); SessionStart 1,077 B, the 10 edits 5,726 B |
+| Fixed cost per session, eager-schema hosts (tools + instructions + hooks) | 27,055 B (~6,764 tokens est) |
+| Fixed cost per session, deferred-schema hosts (names + instructions + hooks) | 9,368 B (~2,342 tokens est) |
+| `memory_search`: recall@5 / hit@5 / MRR@10 over 25 questions | 0.720 / 0.720 / 0.547 |
+| `memory_recall`: same | 0.720 / 0.720 / 0.547 |
+| By question kind (recall@5, MRR@10) | direct 1.00, 0.72; near-duplicate 1.00, 0.87; paraphrase 0.00, 0.00 |
+| Zero-hit correct (5 weak queries) | 4 of 5 for both tools |
+| `memory_search` bytes per call, limit 5 | mean 2,119 (min 106, max 3,056) |
+| `memory_recall` bytes per call, limit 5 | mean 2,497 |
+| `memory_resume` limit 2 | 6,726 B (2 results) |
+| `memory_why_changed` limit 3 | mean 13,981 B (3 queries) |
+| `memory_get` | mean 4,288 B (decision, gotcha, procedure, session summary) |
+| `memory_context` limit 5 | 2,012 B |
+
+Lexical-only run on the same corpus (`--lexical-only`): recall@5 0.14, hit@5 0.16, MRR@10 0.16,
+zero-hit 5 of 5, search 197 B per call, hook injection 4,532 B. The plain `plainto_tsquery` AND of
+all query terms finds almost nothing on its own; recall depends on the semantic channel.
+
+**Observations worth acting on in later steps** (measured, not changed here):
+
+- All 7 paraphrase questions miss: none of their gold memories appears in the top 5 (often nothing is
+  returned), because a vector-only hit does not pass the relevance floor.
+- The weak query "guitar tuning for drop D" returns `rule-migrations-additive` because the rule
+  contains the word "drop"; the floor accepts any distinctive token in a rule or decision.
+- The first PostToolUse still re-injects the full instructions (1,896 B), which the MCP
+  `initialize.instructions` already carries.
+- The SessionStart brief is non-empty (1,077 B) when saves carry the project id, but its
+  `last_handoff` section stays empty because explicit saves carry no branch, and its rule and decision
+  order rests on one-second `created_at` with ties falling back to the oldest id.
+- `memory_why_changed` costs about 14 KB for 3 hits and `memory_resume` about 6.7 KB for 2, both far
+  above `memory_search`.
+
+**Limitations.** The corpus is small (70 memories, 25 questions); one question is about 4 points of
+recall. Synthetic text is cleaner than real memories. Byte counts are the full JSON-RPC `result`
+(content text and `structuredContent` both), so they count a host that bills both channels; the
+text-channel-only size is also recorded. `memory_resume` is measured on the corpus's handoff and
+session-summary memories, not on summaries distilled from a real session. The run needs Docker and
+about 80 s; it was run on macOS arm64 only.
+
+Checks on this machine (Andress-MacBook-Air): the harness ran end to end five times (four hybrid runs
+with identical output, one lexical-only run); no Rust was changed.

@@ -255,6 +255,21 @@ The HTTP boundary can be exercised against the same kind of fresh database with:
 CAIRN_DATABASE_URL="$CAIRN_DATABASE_URL" ./scripts/smoke_postgres.sh
 ```
 
+## Benchmark harness
+
+`scripts/bench.py` measures the agent-facing token cost and recall quality against a disposable
+`pgvector/pgvector:pg17` container and a synthetic corpus (`fixtures/bench/`, no real memories). It
+reports MCP surface size, bytes injected by the hooks in a scripted session, recall@5 and MRR, bytes
+per call, and zero-hit behaviour. Needs Docker, Python 3 and a built workspace; the semantic channel
+uses the pinned MiniLM model when `scripts/download_embedding_model.py ~/.cache/cairn-bench/minilm`
+has been run (otherwise pass `--lexical-only`).
+
+```bash
+python3 scripts/bench.py --out bench/result.json --label my-change
+```
+
+The committed baseline is `bench/baseline-0.1.6-pre.json`; see `docs/evidence.md` (2026-11-21).
+
 ## Reference
 
 - Inspiration: [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory)
