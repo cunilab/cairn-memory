@@ -2,24 +2,21 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
 import {
   ChevronsUpDownIcon,
-  FolderIcon,
+  ActivityIcon,
   BrainIcon,
-  KeyRoundIcon,
+  FolderIcon,
   LayoutDashboardIcon,
   LockKeyholeIcon,
   LogOutIcon,
   MonitorIcon,
   MoonIcon,
+  SettingsIcon,
   SunIcon,
-  ListTodoIcon,
-  UsersIcon,
   WaypointsIcon,
 } from "lucide-react";
 import { CairnMark } from "@/components/cairn-logo";
-import { ChangePasswordDialog } from "@/components/change-password-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -41,9 +38,9 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -58,12 +55,17 @@ import { THEMES, type Theme } from "@/lib/theme";
 const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
 const WORKSPACE = [
-  { href: "/dashboard", label: "Overview", icon: LayoutDashboardIcon },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboardIcon },
   { href: "/memories", label: "Memories", icon: BrainIcon },
-  { href: "/graph", label: "Graph", icon: WaypointsIcon },
+  { href: "/activity", label: "Activity", icon: ActivityIcon },
   { href: "/projects", label: "Projects", icon: FolderIcon },
-  { href: "/devices", label: "Devices", icon: KeyRoundIcon },
+  { href: "/graph", label: "Graph", icon: WaypointsIcon },
+  { href: "/settings", label: "Settings", icon: SettingsIcon },
 ];
+
+// TODO(7a): a dot on Settings when a device needs attention and on Activity when a job is
+// quarantined, from `/stats` (`devices_attention`, `jobs.quarantined`). Empty until then.
+const ATTENTION: Record<string, string> = {};
 
 function NavItem({
   href,
@@ -87,6 +89,9 @@ function NavItem({
         <Icon />
         <span>{label}</span>
       </SidebarMenuButton>
+      {ATTENTION[href] ? (
+        <SidebarMenuBadge aria-label={ATTENTION[href]}>•</SidebarMenuBadge>
+      ) : null}
     </SidebarMenuItem>
   );
 }
@@ -95,7 +100,6 @@ function AccountMenu() {
   const account = useAccount();
   const logout = useLogout();
   const [theme, setTheme] = useTheme();
-  const [changingPassword, setChangingPassword] = useState(false);
   if (account === undefined) {
     return <Skeleton className="h-10 w-full" />;
   }
@@ -131,7 +135,7 @@ function AccountMenu() {
             <DropdownMenuLabel className="truncate">{email}</DropdownMenuLabel>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setChangingPassword(true)}>
+          <DropdownMenuItem render={<Link href="/settings?tab=account" />}>
             <LockKeyholeIcon />
             Change password
           </DropdownMenuItem>
@@ -160,13 +164,11 @@ function AccountMenu() {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <ChangePasswordDialog open={changingPassword} onOpenChange={setChangingPassword} />
     </>
   );
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-  const account = useAccount();
   const pathname = usePathname();
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -182,7 +184,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {WORKSPACE.map((item) => (
@@ -191,17 +192,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        {account?.is_admin ? (
-          <SidebarGroup>
-            <SidebarGroupLabel>Admin</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                <NavItem href="/accounts" label="Accounts" icon={UsersIcon} pathname={pathname} />
-                <NavItem href="/jobs" label="Jobs" icon={ListTodoIcon} pathname={pathname} />
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        ) : null}
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>

@@ -5,11 +5,9 @@ import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
 import { MoreHorizontalIcon, PlusIcon, ShieldAlertIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
-import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
 import { checkNewPassword, FormDialog, MIN_PASSWORD } from "@/components/form-dialog";
-import { PageHeader } from "@/components/page-header";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ErrorAlert } from "@/components/states";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,7 +31,7 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
-import { SessionRequiredError } from "@/lib/session";
+import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { AccountRow } from "@/lib/types";
 
 function PasswordFields({ label = "Password", prefix }: { label?: string; prefix: string }) {
@@ -88,10 +86,10 @@ export function Accounts() {
       setError(null);
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace("/");
+        router.replace(LOGIN_PATH);
         return;
       }
-      setError(cause instanceof Error ? cause.message : "Could not load accounts");
+      setError(`Accounts could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);
     }
   }, [router]);
 
@@ -178,11 +176,10 @@ export function Accounts() {
   );
 
   return (
-    <ConsoleShell crumbs={[{ label: "Admin" }, { label: "Accounts" }]}>
-      <PageHeader
-        title="Accounts"
-        description="Everyone who can sign in to this Cairn server. Create accounts for teammates and reset a password when someone is locked out."
-      />
+    <div className="flex flex-col gap-4">
+      <p className="max-w-prose text-sm text-muted-foreground">
+        Everyone who can sign in to this Cairn server. Register accounts for teammates and reset a password when someone is locked out.
+      </p>
       {account === undefined ? (
         <div role="status">
           <span className="sr-only">Loading…</span>
@@ -190,11 +187,7 @@ export function Accounts() {
         </div>
       ) : admin ? (
         <>
-          {error ? (
-            <Alert variant="destructive">
-              <AlertDescription className="text-destructive">{error}</AlertDescription>
-            </Alert>
-          ) : null}
+          {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
           {rows === null && !error ? (
             <div role="status">
               <span className="sr-only">Loading accounts…</span>
@@ -212,7 +205,7 @@ export function Accounts() {
               toolbar={
                 <Button type="button" className="sm:ml-auto" onClick={() => setCreating(true)}>
                   <PlusIcon />
-                  New user
+                  Register account
                 </Button>
               }
               empty={
@@ -243,9 +236,9 @@ export function Accounts() {
       <FormDialog
         open={creating}
         onOpenChange={setCreating}
-        title="New user"
+        title="Register account"
         description="They sign in with this email and password. Your own session is not changed."
-        submitLabel="Create user"
+        submitLabel="Register account"
         onSubmit={async (data) => {
           const email = String(data.get("email")).trim();
           const password = String(data.get("password"));
@@ -254,7 +247,7 @@ export function Accounts() {
             method: "POST",
             body: JSON.stringify({ email, password }),
           });
-          toast.success(`Account created for ${email}.`);
+          toast.success(`Account registered for ${email}`);
           await load();
         }}
       >
@@ -315,6 +308,6 @@ export function Accounts() {
           <Input id="transfer-project-id" name="projectId" required autoComplete="off" />
         </Field>
       </FormDialog>
-    </ConsoleShell>
+    </div>
   );
 }

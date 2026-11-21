@@ -1,10 +1,11 @@
 "use client";
 
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, Suspense, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { SearchIcon } from "lucide-react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { CommandPalette } from "@/components/command-palette";
+import { MemorySheet } from "@/components/memory-sheet";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -32,8 +33,14 @@ export function ConsoleShell({
   const trail = crumbs.slice(0, -1);
   return (
     <SidebarProvider className="flex-1">
+      <a
+        href="#main"
+        className="sr-only z-50 rounded-md bg-background px-3 py-2 text-sm focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus-visible:ring-3 focus-visible:ring-ring/50"
+      >
+        Skip to content
+      </a>
       <AppSidebar />
-      <SidebarInset className="min-w-0">
+      <SidebarInset id="main" className="min-w-0">
         <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 border-b bg-background/85 px-3 backdrop-blur supports-[backdrop-filter]:bg-background/70 md:px-4">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mx-1 h-4 data-vertical:self-auto" />
@@ -79,6 +86,9 @@ export function ConsoleShell({
           </Button>
         </header>
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        <Suspense>
+          <MemorySheet />
+        </Suspense>
         <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:px-6 md:py-8">
           {children}
         </div>

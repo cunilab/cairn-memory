@@ -1,14 +1,49 @@
 "use client";
 
+import { useState } from "react";
+import { LockKeyholeIcon, LogOutIcon } from "lucide-react";
 import { toast } from "sonner";
 import { checkNewPassword, FormDialog, MIN_PASSWORD } from "@/components/form-dialog";
+import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useAccount } from "@/hooks/use-account";
+import { useLogout } from "@/hooks/use-logout";
 import { cairn } from "@/lib/cairn";
 import { SessionRequiredError } from "@/lib/session";
 
+/** Settings › Account: who you are, change password, sign out of this browser. */
+export function AccountTab() {
+  const account = useAccount();
+  const logout = useLogout();
+  const [changing, setChanging] = useState(false);
+  if (account === undefined) {
+    return <Skeleton className="h-32 w-full max-w-md" />;
+  }
+  return (
+    <div className="flex max-w-md flex-col gap-4">
+      <dl className="text-sm">
+        <dt className="text-xs font-medium text-muted-foreground">Email</dt>
+        <dd className="break-all">{account?.email ?? "Unknown"}</dd>
+      </dl>
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="outline" onClick={() => setChanging(true)}>
+          <LockKeyholeIcon />
+          Change password
+        </Button>
+        <Button type="button" variant="outline" onClick={() => void logout()}>
+          <LogOutIcon />
+          Sign out of this browser
+        </Button>
+      </div>
+      <ChangePasswordDialog open={changing} onOpenChange={setChanging} />
+    </div>
+  );
+}
+
 /** The signed-in person changes their own password. A wrong current password stays in the dialog. */
-export function ChangePasswordDialog({
+function ChangePasswordDialog({
   open,
   onOpenChange,
 }: {
@@ -43,7 +78,7 @@ export function ChangePasswordDialog({
           }
           throw cause;
         }
-        toast.success("Password changed.");
+        toast.success("Password changed");
       }}
     >
       <Field>

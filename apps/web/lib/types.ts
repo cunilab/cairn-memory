@@ -71,8 +71,6 @@ export type ProjectMemory = {
   updated_at: number;
 };
 
-export type PersonalMemory = ProjectMemory;
-
 export type MemoryGraphNode = {
   memory_id: string;
   title: string;
@@ -111,9 +109,6 @@ export type Diagnostics = {
   jobs_running: number;
   jobs_quarantined: number;
 };
-
-/** Two live project memories joined by a `contradicts` link. */
-export type ProjectConflict = { memory_id: string; contradicts_id: string };
 
 export type Device = {
   device_id: string;

@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { cairn } from "@/lib/cairn";
-import { SessionRequiredError } from "@/lib/session";
+import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 
 /** Ends the web session and returns to sign-in. A session that is already gone counts as done. */
 export function useLogout(): () => Promise<void> {
@@ -17,6 +17,6 @@ export function useLogout(): () => Promise<void> {
         return;
       }
     }
-    router.replace("/");
+    router.replace(LOGIN_PATH);
   }, [router]);
 }

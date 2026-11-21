@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { graphEdgeKey } from "@/lib/graph-edge-key";
+import { graphEdgeKey } from "../_lib/graph-edge-key";
 import {
   NODE_SIZE,
   createLayoutSession,
@@ -9,7 +9,7 @@ import {
   selectLabelIds,
   zoomToSizeRatio,
   type LabelCandidate,
-} from "@/lib/graph-layout";
+} from "../_lib/graph-layout";
 import type { MemoryGraph } from "@/lib/types";
 
 const SCOPE_COLOR = {

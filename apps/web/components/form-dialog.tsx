@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { FieldGroup } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
-import { SessionRequiredError } from "@/lib/session";
+import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 
 export const MIN_PASSWORD = 12;
 
@@ -61,7 +61,7 @@ function Body({
       onOpenChange(false);
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace("/");
+        router.replace(LOGIN_PATH);
         return;
       }
       setError(cause instanceof Error ? cause.message : "Request failed");

@@ -92,9 +92,7 @@ async function proxy(request: NextRequest, context: Context) {
     ? new NextResponse(null, { status: upstream.status })
     : new NextResponse(bytes, {
         status: upstream.status,
-        headers: {
-          "content-type": upstream.headers.get("content-type") ?? "application/json",
-        },
+        headers: responseHeaders(upstream),
       });
 
   if (
@@ -106,6 +104,18 @@ async function proxy(request: NextRequest, context: Context) {
   }
 
   return response;
+}
+
+function responseHeaders(upstream: Response): Headers {
+  const headers = new Headers({
+    "content-type": upstream.headers.get("content-type") ?? "application/json",
+  });
+  // Paged lists carry their next cursor in a header.
+  const cursor = upstream.headers.get("x-next-cursor");
+  if (cursor) {
+    headers.set("x-next-cursor", cursor);
+  }
+  return headers;
 }
 
 function upstreamError(bytes: ArrayBuffer): string {

@@ -55,7 +55,7 @@ export function LoginForm({
       });
       setEmail("");
       setPassword("");
-      router.push("/projects");
+      router.push("/dashboard");
     } catch (cause) {
       const message =
         cause instanceof Error

@@ -1,3 +1,6 @@
+/** Where a missing or ended session sends the person. */
+export const LOGIN_PATH = "/login";
+
 const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);
 
 const SESSION_REQUIRED_MESSAGES = new Set([
