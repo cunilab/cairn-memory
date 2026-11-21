@@ -3,6 +3,8 @@
 //! session and never touches a store file.
 
 pub mod agents;
+pub mod doctor;
+pub mod hook;
 pub mod mcp;
 pub mod present;
 pub mod project;
@@ -261,11 +263,15 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: Config) -> Self {
+        Self::with_timeout(config, REQUEST_TIMEOUT)
+    }
+
+    pub fn with_timeout(config: Config, timeout: Duration) -> Self {
         let mut builder = ureq::Agent::config_builder()
             .max_redirects(0)
             .max_redirects_will_error(false)
             .http_status_as_error(false)
-            .timeout_global(Some(REQUEST_TIMEOUT))
+            .timeout_global(Some(timeout))
             // The system trust store, so a server behind a private CA works.
             .tls_config(
                 ureq::tls::TlsConfig::builder()

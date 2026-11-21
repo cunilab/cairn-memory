@@ -612,19 +612,10 @@ def deliver(token, request, content, raw, base_url, queue_retryable, attachment_
 
 # Byte limits are conservative token ceilings, without a tokenizer dependency.
 START_NOTE_MAX_BYTES = 256
-INSTRUCTIONS_MAX_BYTES = 2048
 BRIEF_MAX_BYTES = 4096
-SHORT_NOTE = "Cairn is available: use its memory tools to recall evidence and save reusable knowledge."
 WORK_TOOLS = {"Bash", "Edit", "Write", "MultiEdit", "apply_patch"}
 FILE_TOOLS = {"Edit", "Write", "MultiEdit", "apply_patch"}
 TOPIC_MAX_BYTES = 512
-
-
-def _instructions():
-    text = Path(__file__).with_name("cairn_instructions.txt").read_text(encoding="utf-8").strip()
-    if len(text.encode()) > INSTRUCTIONS_MAX_BYTES:
-        raise ValueError("Cairn instructions exceed their byte limit")
-    return text
 
 
 def _agent_post(origin, token, path, body):
@@ -762,8 +753,6 @@ def agent_context(source, agent, config, token, origin):
         instructed, dirty, worked, generation = row or (0, 0, 0, 0)
         if event == "PostToolUse" and meaningful_work(source):
             dirty, worked, generation = 1, 1, generation + 1
-            if not instructed:
-                text, instructed = _instructions(), 1
         elif event == "Stop" and dirty:
             want_checkpoint = generation
         if topic_path and db.execute("SELECT 1 FROM topics WHERE id=? AND path=?", (key, topic_path)).fetchone():
@@ -790,12 +779,11 @@ def agent_context(source, agent, config, token, origin):
             if note:
                 text = note if text is None else text + "\n" + note
     if event == "SessionStart":
-        text = SHORT_NOTE
         try:
             reply = _agent_post(origin, token, "/cairn-memory/session/brief", {"context":request["context"]})
             brief = reply.get("brief")
-            if isinstance(brief, str) and len(brief.encode()) <= BRIEF_MAX_BYTES:
-                text += "\n" + brief
+            if isinstance(brief, str) and brief and len(brief.encode()) <= BRIEF_MAX_BYTES:
+                text = brief
         except urllib.error.HTTPError as error:
             if error.code == 401:
                 sys.stderr.write(

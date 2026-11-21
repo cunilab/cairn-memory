@@ -95,7 +95,7 @@ jobs:
       - name: Add hook scripts and checksums
         working-directory: dist
         run: |
-          cp ../scripts/cairn_hook.py ../scripts/cairn_outbox.py ../scripts/cairn_instructions.txt .
+          cp ../scripts/cairn_hook.py ../scripts/cairn_outbox.py .
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS .
           cat SHA256SUMS

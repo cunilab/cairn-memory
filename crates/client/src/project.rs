@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 
 const FILE: &str = ".cairn/project.json";
 
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)

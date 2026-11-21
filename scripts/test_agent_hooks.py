@@ -73,22 +73,18 @@ class AgentHooks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.stderr = result.stderr
         return json.loads(result.stdout) if result.stdout.strip() else {}
-    def test_start_short_first_work_once_and_end_only_after_new_work(self):
+    def test_start_injects_brief_only_and_end_only_after_new_work(self):
         for agent in ['claude', 'codex']:
             with self.subTest(agent=agent):
                 start = self.hook('SessionStart', agent)
                 text = start['hookSpecificOutput']['additionalContext']
-                self.assertIn('memory tools', text)
+                self.assertNotIn('memory tools', text)
                 self.assertIn('```json', text)
                 self.assertNotIn('alternatives', text)
                 self.assertLessEqual(len(text.encode()), 4352)
                 self.assertEqual(self.hook('Stop', agent), {})
                 self.assertEqual(self.hook('PostToolUse', agent, tool_name='Read'), {})
-                first = self.hook('PostToolUse', agent, tool_name='Bash', tool_use_id='1', tool_input={'command':'make'})
-                text = first['hookSpecificOutput']['additionalContext']
-                for field in ['scope', 'title', 'summary', 'reason', 'alternatives', 'exceptions', 'symptom', 'steps', 'statement', 'preference']:
-                    self.assertIn(field, text)
-                self.assertLessEqual(len(text.encode()), 2048)
+                self.assertEqual(self.hook('PostToolUse', agent, tool_name='Bash', tool_use_id='1', tool_input={'command':'make'}), {})
                 self.assertEqual(self.hook('PostToolUse', agent, tool_name='Edit', tool_use_id='2'), {})
                 self.assertEqual(self.hook('Stop', agent), {})
                 self.assertEqual(self.hook('Stop', agent), {})
@@ -101,19 +97,18 @@ class AgentHooks(unittest.TestCase):
                 self.hook('SessionEnd', agent)
                 self.assertEqual(self.hook('Stop', agent), {})
         self.assertEqual(sum(path.endswith('/brief') for path, _ in self.server.calls), 2)
-    def test_resume_keeps_once_flag_and_concurrent_first_work_injects_once(self):
+    def test_resume_and_concurrent_first_work_inject_no_instructions(self):
         self.hook('SessionStart')
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda n:self.hook('PostToolUse', tool_name='Bash', tool_use_id=str(n)), range(8)))
-        self.assertEqual(sum(bool(result) for result in results), 1)
+        self.assertEqual(results, [{}] * 8)
         self.hook('SessionStart', source='resume')
         self.assertEqual(self.hook('PostToolUse', tool_name='Write'), {})
-    def test_offline_capture_does_not_discard_first_work_instructions(self):
+    def test_offline_capture_injects_nothing_and_still_checkpoints(self):
         self.server.status = 503
         start = self.hook('SessionStart')
-        self.assertNotIn('```json', start['hookSpecificOutput']['additionalContext'])
-        result = self.hook('PostToolUse', tool_name='Bash', tool_use_id='offline')
-        self.assertIn('required', result['hookSpecificOutput']['additionalContext'].lower())
+        self.assertEqual(start, {})
+        self.assertEqual(self.hook('PostToolUse', tool_name='Bash', tool_use_id='offline'), {})
         before = len(self.server.calls)
         self.assertEqual(self.hook('Stop'), {})
         self.assertIn('checkpoint unavailable', self.stderr)
@@ -172,7 +167,7 @@ class AgentHooks(unittest.TestCase):
         result = self._installed(env, setup)
         self.assertEqual(result.returncode, 0, result.stderr)
         body = json.loads(result.stdout)
-        self.assertIn('memory tools', body['hookSpecificOutput']['additionalContext'])
+        self.assertIn('```json', body['hookSpecificOutput']['additionalContext'])
         self.assertNotIn('ignoring', result.stdout)
         self.assertEqual(self.server.calls[0][0], '/cairn-memory/session/brief')
         self.assertEqual(self.server.authorizations[0], 'Bearer runtime-token-value')
@@ -213,9 +208,7 @@ class AgentHooks(unittest.TestCase):
         env['CAIRN_CONFIG'] = str(runtime)
         result = self._installed(env, setup)
         self.assertEqual(result.returncode, 0, result.stderr)
-        body = json.loads(result.stdout)
-        self.assertIn('memory tools', body['hookSpecificOutput']['additionalContext'])
-        self.assertNotIn('```json', body['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(result.stdout.strip(), '')
         self.assertIn(str(runtime), result.stderr)
         self.assertNotIn(str(setup), result.stderr)
         self.assertIn('cairn setup <server-url>', result.stderr)

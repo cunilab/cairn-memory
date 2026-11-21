@@ -23,7 +23,7 @@ const API_URL: &str = "https://api.github.com/repos/cunilab/cairn-memory/release
 const API_ENV: &str = "CAIRN_UPDATE_URL";
 const NO_CHECK_ENV: &str = "CAIRN_NO_UPDATE_CHECK";
 const SUMS_ASSET: &str = "SHA256SUMS";
-const HOOK_ASSETS: [&str; 3] = ["cairn_hook.py", "cairn_outbox.py", "cairn_instructions.txt"];
+const HOOK_ASSETS: [&str; 2] = ["cairn_hook.py", "cairn_outbox.py"];
 /// Records the SHA-256 of each hook script this module installed, to spot local edits.
 const HOOK_STATE: &str = "installed.json";
 /// The targets `release.yml` builds; keep the two lists together. Linux uses musl so one
@@ -361,10 +361,6 @@ pub fn install_bundled_hooks() -> Result<String, Error> {
         (
             "cairn_outbox.py",
             include_bytes!("../../../scripts/cairn_outbox.py").to_vec(),
-        ),
-        (
-            "cairn_instructions.txt",
-            crate::agents::INSTRUCTIONS.as_bytes().to_vec(),
         ),
     ];
     Ok(hooks_message(&dir, write_hooks(&dir, &files)?))
@@ -706,15 +702,14 @@ mod tests {
         let name = asset_name(LINUX).unwrap();
         mock(|base| {
             let sums = format!(
-                "{binary_sum}  {name}\n{}  cairn_hook.py\n{}  cairn_outbox.py\n{}  cairn_instructions.txt\n",
+                "{binary_sum}  {name}\n{}  cairn_hook.py\n{}  cairn_outbox.py\n",
                 sha_hex(HOOK),
-                sha_hex(OUTBOX),
-                sha_hex(crate::agents::INSTRUCTIONS.as_bytes())
+                sha_hex(OUTBOX)
             );
             let asset = |file: &str| json!({"name": file, "browser_download_url": format!("{base}/dl/{file}")});
             let listing = json!({
                 "tag_name": tag,
-                "assets": [asset(&name), asset("SHA256SUMS"), asset("cairn_hook.py"), asset("cairn_outbox.py"), asset("cairn_instructions.txt")],
+                "assets": [asset(&name), asset("SHA256SUMS"), asset("cairn_hook.py"), asset("cairn_outbox.py")],
             });
             vec![
                 ("/latest".to_owned(), listing.to_string().into_bytes()),
@@ -722,10 +717,6 @@ mod tests {
                 ("/dl/SHA256SUMS".to_owned(), sums.into_bytes()),
                 ("/dl/cairn_hook.py".to_owned(), HOOK.to_vec()),
                 ("/dl/cairn_outbox.py".to_owned(), OUTBOX.to_vec()),
-                (
-                    "/dl/cairn_instructions.txt".to_owned(),
-                    crate::agents::INSTRUCTIONS.as_bytes().to_vec(),
-                ),
             ]
         })
     }
