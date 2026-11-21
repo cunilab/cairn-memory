@@ -171,6 +171,10 @@ pub fn repo_facts(top: &Path, files: &[String], symbols: &[String]) -> Option<Re
     let known: std::collections::HashSet<&str> = listed.split('\0').collect();
     let (mut files_present, mut files_missing) = (Vec::new(), Vec::new());
     for file in files {
+        // A name outside the checkout is never reported, present or missing.
+        if outside(file) {
+            continue;
+        }
         if known.contains(file.as_str()) || top.join(file).exists() {
             files_present.push(file.clone());
         } else if !undecidable(top, file, &known) {
@@ -210,20 +214,20 @@ pub fn repo_facts(top: &Path, files: &[String], symbols: &[String]) -> Option<Re
     })
 }
 
-/// A name that is not in the checkout says nothing about the memory that cites it, when it points
-/// outside the checkout, is gitignored (so another machine may not have it), or is written
+fn outside(file: &str) -> bool {
+    file.starts_with(['/', '~']) || file.contains(':') || file.split('/').any(|part| part == "..")
+}
+
+/// A name that is not in the checkout says nothing about the memory that cites it, when it
+/// is gitignored (so another machine may not have it), or is written
 /// relative to a subdirectory (it is the tail of a tracked path). Such a name is left unreported.
 fn undecidable(top: &Path, file: &str, known: &std::collections::HashSet<&str>) -> bool {
-    let outside = file.starts_with(['/', '~'])
-        || file.contains(':')
-        || file.split('/').any(|part| part == "..");
-    outside
-        || git_run(
-            top,
-            &["check-ignore", "-q", "--no-index", "--", file],
-            GIT_TIMEOUT,
-        )
-        .is_none_or(|(code, _)| code != Some(1))
+    git_run(
+        top,
+        &["check-ignore", "-q", "--no-index", "--", file],
+        GIT_TIMEOUT,
+    )
+    .is_none_or(|(code, _)| code != Some(1))
         || known.iter().any(|path| path.ends_with(&format!("/{file}")))
 }
 
@@ -398,7 +402,10 @@ mod tests {
             "../other/README.md",
         ]
         .map(str::to_owned)
-        .to_vec();
+        .into_iter()
+        // An absolute path that exists on this machine is still outside the checkout's names.
+        .chain([dir.join("crates/x/src/a.rs").to_string_lossy().into_owned()])
+        .collect();
         let facts = repo_facts(&dir, &asked, &[]).unwrap();
         assert_eq!(facts.files_present, ["crates/x/src/a.rs"]);
         assert_eq!(facts.files_missing, ["gone/file.rs"]);
