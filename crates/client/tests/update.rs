@@ -114,7 +114,7 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     assert!(child.wait().unwrap().success());
 
     // The same release feed offers 99.0.0; a copy of the binary updates itself.
-    let name = format!("cairn-{}", env!("CAIRN_TARGET"));
+    let name = "cairn-x86_64-unknown-linux-musl".to_owned();
     let binary = b"#!/bin/sh\necho 'cairn 99.0.0'\n".to_vec();
     let sums = format!("{:x}  {name}\n", Sha256::digest(&binary));
     let base = serve(vec![
@@ -133,6 +133,7 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let output = update
         .arg("update")
         .env("CAIRN_UPDATE_URL", format!("{feed}/releases/latest"))
+        .env("CAIRN_UPDATE_TARGET", "x86_64-unknown-linux-musl")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

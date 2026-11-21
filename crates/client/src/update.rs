@@ -21,6 +21,9 @@ const API_URL: &str = "https://api.github.com/repos/cunilab/cairn-memory/release
 /// Replaces `API_URL` in debug builds only (tests); a release build ignores it, so the
 /// environment cannot point an installed `cairn` at another update source.
 const API_ENV: &str = "CAIRN_UPDATE_URL";
+/// Debug builds only (tests): names the release target to fetch, so a test does not depend
+/// on the host being one `release.yml` builds.
+const TARGET_ENV: &str = "CAIRN_UPDATE_TARGET";
 const NO_CHECK_ENV: &str = "CAIRN_NO_UPDATE_CHECK";
 const SUMS_ASSET: &str = "SHA256SUMS";
 /// The targets `release.yml` builds; keep the two lists together. Linux uses musl so one
@@ -453,7 +456,11 @@ pub fn update(check_only: bool) -> Result<(), Error> {
     let exe = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
         .map_err(|error| Error::Config(format!("cannot locate the cairn executable: {error}")))?;
-    println!("{}", run(&api_url()?, TARGET, &exe, check_only)?);
+    let target = std::env::var(TARGET_ENV)
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .unwrap_or_else(|| TARGET.to_owned());
+    println!("{}", run(&api_url()?, &target, &exe, check_only)?);
     if !check_only {
         // The hook commands name the executable; keep them pointing at it.
         for line in crate::setup::refresh(&exe) {
