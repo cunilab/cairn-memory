@@ -1,0 +1,13 @@
+minilm {"query_ms": 2.7, "doc_ms": 11.7, "batch8_doc_ms": 98.1, "batch32_doc_ms": 463.5, "mean_doc_tokens": 94, "peak_rss_mb": 246, "size_mb": 90}
+minilm-q {"query_ms": 1.7, "doc_ms": 9.1, "batch8_doc_ms": 84.1, "batch32_doc_ms": 355.3, "mean_doc_tokens": 94, "peak_rss_mb": 162, "size_mb": 23}
+bge-small {"query_ms": 6.2, "doc_ms": 24.8, "batch8_doc_ms": 220.1, "batch32_doc_ms": 1044.9, "mean_doc_tokens": 94, "peak_rss_mb": 323, "size_mb": 133}
+bge-small-q {"query_ms": 4.2, "doc_ms": 21.4, "batch8_doc_ms": 173.8, "batch32_doc_ms": 728.0, "mean_doc_tokens": 94, "peak_rss_mb": 158, "size_mb": 34}
+e5-small {"query_ms": 7.8, "doc_ms": 33.1, "batch8_doc_ms": 232.3, "batch32_doc_ms": 991.5, "mean_doc_tokens": 94, "peak_rss_mb": 309, "size_mb": 133}
+gte-small {"query_ms": 5.7, "doc_ms": 27.4, "batch8_doc_ms": 237.7, "batch32_doc_ms": 973.6, "mean_doc_tokens": 94, "peak_rss_mb": 348, "size_mb": 133}
+gte-base {"query_ms": 20.9, "doc_ms": 99.8, "batch8_doc_ms": 974.9, "batch32_doc_ms": 4060.4, "mean_doc_tokens": 94, "peak_rss_mb": 825, "size_mb": 436}
+bge-base {"query_ms": 22.1, "doc_ms": 98.8, "batch8_doc_ms": 990.6, "batch32_doc_ms": 4089.8, "mean_doc_tokens": 94, "peak_rss_mb": 674, "size_mb": 436}
+bge-base-q {"query_ms": 14.4, "doc_ms": 76.7, "batch8_doc_ms": 667.8, "batch32_doc_ms": 2773.2, "mean_doc_tokens": 94, "peak_rss_mb": 333, "size_mb": 110}
+nomic-v15 {"query_ms": 28.9, "doc_ms": 138.7, "batch8_doc_ms": 1332.5, "batch32_doc_ms": 5801.6, "mean_doc_tokens": 94, "peak_rss_mb": 916, "size_mb": 547}
+nomic-v15-q {"query_ms": 18.1, "doc_ms": 88.9, "batch8_doc_ms": 856.8, "batch32_doc_ms": 3752.7, "mean_doc_tokens": 94, "peak_rss_mb": 719, "size_mb": 137}
+minilm {"query_ms": 3.9, "doc_ms": 18.2, "batch8_doc_ms": 133.9, "batch32_doc_ms": 569.2, "mean_doc_tokens": 94, "peak_rss_mb": 316, "size_mb": 90}
+ 1:25  up 3 days, 13:59, 9 users, load averages: 11.78 14.91 22.21

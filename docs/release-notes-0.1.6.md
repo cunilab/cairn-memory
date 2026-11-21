@@ -15,8 +15,9 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
   while they work. No Python needed.
 - **Automatic memory care.** Cairn links, merges near-duplicates, marks stale memories and shares
   repeated lessons globally by itself. There is no review queue and nothing to approve.
-- **Better recall** with a small local embedding model (model: TODO). Benchmark: hit@5 TODO,
-  search reply ~TODO tokens, session overhead ~TODO tokens (final numbers TODO).
+- **Better recall** with a small local embedding model (all-MiniLM-L6-v2, 384 dimensions, runs inside the server).
+  Benchmark (43 questions among 2,000 unrelated memories): hit@5 0.65, 14 of 14 off-topic queries return nothing,
+  search reply ~133 tokens, session overhead ~1,160 tokens. Recall of pure paraphrases (no shared word) stays low (4 of 17).
 - **New web console:** Dashboard, Memories, Activity, Projects, Graph, Settings. Device health,
   setup command, export and import of your own memories.
 - Tested for Claude Code, Codex and OpenCode.
@@ -43,7 +44,3 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
 6. Run `cairn doctor` and check that every item passes.
 
 Repeat steps 2–6 on each machine.
-
-## TODO before release
-
-- Embedding model name and final benchmark numbers.

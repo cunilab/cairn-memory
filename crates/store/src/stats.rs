@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 /// Kinds a person expects to be reused: the ones the "never used" and link ratios talk about.
 const DURABLE: &str = "('decision','rule','gotcha','procedure','fact')";
 
-/// The benchmark card: the committed v2 run `bench/after-0.1.6-step6c-v2.json` (2,000 distractor
+/// The benchmark card: the committed v2 run `bench/after-0.1.6-embed-v2.json` (2,000 distractor
 /// memories, 43 questions). A unit test keeps these equal to the file.
 pub const BENCH: Bench = Bench {
     hit_at_5: 0.6512,
-    search_tokens: 290,
+    search_tokens: 133,
     get_tokens: 266,
     session_tokens: 1162,
 };
@@ -460,7 +460,7 @@ mod tests {
     fn bench_constants_equal_the_committed_run() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../bench/after-0.1.6-step6c-v2.json"
+            "/../../bench/after-0.1.6-embed-v2.json"
         );
         let file: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect("bench file")).unwrap();

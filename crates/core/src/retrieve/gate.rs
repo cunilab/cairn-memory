@@ -3,10 +3,9 @@
 
 /// Share of the query's lexemes the memory contains.
 pub const COVERAGE_MIN: f32 = 0.5;
-/// Cosine that keeps a hit with no word in common (a paraphrase).
-pub const COSINE_STRONG: f32 = 0.40;
-/// Cosine that keeps a hit with some word in common.
-pub const COSINE_WEAK: f32 = 0.25;
+/// Cosine that keeps a hit with no word in common (a paraphrase). Measured on bench v2 (see
+/// `docs/experiments/embedding-model-comparison.md`): 0.43 leaks no weak query.
+pub const COSINE_STRONG: f32 = 0.43;
 
 /// What the candidate load measured for one hit.
 #[derive(Clone, Copy, Debug)]
@@ -18,10 +17,7 @@ pub struct GateInput {
 }
 
 pub fn keep(g: &GateInput) -> bool {
-    g.entity_hit
-        || g.coverage >= COVERAGE_MIN
-        || g.cosine
-            .is_some_and(|c| c >= COSINE_STRONG || (g.coverage > 0.0 && c >= COSINE_WEAK))
+    g.entity_hit || g.coverage >= COVERAGE_MIN || g.cosine.is_some_and(|c| c >= COSINE_STRONG)
 }
 
 #[cfg(test)]
@@ -41,15 +37,14 @@ mod tests {
         assert!(keep(&input(true, 0.0, None)));
         assert!(keep(&input(false, 0.5, None)));
         assert!(keep(&input(false, 0.0, Some(COSINE_STRONG))));
-        assert!(keep(&input(false, 0.2, Some(COSINE_WEAK))));
-        assert!(!keep(&input(false, 0.0, Some(COSINE_WEAK))));
+        // Some shared words do not lower the cosine bar.
+        assert!(!keep(&input(false, 0.2, Some(0.30))));
     }
 
     #[test]
     fn gate_bounds_are_exact_edges() {
         let just_under = |bound: f32| bound - 0.001;
         assert!(!keep(&input(false, 0.0, Some(just_under(COSINE_STRONG)))));
-        assert!(!keep(&input(false, 0.2, Some(just_under(COSINE_WEAK)))));
         assert!(!keep(&input(false, just_under(COVERAGE_MIN), None)));
         // A single shared word in a long query keeps nothing on its own, whatever the corpus size.
         assert!(!keep(&input(false, 0.2, None)));

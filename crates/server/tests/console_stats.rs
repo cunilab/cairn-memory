@@ -308,7 +308,7 @@ async fn stats_usage_days_count_lookups_hits_and_tokens() {
     assert!(last["hits"].as_i64().unwrap() >= 2);
     // The benchmark card is the committed v2 run, current values only.
     assert_eq!(stats["bench"]["hit_at_5"], 0.6512);
-    assert_eq!(stats["bench"]["search_tokens"], 290);
+    assert_eq!(stats["bench"]["search_tokens"], 133);
     assert_eq!(stats["bench"]["get_tokens"], 266);
     assert!(stats["bench"]["session_tokens"].as_i64().unwrap() > 1000);
     app.finish().await;
