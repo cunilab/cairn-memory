@@ -584,46 +584,6 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
 }
 
 #[tokio::test]
-async fn resume_keeps_my_handoffs_among_other_members_handoffs() {
-    let Some(db) = TestDb::new().await else {
-        return;
-    };
-    let store = &db.store;
-    let me = db.person("me").await;
-    let other = db.person("other").await;
-    let (project, _) = store
-        .init_project(&me, "github.com/acme/cairn", None)
-        .await
-        .unwrap();
-    store
-        .join_project(&other, &project.project_id, None)
-        .await
-        .unwrap();
-    bulk_memories(
-        &db,
-        &me,
-        ("project", Some(&project.project_id)),
-        "handoff",
-        1,
-        0,
-    )
-    .await;
-    bulk_memories(
-        &db,
-        &other,
-        ("project", Some(&project.project_id)),
-        "handoff",
-        250,
-        60,
-    )
-    .await;
-    let pack = store.resume(&me, 10, &Default::default()).await.unwrap();
-    assert_eq!(pack.results.len(), 1);
-    assert_eq!(pack.results[0].memory.owner, me);
-    db.finish().await;
-}
-
-#[tokio::test]
 async fn diagnose_counts_only_my_jobs() {
     let Some(db) = TestDb::new().await else {
         return;

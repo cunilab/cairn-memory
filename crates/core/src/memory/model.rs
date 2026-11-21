@@ -116,6 +116,47 @@ pub struct Memory {
     pub usage: Usage,
 }
 
+/// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Record {
+    pub id: String,
+    pub kind: Kind,
+    pub scope: Scope,
+    pub status: Status,
+    pub title: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(skip_serializing_if = "Fields::is_empty")]
+    pub fields: Fields,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub updated_at: i64,
+}
+
+impl From<&Memory> for Record {
+    fn from(m: &Memory) -> Self {
+        Self {
+            id: m.id.clone(),
+            kind: m.kind,
+            scope: m.scope,
+            status: m.status,
+            title: m.title.clone(),
+            summary: m.summary.clone(),
+            reason: m.reason.clone(),
+            fields: m.fields.clone(),
+            evidence: m.evidence.clone(),
+            links: m.links.clone(),
+            branch: m.context.branch.clone(),
+            updated_at: m.updated_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Entity {
     pub kind: EntityKind,

@@ -22,14 +22,6 @@ pub struct Observation {
 }
 
 #[derive(Deserialize)]
-pub struct SessionStart {
-    #[serde(rename = "sessionId", alias = "session_id")]
-    session_id: String,
-    #[serde(default)]
-    context: WorkContext,
-}
-
-#[derive(Deserialize)]
 pub struct SessionRef {
     #[serde(rename = "sessionId", alias = "session_id")]
     session_id: String,
@@ -62,20 +54,6 @@ pub async fn observe(
         "event_id": result.event_id,
         "project_attachment": {"status": if attached { "attached" } else { "personal" }},
     })))
-}
-
-pub async fn start(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<SessionStart>,
-) -> Result<Json<Value>, ApiError> {
-    state
-        .store
-        .start_session(&account.person_id, &body.session_id, &body.context)
-        .await?;
-    Ok(Json(
-        json!({"session_id": body.session_id, "status": "started"}),
-    ))
 }
 
 /// Closes the session and queues its distill. `queued: false` means nothing was captured.

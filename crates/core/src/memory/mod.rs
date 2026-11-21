@@ -9,5 +9,6 @@ pub mod validate;
 
 pub use fields::Fields;
 pub use model::{
-    Context, Entity, EntityKind, Kind, Link, Memory, Relation, SaveInput, Scope, Status, Usage,
+    Context, Entity, EntityKind, Kind, Link, Memory, Record, Relation, SaveInput, Scope, Status,
+    Usage,
 };

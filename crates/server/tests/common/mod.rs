@@ -140,12 +140,3 @@ pub fn ids(reply: &Value) -> Vec<String> {
         .map(|m| m["id"].as_str().unwrap().to_owned())
         .collect()
 }
-
-pub fn titles(reply: &Value) -> Vec<String> {
-    reply["results"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .map(|m| m["title"].as_str().unwrap().to_owned())
-        .collect()
-}

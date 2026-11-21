@@ -85,10 +85,14 @@ async fn meaning_finds_memories_and_never_crosses_people() {
         Some(&mine)
     );
     assert!(ids(&app.post("search", query, &bob).await).is_empty());
-    let why = app
-        .post("why-changed", json!({"query": "invoice blank page"}), &bob)
+    let by_kind = app
+        .post(
+            "search",
+            json!({"query": "invoice blank page", "kind": "gotcha"}),
+            &bob,
+        )
         .await;
-    assert!(ids(&why).is_empty(), "{why}");
+    assert!(ids(&by_kind).is_empty(), "{by_kind}");
     app.finish().await;
 }
 

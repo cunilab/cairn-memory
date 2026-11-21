@@ -78,7 +78,6 @@ pub fn router() -> Router<AppState> {
         // capture
         .route("/cairn-memory/sync/push", post(capture::observe))
         .route("/cairn-memory/observe", post(capture::observe))
-        .route("/cairn-memory/session/start", post(capture::start))
         .route("/cairn-memory/session/end", post(capture::end))
         .route(
             "/cairn-memory/session/checkpoint",
@@ -86,23 +85,15 @@ pub fn router() -> Router<AppState> {
         )
         // memory
         .route("/cairn-memory/remember", post(memory::remember))
+        .route("/cairn-memory/get", post(memory::get_many))
         .route("/cairn-memory/memories", get(memory::list))
         .route("/cairn-memory/memories/{id}", get(memory::get))
         .route("/cairn-memory/feedback", post(memory::feedback))
         .route("/cairn-memory/forget", post(memory::forget))
-        .route("/cairn-memory/delete", post(memory::forget))
-        .route("/cairn-memory/supersede", post(memory::supersede))
-        .route("/cairn-memory/contradict", post(memory::contradict))
-        .route("/cairn-memory/links", post(memory::link))
-        .route("/cairn-memory/links/remove", post(memory::unlink))
+        .route("/cairn-memory/delete", post(memory::delete))
         // retrieve
         .route("/cairn-memory/search", post(retrieve::search))
-        .route("/cairn-memory/smart-search", post(retrieve::search))
         .route("/cairn-memory/context", post(retrieve::search))
-        .route("/cairn-memory/recall", post(retrieve::search))
-        .route("/cairn-memory/why-changed", post(retrieve::why_changed))
-        .route("/cairn-memory/resume", post(retrieve::resume))
-        .route("/cairn-memory/unresolved", post(retrieve::unresolved))
         .route("/cairn-memory/session/brief", post(retrieve::brief))
         .route("/cairn-memory/graph", get(retrieve::graph))
         .route("/cairn-memory/export", post(retrieve::export))

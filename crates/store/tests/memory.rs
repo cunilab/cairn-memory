@@ -291,17 +291,6 @@ async fn supersedes_and_contradicts_become_links_and_a_status_change() {
         Status::Active
     );
 
-    // add_link / remove_link are the thin writers over the same table.
-    db.store
-        .add_link(&me, &disputed, &old, Relation::Relates)
-        .await
-        .unwrap();
-    assert_eq!(db.store.get(&me, &old).await.unwrap().links.len(), 1);
-    db.store
-        .remove_link(&me, &disputed, &old, Relation::Relates)
-        .await
-        .unwrap();
-    assert!(db.store.get(&me, &old).await.unwrap().links.is_empty());
     db.finish().await;
 }
 

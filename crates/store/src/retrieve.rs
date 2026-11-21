@@ -2,14 +2,14 @@ use crate::embed::vector_text;
 use crate::memory::{MEMORY_SELECT, memory_from_row, visible};
 use crate::{Result, Store};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Fields, Kind, Memory, Status};
+use cairn_core::memory::{Memory, Status};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::retrieve::brief::session_brief;
 use cairn_core::retrieve::filter::{Filter, matches, passes_relevance_floor, tokenize};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
 use cairn_core::retrieve::hybrid::{CANDIDATES_PER_CHANNEL, fuse, kind_weight};
-use cairn_core::retrieve::pack::{Hit, Pack, pack};
+use cairn_core::retrieve::pack::{Cards, Hit, cards};
 use cairn_core::retrieve::rank::multiplier;
 use serde::Serialize;
 use sqlx::Row;
@@ -17,15 +17,6 @@ use std::collections::{BTreeMap, HashMap};
 
 /// Hits kept after fusion, before the request filter and floor trim them.
 const POOL: usize = 200;
-
-/// How `rank` treats the result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Agent search and context: the relevance floor applies.
-    Search,
-    /// Why-changed: no floor; decisions and replaced memories come first.
-    WhyChanged,
-}
 
 /// Counts for `GET /diagnose`: what the person can see, and their own share of the job queue.
 #[derive(Clone, Debug, Serialize)]
@@ -174,34 +165,13 @@ impl Store {
         vector: Option<&[f32]>,
         limit: usize,
         filter: &Filter,
-    ) -> Result<Pack> {
-        let hits = self
-            .rank(person_id, query, vector, filter, Mode::Search)
-            .await?;
-        self.packed(query, hits, limit).await
-    }
-
-    pub async fn why_changed(
-        &self,
-        person_id: &str,
-        query: &str,
-        vector: Option<&[f32]>,
-        limit: usize,
-        filter: &Filter,
-    ) -> Result<Pack> {
-        let hits = self
-            .rank(person_id, query, vector, filter, Mode::WhyChanged)
-            .await?;
-        self.packed(&format!("why changed: {query}"), hits, limit)
-            .await
-    }
-
-    async fn packed(&self, query: &str, hits: Vec<Hit>, limit: usize) -> Result<Pack> {
-        let pack = pack(query, hits, limit);
-        let ids: Vec<String> = pack.results.iter().map(|h| h.memory.id.clone()).collect();
+    ) -> Result<Cards> {
+        let hits = self.rank(person_id, query, vector, filter).await?;
+        let cards = cards(hits, limit);
+        let ids: Vec<String> = cards.results.iter().map(|c| c.id.clone()).collect();
         // An agent read counts as a fetch; the person's own pages use `get` and `list`.
         self.mark_fetched(&ids).await?;
-        Ok(pack)
+        Ok(cards)
     }
 
     async fn rank(
@@ -210,7 +180,6 @@ impl Store {
         query: &str,
         vector: Option<&[f32]>,
         filter: &Filter,
-        mode: Mode,
     ) -> Result<Vec<Hit>> {
         if query.trim().is_empty() {
             return Err(crate::StoreError::Validation(
@@ -249,7 +218,7 @@ impl Store {
                 let memory = by_id.get(&id)?.clone();
                 let eligible = memory.status != Status::Superseded
                     && matches(&memory, filter)
-                    && (mode == Mode::WhyChanged || passes_relevance_floor(&memory, query));
+                    && passes_relevance_floor(&memory, query);
                 eligible.then(|| Hit {
                     score: score * kind_weight(memory.kind) * multiplier(&memory.usage),
                     memory,
@@ -261,10 +230,6 @@ impl Store {
                 .total_cmp(&a.score)
                 .then_with(|| a.memory.id.cmp(&b.memory.id))
         });
-        if mode == Mode::WhyChanged {
-            // A stable sort keeps score order inside each class.
-            hits.sort_by_key(|h| std::cmp::Reverse(change_class(&h.memory)));
-        }
         Ok(hits)
     }
 
@@ -310,45 +275,6 @@ impl Store {
             sum.remove(id);
         }
         Ok(sum.into_iter().collect())
-    }
-
-    /// The person's live handoffs, newest first, narrowed by the filter.
-    pub async fn resume(&self, person_id: &str, limit: usize, filter: &Filter) -> Result<Pack> {
-        let handoffs = self.handoffs(person_id, filter).await?;
-        Ok(pack("resume", unit_hits(handoffs), limit))
-    }
-
-    /// Handoffs that still list next steps or open questions.
-    pub async fn unresolved(&self, person_id: &str, limit: usize, filter: &Filter) -> Result<Pack> {
-        let open: Vec<Memory> = self
-            .handoffs(person_id, filter)
-            .await?
-            .into_iter()
-            .filter(|m| {
-                matches!(&m.fields, Fields::Handoff(h)
-                    if !h.next_steps.is_empty() || !h.open_questions.is_empty())
-            })
-            .collect();
-        Ok(pack("unresolved", unit_hits(open), limit))
-    }
-
-    async fn handoffs(&self, person_id: &str, filter: &Filter) -> Result<Vec<Memory>> {
-        let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT}
-              WHERE m.owner_id = $1 AND m.kind = 'handoff' AND m.status = 'active' AND {}
-              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 200",
-            visible("m", "$1")
-        ))
-        .bind(person_id)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut memories = rows
-            .iter()
-            .map(memory_from_row)
-            .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
-        memories.retain(|m| matches(m, filter));
-        Ok(memories)
     }
 
     /// The fenced brief a hook injects at session start.
@@ -416,24 +342,6 @@ impl Store {
             self.person_job_counts(person_id).await?;
         Ok(out)
     }
-}
-
-fn unit_hits(memories: Vec<Memory>) -> Vec<Hit> {
-    memories
-        .into_iter()
-        .map(|memory| Hit { memory, score: 1.0 })
-        .collect()
-}
-
-/// Why-changed order: a decision or a memory that replaced or contradicts another, then one with
-/// a stated reason, then one with more links.
-fn change_class(m: &Memory) -> (bool, bool, usize) {
-    use cairn_core::memory::Relation;
-    let changes = m.kind == Kind::Decision
-        || m.links
-            .iter()
-            .any(|l| matches!(l.relation, Relation::Supersedes | Relation::Contradicts));
-    (changes, !m.reason.is_empty(), m.links.len())
 }
 
 /// Entity names a query can match: its paths and code spans, every word as typed and

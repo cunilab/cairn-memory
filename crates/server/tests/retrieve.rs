@@ -2,7 +2,7 @@
 //! person's private memory never reaches another person's response.
 
 mod common;
-use common::{App, ids, titles};
+use common::{App, ids};
 use serde_json::json;
 
 async fn save(app: &App, token: &str, body: serde_json::Value) -> String {
@@ -18,12 +18,6 @@ async fn session_distills_into_notes_and_a_handoff() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let context = json!({"repository": "r", "branch": "main", "files": ["src/queue.rs"]});
-    app.post(
-        "session/start",
-        json!({"sessionId": "s1", "context": context}),
-        &device,
-    )
-    .await;
     let event = |id: &str, content: &str| json!({"eventId": id, "sessionId": "s1", "role": "assistant", "source": "hook", "content": content, "context": context, "importance": "high"});
     let first = app
         .post(
@@ -91,22 +85,31 @@ async fn session_distills_into_notes_and_a_handoff() {
         "the checkpoint already distilled everything"
     );
 
-    let resume = app
-        .post("resume", json!({"limit": 5, "context": context}), &device)
+    // The handoff is found by kind, and `memory_get` shows its next steps. Another kind finds none.
+    let handoff = app
+        .post(
+            "search",
+            json!({"query": "Handoff s1", "kind": "handoff", "context": context}),
+            &device,
+        )
         .await;
-    assert_eq!(resume["results"].as_array().unwrap().len(), 1, "{resume}");
-    assert_eq!(resume["results"][0]["kind"], "handoff");
+    assert_eq!(handoff["results"].as_array().unwrap().len(), 1, "{handoff}");
+    assert_eq!(handoff["results"][0]["kind"], "handoff");
+    let got = app
+        .post("get", json!({"ids": ids(&handoff)}), &device)
+        .await;
     assert!(
-        resume["results"][0]["fields"]["next_steps"][0]
+        got["memories"][0]["fields"]["next_steps"][0]
             .as_str()
             .unwrap()
             .contains("TODO")
     );
-    let unresolved = app.post("unresolved", json!({"limit": 5}), &device).await;
-    assert_eq!(ids(&unresolved), ids(&resume));
-    // Another session or branch does not see the handoff when the filter names it.
     let other = app
-        .post("resume", json!({"sessionId": "s2"}), &device)
+        .post(
+            "search",
+            json!({"query": "Handoff s1", "kind": "decision"}),
+            &device,
+        )
         .await;
     assert!(ids(&other).is_empty());
 
@@ -131,12 +134,10 @@ async fn session_distills_into_notes_and_a_handoff() {
     app.post("session/end", json!({"sessionId": "s1"}), &device)
         .await;
     app.settle().await;
-    let resume = app
-        .post("resume", json!({"limit": 5, "context": context}), &device)
-        .await;
-    assert_eq!(resume["results"].as_array().unwrap().len(), 1);
+    let handoffs = app.get("memories?kind=handoff", &device).await;
+    assert_eq!(handoffs.as_array().unwrap().len(), 1);
     assert!(
-        resume["results"][0]["fields"]["next_steps"]
+        handoffs[0]["fields"]["next_steps"]
             .to_string()
             .contains("retry metric")
     );
@@ -257,16 +258,14 @@ async fn search_ranks_filters_and_never_leaks() {
         )
         .await;
     assert_eq!(ids(&found), vec![queue.clone()]);
-    assert_eq!(found["results"][0]["fields"]["alternatives"][0], "Redis");
-    assert!(found["results"][0].get("usage").is_none());
+    let keys: Vec<_> = found["results"][0].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["id", "kind", "score", "summary", "title"]);
+    let got = app.post("get", json!({"ids": [&queue]}), &bob_device).await;
+    assert_eq!(got["memories"][0]["fields"]["alternatives"][0], "Redis");
+    assert!(got["memories"][0].get("usage").is_none());
     // A link from alice's private memory to the project decision is invisible to bob: it adds
     // no hit and shows up in no `links` list.
-    app.post(
-        "links",
-        json!({"sourceId": secret, "relation": "relates", "targetId": queue}),
-        &admin,
-    )
-    .await;
+    let linker = save(&app, &admin, json!({"kind": "gotcha", "title": "Private queue quirk", "summary": "Claims lag.", "reason": "seen", "scope": "personal", "contradicts": queue, "fields": {"symptom": "lag"}})).await;
     let linked = app
         .post(
             "search",
@@ -275,10 +274,14 @@ async fn search_ranks_filters_and_never_leaks() {
         )
         .await;
     assert_eq!(ids(&linked), vec![queue.clone()]);
-    assert!(linked["results"][0].get("links").is_none(), "{linked}");
+    let theirs = app
+        .post("get", json!({"ids": [&queue, &linker]}), &bob_device)
+        .await;
+    assert!(theirs["memories"][0].get("links").is_none(), "{theirs}");
+    assert_eq!(theirs["missing"][0], linker.as_str());
     let mine = app.get(&format!("memories/{queue}"), &admin).await;
     assert_eq!(
-        mine["links"][0]["relation"], "relates",
+        mine["links"][0]["relation"], "contradicts",
         "the owner of the link sees it"
     );
     let graph = app.get("graph", &bob_device).await;
@@ -288,7 +291,7 @@ async fn search_ranks_filters_and_never_leaks() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|n| n["memory_id"] != secret.as_str())
+                .all(|n| n["memory_id"] != linker.as_str())
     );
     // A project filter for another project hides it.
     let elsewhere = app
@@ -334,7 +337,7 @@ async fn search_ranks_filters_and_never_leaks() {
 }
 
 #[tokio::test]
-async fn why_changed_graph_export_and_diagnose() {
+async fn supersede_graph_export_and_diagnose() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "d").await;
@@ -349,12 +352,10 @@ async fn why_changed_graph_export_and_diagnose() {
         app.get(&format!("memories/{old}"), &device).await["status"],
         "superseded"
     );
-    let why = app
-        .post("why-changed", json!({"query": "sessions cache"}), &device)
-        .await;
-    assert_eq!(ids(&why), vec![new.clone()]);
-    assert_eq!(why["results"][0]["links"][0]["relation"], "supersedes");
-    assert_eq!(titles(&why), vec!["Cache sessions in Postgres"]);
+    let got = app.post("get", json!({"ids": [&new, &old]}), &device).await;
+    assert_eq!(got["memories"][0]["links"][0]["relation"], "supersedes");
+    assert_eq!(got["memories"][0]["title"], "Cache sessions in Postgres");
+    assert_eq!(got["memories"][1]["status"], "superseded");
 
     let graph = app.get("graph", &device).await;
     assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
@@ -391,7 +392,10 @@ async fn why_changed_graph_export_and_diagnose() {
             &device,
         )
         .await;
-    assert_eq!(marked["status"], "stale");
+    assert_eq!(
+        (marked["status"].as_str(), marked["id"].as_str()),
+        (Some("stale"), Some(new.as_str()))
+    );
     let (status, _) = app
         .send(
             "POST",
@@ -401,17 +405,89 @@ async fn why_changed_graph_export_and_diagnose() {
         )
         .await;
     assert_eq!(status, 400);
-    // Unlinking the supersession restores the old memory.
-    app.post(
-        "links/remove",
-        json!({"sourceId": new, "relation": "supersedes", "targetId": old}),
-        &device,
-    )
-    .await;
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn get_returns_requested_records_and_names_the_rest() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let bob = app.member(&admin, "bob").await;
+    let mine = save(&app, &admin, json!({"kind": "fact", "title": "Mine", "summary": "s", "reason": "r", "scope": "personal", "fields": {"source": "docs"}})).await;
+    let shared = save(&app, &admin, json!({"kind": "fact", "title": "Shared", "summary": "s", "reason": "r", "scope": "global"})).await;
+    let got = app
+        .post("get", json!({"ids": [shared, "nope", mine]}), &admin)
+        .await;
+    let order: Vec<_> = got["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["Shared", "Mine"]);
+    assert_eq!(got["missing"], json!(["nope"]));
+    let keys: Vec<_> = got["memories"][1].as_object().unwrap().keys().collect();
     assert_eq!(
-        app.get(&format!("memories/{old}"), &device).await["status"],
-        "active"
+        keys,
+        [
+            "fields",
+            "id",
+            "kind",
+            "reason",
+            "scope",
+            "status",
+            "summary",
+            "title",
+            "updated_at"
+        ]
     );
+    // Another person's private memory is missing for them; empty `missing` is left out.
+    let theirs = app.post("get", json!({"ids": [mine]}), &bob).await;
+    assert_eq!(
+        (
+            theirs["memories"].as_array().unwrap().len(),
+            &theirs["missing"]
+        ),
+        (0, &json!([mine]))
+    );
+    assert!(got["memories"][0].get("fields").is_none());
+    for ids in [json!([]), json!(vec!["a"; 11]), json!(["x".repeat(129)])] {
+        let (status, _) = app
+            .send("POST", "get", json!({"ids": ids}), Some(&admin))
+            .await;
+        assert_eq!(status, 400);
+    }
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn removed_routes_and_unknown_search_keys_are_refused() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    for path in [
+        "smart-search",
+        "recall",
+        "why-changed",
+        "resume",
+        "unresolved",
+        "session/start",
+        "supersede",
+        "contradict",
+        "links",
+        "links/remove",
+    ] {
+        let (status, _) = app.send("POST", path, json!({}), Some(&admin)).await;
+        assert_eq!(status, 404, "{path}");
+    }
+    let (status, _) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "x", "sessionId": "s1"}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 422, "unknown search keys are refused");
     app.finish().await;
 }
 

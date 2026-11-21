@@ -4,39 +4,34 @@ use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Query, State};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Relation, Scope};
+use cairn_core::memory::{Kind, Relation, Scope};
 use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
-use cairn_core::retrieve::pack::Pack;
+use cairn_core::retrieve::pack::Cards;
 use cairn_store::export::Export;
 use cairn_store::retrieve::Diagnostics;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const MAX_LIMIT: usize = 100;
+const MAX_LIMIT: usize = 20;
 
-fn default_limit() -> usize {
-    10
+fn five() -> usize {
+    5
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Search {
     query: String,
-    #[serde(default = "default_limit")]
-    limit: usize,
-    #[serde(rename = "sessionId", alias = "session_id", default)]
-    session_id: Option<String>,
     #[serde(default)]
-    context: Option<WorkContext>,
-}
-
-#[derive(Deserialize)]
-pub struct Continuity {
-    #[serde(default = "default_limit")]
+    kind: Option<Kind>,
+    #[serde(default = "five")]
     limit: usize,
-    #[serde(rename = "sessionId", alias = "session_id", default)]
-    session_id: Option<String>,
+    /// Tokens; accepted and ignored until step 5.
+    #[serde(default)]
+    #[allow(dead_code)]
+    budget: Option<usize>,
     #[serde(default)]
     context: Option<WorkContext>,
 }
@@ -56,17 +51,6 @@ pub struct GraphQuery {
     cap: Option<usize>,
 }
 
-fn limit(requested: usize) -> usize {
-    requested.clamp(1, MAX_LIMIT)
-}
-
-fn filter(session_id: Option<String>, context: Option<WorkContext>) -> Filter {
-    Filter {
-        session_id,
-        context,
-    }
-}
-
 /// The query vector, when the embedding model is loaded and free; otherwise lexical and entity
 /// recall carry the search.
 async fn vector(state: &AppState, query: &str) -> Option<Vec<f32>> {
@@ -76,13 +60,18 @@ async fn vector(state: &AppState, query: &str) -> Option<Vec<f32>> {
     }
 }
 
-/// `/search`, `/smart-search`, `/context` and `/recall` are one search.
+/// `/search`, and `/context` for the hook until step 4: cards, not rows.
 pub async fn search(
     State(state): State<AppState>,
     Agent(account): Agent,
     Json(body): Json<Search>,
-) -> ApiResult<Pack> {
+) -> ApiResult<Cards> {
     let vector = vector(&state, &body.query).await;
+    let filter = Filter {
+        kind: body.kind,
+        context: body.context,
+        ..Filter::default()
+    };
     Ok(Json(
         state
             .store
@@ -90,62 +79,8 @@ pub async fn search(
                 &account.person_id,
                 &body.query,
                 vector.as_deref(),
-                limit(body.limit),
-                &filter(body.session_id, body.context),
-            )
-            .await?,
-    ))
-}
-
-pub async fn why_changed(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<Search>,
-) -> ApiResult<Pack> {
-    let vector = vector(&state, &body.query).await;
-    Ok(Json(
-        state
-            .store
-            .why_changed(
-                &account.person_id,
-                &body.query,
-                vector.as_deref(),
-                limit(body.limit),
-                &filter(body.session_id, body.context),
-            )
-            .await?,
-    ))
-}
-
-pub async fn resume(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<Continuity>,
-) -> ApiResult<Pack> {
-    Ok(Json(
-        state
-            .store
-            .resume(
-                &account.person_id,
-                limit(body.limit),
-                &filter(body.session_id, body.context),
-            )
-            .await?,
-    ))
-}
-
-pub async fn unresolved(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<Continuity>,
-) -> ApiResult<Pack> {
-    Ok(Json(
-        state
-            .store
-            .unresolved(
-                &account.person_id,
-                limit(body.limit),
-                &filter(body.session_id, body.context),
+                body.limit.clamp(1, MAX_LIMIT),
+                &filter,
             )
             .await?,
     ))

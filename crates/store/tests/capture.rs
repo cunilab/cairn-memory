@@ -85,17 +85,12 @@ async fn bare_project_context_inherits_the_session_context() {
         return;
     };
     let me = db.person("me").await;
-    db.store
-        .start_session(
-            &me,
-            "s1",
-            &WorkContext {
-                branch: Some("feature".into()),
-                ..WorkContext::default()
-            },
-        )
-        .await
-        .unwrap();
+    let first: ObservationInput = serde_json::from_value(serde_json::json!({
+        "event_id": "e0", "session_id": "s1", "content": "x", "role": "user", "source": "cli",
+        "context": {"branch": "feature"}
+    }))
+    .unwrap();
+    db.store.capture(&me, first).await.unwrap();
     let bare: ObservationInput = serde_json::from_value(serde_json::json!({
         "event_id": "e1", "session_id": "s1", "content": "x", "role": "user", "source": "cli"
     }))

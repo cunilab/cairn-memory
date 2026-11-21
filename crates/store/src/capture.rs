@@ -29,30 +29,6 @@ pub struct SweepReport {
 }
 
 impl Store {
-    /// Opens or refreshes a session row and returns nothing; captures also open sessions.
-    pub async fn start_session(
-        &self,
-        person_id: &str,
-        session_id: &str,
-        work: &WorkContext,
-    ) -> Result<()> {
-        if session_id.trim().is_empty() {
-            return Err(StoreError::Validation(
-                "session_id must not be empty".into(),
-            ));
-        }
-        let project_id = self.context_project(person_id, work).await?;
-        upsert_session(
-            &self.pool,
-            person_id,
-            session_id,
-            project_id.as_deref(),
-            work,
-            false,
-        )
-        .await
-    }
-
     /// Stores one redacted observation. The same event id with the same content is a duplicate;
     /// with other content it is a 409.
     pub async fn capture(&self, person_id: &str, input: ObservationInput) -> Result<CaptureResult> {

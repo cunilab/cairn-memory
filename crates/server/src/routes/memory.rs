@@ -6,10 +6,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory, Relation, SaveInput, Scope, Status};
+use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
 use cairn_store::memory::{ListFilter, Vote};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::collections::HashMap;
 
 #[derive(Serialize)]
 pub struct Receipt {
@@ -32,34 +33,22 @@ pub struct Target {
 
 #[derive(Deserialize)]
 pub struct Feedback {
-    #[serde(rename = "memoryId", alias = "memory_id", alias = "id")]
-    memory_id: String,
+    #[serde(alias = "memoryId", alias = "memory_id")]
+    id: String,
     vote: String,
 }
 
 #[derive(Deserialize)]
-pub struct Supersede {
-    #[serde(rename = "successorId", alias = "successor_id")]
-    successor_id: String,
-    #[serde(rename = "targetId", alias = "target_id")]
-    target_id: String,
+pub struct GetMany {
+    ids: Vec<String>,
 }
 
-#[derive(Deserialize)]
-pub struct Contradict {
-    #[serde(rename = "contradictingId", alias = "contradicting_id")]
-    contradicting_id: String,
-    #[serde(rename = "contradictedId", alias = "contradicted_id")]
-    contradicted_id: String,
-}
-
-#[derive(Deserialize)]
-pub struct LinkBody {
-    #[serde(rename = "sourceId", alias = "source_id")]
-    source_id: String,
-    relation: Relation,
-    #[serde(rename = "targetId", alias = "target_id")]
-    target_id: String,
+/// `missing` holds ids that do not exist or that the person cannot see.
+#[derive(Serialize)]
+pub struct Got {
+    memories: Vec<Record>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -133,120 +122,80 @@ pub async fn get(
     Agent(account): Agent,
     Path(id): Path<String>,
 ) -> ApiResult<Memory> {
-    let memory = state.store.get(&account.person_id, &id).await?;
-    state
+    Ok(Json(state.store.get(&account.person_id, &id).await?))
+}
+
+/// The agent read: up to 10 records in request order, each counted as a fetch.
+pub async fn get_many(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Json(body): Json<GetMany>,
+) -> ApiResult<Got> {
+    if body.ids.is_empty() || body.ids.len() > 10 || body.ids.iter().any(|id| id.len() > 128) {
+        return Err(ApiError::invalid(
+            "ids: 1 to 10 ids of at most 128 characters",
+        ));
+    }
+    let mut found: HashMap<String, Memory> = state
         .store
-        .mark_fetched(std::slice::from_ref(&memory.id))
-        .await?;
-    Ok(Json(memory))
+        .memories_by_ids(&account.person_id, &body.ids)
+        .await?
+        .into_iter()
+        .map(|m| (m.id.clone(), m))
+        .collect();
+    let (mut memories, mut missing) = (Vec::new(), Vec::new());
+    for id in body.ids {
+        match found.remove(&id) {
+            Some(memory) => memories.push(Record::from(&memory)),
+            None => missing.push(id),
+        }
+    }
+    let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
+    state.store.mark_fetched(&fetched).await?;
+    Ok(Json(Got { memories, missing }))
 }
 
 pub async fn feedback(
     State(state): State<AppState>,
     Agent(account): Agent,
     Json(body): Json<Feedback>,
-) -> ApiResult<Memory> {
+) -> ApiResult<Value> {
     let vote = match body.vote.as_str() {
         "helpful" => Vote::Helpful,
         "wrong" | "stale" => Vote::Wrong,
         _ => return Err(ApiError::invalid("vote must be helpful or wrong")),
     };
-    state
+    let status = state
         .store
-        .feedback(&account.person_id, &body.memory_id, vote)
+        .feedback(&account.person_id, &body.id, vote)
         .await?;
-    Ok(Json(
-        state.store.get(&account.person_id, &body.memory_id).await?,
-    ))
+    Ok(Json(json!({"id": body.id, "status": status})))
 }
 
-/// Forget (also the console's delete): the owner's memory is blanked and stays forgotten.
+/// Forget: the owner's memory is blanked and stays forgotten.
 pub async fn forget(
     State(state): State<AppState>,
     Agent(account): Agent,
     Json(body): Json<Target>,
+) -> ApiResult<Value> {
+    let id = erase(&state, &account.person_id, body).await?;
+    Ok(Json(json!({"id": id, "status": "forgotten"})))
+}
+
+/// The console's delete: the same erase, no body.
+pub async fn delete(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Json(body): Json<Target>,
 ) -> Result<StatusCode, ApiError> {
-    let id = body
-        .memory_id
-        .ok_or_else(|| ApiError::invalid("id is required"))?;
-    state.store.forget(&account.person_id, &id).await?;
+    erase(&state, &account.person_id, body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn supersede(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<Supersede>,
-) -> ApiResult<Memory> {
-    linked(
-        &state,
-        &account.person_id,
-        &body.successor_id,
-        &body.target_id,
-        Relation::Supersedes,
-    )
-    .await
-}
-
-pub async fn contradict(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<Contradict>,
-) -> ApiResult<Memory> {
-    linked(
-        &state,
-        &account.person_id,
-        &body.contradicting_id,
-        &body.contradicted_id,
-        Relation::Contradicts,
-    )
-    .await
-}
-
-pub async fn link(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<LinkBody>,
-) -> ApiResult<Memory> {
-    linked(
-        &state,
-        &account.person_id,
-        &body.source_id,
-        &body.target_id,
-        body.relation,
-    )
-    .await
-}
-
-pub async fn unlink(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-    Json(body): Json<LinkBody>,
-) -> ApiResult<Memory> {
-    state
-        .store
-        .remove_link(
-            &account.person_id,
-            &body.source_id,
-            &body.target_id,
-            body.relation,
-        )
-        .await?;
-    Ok(Json(
-        state.store.get(&account.person_id, &body.source_id).await?,
-    ))
-}
-
-async fn linked(
-    state: &AppState,
-    person_id: &str,
-    source: &str,
-    target: &str,
-    relation: Relation,
-) -> ApiResult<Memory> {
-    state
-        .store
-        .add_link(person_id, source, target, relation)
-        .await?;
-    Ok(Json(state.store.get(person_id, source).await?))
+async fn erase(state: &AppState, person_id: &str, body: Target) -> Result<String, ApiError> {
+    let id = body
+        .memory_id
+        .ok_or_else(|| ApiError::invalid("id is required"))?;
+    state.store.forget(person_id, &id).await?;
+    Ok(id)
 }

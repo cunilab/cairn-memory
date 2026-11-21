@@ -19,12 +19,11 @@ export function MemoryFeedback({
     setPending(vote);
     setError(null);
     try {
-      onUpdated(
-        await cairn<ProjectMemory>("feedback", {
-          method: "POST",
-          body: JSON.stringify({ memoryId: memory.id, vote }),
-        }),
-      );
+      await cairn("feedback", {
+        method: "POST",
+        body: JSON.stringify({ id: memory.id, vote }),
+      });
+      onUpdated(await cairn<ProjectMemory>(`memories/${memory.id}`));
     } catch (cause: unknown) {
       setError(cause instanceof Error ? cause.message : "Could not save feedback");
     } finally {

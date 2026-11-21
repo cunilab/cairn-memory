@@ -6,18 +6,24 @@ use crate::process::distill::handoff_id;
 use serde::Deserialize;
 use std::collections::HashSet;
 
-/// What the caller is working on. With neither field set, nothing is narrowed.
+/// What the caller is working on, and the kind it asks for. With no field set, nothing is
+/// narrowed.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Filter {
     #[serde(rename = "sessionId", alias = "session_id", default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub context: Option<WorkContext>,
+    #[serde(default)]
+    pub kind: Option<Kind>,
 }
 
-/// Global memories always match. A project memory matches the context's project. A handoff
+/// A memory of another kind never matches. Global memories always match. A project memory matches the context's project. A handoff
 /// matches its own session and repository, branch and worktree; other personal memories match.
 pub fn matches(memory: &Memory, filter: &Filter) -> bool {
+    if filter.kind.is_some_and(|kind| kind != memory.kind) {
+        return false;
+    }
     if filter.session_id.is_none() && filter.context.is_none() {
         return true;
     }
@@ -141,21 +147,32 @@ mod tests {
         let m = memory("a", Kind::Rule, Scope::Project);
         assert!(matches(&m, &Filter::default()));
         let other = Filter {
-            session_id: None,
             context: Some(WorkContext {
                 project_id: Some("p2".into()),
                 ..WorkContext::default()
             }),
+            ..Filter::default()
         };
         assert!(!matches(&m, &other));
         let own = Filter {
-            session_id: None,
             context: Some(WorkContext {
                 project_id: Some("p1".into()),
                 ..WorkContext::default()
             }),
+            ..Filter::default()
         };
         assert!(matches(&m, &own));
+    }
+
+    #[test]
+    fn kind_filter_narrows_to_that_kind() {
+        let m = memory("a", Kind::Rule, Scope::Global);
+        let want = |kind| Filter {
+            kind: Some(kind),
+            ..Filter::default()
+        };
+        assert!(matches(&m, &want(Kind::Rule)));
+        assert!(!matches(&m, &want(Kind::Decision)));
     }
 
     #[test]
@@ -164,7 +181,7 @@ mod tests {
         h.id = handoff_id(&h.owner, "s1");
         let for_session = |s: &str| Filter {
             session_id: Some(s.into()),
-            context: None,
+            ..Filter::default()
         };
         assert!(matches(&h, &for_session("s1")));
         assert!(!matches(&h, &for_session("s2")));

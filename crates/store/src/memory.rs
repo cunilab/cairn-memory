@@ -425,69 +425,6 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
-
-    /// A graph edge written by an agent. `supersedes` also hides the target (same rules as save).
-    pub async fn add_link(
-        &self,
-        person_id: &str,
-        source: &str,
-        target: &str,
-        relation: Relation,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(&format!(
-            "SELECT m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND m.owner_id = $1 AND {}",
-            visible("m", "$1")
-        ))
-        .bind(person_id)
-        .bind(source)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
-        let scope: Scope = parse(&row, "scope")?;
-        let project_id: Option<String> = row.try_get("project_id")?;
-        link_tx(
-            &mut tx,
-            person_id,
-            source,
-            scope,
-            project_id.as_deref(),
-            target,
-            relation,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn remove_link(
-        &self,
-        person_id: &str,
-        source: &str,
-        target: &str,
-        relation: Relation,
-    ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let deleted = sqlx::query(
-            "DELETE FROM links l USING memories m
-              WHERE l.source_id = $2 AND l.target_id = $3 AND l.relation = $4
-                AND m.memory_id = l.source_id AND m.owner_id = $1",
-        )
-        .bind(person_id)
-        .bind(source)
-        .bind(target)
-        .bind(relation.as_str())
-        .execute(&mut *tx)
-        .await?;
-        if deleted.rows_affected() == 0 {
-            return Err(StoreError::NotFound("link".into()));
-        }
-        if relation == Relation::Supersedes {
-            restore_if_unsuperseded(&mut tx, target).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
 }
 
 /// Back to `active` when no remaining live memory supersedes it.

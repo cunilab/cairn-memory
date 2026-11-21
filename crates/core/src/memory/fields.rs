@@ -82,6 +82,11 @@ impl Fields {
         })
     }
 
+    /// True when `to_json()` is `{}`.
+    pub fn is_empty(&self) -> bool {
+        self.to_json().as_object().is_none_or(|o| o.is_empty())
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Self::Decision(_) => Kind::Decision,
