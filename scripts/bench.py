@@ -282,8 +282,9 @@ def main():
         # Load the corpus through the same /remember route the save tools use.
         ids = {}
         for memory in corpus:
-            body = {k: v for k, v in memory.items() if k != "key"}
-            body.update(scope="project", context=context)
+            body = {k: v for k, v in memory.items() if k not in ("key", "context")}
+            # A corpus memory's own `context.files` (step 6 §6) rides in the request context, where entities read it.
+            body.update(scope="project", context={**context, **memory.get("context", {})})
             reply = http.call("/remember", body, device)
             ids[memory["key"]] = reply["id"]
         assert len(set(ids.values())) == len(corpus), "a corpus memory was merged into another on save"
