@@ -264,10 +264,6 @@ private_id="$(printf '%s' "$private_json" | python3 -c 'import json,sys; print(j
 
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"session_id":"web-project","context":{"repository":"cairn-demo","commit":"abc1234"}}' \
-  "${api}/cairn-memory/session/start" >/dev/null
-curl -fsS -H 'content-type: application/json' \
-  -H "authorization: Bearer ${device_token}" \
   -d '{"event_id":"evt-project","session_id":"web-project","content":"repository cache decision is ready for the project","role":"agent","source":"hook"}' \
   "${api}/cairn-memory/observe" >/dev/null
 curl -fsS -H 'content-type: application/json' \
@@ -535,11 +531,11 @@ if [ -z "$new_token" ] || [ "$new_token" = "$old_token" ]; then
   exit 1
 fi
 old_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -H "authorization: Bearer ${old_token}" -d '{"session_id":"rotate-old","context":{}}' \
-  "${api}/cairn-memory/session/start")"
+  -H "authorization: Bearer ${old_token}" -d '{"context":{}}' \
+  "${api}/cairn-memory/session/brief")"
 new_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -H "authorization: Bearer ${new_token}" -d '{"session_id":"rotate-new","context":{}}' \
-  "${api}/cairn-memory/session/start")"
+  -H "authorization: Bearer ${new_token}" -d '{"context":{}}' \
+  "${api}/cairn-memory/session/brief")"
 if [ "$old_code" != "401" ] || [ "$new_code" != "200" ]; then
   printf '%s\n' "rotated token status old=${old_code} new=${new_code}" >&2
   exit 1

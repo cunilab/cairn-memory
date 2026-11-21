@@ -120,12 +120,12 @@ class Mcp:
         return reply["result"]
 
     def tool(self, name, **arguments):
-        """Returns (structured result, wire bytes of the MCP result, bytes of the text channel)."""
+        """Returns (parsed result, wire bytes of the MCP result, bytes of the text channel)."""
         result = self.rpc("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
             raise RuntimeError(f"{name}: {result['content'][0]['text']}")
         text = result["content"][0]["text"]
-        return result.get("structuredContent"), blen(compact(result)), blen(text)
+        return json.loads(text), blen(compact(result)), blen(text)
 
     def close(self):
         self.proc.stdin.close()
@@ -302,7 +302,7 @@ def main():
         recall = {}
         per_question = []
         search_wire, search_text = [], []
-        for tool in ("memory_search", "memory_recall"):
+        for tool in ("memory_search",):
             wire_all, text_all = [], []
             scores = {"recall5": [], "hit5": [], "rr": []}
             by_kind = {}
@@ -342,7 +342,7 @@ def main():
                 search_wire, search_text = wire_all, text_all
 
         zero = {}
-        for tool in ("memory_search", "memory_recall"):
+        for tool in ("memory_search",):
             rows = []
             for w in weak:
                 shaped, wire, _ = mcp.tool(tool, query=w["query"], limit=5)
@@ -352,20 +352,18 @@ def main():
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
         calls["memory_search"]["note"] = "limit 5, mean over the gold questions"
-        shaped, wire, text = mcp.tool("memory_resume", limit=2)
-        calls["memory_resume"] = {"limit": 2, "results": len((shaped or {}).get("results") or []), "bytes": wire, "tokens_est": est_tokens(wire), "text_channel_bytes": text}
-        why = []
+        decisions = []
         for query in ("migration lock deploy", "money cents", "payment webhook duplicate"):
-            shaped, wire, text = mcp.tool("memory_why_changed", query=query, limit=3)
-            why.append(wire)
-        calls["memory_why_changed"] = dict(stats(why), limit=3, note="3 queries")
+            shaped, wire, text = mcp.tool("memory_search", query=query, kind="decision", limit=3)
+            decisions.append(wire)
+        calls["memory_search_kind_decision"] = dict(stats(decisions), limit=3, note="3 queries")
+        shaped, wire, text = mcp.tool("memory_search", query="recent work handoff", kind="handoff", limit=2)
+        calls["memory_search_kind_handoff"] = {"limit": 2, "results": len(result_ids(shaped)), "bytes": wire, "tokens_est": est_tokens(wire), "text_channel_bytes": text}
         get = []
         for key in ("dec-queue-postgres", "got-migration-lock", "proc-release", "sess-typst"):
-            shaped, wire, text = mcp.tool("memory_get", memoryId=ids[key])
+            shaped, wire, text = mcp.tool("memory_get", ids=[ids[key]])
             get.append(wire)
-        calls["memory_get"] = dict(stats(get), note="decision, gotcha, procedure, note")
-        shaped, wire, text = mcp.tool("memory_context", query="payments and idempotency", limit=5)
-        calls["memory_context"] = {"limit": 5, "bytes": wire, "tokens_est": est_tokens(wire)}
+        calls["memory_get"] = dict(stats(get), note="decision, gotcha, procedure, note; one id per call")
         mcp.close()
         mcp = None
 
@@ -465,7 +463,7 @@ def print_table(r):
         ("hook injection / scripted session", f"{f['total_injected_bytes']} B (~{f['total_injected_tokens_est']} tok est)"
          f"  [start {f['session_start_bytes']} B, 10 edits {f['post_tool_use_bytes']} B]"),
     ]
-    for tool in ("memory_search", "memory_recall"):
+    for tool in ("memory_search",):
         t = rec[tool]
         rows.append((f"{tool} recall@5 / hit@5 / MRR@10",
                      f"{t['recall_at_5']:.3f} / {t['hit_at_5']:.3f} / {t['mrr_at_10']:.3f}  (n={t['questions']}, mean {t['bytes_per_call']['mean_bytes']} B/call)"))
@@ -473,8 +471,8 @@ def print_table(r):
         rows.append((f"{tool} zero-hit correct", f"{z['correct_zero_hit']}/{z['queries']}"))
     c = r["call_bytes"]
     rows.append(("bytes: search (mean, limit 5)", f"{c['memory_search']['mean_bytes']}"))
-    rows.append(("bytes: resume (limit 2)", f"{c['memory_resume']['bytes']}  ({c['memory_resume']['results']} results)"))
-    rows.append(("bytes: why_changed (mean, limit 3)", f"{c['memory_why_changed']['mean_bytes']}"))
+    rows.append(("bytes: search kind=handoff (limit 2)", f"{c['memory_search_kind_handoff']['bytes']}  ({c['memory_search_kind_handoff']['results']} results)"))
+    rows.append(("bytes: search kind=decision (mean, limit 3)", f"{c['memory_search_kind_decision']['mean_bytes']}"))
     rows.append(("bytes: get (mean)", f"{c['memory_get']['mean_bytes']}"))
     width = max(len(k) for k, _ in rows)
     print(f"Cairn benchmark: {r['label']}  (tokens = bytes/4, estimate)")
