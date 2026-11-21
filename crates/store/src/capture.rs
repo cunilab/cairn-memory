@@ -13,8 +13,8 @@ use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key
 use cairn_core::process::{Origin, prepare_save};
 use sqlx::Row;
 
-const RECENT_FILES_MAX: usize = 20;
-const RECENT_FILE_MAX_BYTES: usize = 512;
+pub(crate) const RECENT_FILES_MAX: usize = 20;
+pub(crate) const RECENT_FILE_MAX_BYTES: usize = 512;
 
 /// What `distill_session` wrote.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -439,7 +439,7 @@ async fn upsert_session(
     Ok(())
 }
 
-fn clip(text: &str, max_bytes: usize) -> String {
+pub(crate) fn clip(text: &str, max_bytes: usize) -> String {
     let mut end = text.len().min(max_bytes);
     while !text.is_char_boundary(end) {
         end -= 1;

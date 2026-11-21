@@ -4,6 +4,7 @@
 
 mod common;
 use cairn_server::LocalEmbeddings;
+use cairn_store::retrieve::Narrow;
 use common::{App, ids};
 use serde_json::json;
 use std::path::PathBuf;
@@ -60,14 +61,14 @@ async fn meaning_finds_memories_and_never_crosses_people() {
     let alice_projects = store.member_projects(&alice_id).await.unwrap();
     let bob_projects = store.member_projects(&bob_id).await.unwrap();
     let candidates = store
-        .vector_candidates(&alice_id, &alice_projects, &vector, 50)
+        .vector_candidates(&alice_id, &alice_projects, &vector, 50, &Narrow::NONE)
         .await
         .unwrap();
     assert_eq!(candidates.first().map(|(id, _)| id), Some(&mine));
     // ...and the visibility rule is applied to what it returns: bob gets nothing of alice's.
     assert!(
         store
-            .vector_candidates(&bob_id, &bob_projects, &vector, 50)
+            .vector_candidates(&bob_id, &bob_projects, &vector, 50, &Narrow::NONE)
             .await
             .unwrap()
             .is_empty()
@@ -172,5 +173,89 @@ async fn consolidate_supersedes_near_duplicates_and_links_related() {
         app.get(&format!("memories/{new}"), &owner).await["status"],
         "active"
     );
+    app.finish().await;
+}
+
+/// The gate's margin shrinks as a store grows (review I5): the nearest unrelated neighbour of an
+/// off-topic query gets closer. With 400 everyday notes, an off-topic query, including one that
+/// shares an ordinary word with a note, still returns nothing, and a paraphrase still finds its
+/// memory. Real MiniLM embeddings of 400 short notes take a few seconds. This is a guard, not a
+/// calibration: no constant was chosen with it.
+#[tokio::test]
+async fn off_topic_queries_stay_empty_among_400_distractors() {
+    let Some(model) = model() else { return };
+    let Some(app) = App::with_model(Some(model)).await else {
+        return;
+    };
+    let me = app.admin("me").await;
+    let topics = [
+        "sourdough starter",
+        "telescope mirror",
+        "garden irrigation",
+        "train timetable",
+        "dentist visit",
+        "bike repair",
+        "language class",
+        "book club",
+        "guitar practice",
+        "insurance renewal",
+        "office lunch order",
+        "parking permit",
+        "recipe for leek soup",
+        "running route",
+        "moving checklist",
+        "conference notes",
+    ];
+    let details = [
+        "needs attention before the weekend",
+        "was moved to the second Tuesday of the month",
+        "costs a little more than last year",
+        "is booked through the front desk",
+        "should be compared against two other quotes",
+        "is easier in the morning when it is quiet",
+        "was agreed with the whole family",
+        "stays the same until the end of spring",
+    ];
+    for i in 0..400 {
+        let title = format!("{} {}", topics[i % topics.len()], 100 + i);
+        let summary = format!(
+            "The {} {}.",
+            topics[i % topics.len()],
+            details[(i / 2) % details.len()]
+        );
+        app.post("remember", json!({"kind": "fact", "title": title, "summary": summary, "reason": "note", "scope": "personal"}), &me).await;
+    }
+    let target = app
+        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal"}), &me)
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for _ in 0..200 {
+        if app.db.store.pending_embeddings(1).await.unwrap().is_empty() {
+            break;
+        }
+        app.settle().await;
+    }
+    for query in [
+        "volcanic eruption evacuation plan",
+        "quantum chromodynamics lattice simulation",
+        "quarterly revenue forecast for the mining sector",
+        "ancient Roman aqueduct engineering",
+        // One ordinary word in common with the notes, nothing else.
+        "tuning a diesel engine for a rally race",
+        "plan the national budget for next year",
+    ] {
+        let found = app.post("search", json!({"query": query}), &me).await;
+        assert!(ids(&found).is_empty(), "`{query}` returned cards: {found}");
+    }
+    let found = app
+        .post(
+            "search",
+            json!({"query": "pdf bill shows empty sheet with unusual symbols"}),
+            &me,
+        )
+        .await;
+    assert_eq!(ids(&found).first(), Some(&target), "{found}");
     app.finish().await;
 }

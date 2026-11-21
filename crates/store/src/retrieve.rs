@@ -1,3 +1,4 @@
+use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
 use crate::memory::{MEMORY_COLUMNS, MEMORY_SELECT, memory_from_row, searchable, visible};
 use crate::{Result, Store};
@@ -10,14 +11,19 @@ use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
 use cairn_core::retrieve::hybrid::{CANDIDATES_PER_CHANNEL, POOL, fuse};
-use cairn_core::retrieve::pack::{Cards, Hit, pack};
+use cairn_core::retrieve::pack::{Cards, Hit, pack, sort_best_first};
 use cairn_core::retrieve::rank::adjust;
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::postgres::PgArguments;
+use sqlx::query::Query;
+use sqlx::{Postgres, Row};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Fused hits whose neighbours are added to the candidate pool.
 const NEIGHBOUR_SEEDS: usize = 32;
+/// Rules read for the brief: those on a recent file or its directory, then the newest of any.
+const BRIEF_NEAR_RULES: i32 = 100;
+const BRIEF_NEWEST_RULES: i32 = 200;
 
 /// A candidate with the inputs of the relevance gate.
 #[derive(Clone, Debug)]
@@ -38,6 +44,66 @@ pub struct Trace {
     pub coverage: f32,
     pub entity_hit: bool,
     pub kept: bool,
+}
+
+/// Most rows one lexical leg reads before ranking (see `lexical_sql`).
+pub const LEXICAL_MATCH_CAP: i64 = 2000;
+
+/// The request's project and kind, applied inside every channel's `WHERE` so the candidate pool
+/// holds only memories the filter would keep. `cairn_core::retrieve::filter::matches` still runs
+/// afterwards and is exact (it also reads a handoff's session, branch and worktree).
+#[derive(Clone, Debug, Default)]
+pub struct Narrow {
+    /// A context or session was given: project memories must belong to `project`.
+    pub scoped: bool,
+    pub project: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl Narrow {
+    pub const NONE: Narrow = Narrow {
+        scoped: false,
+        project: None,
+        kind: None,
+    };
+
+    /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
+    fn sql(&self, alias: &str, first: usize) -> String {
+        let mut next = first;
+        let mut out = String::new();
+        if self.scoped {
+            out +=
+                &format!(" AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text)");
+            next += 1;
+        }
+        if self.kind.is_some() {
+            out += &format!(" AND {alias}.kind = ${next}::text");
+        }
+        out
+    }
+
+    fn bind<'q>(
+        &'q self,
+        mut q: Query<'q, Postgres, PgArguments>,
+    ) -> Query<'q, Postgres, PgArguments> {
+        if self.scoped {
+            q = q.bind(self.project.as_deref());
+        }
+        if let Some(kind) = &self.kind {
+            q = q.bind(kind.as_str());
+        }
+        q
+    }
+}
+
+impl From<&Filter> for Narrow {
+    fn from(f: &Filter) -> Self {
+        Self {
+            scoped: f.session_id.is_some() || f.context.is_some(),
+            project: f.context.as_ref().and_then(|c| c.project_id.clone()),
+            kind: f.kind.map(|k| k.as_str().to_owned()),
+        }
+    }
 }
 
 /// The fused candidates of one query, loaded with the gate inputs.
@@ -106,13 +172,17 @@ impl Store {
         projects: &[String],
         query: &str,
         limit: i64,
+        narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
         scored(
-            sqlx::query(&lexical_sql())
-                .bind(person_id)
-                .bind(query)
-                .bind(projects)
-                .bind(limit)
+            narrow
+                .bind(
+                    sqlx::query(&lexical_sql(narrow))
+                        .bind(person_id)
+                        .bind(query)
+                        .bind(projects)
+                        .bind(limit),
+                )
                 .fetch_all(&self.pool)
                 .await?,
         )
@@ -125,22 +195,27 @@ impl Store {
         projects: &[String],
         names: &[String],
         limit: i64,
+        narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
         scored(
-            sqlx::query(&format!(
-                "SELECT e.memory_id, count(*)::float4 AS score
-                   FROM entities e JOIN memories m ON m.memory_id = e.memory_id
-                  WHERE e.name = ANY($2) AND {}
-                  GROUP BY e.memory_id, m.created_at
-                  ORDER BY score DESC, m.created_at DESC, e.memory_id LIMIT $4",
-                searchable("m", "$1", "$3")
-            ))
-            .bind(person_id)
-            .bind(names)
-            .bind(projects)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?,
+            narrow
+                .bind(
+                    sqlx::query(&format!(
+                        "SELECT e.memory_id, count(*)::float4 AS score
+                           FROM entities e JOIN memories m ON m.memory_id = e.memory_id
+                          WHERE e.name = ANY($2) AND {}{}
+                          GROUP BY e.memory_id, m.created_at
+                          ORDER BY score DESC, m.created_at DESC, e.memory_id LIMIT $4",
+                        searchable("m", "$1", "$3"),
+                        narrow.sql("m", 5)
+                    ))
+                    .bind(person_id)
+                    .bind(names)
+                    .bind(projects)
+                    .bind(limit),
+                )
+                .fetch_all(&self.pool)
+                .await?,
         )
     }
 
@@ -155,6 +230,7 @@ impl Store {
         projects: &[String],
         vector: &[f32],
         limit: i64,
+        narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
         validate_vector(vector)?;
         let mut tx = self.pool.begin().await?;
@@ -165,11 +241,14 @@ impl Store {
         )
         .execute(&mut *tx)
         .await?;
-        let rows = sqlx::query(&vector_sql())
-            .bind(person_id)
-            .bind(vector_text(vector))
-            .bind(projects)
-            .bind(limit)
+        let rows = narrow
+            .bind(
+                sqlx::query(&vector_sql(narrow))
+                    .bind(person_id)
+                    .bind(vector_text(vector))
+                    .bind(projects)
+                    .bind(limit),
+            )
             .fetch_all(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -177,32 +256,45 @@ impl Store {
     }
 }
 
-/// The lexical channel's statement; the plan test explains the same text.
-pub fn lexical_sql() -> String {
+/// The lexical channel's statement; the plan test explains the same text. Two legs find the
+/// matching rows, each capped at `LEXICAL_MATCH_CAP` before anything is ranked: the all-terms
+/// leg (so a full match is never crowded out) and the any-term leg (partial matches). A word
+/// found in most rows would otherwise make every row be ranked.
+// shortcut: a capped leg keeps the first rows the bitmap yields (physical order), not the best;
+// upgrade by ranking per rare lexeme if a corpus has >2,000 matches for its rarest term.
+pub fn lexical_sql(narrow: &Narrow) -> String {
+    let scope = searchable("m", "$1", "$3");
+    let narrowed = narrow.sql("m", 5);
     format!(
         "WITH q AS (
-           SELECT CASE WHEN strpos(w::text, '!') > 0 THEN w
-                       ELSE replace(w::text, ' & ', ' | ')::tsquery END AS query
-             FROM websearch_to_tsquery('english', $2) AS w)
-         SELECT m.memory_id, ts_rank_cd(m.search_tsv, q.query, 32)::float4 AS score
-           FROM memories m, q
-          WHERE m.search_tsv @@ q.query AND {}
-          ORDER BY score DESC, m.created_at DESC, m.memory_id LIMIT $4",
-        searchable("m", "$1", "$3")
+           SELECT w AS all_terms,
+                  CASE WHEN strpos(w::text, '!') > 0 THEN w
+                       ELSE replace(w::text, ' & ', ' | ')::tsquery END AS any_term
+             FROM websearch_to_tsquery('english', $2) AS w),
+         hit AS MATERIALIZED (
+           (SELECT m.memory_id FROM memories m, q
+             WHERE m.search_tsv @@ q.all_terms AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP})
+           UNION
+           (SELECT m.memory_id FROM memories m, q
+             WHERE m.search_tsv @@ q.any_term AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP}))
+         SELECT m.memory_id, ts_rank_cd(m.search_tsv, q.any_term, 32)::float4 AS score
+           FROM hit JOIN memories m USING (memory_id), q
+          ORDER BY score DESC, m.created_at DESC, m.memory_id LIMIT $4"
     )
 }
 
 /// The vector channel's statement; the plan test explains the same text.
-pub fn vector_sql() -> String {
+pub fn vector_sql(narrow: &Narrow) -> String {
     format!(
         "WITH c AS MATERIALIZED (
            SELECT m.memory_id, m.created_at, m.embedding <=> $2::vector AS dist
              FROM memories m
-            WHERE m.embedding IS NOT NULL AND {}
+            WHERE m.embedding IS NOT NULL AND {}{}
             ORDER BY m.embedding <=> $2::vector
             LIMIT $4)
          SELECT memory_id, (1 - dist)::float4 AS score FROM c ORDER BY dist, created_at DESC, memory_id",
-        searchable("m", "$1", "$3")
+        searchable("m", "$1", "$3"),
+        narrow.sql("m", 5)
     )
 }
 
@@ -298,27 +390,48 @@ impl Store {
         }
         let projects = self.member_projects(person_id).await?;
         let per_channel = CANDIDATES_PER_CHANNEL as i64;
+        let narrow = Narrow::from(filter);
         let lexical = self
-            .lexical_candidates(person_id, &projects, query, per_channel)
+            .lexical_candidates(person_id, &projects, query, per_channel, &narrow)
             .await?;
-        let names = query_entity_names(query, filter.context.as_ref());
+        // Only names the query itself contains can pass the gate; the open files, symbols and
+        // commands of the work context are one more ranked channel (closeness), never a pass.
+        let names = entity_names(&[query], &WorkContext::default());
         let entity = if names.is_empty() {
             Vec::new()
         } else {
-            self.entity_candidates(person_id, &projects, &names, per_channel)
+            self.entity_candidates(person_id, &projects, &names, per_channel, &narrow)
+                .await?
+        };
+        let mut context_names = filter
+            .context
+            .as_ref()
+            .map_or_else(Vec::new, |work| entity_names(&[], work));
+        context_names.retain(|name| !names.contains(name));
+        let near = if context_names.is_empty() {
+            Vec::new()
+        } else {
+            self.entity_candidates(person_id, &projects, &context_names, per_channel, &narrow)
                 .await?
         };
         let semantic = match vector {
             Some(vector) => {
-                self.vector_candidates(person_id, &projects, vector, per_channel)
+                self.vector_candidates(person_id, &projects, vector, per_channel, &narrow)
                     .await?
             }
             None => Vec::new(),
         };
         let entity_hits: HashSet<String> = entity.iter().map(|(id, _)| id.clone()).collect();
-        let seeds = fuse(vec![lexical.clone(), entity.clone(), semantic.clone()]);
-        let neighbours = self.neighbours(person_id, &projects, &seeds).await?;
-        let mut fused = fuse(vec![lexical, entity, semantic, neighbours]);
+        let seeds = fuse(vec![
+            lexical.clone(),
+            entity.clone(),
+            near.clone(),
+            semantic.clone(),
+        ]);
+        let neighbours = self
+            .neighbours(person_id, &projects, &seeds, &narrow)
+            .await?;
+        let mut fused = fuse(vec![lexical, entity, near, semantic, neighbours]);
         fused.truncate(POOL);
         let ids: Vec<String> = fused.iter().map(|(id, _)| id.clone()).collect();
         let by_id = self
@@ -389,6 +502,7 @@ impl Store {
         person_id: &str,
         projects: &[String],
         seeds: &[(String, f32)],
+        narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
         if seeds.is_empty() {
             return Ok(Vec::new());
@@ -398,18 +512,22 @@ impl Store {
             .take(NEIGHBOUR_SEEDS)
             .map(|(id, _)| id.clone())
             .collect();
-        let rows = sqlx::query(&format!(
-            "SELECT l.source_id, l.target_id FROM links l
-               JOIN memories n ON n.memory_id = CASE WHEN l.source_id = ANY($2) THEN l.target_id ELSE l.source_id END
-              WHERE (l.source_id = ANY($2) OR l.target_id = ANY($2)) AND {}
-              ORDER BY l.created_at, l.source_id, l.target_id",
-            searchable("n", "$1", "$3")
-        ))
-        .bind(person_id)
-        .bind(&ids)
-        .bind(projects)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = narrow
+            .bind(
+                sqlx::query(&format!(
+                    "SELECT l.source_id, l.target_id FROM links l
+                       JOIN memories n ON n.memory_id = CASE WHEN l.source_id = ANY($2) THEN l.target_id ELSE l.source_id END
+                      WHERE (l.source_id = ANY($2) OR l.target_id = ANY($2)) AND {}{}
+                      ORDER BY n.created_at DESC, n.memory_id, l.source_id, l.target_id",
+                    searchable("n", "$1", "$3"),
+                    narrow.sql("n", 4)
+                ))
+                .bind(person_id)
+                .bind(&ids)
+                .bind(projects),
+            )
+            .fetch_all(&self.pool)
+            .await?;
         let score: HashMap<&str, f32> = seeds.iter().map(|(id, s)| (id.as_str(), *s)).collect();
         let mut sum: HashMap<String, f32> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -427,7 +545,8 @@ impl Store {
                 }
             }
         }
-        // First-seen order, so equal sums keep a stable rank.
+        // First-seen order (newest neighbour first, not link creation time, which depends on job
+        // timing), so equal sums keep a stable rank.
         Ok(order
             .into_iter()
             .filter(|id| !ids.contains(id))
@@ -440,36 +559,20 @@ impl Store {
 
     /// The fenced brief a hook injects at session start: this branch's last handoff, the project's
     /// rules, decisions and gotchas ranked by `recent_files`, branch and feedback, and the
-    /// person's preferences. Nothing is counted as fetched.
+    /// person's preferences. Nothing is counted as fetched. Each section has its own query and
+    /// limit, so a project with hundreds of newer rules still shows its handoff and preferences,
+    /// and the rules that name a recent file (or a file beside one) are read before the newest.
     pub async fn brief(
         &self,
         person_id: &str,
         context: &WorkContext,
         recent_files: &[String],
     ) -> Result<String> {
-        let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active'
-                AND ((m.kind = 'handoff' AND m.owner_id = $1 AND m.repo = $3
-                      AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
-                      AND m.project_id IS NOT DISTINCT FROM $2)
-                     OR (m.kind IN ('rule','decision','gotcha') AND m.scope = 'project' AND m.project_id = $2)
-                     OR (m.kind = 'preference' AND m.owner_id = $1))
-              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 300",
-            visible("m", "$1")
-        ))
-        .bind(person_id)
-        .bind(&context.project_id)
-        .bind(&context.repository)
-        .bind(&context.branch)
-        .bind(&context.worktree)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut memories = rows
+        let recent: Vec<String> = recent_files
             .iter()
-            .map(memory_from_row)
-            .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
+            .take(RECENT_FILES_MAX)
+            .map(|f| clip(f, RECENT_FILE_MAX_BYTES))
+            .collect();
         let default_branch: Option<String> = match &context.project_id {
             Some(id) => {
                 sqlx::query_scalar("SELECT default_branch FROM projects WHERE project_id = $1")
@@ -480,10 +583,102 @@ impl Store {
             }
             None => None,
         };
+        let newest = "ORDER BY m.created_at DESC, m.memory_id";
+        let handoff = sqlx::query(&format!(
+            "{MEMORY_SELECT}
+              WHERE {} AND m.status = 'active' AND m.kind = 'handoff' AND m.owner_id = $1
+                AND m.repo = $3 AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
+                AND m.project_id IS NOT DISTINCT FROM $2
+              {newest} LIMIT 1",
+            visible("m", "$1")
+        ))
+        .bind(person_id)
+        .bind(&context.project_id)
+        .bind(&context.repository)
+        .bind(&context.branch)
+        .bind(&context.worktree)
+        .fetch_all(&self.pool)
+        .await?;
+        let preferences = sqlx::query(&format!(
+            "{MEMORY_SELECT}
+              WHERE {} AND m.status = 'active' AND m.kind = 'preference' AND m.scope = 'personal'
+                AND m.owner_id = $1
+              {newest} LIMIT 2",
+            visible("m", "$1")
+        ))
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        // Project items on this branch or the default branch (`NULL` branch: any), the same rule
+        // `session_brief` applies, so the limit never fills with rows it would drop.
+        let project_items = |extra: &str, order: &str, limit: i32| {
+            format!(
+                "{MEMORY_SELECT}
+                  WHERE {} AND m.status = 'active' AND m.scope = 'project' AND m.project_id = $2
+                    AND m.kind IN ('rule','decision','gotcha')
+                    AND (m.repo_branch IS NULL OR m.repo_branch = $3
+                         OR CASE WHEN $4::text IS NULL THEN m.repo_branch IN ('main','master')
+                                 ELSE m.repo_branch = $4 END){extra}
+                  {order} LIMIT {limit}",
+                visible("m", "$1")
+            )
+        };
+        let mut rows = Vec::new();
+        if context.project_id.is_some() {
+            if !recent.is_empty() {
+                let dirs: Vec<String> = recent
+                    .iter()
+                    .filter_map(|f| f.rsplit_once('/').map(|(dir, _)| format!("{dir}/")))
+                    .collect();
+                rows.extend(
+                    sqlx::query(&project_items(
+                        " AND EXISTS (SELECT 1 FROM entities e
+                                       WHERE e.memory_id = m.memory_id AND e.kind = 'file'
+                                         AND (e.name = ANY($5)
+                                              OR EXISTS (SELECT 1 FROM unnest($6::text[]) d
+                                                          WHERE starts_with(e.name, d))))",
+                        "ORDER BY m.updated_at DESC, m.memory_id DESC",
+                        BRIEF_NEAR_RULES,
+                    ))
+                    .bind(person_id)
+                    .bind(&context.project_id)
+                    .bind(&context.branch)
+                    .bind(&default_branch)
+                    .bind(&recent)
+                    .bind(&dirs)
+                    .fetch_all(&self.pool)
+                    .await?,
+                );
+            }
+            rows.extend(
+                sqlx::query(&project_items(
+                    "",
+                    "ORDER BY m.updated_at DESC, m.memory_id DESC",
+                    BRIEF_NEWEST_RULES,
+                ))
+                .bind(person_id)
+                .bind(&context.project_id)
+                .bind(&context.branch)
+                .bind(&default_branch)
+                .fetch_all(&self.pool)
+                .await?,
+            );
+        }
+        rows.extend(handoff);
+        rows.extend(preferences);
+        let mut seen = HashSet::new();
+        let mut memories = Vec::new();
+        for row in &rows {
+            let memory = memory_from_row(row)?;
+            if seen.insert(memory.id.clone()) {
+                memories.push(memory);
+            }
+        }
+        self.attach(person_id, &mut memories).await?;
         Ok(session_brief(
             &memories,
             context,
-            recent_files,
+            &recent,
             default_branch.as_deref(),
             cairn_core::id::now_seconds(),
         ))
@@ -593,20 +788,14 @@ fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
             })
         })
         .collect();
-    hits.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
-            .then_with(|| a.memory.id.cmp(&b.memory.id))
-    });
+    sort_best_first(&mut hits);
     hits
 }
 
-/// Entity names a query can match: the paths and code spans it contains, and the work context's
-/// files, symbols and commands. Plain words are not entity names; the lexical channel has them.
-fn query_entity_names(query: &str, context: Option<&WorkContext>) -> Vec<String> {
-    let work = context.cloned().unwrap_or_default();
-    let mut names: Vec<String> = entities::derive(&[query], &work)
+/// Entity names in `texts` (paths and code spans) and in the work context's files, symbols,
+/// commands, tests and services. Plain words are not entity names; the lexical channel has them.
+fn entity_names(texts: &[&str], work: &WorkContext) -> Vec<String> {
+    let mut names: Vec<String> = entities::derive(texts, work)
         .into_iter()
         .map(|e| e.name)
         .collect();

@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 /// Reciprocal-rank-fusion constant. Same algorithm as 0.1.5; only the channels change in step 5.
 pub const RRF_K: f32 = 60.0;
-pub const CANDIDATES_PER_CHANNEL: usize = 64;
+/// Rows each channel lists. The request filter acts inside the channel's `WHERE`, so every one of
+/// them is eligible; the ids are cheap (the expensive load is capped by `POOL`).
+pub const CANDIDATES_PER_CHANNEL: usize = 256;
 /// Fused hits kept before the request filter and the relevance gate trim them.
 pub const POOL: usize = 128;
 /// Fuses ranked channels (lexical, entity, semantic, neighbours). Each channel is `(id, score)`;

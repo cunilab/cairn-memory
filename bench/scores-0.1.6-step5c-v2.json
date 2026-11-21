@@ -1,0 +1,1234 @@
+{
+  "questions": [
+    {
+      "id": "q01",
+      "kind": "direct",
+      "query": "why do we use SKIP LOCKED for background jobs",
+      "gold": {
+        "dec-queue-postgres": {
+          "cosine": 0.555334210395813,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q02",
+      "kind": "direct",
+      "query": "how do clients select the API version",
+      "gold": {
+        "dec-api-versioning-header": {
+          "cosine": 0.6385106444358826,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q03",
+      "kind": "direct",
+      "query": "CORS error only in staging for the admin console",
+      "gold": {
+        "got-cors-preflight": {
+          "cosine": 0.7158553004264832,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q04",
+      "kind": "direct",
+      "query": "steps to cut a production release",
+      "gold": {
+        "proc-release": {
+          "cosine": 0.5627565979957581,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q05",
+      "kind": "direct",
+      "query": "attachment upload size limit",
+      "gold": {
+        "fact-max-upload": {
+          "cosine": 0.7755836248397827,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q06",
+      "kind": "direct",
+      "query": "how many changed lines may a pull request have",
+      "gold": {
+        "rule-pr-small": {
+          "cosine": 0.7771729230880737,
+          "coverage": 0.6666666865348816,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q07",
+      "kind": "direct",
+      "query": "Sydney daily revenue report is off by one day",
+      "gold": {
+        "got-timezone-report": {
+          "cosine": 0.8709818124771118,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q08",
+      "kind": "direct",
+      "query": "which provider handles card payments and bank debits",
+      "gold": {
+        "fact-payment-provider": {
+          "cosine": 0.631937563419342,
+          "coverage": 0.8333333134651184,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q09",
+      "kind": "direct",
+      "query": "health check times out while PDF rendering runs",
+      "gold": {
+        "got-tokio-blocking": {
+          "cosine": 0.7049890756607056,
+          "coverage": 0.8333333134651184,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q10",
+      "kind": "direct",
+      "query": "how do I restore the database from a backup",
+      "gold": {
+        "proc-restore-backup": {
+          "cosine": 0.5055947303771973,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q11",
+      "kind": "direct",
+      "query": "what remains on the refund endpoint",
+      "gold": {
+        "hand-refund-api": {
+          "cosine": 0.6702943444252014,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q12",
+      "kind": "direct",
+      "query": "Typst invoice template fonts and right-to-left names",
+      "gold": {
+        "sess-typst": {
+          "cosine": 0.7361767888069153,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q13",
+      "kind": "direct",
+      "query": "when must a feature flag be removed after rollout",
+      "gold": {
+        "rule-feature-flag-cleanup": {
+          "cosine": 0.7474876642227173,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q14",
+      "kind": "paraphrase",
+      "query": "users paid two times when the vendor resent callbacks",
+      "gold": {
+        "got-webhook-duplicates": {
+          "cosine": 0.4945465624332428,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q15",
+      "kind": "paraphrase",
+      "query": "how should prices be represented to stop fractional slips",
+      "gold": {
+        "dec-money-integer-cents": {
+          "cosine": 0.45837441086769104,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q16",
+      "kind": "paraphrase",
+      "query": "which geographic area hosts the platform",
+      "gold": {
+        "fact-prod-region": {
+          "cosine": 0.4732631742954254,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q17",
+      "kind": "paraphrase_stem",
+      "query": "who answers pages this week",
+      "gold": {
+        "fact-oncall": {
+          "cosine": 0.3938028812408447,
+          "coverage": 0.6666666865348816,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q18",
+      "kind": "paraphrase",
+      "query": "a mandatory field on the giant relation froze the rollout",
+      "gold": {
+        "got-migration-lock": {
+          "cosine": 0.35109665989875793,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q19",
+      "kind": "paraphrase",
+      "query": "identifiers look wrong for huge numeric values in the browser",
+      "gold": {
+        "got-json-bigint": {
+          "cosine": 0.6375913619995117,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q20",
+      "kind": "paraphrase_stem",
+      "query": "the job that fetches fiscal percentages for Europe each night",
+      "gold": {
+        "fact-vat-sync": {
+          "cosine": 0.3033105432987213,
+          "coverage": 0.1666666716337204,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q21",
+      "kind": "near_duplicate",
+      "query": "idempotency key required on payment requests",
+      "gold": {
+        "rule-idempotency-keys": {
+          "cosine": 0.7147566080093384,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-idempotency-header": {
+          "cosine": 0.7631366848945618,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q22",
+      "kind": "near_duplicate",
+      "query": "do not log customer email or card numbers",
+      "gold": {
+        "rule-log-no-pii": {
+          "cosine": 0.7833065986633301,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-log-pii": {
+          "cosine": 0.6172768473625183,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q23",
+      "kind": "near_duplicate",
+      "query": "drop a column only one release after code stops using it",
+      "gold": {
+        "rule-migrations-additive": {
+          "cosine": 0.4665435254573822,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-migration-expand-contract": {
+          "cosine": 0.4780454933643341,
+          "coverage": 0.8571428656578064,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q24",
+      "kind": "near_duplicate",
+      "query": "connection pool exhausted by a long report query",
+      "gold": {
+        "got-timeout-pool": {
+          "cosine": 0.7426967620849609,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-pool-exhaustion": {
+          "cosine": 0.7354454398155212,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q25",
+      "kind": "near_duplicate",
+      "query": "webhook retried and the charge booked twice",
+      "gold": {
+        "got-webhook-duplicates": {
+          "cosine": 0.7708704471588135,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-webhook-replay": {
+          "cosine": 0.7682707905769348,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q26",
+      "kind": "direct",
+      "query": "default local ports for the API and the console dev server",
+      "gold": {
+        "fact-service-ports": {
+          "cosine": 0.8647055625915527,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q27",
+      "kind": "direct",
+      "query": "which prefixes do conventional commits use and how are breaking changes marked",
+      "gold": {
+        "rule-commit-conventional": {
+          "cosine": 0.7302616238594055,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q28",
+      "kind": "direct",
+      "query": "billing tests fail on the last day of the month",
+      "gold": {
+        "got-test-flaky-time": {
+          "cosine": 0.8184910416603088,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q29",
+      "kind": "direct",
+      "query": "how to add a database migration",
+      "gold": {
+        "proc-add-migration": {
+          "cosine": 0.5045096278190613,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q30",
+      "kind": "direct",
+      "query": "what are the steps to onboard a new merchant",
+      "gold": {
+        "proc-onboard-merchant": {
+          "cosine": 0.5592488050460815,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q31",
+      "kind": "direct",
+      "query": "what is the availability target of the public API",
+      "gold": {
+        "fact-slo": {
+          "cosine": 0.6471700668334961,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q32",
+      "kind": "paraphrase",
+      "query": "why is the management dashboard delivered as ready-made assets with no per-request generation",
+      "gold": {
+        "dec-frontend-spa": null
+      }
+    },
+    {
+      "id": "q33",
+      "kind": "paraphrase",
+      "query": "which clock standard do we use when recording moments",
+      "gold": {
+        "dec-timestamps-utc": {
+          "cosine": 0.3554920256137848,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q34",
+      "kind": "paraphrase",
+      "query": "is it allowed for several automated verifications to run against the same storage",
+      "gold": {
+        "rule-test-db-isolated": null
+      }
+    },
+    {
+      "id": "q35",
+      "kind": "paraphrase",
+      "query": "everything got very slow once libraries were upgraded because saved artifacts were outdated",
+      "gold": {
+        "got-cargo-cache-ci": {
+          "cosine": 0.4013698697090149,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q36",
+      "kind": "paraphrase",
+      "query": "scrolling through long result sets sometimes repeats an entry or loses one",
+      "gold": {
+        "got-pagination-ties": {
+          "cosine": 0.3676406741142273,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q37",
+      "kind": "paraphrase",
+      "query": "how do we replace the lookup structure for free-text queries without downtime",
+      "gold": {
+        "proc-reindex-search": {
+          "cosine": 0.3254965543746948,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q38",
+      "kind": "paraphrase",
+      "query": "what is forbidden when writing software that answers web calls",
+      "gold": {
+        "rule-no-unwrap-handlers": {
+          "cosine": 0.16857632994651794,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q39",
+      "kind": "paraphrase",
+      "query": "what uptime percentage do we guarantee externally",
+      "gold": {
+        "fact-slo": {
+          "cosine": 0.3111060559749603,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q40",
+      "kind": "paraphrase",
+      "query": "which backend stores the performance timelines of our microservices",
+      "gold": {
+        "dec-observability-otel": null
+      }
+    },
+    {
+      "id": "q41",
+      "kind": "paraphrase",
+      "query": "when nothing is stored from previous attempts how long does automated verification last",
+      "gold": {
+        "fact-ci-runtime": null
+      }
+    },
+    {
+      "id": "q42",
+      "kind": "paraphrase",
+      "query": "where are on/off switches kept and how fresh are they",
+      "gold": {
+        "dec-feature-flags-db": {
+          "cosine": 0.19516129791736603,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q43",
+      "kind": "paraphrase",
+      "query": "which vendor handles our outgoing notices to users' mailboxes",
+      "gold": {
+        "dec-email-postmark": {
+          "cosine": 0.35867801308631897,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    }
+  ],
+  "weak": [
+    {
+      "id": "w1",
+      "query": "quantum chromodynamics lattice simulation",
+      "top3": [
+        {
+          "memory": "dis-0349",
+          "cosine": 0.15473754703998566,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-0175",
+          "cosine": 0.15400435030460358,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1399",
+          "cosine": 0.1452951282262802,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w2",
+      "query": "sourdough starter hydration ratio",
+      "top3": [
+        {
+          "memory": "dis-1407",
+          "cosine": 0.39131787419319153,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-0871",
+          "cosine": 0.35422593355178833,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1217",
+          "cosine": 0.3517482876777649,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w3",
+      "query": "xyzzy plugh frobnicate",
+      "top3": [
+        {
+          "memory": "dis-1261",
+          "cosine": 0.171369731426239,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1342",
+          "cosine": 0.1600458323955536,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1524",
+          "cosine": 0.1539454162120819,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w4",
+      "query": "Premier League fixtures this weekend",
+      "top3": [
+        {
+          "memory": "dist-offsite",
+          "cosine": 0.34635043144226074,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1130",
+          "cosine": 0.3133620619773865,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1554",
+          "cosine": 0.29093292355537415,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w5",
+      "query": "guitar tuning for drop D",
+      "top3": [
+        {
+          "memory": "dis-1801",
+          "cosine": 0.24173705279827118,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1099",
+          "cosine": 0.22721199691295624,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-0667",
+          "cosine": 0.22635793685913086,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w6",
+      "query": "release schedule for the Premier League season",
+      "top3": [
+        {
+          "memory": "dis-1545",
+          "cosine": 0.35265588760375977,
+          "coverage": 0.4000000059604645,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "got-timezone-report",
+          "cosine": 0.3055524230003357,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dist-offsite",
+          "cosine": 0.29201725125312805,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w7",
+      "query": "payment plan for buying a used car",
+      "top3": [
+        {
+          "memory": "dup-idempotency-header",
+          "cosine": 0.36616408824920654,
+          "coverage": 0.20000000298023224,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "rule-idempotency-keys",
+          "cosine": 0.33200791478157043,
+          "coverage": 0.20000000298023224,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1708",
+          "cosine": 0.27778738737106323,
+          "coverage": 0.20000000298023224,
+          "entity_hit": false,
+          "kept": true
+        }
+      ]
+    },
+    {
+      "id": "w8",
+      "query": "migration patterns of arctic birds",
+      "top3": [
+        {
+          "memory": "rule-migrations-additive",
+          "cosine": 0.25041598081588745,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1830",
+          "cosine": 0.17877830564975739,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1773",
+          "cosine": 0.1608753800392151,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w9",
+      "query": "queue at the airport security checkpoint",
+      "top3": [
+        {
+          "memory": "dec-queue-postgres",
+          "cosine": 0.36780792474746704,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-0551",
+          "cosine": 0.36461809277534485,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1751",
+          "cosine": 0.3158087134361267,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        }
+      ]
+    },
+    {
+      "id": "w10",
+      "query": "database of ancient Roman coins",
+      "top3": [
+        {
+          "memory": "dup-money-minor-units",
+          "cosine": 0.33645951747894287,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-money-integer-cents",
+          "cosine": 0.30916544795036316,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1074",
+          "cosine": 0.2569981813430786,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w11",
+      "query": "invoice for a wedding photographer",
+      "top3": [
+        {
+          "memory": "dec-pdf-typst",
+          "cosine": 0.37247970700263977,
+          "coverage": 0.3333333432674408,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "sess-typst",
+          "cosine": 0.3180537819862366,
+          "coverage": 0.3333333432674408,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1872",
+          "cosine": 0.28795480728149414,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w12",
+      "query": "deploy a hot air balloon in strong wind",
+      "top3": [
+        {
+          "memory": "proc-release",
+          "cosine": 0.20278380811214447,
+          "coverage": 0.1666666716337204,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-deploy-rolling-drain",
+          "cosine": 0.1869000494480133,
+          "coverage": 0.1666666716337204,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1795",
+          "cosine": 0.1866988241672516,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w13",
+      "query": "backup plan if it rains at the picnic",
+      "top3": [
+        {
+          "memory": "dis-1842",
+          "cosine": 0.4044801592826843,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1028",
+          "cosine": 0.377265989780426,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1132",
+          "cosine": 0.34502407908439636,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        }
+      ]
+    },
+    {
+      "id": "w14",
+      "query": "rotate the tires on a pickup truck",
+      "top3": [
+        {
+          "memory": "fact-oncall",
+          "cosine": 0.2732198238372803,
+          "coverage": 0.25,
+          "entity_hit": false,
+          "kept": true
+        },
+        {
+          "memory": "dis-1373",
+          "cosine": 0.27267563343048096,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dis-1521",
+          "cosine": 0.2673785388469696,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    }
+  ],
+  "holdout": {
+    "questions": [
+      {
+        "id": "h01",
+        "query": "how are people signing in on the website and kicked out immediately",
+        "gold": {
+          "dec-auth-sessions-cookies": {
+            "cosine": 0.3012816905975342,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        }
+      },
+      {
+        "id": "h02",
+        "query": "how do we keep users uninterrupted while machines are swapped sequentially",
+        "gold": {
+          "dec-deploy-rolling-drain": null
+        }
+      },
+      {
+        "id": "h03",
+        "query": "what tool prints our billing documents",
+        "gold": {
+          "dec-pdf-typst": {
+            "cosine": 0.363057404756546,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        }
+      },
+      {
+        "id": "h04",
+        "query": "newly minted links get denied because one machine's watch was ahead",
+        "gold": {
+          "got-upload-clock-skew": {
+            "cosine": 0.3096286952495575,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        }
+      },
+      {
+        "id": "h05",
+        "query": "program refuses to launch on my newer notebook computer",
+        "gold": {
+          "got-docker-arm-build": {
+            "cosine": 0.24572725594043732,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        }
+      },
+      {
+        "id": "h06",
+        "query": "where may passwords and keys live in our repo",
+        "gold": {
+          "rule-secrets-env": {
+            "cosine": 0.4809968173503876,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": true
+          }
+        }
+      },
+      {
+        "id": "h07",
+        "query": "anonymous URLs must state how much traffic they tolerate",
+        "gold": {
+          "rule-rate-limits-public": {
+            "cosine": 0.4208844006061554,
+            "coverage": 0.1428571492433548,
+            "entity_hit": false,
+            "kept": true
+          }
+        }
+      },
+      {
+        "id": "h08",
+        "query": "swapping the access phrase for our datastore with no outage",
+        "gold": {
+          "proc-rotate-db-password": {
+            "cosine": 0.3473901152610779,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        }
+      },
+      {
+        "id": "h09",
+        "query": "how long are purchase histories stored",
+        "gold": {
+          "fact-retention": {
+            "cosine": 0.524165153503418,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": true
+          }
+        }
+      },
+      {
+        "id": "h10",
+        "query": "which release of our data store software is deployed",
+        "gold": {
+          "fact-pg-version": {
+            "cosine": 0.47065022587776184,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": true
+          }
+        }
+      }
+    ],
+    "weak": [
+      {
+        "id": "hw1",
+        "query": "volcanic eruption evacuation plan",
+        "top3": [
+          {
+            "memory": "dis-1842",
+            "cosine": 0.27029532194137573,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-1028",
+            "cosine": 0.26854145526885986,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-1132",
+            "cosine": 0.2640044689178467,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          }
+        ]
+      },
+      {
+        "id": "hw2",
+        "query": "knitting pattern for a wool scarf",
+        "top3": [
+          {
+            "memory": "dis-0822",
+            "cosine": 0.15306486189365387,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          },
+          {
+            "memory": "dis-1960",
+            "cosine": 0.14907598495483398,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          },
+          {
+            "memory": "rule-no-unwrap-handlers",
+            "cosine": 0.13970883190631866,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        ]
+      },
+      {
+        "id": "hw3",
+        "query": "ancient Roman aqueduct engineering",
+        "top3": [
+          {
+            "memory": "rule-no-unwrap-handlers",
+            "cosine": 0.15401938557624817,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          },
+          {
+            "memory": "dis-1898",
+            "cosine": 0.11010699719190598,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          },
+          {
+            "memory": "dis-1969",
+            "cosine": 0.10784130543470383,
+            "coverage": 0.0,
+            "entity_hit": false,
+            "kept": false
+          }
+        ]
+      },
+      {
+        "id": "hw4",
+        "query": "marathon training schedule for beginners",
+        "top3": [
+          {
+            "memory": "dis-1559",
+            "cosine": 0.3514714241027832,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-1993",
+            "cosine": 0.3424403667449951,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-1087",
+            "cosine": 0.3247230052947998,
+            "coverage": 0.25,
+            "entity_hit": false,
+            "kept": true
+          }
+        ]
+      },
+      {
+        "id": "hw5",
+        "query": "fix a leaking kitchen faucet",
+        "top3": [
+          {
+            "memory": "dis-1113",
+            "cosine": 0.3279782831668854,
+            "coverage": 0.5,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-1233",
+            "cosine": 0.30124717950820923,
+            "coverage": 0.5,
+            "entity_hit": false,
+            "kept": true
+          },
+          {
+            "memory": "dis-0265",
+            "cosine": 0.27862727642059326,
+            "coverage": 0.5,
+            "entity_hit": false,
+            "kept": true
+          }
+        ]
+      }
+    ]
+  },
+  "summary": {
+    "paraphrase_best_gold_cosines_desc": [
+      0.6375913619995117,
+      0.4945465624332428,
+      0.4732631742954254,
+      0.45837441086769104,
+      0.4013698697090149,
+      0.3938028812408447,
+      0.3676406741142273,
+      0.35867801308631897,
+      0.3554920256137848,
+      0.35109665989875793,
+      0.3254965543746948,
+      0.3111060559749603,
+      0.3033105432987213,
+      0.19516129791736603,
+      0.16857632994651794,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "fourth_paraphrase_cosine": 0.45837441086769104,
+    "max_weak_cosine": 0.4044801592826843
+  }
+}

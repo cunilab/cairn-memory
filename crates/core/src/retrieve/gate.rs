@@ -46,6 +46,16 @@ mod tests {
     }
 
     #[test]
+    fn gate_bounds_are_exact_edges() {
+        let just_under = |bound: f32| bound - 0.001;
+        assert!(!keep(&input(false, 0.0, Some(just_under(COSINE_STRONG)))));
+        assert!(!keep(&input(false, 0.2, Some(just_under(COSINE_WEAK)))));
+        assert!(!keep(&input(false, just_under(COVERAGE_MIN), None)));
+        // A single shared word in a long query keeps nothing on its own, whatever the corpus size.
+        assert!(!keep(&input(false, 0.2, None)));
+    }
+
+    #[test]
     fn gate_drops_single_shared_word_without_meaning() {
         assert!(!keep(&input(false, 0.33, Some(0.10))));
         assert!(!keep(&input(false, 0.33, None)));

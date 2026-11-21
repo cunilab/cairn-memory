@@ -2,6 +2,7 @@ use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Scope, Status};
 use cairn_core::process::jobs::JobKind;
 use cairn_core::retrieve::hybrid::fuse;
+use cairn_store::retrieve::Narrow;
 use cairn_store::testing::{TestDb, rule, save_input};
 
 /// A unit vector with `weight` on axis 0 and the rest on axis `axis`, so cosine to axis 0 is `weight`.
@@ -111,7 +112,7 @@ async fn candidate_channels_respect_visibility_and_fuse() {
     let mine = store.member_projects(&me).await.unwrap();
     let theirs = store.member_projects(&other).await.unwrap();
     let lexical = store
-        .lexical_candidates(&me, &mine, "pool search_path", 10)
+        .lexical_candidates(&me, &mine, "pool search_path", 10, &Narrow::NONE)
         .await
         .unwrap();
     assert_eq!(
@@ -122,12 +123,18 @@ async fn candidate_channels_respect_visibility_and_fuse() {
         [pool.as_str()]
     );
     let by_entity = store
-        .entity_candidates(&me, &mine, &["crates/store/src/lib.rs".to_owned()], 10)
+        .entity_candidates(
+            &me,
+            &mine,
+            &["crates/store/src/lib.rs".to_owned()],
+            10,
+            &Narrow::NONE,
+        )
         .await
         .unwrap();
     assert_eq!(by_entity, [(pool.clone(), 1.0)]);
     let semantic = store
-        .vector_candidates(&me, &mine, &tilted(1.0, 1), 10)
+        .vector_candidates(&me, &mine, &tilted(1.0, 1), 10, &Narrow::NONE)
         .await
         .unwrap();
     assert_eq!(semantic[0].0, pool);
@@ -135,15 +142,21 @@ async fn candidate_channels_respect_visibility_and_fuse() {
 
     for channel in [
         store
-            .lexical_candidates(&other, &theirs, "pool", 10)
+            .lexical_candidates(&other, &theirs, "pool", 10, &Narrow::NONE)
             .await
             .unwrap(),
         store
-            .entity_candidates(&other, &theirs, &["crates/store/src/lib.rs".to_owned()], 10)
+            .entity_candidates(
+                &other,
+                &theirs,
+                &["crates/store/src/lib.rs".to_owned()],
+                10,
+                &Narrow::NONE,
+            )
             .await
             .unwrap(),
         store
-            .vector_candidates(&other, &theirs, &tilted(1.0, 1), 10)
+            .vector_candidates(&other, &theirs, &tilted(1.0, 1), 10, &Narrow::NONE)
             .await
             .unwrap(),
     ] {
@@ -153,7 +166,7 @@ async fn candidate_channels_respect_visibility_and_fuse() {
     assert_eq!(fused[0].0, pool);
     assert!(
         store
-            .lexical_candidates(&me, &mine, "   ", 10)
+            .lexical_candidates(&me, &mine, "   ", 10, &Narrow::NONE)
             .await
             .unwrap()
             .is_empty(),
@@ -285,7 +298,7 @@ async fn vector_filter_inside_scan() {
 
     let plan = explain(
         &indexed,
-        &cairn_store::retrieve::vector_sql(),
+        &cairn_store::retrieve::vector_sql(&Narrow::NONE),
         &p,
         &vector_literal(&query),
     )
@@ -293,7 +306,7 @@ async fn vector_filter_inside_scan() {
     assert!(plan.contains("memories_embedding_hnsw"), "{plan}");
 
     let found = indexed
-        .vector_candidates(&p, &projects, &query, 64)
+        .vector_candidates(&p, &projects, &query, 64, &Narrow::NONE)
         .await
         .unwrap();
     assert_eq!(found.len(), 64, "a 2 % owner still gets K rows");
@@ -320,7 +333,7 @@ async fn vector_filter_inside_scan() {
         .unwrap();
     let exact: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
         "SELECT memory_id FROM ({}) r",
-        cairn_store::retrieve::vector_sql()
+        cairn_store::retrieve::vector_sql(&Narrow::NONE)
     ))
     .bind(&p)
     .bind(vector_literal(&query))
@@ -347,11 +360,17 @@ async fn plans_use_the_hnsw_gin_and_entity_indexes() {
     // `heavy` owns nothing but sees the 5,000 global rows: half the table.
     synthetic(&db, &[(&me, "global", 5000), (&me, "personal", 5000)]).await;
     let vector = vector_literal(&noise(7));
-    let plan = explain(store, &cairn_store::retrieve::vector_sql(), &heavy, &vector).await;
+    let plan = explain(
+        store,
+        &cairn_store::retrieve::vector_sql(&Narrow::NONE),
+        &heavy,
+        &vector,
+    )
+    .await;
     assert!(plan.contains("memories_embedding_hnsw"), "{plan}");
     let plan = explain(
         store,
-        &cairn_store::retrieve::lexical_sql(),
+        &cairn_store::retrieve::lexical_sql(&Narrow::NONE),
         &heavy,
         "zeta77x",
     )
@@ -367,14 +386,20 @@ async fn plans_use_the_hnsw_gin_and_entity_indexes() {
     let projects = store.member_projects(&heavy).await.unwrap();
     assert_eq!(
         store
-            .entity_candidates(&me, &projects, &["src/file77.rs".to_owned()], 5)
+            .entity_candidates(
+                &me,
+                &projects,
+                &["src/file77.rs".to_owned()],
+                5,
+                &Narrow::NONE
+            )
             .await
             .unwrap(),
         [("m77".to_owned(), 1.0)]
     );
     assert_eq!(
         store
-            .lexical_candidates(&heavy, &projects, "zeta77x", 5)
+            .lexical_candidates(&heavy, &projects, "zeta77x", 5, &Narrow::NONE)
             .await
             .unwrap()
             .len(),
@@ -382,7 +407,7 @@ async fn plans_use_the_hnsw_gin_and_entity_indexes() {
     );
     assert_eq!(
         store
-            .vector_candidates(&heavy, &projects, &noise(7), 64)
+            .vector_candidates(&heavy, &projects, &noise(7), 64, &Narrow::NONE)
             .await
             .unwrap()
             .len(),
@@ -413,7 +438,7 @@ async fn lexical_reads_and_as_or_with_coverage_unless_negated() {
 
     let query = "guitar tuning for drop D";
     let found = store
-        .lexical_candidates(&me, &projects, query, 10)
+        .lexical_candidates(&me, &projects, query, 10, &Narrow::NONE)
         .await
         .unwrap();
     let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
@@ -452,7 +477,7 @@ async fn lexical_reads_and_as_or_with_coverage_unless_negated() {
 
     // A negation keeps AND semantics: both words are required and the excluded one forbidden.
     let negated = store
-        .lexical_candidates(&me, &projects, "drop table -guitar", 10)
+        .lexical_candidates(&me, &projects, "drop table -guitar", 10, &Narrow::NONE)
         .await
         .unwrap();
     assert_eq!(
@@ -463,7 +488,7 @@ async fn lexical_reads_and_as_or_with_coverage_unless_negated() {
         [only_drop.as_str()]
     );
     let strict = store
-        .lexical_candidates(&me, &projects, "guitar table -tuning", 10)
+        .lexical_candidates(&me, &projects, "guitar table -tuning", 10, &Narrow::NONE)
         .await
         .unwrap();
     assert!(
@@ -557,17 +582,23 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
     let channels = || async {
         (
             store
-                .lexical_candidates(&me, &projects, "marker", 10)
+                .lexical_candidates(&me, &projects, "marker", 10, &Narrow::NONE)
                 .await
                 .unwrap()
                 .len(),
             store
-                .entity_candidates(&me, &projects, &["src/gone.rs".to_owned()], 10)
+                .entity_candidates(
+                    &me,
+                    &projects,
+                    &["src/gone.rs".to_owned()],
+                    10,
+                    &Narrow::NONE,
+                )
                 .await
                 .unwrap()
                 .len(),
             store
-                .vector_candidates(&me, &projects, &tilted(1.0, 1), 10)
+                .vector_candidates(&me, &projects, &tilted(1.0, 1), 10, &Narrow::NONE)
                 .await
                 .unwrap()
                 .len(),
@@ -673,18 +704,27 @@ async fn visibility_matrix_for_all_four_channels() {
                 .collect(),
         );
         let lexical = ids(store
-            .lexical_candidates(person, &projects, "matrix", 10)
+            .lexical_candidates(person, &projects, "matrix", 10, &Narrow::NONE)
             .await
             .unwrap());
         let entity = ids(store
-            .entity_candidates(person, &projects, &["src/matrix.rs".to_owned()], 10)
+            .entity_candidates(
+                person,
+                &projects,
+                &["src/matrix.rs".to_owned()],
+                10,
+                &Narrow::NONE,
+            )
             .await
             .unwrap());
         let vector = ids(store
-            .vector_candidates(person, &projects, &tilted(1.0, 1), 10)
+            .vector_candidates(person, &projects, &tilted(1.0, 1), 10, &Narrow::NONE)
             .await
             .unwrap());
-        let neighbours = ids(store.neighbours(person, &projects, &seeds).await.unwrap());
+        let neighbours = ids(store
+            .neighbours(person, &projects, &seeds, &Narrow::NONE)
+            .await
+            .unwrap());
         assert_eq!(lexical, channel_want, "lexical for {person}");
         assert_eq!(entity, channel_want, "entity for {person}");
         assert_eq!(vector, channel_want, "vector for {person}");
@@ -1336,5 +1376,56 @@ async fn gate_drops_a_one_word_match_and_keeps_a_covered_one() {
     assert!(search("guitar tuning for drop D").await.results.is_empty());
     let found = search("drop column release").await;
     assert_eq!(found.results.first().map(|c| &c.id), Some(&id));
+    db.finish().await;
+}
+
+/// Every scan node's actual row count in an `EXPLAIN (ANALYZE, FORMAT JSON)` plan.
+fn scanned_rows(plan: &serde_json::Value, out: &mut Vec<u64>) {
+    if let Some(kind) = plan["Node Type"].as_str()
+        && kind.ends_with("Scan")
+        && plan["Relation Name"] == "memories"
+    {
+        out.push(plan["Actual Rows"].as_u64().unwrap() * plan["Actual Loops"].as_u64().unwrap());
+    }
+    for child in plan["Plans"].as_array().into_iter().flatten() {
+        scanned_rows(child, out);
+    }
+}
+
+/// A word that is in every row ("summary") must not make the OR channel rank every row: the
+/// candidate set is capped before ranking, whatever the table size.
+#[tokio::test]
+async fn lexical_or_channel_caps_the_rows_it_ranks() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    synthetic(&db, &[(&me, "global", 10_000)]).await;
+    let projects = store.member_projects(&me).await.unwrap();
+    let plan: Vec<serde_json::Value> = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        cairn_store::retrieve::lexical_sql(&Narrow::NONE)
+    ))
+    .bind(&me)
+    .bind("summary filler zeta77x")
+    .bind(&projects)
+    .bind(64_i64)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    let mut rows = Vec::new();
+    scanned_rows(&plan[0][0]["Plan"], &mut rows);
+    let cap = cairn_store::retrieve::LEXICAL_MATCH_CAP as u64;
+    assert!(
+        rows.iter().all(|r| *r <= cap),
+        "a scan read more than {cap} rows of 10,000: {rows:?}"
+    );
+    // The rare word is still found: the all-terms leg is not starved by the common ones.
+    let found = store
+        .lexical_candidates(&me, &projects, "summary filler zeta77x", 64, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert_eq!(found.first().map(|(id, _)| id.as_str()), Some("m77"));
     db.finish().await;
 }

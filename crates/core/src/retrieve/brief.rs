@@ -10,6 +10,8 @@ use std::collections::HashSet;
 /// UTF-8 bytes, including the data label and fence.
 pub const SESSION_BRIEF_MAX_BYTES: usize = 1200;
 const HANDOFF_MAX_BYTES: usize = 400;
+/// Project items shown whatever they touch; further ones need a file or branch match.
+const PROJECT_BASE_ITEMS: usize = 3;
 const PREFERENCES: usize = 2;
 const PREFERENCES_MAX_BYTES: usize = 240;
 const FRESH_SECONDS: i64 = 14 * 86_400;
@@ -28,13 +30,14 @@ fn parent_dir(path: &str) -> Option<&str> {
 }
 
 /// Rule, decision and gotcha rank: kind, files near the recent ones, branch, feedback, freshness.
+/// The flag says the item touches a recent file (or its directory) or the current branch.
 fn project_score(
     m: &Memory,
     recent: &HashSet<&str>,
     dirs: &HashSet<&str>,
     ctx: &WorkContext,
     now: i64,
-) -> f32 {
+) -> (f32, bool) {
     let base = match m.kind {
         Kind::Rule | Kind::Decision => 3.0,
         _ => 2.0,
@@ -60,7 +63,10 @@ fn project_score(
     } else {
         0.0
     };
-    base + 2.0 * overlap as f32 + branch + 0.5 * net + fresh
+    (
+        base + 2.0 * overlap as f32 + branch + 0.5 * net + fresh,
+        overlap > 0 || branch > 0.0,
+    )
 }
 
 /// `memories` must already be visible to the caller. `default_branch` is the project's; `None`
@@ -94,7 +100,7 @@ pub fn session_brief(
         Some(d) => branch == d,
         None => branch == "main" || branch == "master",
     };
-    let mut project: Vec<(f32, &Memory)> = live()
+    let mut project: Vec<((f32, bool), &Memory)> = live()
         .filter(|m| {
             m.scope == Scope::Project
                 && ctx.project_id.is_some()
@@ -107,7 +113,7 @@ pub fn session_brief(
         })
         .map(|m| (project_score(m, &recent, &dirs, ctx, now), m))
         .collect();
-    project.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| newest_first(a.1, b.1)));
+    project.sort_by(|a, b| b.0.0.total_cmp(&a.0.0).then_with(|| newest_first(a.1, b.1)));
     let mut preferences: Vec<&Memory> = live()
         .filter(|m| m.scope == Scope::Personal && m.kind == Kind::Preference)
         .collect();
@@ -118,11 +124,14 @@ pub fn session_brief(
         handoff_items.push(handoff_record(m));
     }
     let mut project_items = Vec::new();
-    for (_, m) in project {
+    for (rank, ((_, near), m)) in project.into_iter().enumerate() {
+        if rank >= PROJECT_BASE_ITEMS && !near {
+            continue;
+        }
         project_items.push(record(m));
+        // A later, shorter item may still fit.
         if render(&handoff_items, &project_items, &[]).len() > SESSION_BRIEF_MAX_BYTES {
             project_items.pop();
-            break;
         }
     }
     let mut preference_items = Vec::new();
@@ -262,6 +271,50 @@ mod tests {
         assert!(
             pos("near") < pos("sibling") && pos("sibling") < pos("far"),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn unrelated_items_stop_at_three() {
+        let mut other_branch = ctx();
+        other_branch.branch = Some("elsewhere".into());
+        let all: Vec<Memory> = (0..10)
+            .map(|i| memory(&format!("m{i}"), Kind::Rule, Scope::Project))
+            .collect();
+        let out = brief(&all, &other_branch, &[]);
+        assert_eq!(
+            out.matches("\"id\":\"m").count(),
+            PROJECT_BASE_ITEMS,
+            "{out}"
+        );
+        // A file match is shown beyond the three.
+        let mut near = memory("near", Kind::Gotcha, Scope::Project);
+        file(&mut near, "src/jobs/queue.rs");
+        let mut all = all;
+        all.push(near);
+        let out = brief(&all, &other_branch, &["src/jobs/queue.rs"]);
+        assert!(out.contains("\"id\":\"near\""), "{out}");
+    }
+
+    #[test]
+    fn a_shorter_later_item_still_fits() {
+        let mut all = Vec::new();
+        for i in 0..6 {
+            let mut big = memory(&format!("big{i}"), Kind::Rule, Scope::Project);
+            big.summary = "s".repeat(240);
+            file(&mut big, "src/jobs/queue.rs");
+            all.push(big);
+        }
+        let mut tiny = memory("tiny", Kind::Gotcha, Scope::Project);
+        tiny.summary = "s".into();
+        file(&mut tiny, "src/jobs/queue.rs");
+        all.push(tiny);
+        let out = brief(&all, &ctx(), &["src/jobs/queue.rs"]);
+        assert!(out.len() <= SESSION_BRIEF_MAX_BYTES);
+        assert!(out.contains("\"id\":\"tiny\""), "{out}");
+        assert!(
+            !out.contains("\"id\":\"big5\""),
+            "the budget did fill: {out}"
         );
     }
 

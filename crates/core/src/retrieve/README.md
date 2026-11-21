@@ -8,6 +8,7 @@ brief and the memory graph.
 
 ## Entry points
 - `filter::{Filter, matches}`; `hybrid::{fuse, RRF_K}`; `gate::{keep, GateInput}`.
+- The store applies the request's project and kind inside every channel (`Narrow`) and caps the lexical legs; only a name in the query text can pass the gate through the entity channel.
 - `rank::{adjust, status_after_wrong}` (adjustments capped at ±30 %); `pack::{pack, Cards, Hit}`.
 - `brief::session_brief` (at most 1,200 bytes); `graph::{build, node_cap, Graph}`.
 

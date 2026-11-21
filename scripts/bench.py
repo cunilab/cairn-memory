@@ -6,6 +6,13 @@ synthetic corpus in bench/fixtures, then measures the agent-facing surface throu
 `cairn mcp` and `cairn hook` binary. Prints a short table and writes JSON.
 
     python3 scripts/bench.py --out bench/result.json [--label NAME] [--lexical-only]
+        [--questions questions-v2.json --distractors 2000]
+
+Question sets (bench/fixtures): `questions.json` (v1, frozen history), `questions-v2.json` (the main
+set from step 5c on: stemmed self-check, single-gold paraphrases, partial-overlap weak queries) and
+`questions-holdout.json` (never used to tune; reported with every run). `--distractors N` adds N
+generated, unrelated memories (scripts/bench_distractors.py) so the relevance gate and precision
+are measured on a store that is not tiny.
 
 Token figures are estimates: bytes / 4. There is no tokenizer and no LLM. The run is
 deterministic: fixed corpus, fixed query order, no clocks or random ids in the output.
@@ -23,6 +30,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_distractors  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "bench" / "fixtures"
@@ -90,9 +100,12 @@ class Http:
         request = urllib.request.Request(self.base + path, data=data, headers=headers,
                                          method="POST" if data is not None else "GET")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=30) as response:
-            body = response.read()
-            return json.loads(body) if body else None
+        try:
+            with opener.open(request, timeout=30) as response:
+                body = response.read()
+                return json.loads(body) if body else None
+        except urllib.error.HTTPError as err:
+            raise RuntimeError(f"{path}: HTTP {err.code}: {err.read().decode(errors='replace')}") from None
 
 
 class Mcp:
@@ -153,6 +166,8 @@ def main():
                         "CAIRN_TEST_EMBEDDING_MODEL_DIR, then ~/.cache/cairn-bench/minilm)")
     parser.add_argument("--lexical-only", action="store_true", help="do not load the embedding model")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--questions", default="questions.json", help="main question set in bench/fixtures (default: v1)")
+    parser.add_argument("--distractors", type=int, default=0, help="add this many generated unrelated memories")
     parser.add_argument("--min-hit5", type=float, help="exit 1 when memory_search hit@5 is below this (a CI gate)")
     parser.add_argument("--max-weak-hits", type=int, help="exit 1 when the main-set weak queries return more than this many cards in total (a CI gate)")
     parser.add_argument("--dump-scores", help="write gold cosine and coverage per main question and the top candidate cosines per weak query "
@@ -162,16 +177,21 @@ def main():
     args = parser.parse_args()
 
     corpus = json.loads((FIXTURES / "corpus.json").read_text())["memories"]
-    spec = json.loads((FIXTURES / "questions.json").read_text())
+    spec = json.loads((FIXTURES / args.questions).read_text())
     questions, weak = spec["questions"], spec["weak_queries"]
+    strict = bool(spec.get("strict_coverage"))
     holdout = json.loads((FIXTURES / "questions-holdout.json").read_text())
     by_key = {m["key"]: m for m in corpus}
+    distractors = bench_distractors.make(args.distractors) if args.distractors else []
 
-    # Fixture self-check: paraphrase questions share no content word with any gold memory.
+    # Fixture self-check, unstemmed: paraphrase questions share no content word with any gold memory.
+    # The stemmed check (what Postgres actually matches) runs after the load, below.
     for q in questions + holdout["questions"]:
         for key in q["gold"]:
             assert key in by_key, f"{q['id']}: unknown gold {key}"
-        if q["kind"] == "paraphrase":
+        if q["kind"].startswith("paraphrase"):
+            if q["kind"] == "paraphrase_stem":
+                continue
             for key in q["gold"]:
                 shared = words(q["query"]) & words(searchable(by_key[key]))
                 assert not shared, f"{q['id']} shares words with {key}: {sorted(shared)}"
@@ -267,6 +287,16 @@ def main():
             reply = http.call("/remember", body, device)
             ids[memory["key"]] = reply["id"]
         assert len(set(ids.values())) == len(corpus), "a corpus memory was merged into another on save"
+        # Distractors: half engineering notes in the project, then global and personal everyday notes,
+        # so every search rule (project, global, own) has unrelated rows to rank.
+        for i, memory in enumerate(distractors):
+            body = {k: v for k, v in memory.items() if k != "key"}
+            body["scope"] = "project" if memory["kind"] != "fact" or i % 4 == 0 else ("global" if i % 4 == 1 else "personal")
+            if body["scope"] == "personal" and body["kind"] in ("rule", "decision", "gotcha"):
+                body["scope"] = "project"
+            body["context"] = context
+            ids[memory["key"]] = http.call("/remember", body, device)["id"]
+        assert len(set(ids.values())) == len(corpus) + len(distractors), "a distractor was merged into another on save"
 
         def settle():
             # Measure only once every memory has its vector and the embed and consolidate jobs are done:
@@ -274,14 +304,43 @@ def main():
             # search that races it makes two runs differ.
             missing = "(select count(*) from cairn.memories where embedding is null)" if model_dir else "0"
             busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate') and status in ('pending','running'))"
-            for _ in range(240):
+            for _ in range(240 + 4 * len(distractors)):
                 if int(sql(f"select {missing} + {busy}") or 0) == 0:
                     return
-                time.sleep(0.25)
+                time.sleep(1.0 if distractors else 0.25)
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
         key_of = {v: k for k, v in ids.items()}
+
+        def coverage(query, gold_keys):
+            """Share of the query's stemmed lexemes each gold memory's `search_tsv` contains: the
+            number the relevance gate reads (`load_candidates`)."""
+            gold_ids = ",".join(f"'{ids[k]}'" for k in gold_keys)
+            rows = sql(f"""with q as (select coalesce(array_agg(distinct lexeme), '{{}}') lx from unnest(to_tsvector('english', $q${query}$q$)))
+                           select m.memory_id, case when cardinality(q.lx) = 0 then 0 else
+                             (select count(*) from unnest(m.search_tsv) t where t.lexeme = any(q.lx))::float / cardinality(q.lx) end
+                           from cairn.memories m, q where m.memory_id in ({gold_ids})""")
+            by_id = dict(line.split("|") for line in rows.splitlines())
+            return {k: round(float(by_id[ids[k]]), 3) for k in gold_keys}
+
+        # Stemmed fixture self-check (the review's finding: unstemmed word checks let q17 and q20 pass
+        # as paraphrases while Postgres matched page/paging and night/nightly). A strict set asserts
+        # it: `paraphrase` has coverage 0 on every gold memory, `paraphrase_stem` has some. Frozen
+        # sets only report it.
+        gold_coverage = {}
+        for q in questions + holdout["questions"]:
+            if q["kind"].startswith("paraphrase"):
+                gold_coverage[q["id"]] = coverage(q["query"], q["gold"])
+        if strict:
+            wrong = []
+            for q in questions:
+                cov = gold_coverage.get(q["id"])
+                if q["kind"] == "paraphrase" and not all(v == 0 for v in cov.values()):
+                    wrong.append(f"{q['id']} is labelled paraphrase but a gold memory shares stems: {cov}")
+                elif q["kind"] == "paraphrase_stem" and not any(v > 0 for v in cov.values()):
+                    wrong.append(f"{q['id']} is labelled paraphrase_stem but no gold shares a stem: {cov}")
+            assert not wrong, "stemmed self-check failed:\n" + "\n".join(wrong)
 
         # (a) MCP surface.
         mcp = Mcp(cairn_exe, repo, env)
@@ -308,7 +367,7 @@ def main():
         search_wire, search_text = [], []
         for tool in ("memory_search",):
             wire_all, text_all = [], []
-            scores = {"recall5": [], "hit5": [], "rr": []}
+            scores = {"recall5": [], "hit5": [], "rr": [], "cards": [], "goldcards": []}
             by_kind = {}
             for q in questions:
                 gold = {ids[k] for k in q["gold"]}
@@ -324,21 +383,30 @@ def main():
                     "recall5": len(gold & set(top5)) / len(gold),
                     "hit5": 1.0 if gold & set(top5) else 0.0,
                     "rr": 1.0 / rank if rank else 0.0,
+                    "cards": len(top5),
+                    "goldcards": len(gold & set(top5)),
                 }
                 for name, value in values.items():
                     scores[name].append(value)
                     by_kind.setdefault(q["kind"], {}).setdefault(name, []).append(value)
                 if tool == "memory_search":
                     per_question.append({"id": q["id"], "kind": q["kind"], "gold": q["gold"], "first_gold_rank_in_10": rank,
+                                         "gold_coverage": gold_coverage.get(q["id"]),
+                                         "cards": len(top5),
                                          "gold_in_top5": sorted(key_of[m] for m in gold & set(top5)),
                                          "top5": [key_of.get(m, "?") for m in top5]})
             avg = lambda xs: round(sum(xs) / len(xs), 4)
+            precision = lambda d: round(sum(d["goldcards"]) / sum(d["cards"]), 4) if sum(d["cards"]) else None
             recall[tool] = {
                 "questions": len(questions),
                 "recall_at_5": avg(scores["recall5"]),
                 "hit_at_5": avg(scores["hit5"]),
                 "mrr_at_10": avg(scores["rr"]),
-                "by_kind": {k: {n: avg(v) for n, v in d.items()} for k, d in sorted(by_kind.items())},
+                "precision_at_5": precision(scores),
+                "cards_returned": sum(scores["cards"]),
+                "gold_cards_returned": sum(scores["goldcards"]),
+                "by_kind": {k: dict({n: avg(d[n]) for n in ("recall5", "hit5", "rr")}, n=len(d["hit5"]), precision_at_5=precision(d))
+                            for k, d in sorted(by_kind.items())},
                 "bytes_per_call": stats(wire_all),
                 "text_channel_bytes_per_call": stats(text_all),
             }
@@ -355,7 +423,7 @@ def main():
 
         # Holdout set: same measurements, reported next to the main set and never used to tune it.
         recall_holdout = {"questions": len(holdout["questions"]), "per_question": []}
-        hits, ranks = [], []
+        hits, ranks, cards, goldcards = [], [], 0, 0
         for q in holdout["questions"]:
             gold = {ids[k] for k in q["gold"]}
             shaped, _, _ = mcp.tool("memory_search", query=q["query"], limit=5, **extra)
@@ -365,10 +433,15 @@ def main():
             rank = next((i + 1 for i, mid in enumerate(ranked) if mid in gold), None)
             hits.append(1.0 if gold & set(top5) else 0.0)
             ranks.append(1.0 / rank if rank else 0.0)
+            cards += len(top5)
+            goldcards += len(gold & set(top5))
             recall_holdout["per_question"].append({"id": q["id"], "gold": q["gold"], "first_gold_rank_in_10": rank,
+                                                   "gold_coverage": gold_coverage.get(q["id"]), "cards": len(top5),
                                                    "top5": [key_of.get(m, "?") for m in top5]})
         recall_holdout["hit_at_5"] = round(sum(hits) / len(hits), 4)
         recall_holdout["mrr_at_10"] = round(sum(ranks) / len(ranks), 4)
+        recall_holdout["precision_at_5"] = round(goldcards / cards, 4) if cards else None
+        recall_holdout["cards_returned"] = cards
         rows = []
         for w in holdout["weak_queries"]:
             shaped, wire, _ = mcp.tool("memory_search", query=w["query"], limit=5, **extra)
@@ -376,7 +449,7 @@ def main():
         zero_holdout = {"queries": len(rows), "correct_zero_hit": sum(1 for r in rows if r["hits"] == 0), "rows": rows}
 
         if args.dump_scores:
-            dump_scores(http, device, context, questions, weak, ids, key_of, args.dump_scores)
+            dump_scores(http, device, context, questions, weak, holdout, ids, key_of, args.dump_scores)
 
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
@@ -448,7 +521,8 @@ def main():
         result = {
             "label": args.label,
             "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
-            "corpus": {"memories": len(corpus), "questions": len(questions), "weak_queries": len(weak)},
+            "corpus": {"memories": len(corpus), "distractors": len(distractors), "question_set": args.questions,
+                       "questions": len(questions), "weak_queries": len(weak)},
             "semantic_channel": {"server_health": semantic, "embedding_model": "pinned all-MiniLM-L6-v2" if model_dir else None,
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,
@@ -495,9 +569,10 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
 
 
-def dump_scores(http, device, context, questions, weak, ids, key_of, path):
-    """Gate inputs for calibration (spec 4.3), main set only: the gold memories' cosine and coverage
-    per question, and the three highest candidate cosines per weak query."""
+def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, path):
+    """Gate inputs: the gold memories' cosine and coverage per question, and the three highest
+    candidate cosines per weak query. Main set first (calibration input, spec 4.3); the holdout is
+    dumped under `holdout` to report where its misses fall, never to tune."""
     def trace(query):
         return http.call("/search", {"query": query, "context": context, "debug": True}, device)["trace"]
 
@@ -514,8 +589,18 @@ def dump_scores(http, device, context, questions, weak, ids, key_of, path):
         out["weak"].append({"id": w["id"], "query": w["query"],
                             "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     best = sorted((max((g["cosine"] for g in q["gold"].values() if g and g["cosine"] is not None), default=0.0)
-                   for q in out["questions"] if q["kind"] == "paraphrase"), reverse=True)
+                   for q in out["questions"] if q["kind"].startswith("paraphrase")), reverse=True)
     weak_max = max((r["cosine"] for w in out["weak"] for r in w["top3"] if r["cosine"] is not None), default=0.0)
+    out["holdout"] = {"questions": [], "weak": []}
+    for q in holdout["questions"]:
+        rows = {row["id"]: row for row in trace(q["query"])}
+        out["holdout"]["questions"].append({"id": q["id"], "query": q["query"], "gold": {
+            key: (None if ids[key] not in rows else {k: rows[ids[key]][k] for k in ("cosine", "coverage", "entity_hit", "kept")})
+            for key in q["gold"]}})
+    for w in holdout["weak_queries"]:
+        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["holdout"]["weak"].append({"id": w["id"], "query": w["query"],
+                                       "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     out["summary"] = {"paraphrase_best_gold_cosines_desc": best, "fourth_paraphrase_cosine": best[3] if len(best) > 3 else None,
                       "max_weak_cosine": weak_max}
     Path(path).write_text(json.dumps(out, indent=2) + "\n")
@@ -535,10 +620,14 @@ def print_table(r):
         t = rec[tool]
         rows.append((f"{tool} recall@5 / hit@5 / MRR@10",
                      f"{t['recall_at_5']:.3f} / {t['hit_at_5']:.3f} / {t['mrr_at_10']:.3f}  (n={t['questions']}, mean {t['bytes_per_call']['mean_bytes']} B/call)"))
+        rows.append(("precision@5 (gold cards / cards)", f"{t['precision_at_5']:.3f}  ({t['gold_cards_returned']} of {t['cards_returned']})"))
+        for kind, k in t["by_kind"].items():
+            rows.append((f"  hit@5 {kind}", f"{k['hit5']:.3f}  (n={k['n']}, precision {k['precision_at_5']})"))
     for tool, z in r["zero_hit"].items():
         rows.append((f"{tool} zero-hit correct", f"{z['correct_zero_hit']}/{z['queries']}"))
     h, hz = r["recall_holdout"], r["zero_hit_holdout"]
-    rows.append(("holdout hit@5 / MRR@10", f"{h['hit_at_5']:.3f} / {h['mrr_at_10']:.3f}  (n={h['questions']})"))
+    rows.append(("holdout hit@5 / MRR@10", f"{h['hit_at_5']:.3f} / {h['mrr_at_10']:.3f}  (n={h['questions']}, precision {h['precision_at_5']})"))
+    rows.append(("corpus", f"{r['corpus']['memories']} fixture + {r['corpus']['distractors']} distractor memories, set {r['corpus']['question_set']}"))
     rows.append(("holdout zero-hit correct", f"{hz['correct_zero_hit']}/{hz['queries']}"))
     c = r["call_bytes"]
     rows.append(("bytes: search (mean, limit 5)", f"{c['memory_search']['mean_bytes']}"))

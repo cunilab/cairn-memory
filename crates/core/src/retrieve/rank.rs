@@ -9,7 +9,8 @@ const FRESH_SECONDS: i64 = 30 * 86_400;
 /// kind, capped at ±30 %. Reading a memory never raises its score (A17).
 pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     let scope = match m.scope {
-        _ if ctx.branch.is_some()
+        _ if ctx.project_id.is_some()
+            && ctx.branch.is_some()
             && m.context.branch == ctx.branch
             && m.project_id == ctx.project_id =>
         {
@@ -74,6 +75,19 @@ mod tests {
         worst.usage.wrong = 9;
         worst.updated_at = -100 * 86_400;
         assert_eq!(adjust(&worst, &ctx(), 0), -ADJUST_CAP);
+    }
+
+    #[test]
+    fn branch_closeness_needs_a_project_context() {
+        // Without a project, another repo's "main" must not look close.
+        let mut m = memory("a", Kind::Fact, Scope::Personal);
+        m.context.branch = Some("main".into());
+        m.updated_at = -100 * 86_400;
+        let no_project = WorkContext {
+            branch: Some("main".into()),
+            ..WorkContext::default()
+        };
+        assert_eq!(adjust(&m, &no_project, 0), 0.0);
     }
 
     #[test]

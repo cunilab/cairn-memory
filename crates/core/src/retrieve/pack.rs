@@ -57,8 +57,19 @@ fn file_and_symbol_names(memory: &Memory) -> Vec<&str> {
         .collect()
 }
 
+/// Best first: score descending, then newest, then id.
+pub fn sort_best_first(hits: &mut [Hit]) {
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+}
+
 struct Packer {
-    out: Vec<Card>,
+    /// Each card with its index in `hits`, so the response can be put back in score order.
+    out: Vec<(usize, Card)>,
     used: usize,
     budget: usize,
     limit: usize,
@@ -67,7 +78,7 @@ struct Packer {
 
 impl Packer {
     /// Adds the card unless the limit or the byte budget is reached; the first card always fits.
-    fn add(&mut self, hit: &Hit) -> bool {
+    fn add(&mut self, index: usize, hit: &Hit) -> bool {
         let card = Card {
             id: hit.memory.id.clone(),
             kind: hit.memory.kind,
@@ -86,7 +97,7 @@ impl Packer {
             return false;
         }
         self.used += cost;
-        self.out.push(card);
+        self.out.push((index, card));
         true
     }
 }
@@ -104,30 +115,37 @@ pub fn pack(hits: &[Hit], limit: usize, budget_tokens: usize) -> Cards {
     };
     let mut per_entity: HashMap<&str, u8> = HashMap::new();
     let mut deferred = Vec::new();
-    for hit in hits {
+    for (index, hit) in hits.iter().enumerate() {
+        if packer.out.len() == limit {
+            break;
+        }
         let keys = file_and_symbol_names(&hit.memory);
         if keys
             .iter()
             .any(|k| per_entity.get(k).copied().unwrap_or(0) >= PER_ENTITY)
         {
-            deferred.push(hit);
+            deferred.push((index, hit));
             continue;
         }
-        if !packer.add(hit) {
-            break;
-        }
-        for key in keys {
-            *per_entity.entry(key).or_default() += 1;
-        }
-    }
-    for hit in deferred {
-        if !packer.add(hit) {
-            break;
+        // A card that does not fit leaves room for a smaller one further down.
+        if packer.add(index, hit) {
+            for key in keys {
+                *per_entity.entry(key).or_default() += 1;
+            }
         }
     }
+    for (index, hit) in deferred {
+        if packer.out.len() == limit {
+            break;
+        }
+        packer.add(index, hit);
+    }
+    packer.out.sort_by_key(|(index, _)| *index);
+    let results: Vec<Card> = packer.out.into_iter().map(|(_, card)| card).collect();
+    // `hits` is already capped at the pool, so `more` never counts beyond it.
     Cards {
-        more: hits.len() - packer.out.len(),
-        results: packer.out,
+        more: hits.len() - results.len(),
+        results,
     }
 }
 
@@ -181,8 +199,42 @@ mod tests {
             on_file("d", 0.7, "src/y.rs"),
         ];
         assert_eq!(ids(&pack(&hits, 3, 1200)), ["a", "b", "d"]);
-        // With room left, the deferred hit still comes, after the diverse ones.
-        assert_eq!(ids(&pack(&hits, 4, 1200)), ["a", "b", "d", "c"]);
+        // With room left the deferred hit comes too, and the response stays in score order.
+        assert_eq!(ids(&pack(&hits, 4, 1200)), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn pack_tries_a_smaller_card_after_one_that_does_not_fit() {
+        let mut big = hit("big", 0.9);
+        big.memory.summary = "s".repeat(240);
+        let mut hits = vec![hit("a", 1.0)];
+        hits.extend((0..4).map(|i| {
+            let mut h = big.clone();
+            h.memory.id = format!("big{i}");
+            h
+        }));
+        hits.push(hit("small", 0.1));
+        let c = pack(&hits, 10, 200);
+        assert_eq!(ids(&c).first(), Some(&"a"));
+        assert_eq!(ids(&c).last(), Some(&"small"), "{:?}", ids(&c));
+    }
+
+    #[test]
+    fn best_first_breaks_ties_on_newest_then_id() {
+        let at = |id: &str, score: f32, us: i64| {
+            let mut h = hit(id, score);
+            h.memory.created_us = us;
+            h
+        };
+        let mut hits = vec![
+            at("b", 0.5, 1),
+            at("c", 0.5, 2),
+            at("a", 0.5, 2),
+            at("z", 0.9, 0),
+        ];
+        sort_best_first(&mut hits);
+        let order: Vec<&str> = hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert_eq!(order, ["z", "a", "c", "b"]);
     }
 
     #[test]
