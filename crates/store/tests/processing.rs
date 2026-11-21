@@ -165,6 +165,27 @@ async fn link_job_never_crosses_cohort() {
         .id;
     store.link_memory(&theirs).await.unwrap();
     store.link_memory(&mine).await.unwrap();
+    // The raw table: one personal memory of Bob's against Alice's personal memory in the same
+    // project must not link, whatever the read path would hide.
+    let mut bob_personal = rule("Bob personal in project");
+    bob_personal.scope = Some(Scope::Personal);
+    let bob_personal = store
+        .save(
+            &b,
+            bob_personal,
+            &in_project(&project.project_id, &["src/shared.rs"]),
+        )
+        .await
+        .unwrap()
+        .id;
+    store.link_memory(&bob_personal).await.unwrap();
+    store.link_memory(&mine).await.unwrap();
+    let raw = links(&db).await;
+    assert!(
+        !raw.iter()
+            .any(|l| [&l.0, &l.1].contains(&&bob_personal) && [&l.0, &l.1].contains(&&mine)),
+        "personal memories of two members never link: {raw:?}"
+    );
     // Alice (a project member) may be linked from her personal memory to a project rule; the link
     // is hidden from Bob, who cannot read her personal memory, and no link reaches her first rule.
     let seen_by_bob = store.get(&b, &theirs).await.unwrap();
@@ -288,7 +309,8 @@ async fn twin_gotchas(db: &TestDb) -> (String, String, String, String, String) {
     let gotcha = |title: &str| {
         save_input(serde_json::json!({
             "kind": "gotcha", "title": title, "summary": "Webhooks are delivered twice by the provider.",
-            "reason": "Seen in production.", "fields": {"symptom": "double charge", "fix": "Dedupe on the event id"}}))
+            "reason": "Seen in production.", "fields": {"symptom": "double charge", "fix": "Dedupe on the event id"},
+            "evidence": ["src/webhooks/replay.rs", "https://internal.example/runbooks/webhooks"]}))
     };
     let one = store
         .save(
@@ -338,6 +360,22 @@ async fn promotion_creates_one_global_across_owners() {
     let copies = globals(&db).await;
     assert_eq!(copies.len(), 1, "both twins promote to the same copy");
     let global = &copies[0];
+    // The copy carries the lesson only: no one's evidence, and no person as its owner.
+    let (owner, evidence): (String, i32) =
+        sqlx::query_as("SELECT owner_id, cardinality(evidence) FROM memories WHERE memory_id = $1")
+            .bind(global)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!((owner.as_str(), evidence), ("system", 0));
+    let sources: i32 = sqlx::query_scalar(
+        "SELECT min(cardinality(evidence)) FROM memories WHERE memory_id = ANY($1)",
+    )
+    .bind([one.as_str(), two.as_str()])
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(sources > 0, "the sources carry evidence the copy must not");
     let mut linked: Vec<_> = links(&db)
         .await
         .into_iter()
@@ -363,8 +401,9 @@ async fn promotion_creates_one_global_across_owners() {
     // so the age sweep cannot expire it for the reconcile pass to revive.
     assert_eq!(seen.expires_at, None);
     assert!(store.get(&stranger, &one).await.is_err());
-    // Only the owner of the copy can forget it, and the audit trail has the promotion.
+    // Nobody can forget the copy, and the audit trail has the promotion.
     assert!(store.forget(&stranger, global).await.is_err());
+    assert!(store.forget(&a, global).await.is_err());
     let audit = store.list_audit(&a, 20).await.unwrap();
     assert!(
         audit.iter().any(|e| e.action == "memory_promoted"),
@@ -439,6 +478,9 @@ async fn promotion_redacts_the_copy() {
     // A secret that slipped into a stored project memory (for example before a redaction rule existed).
     sqlx::query(
         "UPDATE memories SET summary = 'Key token=sk_live_abcdef123456789 leaked in a log line.',
+                title = 'Rotate token=sk_live_abcdef123456789 now',
+                reason = 'Seen with password=hunter2hunter2 in prod.',
+                evidence = ARRAY['https://x.test/?token=sk_live_abcdef123456789'],
                 fields = '{\"symptom\":\"x\",\"fix\":\"rotate password=hunter2hunter2 now\"}' WHERE memory_id = ANY($1)",
     )
     .bind([one.as_str(), two.as_str()])
@@ -448,18 +490,17 @@ async fn promotion_redacts_the_copy() {
     store.consolidate_memory(&two).await.unwrap();
     let copy = globals(&db).await;
     assert_eq!(copy.len(), 1);
-    let row =
-        sqlx::query("SELECT summary, fields::text AS fields FROM memories WHERE memory_id = $1")
-            .bind(&copy[0])
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
-    let (summary, fields): (String, String) = (row.get("summary"), row.get("fields"));
+    let row = sqlx::query(
+        "SELECT title || ' ' || summary || ' ' || reason || ' ' || fields::text || ' ' || array_to_string(evidence, ' ') AS text
+           FROM memories WHERE memory_id = $1",
+    )
+    .bind(&copy[0])
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let text: String = row.get("text");
     for secret in ["sk_live_abcdef123456789", "hunter2hunter2"] {
-        assert!(
-            !summary.contains(secret) && !fields.contains(secret),
-            "{summary} {fields}"
-        );
+        assert!(!text.contains(secret), "{text}");
     }
     db.finish().await;
 }
@@ -574,5 +615,299 @@ async fn quarantined_jobs_retry_without_a_human() {
         .await
         .unwrap();
     assert_eq!(store.job_snapshot().await.unwrap().quarantined, 1);
+    db.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_promotion_makes_one_copy() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (_a, _b, one, two, _) = twin_gotchas(&db).await;
+    let store = &db.store;
+    for _ in 0..3 {
+        let (x, y) = tokio::join!(store.promote_memory(&one), store.promote_memory(&two));
+        x.unwrap();
+        y.unwrap();
+    }
+    assert_eq!(globals(&db).await.len(), 1, "racing twins share one copy");
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_copy_not_yet_linked_is_joined_by_cosine() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let (_a, _b, one, two, _) = twin_gotchas(&db).await;
+    store.consolidate_memory(&two).await.unwrap();
+    let global = globals(&db).await.remove(0);
+    // The copy is embedded but its links are gone: only the vector can find it.
+    sqlx::query("DELETE FROM links WHERE source_id = $1")
+        .bind(&global)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store
+        .upsert_embedding(&global, "hg", &tilted(1.0, 1))
+        .await
+        .unwrap();
+    let c = db.person("c").await;
+    let (pc, _) = store
+        .init_project(&c, "github.com/acme/three", None)
+        .await
+        .unwrap();
+    let three = store
+        .save(
+            &c,
+            save_input(serde_json::json!({
+                "kind": "gotcha", "title": "Webhook retries charge twice",
+                "summary": "The provider redelivers webhooks.", "reason": "Seen in production.",
+                "fields": {"symptom": "double charge", "fix": "Dedupe on the event id"}})),
+            &in_project(&pc.project_id, &[]),
+        )
+        .await
+        .unwrap()
+        .id;
+    store
+        .upsert_embedding(&three, "h3", &tilted(0.98, 3))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.promote_memory(&three).await.unwrap().as_deref(),
+        Some(global.as_str())
+    );
+    assert_eq!(
+        globals(&db).await,
+        std::slice::from_ref(&global),
+        "no second copy"
+    );
+    let linked: Vec<String> = links(&db)
+        .await
+        .into_iter()
+        .filter(|l| l.0 == global)
+        .map(|l| l.1)
+        .collect();
+    assert!(linked.contains(&three), "{linked:?}");
+    assert!(linked.contains(&one) || linked.contains(&two), "{linked:?}");
+    db.finish().await;
+}
+
+/// A twin hides behind more same-project neighbours than the index scan returns by default.
+#[tokio::test]
+async fn twin_search_finds_a_twin_behind_a_crowd_of_nearer_neighbours() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    // A second pool that forbids scans and sorts the HNSW index cannot replace, so the planner must
+    // use it (a tiny test table would otherwise be read in full).
+    let url = format!(
+        "{}{}options=-c%20enable_seqscan%3Doff%20-c%20enable_bitmapscan%3Doff%20-c%20enable_sort%3Doff",
+        db.url(),
+        if db.url().contains('?') { "&" } else { "?" }
+    );
+    let indexed = cairn_store::Store::connect(&url, db.store.schema())
+        .await
+        .unwrap();
+    let (a, b) = (db.person("a").await, db.person("b").await);
+    let (pa, _) = indexed
+        .init_project(&a, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let (pb, _) = indexed
+        .init_project(&b, "github.com/acme/two", None)
+        .await
+        .unwrap();
+    let gotcha = |title: String| {
+        save_input(serde_json::json!({
+            "kind": "gotcha", "title": title, "summary": "Webhooks are delivered twice.",
+            "reason": "Seen in production.", "fields": {"symptom": "double charge", "fix": "Dedupe on the event id"}}))
+    };
+    let subject = indexed
+        .save(
+            &a,
+            gotcha("Webhook replays charge twice".into()),
+            &in_project(&pa.project_id, &[]),
+        )
+        .await
+        .unwrap()
+        .id;
+    indexed
+        .upsert_embedding(&subject, "s", &tilted(1.0, 1))
+        .await
+        .unwrap();
+    // 110 neighbours in the subject's own project, all nearer than the twin (which sits beside one
+    // of them, so the graph can reach it).
+    for n in 0..110 {
+        let id = indexed
+            .save(
+                &a,
+                gotcha(format!("Crowd gotcha number {n}")),
+                &in_project(&pa.project_id, &[]),
+            )
+            .await
+            .unwrap()
+            .id;
+        indexed
+            .upsert_embedding(&id, &format!("c{n}"), &tilted(0.97, 2 + n))
+            .await
+            .unwrap();
+    }
+    let twin = indexed
+        .save(
+            &b,
+            gotcha("Provider replays webhook events".into()),
+            &in_project(&pb.project_id, &[]),
+        )
+        .await
+        .unwrap()
+        .id;
+    indexed
+        .upsert_embedding(&twin, "t", &tilted(0.95, 2))
+        .await
+        .unwrap();
+    sqlx::raw_sql("ANALYZE memories")
+        .execute(indexed.pool())
+        .await
+        .unwrap();
+    assert!(
+        indexed.promote_memory(&subject).await.unwrap().is_some(),
+        "the twin is found past the first ef_search (100) index hits"
+    );
+    indexed.pool().close().await;
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn the_link_cohort_excludes_expired_memories_and_promoted_copies() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let (_a, _b, _one, two, pa) = twin_gotchas(&db).await;
+    store.consolidate_memory(&two).await.unwrap();
+    let global = globals(&db).await.remove(0);
+    let a = db.person("c").await;
+    store.join_project(&a, &pa, None).await.unwrap();
+    let work = in_project(&pa, &["src/shared.rs"]);
+    let live = store
+        .save(&a, rule("Shared file rule one"), &work)
+        .await
+        .unwrap()
+        .id;
+    let gone = store
+        .save(&a, rule("Shared file rule two"), &work)
+        .await
+        .unwrap()
+        .id;
+    let fresh = store
+        .save(&a, rule("Shared file rule three"), &work)
+        .await
+        .unwrap()
+        .id;
+    sqlx::query(
+        "UPDATE memories SET expires_at = now() - interval '1 second' WHERE memory_id = $1",
+    )
+    .bind(&gone)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    // The promoted copy cites the same file, yet no rule links to it.
+    sqlx::query(
+        "INSERT INTO entities (memory_id, kind, name) VALUES ($1, 'file', 'src/shared.rs')",
+    )
+    .bind(&global)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.link_memory(&fresh).await.unwrap();
+    store.link_memory(&live).await.unwrap();
+    let shown: Vec<_> = links(&db)
+        .await
+        .into_iter()
+        .filter(|l| [&l.0, &l.1].iter().any(|id| [&live, &fresh].contains(id)))
+        .collect();
+    assert_eq!(shown.len(), 1, "only live with fresh: {shown:?}");
+    assert!(
+        shown
+            .iter()
+            .all(|l| ![&l.0, &l.1].contains(&&gone) && ![&l.0, &l.1].contains(&&global))
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_stale_copy_that_lapses_is_not_revived_by_reconcile() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let (_a, _b, _one, two, _) = twin_gotchas(&db).await;
+    store.consolidate_memory(&two).await.unwrap();
+    let global = globals(&db).await.remove(0);
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'feedback',
+                status_changed_at = now() - interval '100 days' WHERE memory_id = $1",
+    )
+    .bind(&global)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.sweep().await.unwrap();
+    let after = |store: &cairn_store::Store| {
+        let (store, global) = (store.clone(), global.clone());
+        async move {
+            sqlx::query_as::<_, (bool, String)>(
+                "SELECT coalesce(expires_at <= now(), false), updated_at::text FROM memories WHERE memory_id = $1",
+            )
+            .bind(global)
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+        }
+    };
+    let first = after(store).await;
+    assert!(
+        first.0,
+        "the lapsed copy stays withdrawn: its two sources are live but it was flagged wrong"
+    );
+    store.sweep().await.unwrap();
+    assert_eq!(after(store).await, first, "a second sweep changes nothing");
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn quarantined_twins_of_one_key_do_not_fail_the_sweep() {
+    use cairn_core::process::jobs::{JobEnd, JobKind};
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    for round in 0..2 {
+        store.enqueue_job(JobKind::Link, "mem_x").await.unwrap();
+        let job = store.claim_jobs(JobKind::Link, 1).await.unwrap().remove(0);
+        store
+            .settle_job(
+                &job.job_id,
+                job.claim_id.as_deref().unwrap(),
+                JobEnd::Quarantine(format!("bad {round}")),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.job_snapshot().await.unwrap().quarantined, 2);
+    sqlx::query(
+        "UPDATE jobs SET finished_at = now() - interval '2 hours' WHERE status = 'quarantined'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store
+        .sweep()
+        .await
+        .expect("the retry cannot trip jobs_one_pending");
+    let snapshot = store.job_snapshot().await.unwrap();
+    assert_eq!((snapshot.pending, snapshot.quarantined), (1, 0));
     db.finish().await;
 }

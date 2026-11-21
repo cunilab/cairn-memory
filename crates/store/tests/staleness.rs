@@ -97,16 +97,13 @@ async fn repo_state_marks_stale_and_revives() {
     report.files_present = strings(&["src/b.rs", "src/c.rs"]);
     report.symbols_missing = strings(&["Lease::claim"]);
     let out = store.repo_state(&a, &report).await.unwrap();
-    assert_eq!((out.stale, out.revived, out.promoted), (2, 0, 0));
+    assert_eq!((out.stale, out.revived, out.promoted), (1, 0, 0));
     assert_eq!(
         status(&db, &a, &gone).await,
         (Status::Stale, Some("missing".to_owned()))
     );
-    assert_eq!(
-        status(&db, &a, &by_symbol).await,
-        (Status::Stale, Some("missing".to_owned()))
-    );
-    for id in [&partly, &kept, &unchecked] {
+    // A symbol alone never decides that a memory is gone.
+    for id in [&partly, &kept, &unchecked, &by_symbol] {
         assert_eq!(status(&db, &a, id).await, (Status::Active, None), "{id}");
     }
     let checked: Vec<(String, bool)> = sqlx::query(
@@ -436,7 +433,7 @@ async fn sweep_expires_unused_stale_and_purges_distilled_observations() {
     // old+unused, old but used since going stale, recent
     for (id, age) in ids.iter().zip(["100 days", "100 days", "10 days"]) {
         sqlx::query(&format!(
-            "UPDATE memories SET status = 'stale', stale_cause = 'feedback',
+            "UPDATE memories SET status = 'stale', stale_cause = 'feedback', origin = 'system',
                     status_changed_at = now() - interval '{age}' WHERE memory_id = $1"
         ))
         .bind(id)
@@ -679,5 +676,232 @@ async fn observations_keep_their_capture_order_within_one_second() {
         .map(|o| o.event_id)
         .collect();
     assert_eq!(order, ["z1", "y2", "x3"]);
+    db.finish().await;
+}
+
+/// Count of `entities` rows named `name`, so a test cannot pass vacuously on a name the server
+/// never recorded.
+async fn entity_rows(db: &TestDb, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM entities WHERE name = $1")
+        .bind(name)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn stale_never_expires_an_agent_memory() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (store, a) = (&db.store, db.person("a").await);
+    let pid = project(&db, &a).await;
+    let durable = saved(&db, &a, &pid, "Queue claims use leases", &["src/a.rs"], &[]).await;
+    let derived = saved(
+        &db,
+        &a,
+        &pid,
+        "Queue retries are capped",
+        &["src/b.rs"],
+        &[],
+    )
+    .await;
+    sqlx::query("UPDATE memories SET origin = 'system' WHERE memory_id = $1")
+        .bind(&derived)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'missing',
+                status_changed_at = now() - interval '400 days' WHERE memory_id = ANY($1)",
+    )
+    .bind([durable.as_str(), derived.as_str()])
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.sweep().await.unwrap();
+    store.sweep().await.unwrap();
+    let expires: Vec<(String, bool)> = sqlx::query(
+        "SELECT memory_id, expires_at IS NOT NULL AS expires FROM memories WHERE memory_id = ANY($1)",
+    )
+    .bind([durable.as_str(), derived.as_str()])
+    .fetch_all(store.pool())
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| (r.get("memory_id"), r.get("expires")))
+    .collect();
+    for (id, expires) in expires {
+        // Only system-derived rows lapse; an agent's memory stays, stale and down-ranked.
+        assert_eq!(expires, id == derived, "{id}");
+    }
+    assert_eq!(status(&db, &a, &durable).await.0, Status::Stale);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn repo_state_marks_stale_only_when_sure_the_file_is_gone() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (store, a) = (&db.store, db.person("a").await);
+    let pid = project(&db, &a).await;
+    let control = saved(
+        &db,
+        &a,
+        &pid,
+        "Queue claims use leases",
+        &["src/gone.rs"],
+        &[],
+    )
+    .await;
+    let absolute = saved(
+        &db,
+        &a,
+        &pid,
+        "Nginx lives in etc",
+        &["/etc/nginx/nginx.conf"],
+        &[],
+    )
+    .await;
+    let outside = saved(
+        &db,
+        &a,
+        &pid,
+        "Sibling repo readme",
+        &["../other/README.md"],
+        &[],
+    )
+    .await;
+    let words = saved(&db, &a, &pid, "Keep user id snake case", &[], &["user_id"]).await;
+    let branch_only = store
+        .save(
+            &a,
+            rule("Feature branch only file"),
+            &work(&pid, "feat", &["src/feature.rs"], &[]),
+        )
+        .await
+        .unwrap()
+        .id;
+    for name in [
+        "/etc/nginx/nginx.conf",
+        "../other/README.md",
+        "user_id",
+        "src/feature.rs",
+    ] {
+        assert!(entity_rows(&db, name).await > 0, "{name} was not recorded");
+    }
+    let mut report = state(&pid, "main");
+    report.files_missing = strings(&[
+        "src/gone.rs",
+        "/etc/nginx/nginx.conf",
+        "../other/README.md",
+        "src/feature.rs",
+    ]);
+    report.symbols_missing = strings(&["user_id"]);
+    let out = store.repo_state(&a, &report).await.unwrap();
+    assert_eq!(out.stale, 1);
+    assert_eq!(status(&db, &a, &control).await.0, Status::Stale);
+    for id in [&absolute, &outside, &words, &branch_only] {
+        assert_eq!(status(&db, &a, id).await.0, Status::Active, "{id}");
+    }
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (store, a, b) = (&db.store, db.person("a").await, db.person("b").await);
+    let pid = project(&db, &a).await;
+    store.join_project(&b, &pid, None).await.unwrap();
+    let mine = saved_on(&db, &a, &pid, "Queue claims use leases", "dev").await;
+    let theirs = saved_on(&db, &b, &pid, "Billing rounds to cents", "dev").await;
+    store
+        .capture(&a, edit_capture("e1", "sa", "dev", "src/a.rs", &pid))
+        .await
+        .unwrap();
+    store
+        .capture(&b, edit_capture("e2", "sb", "dev", "src/b.rs", &pid))
+        .await
+        .unwrap();
+    assert!(store.distill_session(&a, "sa").await.unwrap().handoff);
+    assert!(store.distill_session(&b, "sb").await.unwrap().handoff);
+    let mut report = state(&pid, "main");
+    report.merged_branches = strings(&["dev"]);
+    let out = store.repo_state(&a, &report).await.unwrap();
+    assert_eq!(out.promoted, 1, "only the reporter's own memory moves");
+    let branch = |id: String| {
+        let store = store.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT repo_branch FROM memories WHERE memory_id = $1",
+            )
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(branch(mine).await.as_deref(), Some("main"));
+    assert_eq!(branch(theirs).await.as_deref(), Some("dev"));
+    let expired: Vec<(String, bool)> = sqlx::query(
+        "SELECT owner_id, expires_at <= now() AS expired FROM memories WHERE kind = 'handoff'",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| (r.get("owner_id"), r.get("expired")))
+    .collect();
+    assert_eq!(expired.len(), 2);
+    for (owner, expired) in expired {
+        assert_eq!(expired, owner == a, "only the reporter's handoff expires");
+    }
+    db.finish().await;
+}
+
+async fn saved_on(db: &TestDb, who: &str, pid: &str, title: &str, branch: &str) -> String {
+    db.store
+        .save(who, rule(title), &work(pid, branch, &["src/x.rs"], &[]))
+        .await
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn a_forgotten_handoff_does_not_block_the_checkout() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (store, a) = (&db.store, db.person("a").await);
+    let pid = project(&db, &a).await;
+    store
+        .capture(&a, edit_capture("e1", "s1", "feat", "src/a.rs", &pid))
+        .await
+        .unwrap();
+    assert!(store.distill_session(&a, "s1").await.unwrap().handoff);
+    let handoff: String =
+        sqlx::query_scalar("SELECT memory_id FROM memories WHERE kind = 'handoff'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    store.forget(&a, &handoff).await.unwrap();
+    store
+        .capture(&a, edit_capture("e2", "s2", "feat", "src/b.rs", &pid))
+        .await
+        .unwrap();
+    assert!(
+        store.distill_session(&a, "s2").await.unwrap().handoff,
+        "forgetting one handoff is not forgetting the checkout"
+    );
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE kind = 'handoff' AND status = 'active'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(live, 1);
     db.finish().await;
 }

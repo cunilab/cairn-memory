@@ -153,13 +153,17 @@ impl Store {
 
     /// No human requeue: a job quarantined for `JOB_QUARANTINE_RETRY_SECONDS` goes back to pending
     /// with one attempt left, so a poison job costs one try an hour while a fixed one heals itself.
-    /// A quarantined job whose key already has a pending job is dropped. Returns the jobs retried.
+    /// A quarantined job whose key already has a pending job, or a newer quarantined row, is dropped:
+    /// only the newest row per key is revived, so `jobs_one_pending` cannot fail the sweep. Returns
+    /// the jobs retried.
     pub async fn retry_quarantined(&self) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(&format!(
             "DELETE FROM jobs q WHERE q.status = 'quarantined'
                 AND q.finished_at < now() - make_interval(secs => {JOB_QUARANTINE_RETRY_SECONDS})
-                AND EXISTS (SELECT 1 FROM jobs p WHERE p.kind = q.kind AND p.job_key = q.job_key AND p.status = 'pending')"
+                AND (EXISTS (SELECT 1 FROM jobs p WHERE p.kind = q.kind AND p.job_key = q.job_key AND p.status = 'pending')
+                     OR EXISTS (SELECT 1 FROM jobs n WHERE n.kind = q.kind AND n.job_key = q.job_key AND n.status = 'quarantined'
+                                   AND (n.finished_at, n.job_id) > (q.finished_at, q.job_id)))"
         ))
         .execute(&mut *tx)
         .await?;

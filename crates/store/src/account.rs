@@ -172,7 +172,8 @@ impl Store {
 
     pub async fn list_accounts(&self) -> Result<Vec<Account>> {
         let rows = sqlx::query(&format!(
-            "SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY created_at, person_id"
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE person_id <> '{}' ORDER BY created_at, person_id",
+            crate::consolidate::SYSTEM_OWNER
         ))
         .fetch_all(&self.pool)
         .await?;

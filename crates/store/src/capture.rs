@@ -317,13 +317,16 @@ impl Store {
                 now_seconds(),
             )?;
             let id = handoff_id(person_id, &work);
+            // The id is fixed per checkout. Forgetting a handoff forgets that content, not the
+            // checkout: the same content stays forgotten, a later handoff replaces the row.
             let mut tx = self.pool.begin().await?;
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM memories WHERE memory_id = $1 FOR UPDATE")
-                    .bind(&id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if status.as_deref() != Some("forgotten") {
+            let forgotten: Option<String> = sqlx::query_scalar(
+                "SELECT identity_hash FROM memories WHERE memory_id = $1 AND status = 'forgotten' FOR UPDATE",
+            )
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if forgotten.as_deref() != Some(new.identity_hash.as_str()) {
                 sqlx::query("DELETE FROM memories WHERE memory_id = $1 AND owner_id = $2")
                     .bind(&id)
                     .bind(person_id)
@@ -383,10 +386,11 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        // A stale memory nobody has used since it went stale lapses after 90 days.
+        // A system-derived memory nobody has used since it went stale lapses after 90 days. An
+        // agent's memory never does: stale only ranks it lower and shows why.
         sqlx::query(
             "UPDATE memories m SET expires_at = now()
-              WHERE m.status = 'stale' AND m.status_changed_at < now() - interval '90 days'
+              WHERE m.origin = 'system' AND m.status = 'stale' AND m.status_changed_at < now() - interval '90 days'
                 AND m.expires_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.memory_id = m.memory_id
                                    AND u.last_used_at > m.status_changed_at)",
@@ -414,8 +418,10 @@ impl Store {
         .await?
         .rows_affected();
         tx.commit().await?;
-        self.retry_quarantined().await?;
+        // A failed retry must not stop the reconcile pass.
+        let retried = self.retry_quarantined().await;
         self.reconcile_promoted().await?;
+        retried?;
         Ok(report)
     }
 }

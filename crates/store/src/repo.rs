@@ -54,6 +54,18 @@ fn is_default(default_branch: Option<&str>, branch: &str) -> bool {
     }
 }
 
+/// The branch names a memory may have been made on to count as "on the default branch".
+fn default_names(default_branch: Option<&str>) -> Vec<String> {
+    match default_branch {
+        Some(default) => vec![default.to_owned()],
+        None => vec!["main".to_owned(), "master".to_owned()],
+    }
+}
+
+/// Only a repo-relative file can be judged gone: an absolute, home or parent-relative name points
+/// outside the checkout, so its absence says nothing. SQL over entity alias `e`.
+const IN_REPO: &str = "(e.kind <> 'file' OR (e.name !~ '^[/~]' AND e.name !~ '(^|/)\\.\\.(/|$)' AND position(':' in e.name) = 0))";
+
 fn set(items: &[String]) -> HashSet<&str> {
     items.iter().map(String::as_str).collect()
 }
@@ -87,13 +99,15 @@ impl Store {
         {
             return Ok(None);
         }
+        let on_default = default_names(default_branch.as_deref());
         let mut lists = Vec::new();
         for (kind, limit) in [("file", CHECK_FILES_MAX), ("symbol", CHECK_SYMBOLS_MAX)] {
             // Never checked first, then the oldest check, then by name.
             let names: Vec<String> = sqlx::query_scalar(&format!(
                 "SELECT e.name FROM entities e JOIN memories m ON m.memory_id = e.memory_id
-                  WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind = $2
+                  WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind = $2 AND {IN_REPO}
                     AND (m.expires_at IS NULL OR m.expires_at > now())
+                    AND (m.repo_branch IS NULL OR m.repo_branch = ANY($3))
                     AND (m.status = 'active' OR (m.status = 'stale' AND m.stale_cause = 'missing'))
                   GROUP BY e.name
                   ORDER BY bool_or(m.checked_at IS NULL) DESC, min(m.checked_at), e.name
@@ -101,6 +115,7 @@ impl Store {
             ))
             .bind(project_id)
             .bind(kind)
+            .bind(&on_default)
             .fetch_all(&self.pool)
             .await?;
             lists.push(names);
@@ -118,7 +133,8 @@ impl Store {
     /// Applies the hook's report in one transaction: a memory whose cited files (and symbols) are
     /// all gone becomes `stale` (`missing`); one that was stale for that reason and has a cited
     /// file or symbol back becomes `active`; then branches merged into the default branch move
-    /// their memories to it and expire their handoffs. Rejected for a non-member or a branch that
+    /// the reporter's own memories to it and expire the reporter's own handoffs (never another
+    /// member's branches or handoffs). Rejected for a non-member or a branch that
     /// is not the project's default.
     pub async fn repo_state(&self, person_id: &str, state: &RepoState) -> Result<RepoStateReport> {
         let default_branch: Option<Option<String>> =
@@ -152,16 +168,33 @@ impl Store {
         let (symbols_missing, symbols_present) =
             (set(&state.symbols_missing), set(&state.symbols_present));
 
+        let on_default = default_names(default_branch.as_deref());
+        let reported: Vec<&str> = [
+            &state.files_missing,
+            &state.files_present,
+            &state.symbols_missing,
+            &state.symbols_present,
+        ]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
         let mut tx = self.pool.begin().await?;
-        let rows = sqlx::query(
+        // Only memories that cite a reported name are read and locked, with all their entities.
+        let rows = sqlx::query(&format!(
             "SELECT m.memory_id, m.status, e.kind, e.name
                FROM memories m JOIN entities e ON e.memory_id = m.memory_id
-              WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind IN ('file','symbol')
+              WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind IN ('file','symbol') AND {IN_REPO}
                 AND (m.expires_at IS NULL OR m.expires_at > now())
+                AND (m.repo_branch IS NULL OR m.repo_branch = ANY($3))
                 AND (m.status = 'active' OR (m.status = 'stale' AND m.stale_cause = 'missing'))
-              FOR UPDATE OF m",
-        )
+                AND m.memory_id IN (SELECT r.memory_id FROM entities r WHERE r.name = ANY($2)
+                                     AND r.kind IN ('file','symbol'))
+              FOR UPDATE OF m"
+        ))
         .bind(&state.project_id)
+        .bind(&reported)
+        .bind(&on_default)
         .fetch_all(&mut *tx)
         .await?;
         let mut cited: HashMap<String, Cited> = HashMap::new();
@@ -195,12 +228,11 @@ impl Store {
                 continue;
             }
             checked.push(id.clone());
-            let gone = (!m.files.is_empty()
+            // A symbol alone never decides: prose words and `Type::method` names are not reliably
+            // found by grep. A file in the repo that is gone, with no cited symbol still present, does.
+            let gone = !m.files.is_empty()
                 && all(&m.files, &files_missing)
-                && (m.symbols.is_empty() || all(&m.symbols, &symbols_missing)))
-                || (m.files.is_empty()
-                    && !m.symbols.is_empty()
-                    && all(&m.symbols, &symbols_missing));
+                && (m.symbols.is_empty() || all(&m.symbols, &symbols_missing));
             let back = any(&m.files, &files_present) || any(&m.symbols, &symbols_present);
             if m.status == "active" && gone {
                 stale.push(id.clone());
@@ -229,20 +261,22 @@ impl Store {
         // Handoffs first (they are not promoted), then everything else moves to the default branch.
         sqlx::query(
             "UPDATE memories SET expires_at = now()
-              WHERE kind = 'handoff' AND project_id = $1 AND repo_branch = ANY($2)
+              WHERE kind = 'handoff' AND project_id = $1 AND repo_branch = ANY($2) AND owner_id = $3
                 AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(&state.project_id)
         .bind(&merged)
+        .bind(person_id)
         .execute(&mut *tx)
         .await?;
         let promoted = sqlx::query(
             "UPDATE memories SET repo_branch = $3, updated_at = now()
-              WHERE project_id = $1 AND kind <> 'handoff' AND repo_branch = ANY($2)",
+              WHERE project_id = $1 AND kind <> 'handoff' AND repo_branch = ANY($2) AND owner_id = $4",
         )
         .bind(&state.project_id)
         .bind(&merged)
         .bind(&state.branch)
+        .bind(person_id)
         .execute(&mut *tx)
         .await?
         .rows_affected() as usize;

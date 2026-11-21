@@ -22,9 +22,33 @@ pub struct Consolidated {
 
 /// A twin in another project: a rule or gotcha this close in meaning counts as "the same lesson".
 const PROMOTE_AT: f32 = SUPERSEDE_AT;
-/// Serialises promotion and withdrawal so two twins promoted at once make one copy.
-const PROMOTE_LOCK: &str =
-    "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || '|promote', 0))";
+/// The owner of every promoted copy: no person wrote it.
+pub(crate) const SYSTEM_OWNER: &str = "system";
+/// Kinds that are promoted; a lock per kind serialises promotion and withdrawal of one kind so two
+/// twins promoted at once make one copy, and nothing else waits.
+const PROMOTED_KINDS: [&str; 2] = ["gotcha", "rule"];
+
+async fn lock_promotion(tx: &mut PgConnection, kind: &str) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || '|promote|' || $1, 0))",
+    )
+    .bind(kind)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// The reserved account that owns promoted copies. Created on first use; it cannot log in.
+async fn ensure_system_owner(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, status)
+         VALUES ($1, 'system@cairn.invalid', '!', 'disabled') ON CONFLICT DO NOTHING",
+    )
+    .bind(SYSTEM_OWNER)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
 
 impl Store {
     /// The `consolidate` job body. Takes the 20 nearest neighbours with the same owner, scope,
@@ -147,7 +171,11 @@ impl Store {
         }
         tx.commit().await?;
         out.promoted = self.promote_memory(memory_id).await?;
-        self.reconcile_promoted().await?;
+        // A copy's source count only changes when something is promoted or superseded here; the
+        // sweep covers every other change.
+        if out.promoted.is_some() || !out.superseded.is_empty() {
+            self.reconcile_promoted().await?;
+        }
         Ok(out)
     }
 
@@ -157,7 +185,15 @@ impl Store {
     /// promoted; the copy goes through the same redaction as every save. Returns the copy's id.
     pub async fn promote_memory(&self, memory_id: &str) -> Result<Option<String>> {
         let mut lock = self.pool.begin().await?;
-        sqlx::query(PROMOTE_LOCK).execute(&mut *lock).await?;
+        // The same iterative scan as retrieval: the visibility filters below must not run only
+        // over the index's first `ef_search` hits.
+        sqlx::query(
+            "SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true),
+                    set_config('hnsw.ef_search', '100', true),
+                    set_config('hnsw.max_scan_tuples', '20000', true)",
+        )
+        .execute(&mut *lock)
+        .await?;
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT} WHERE m.memory_id = $1 AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
                 AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL
@@ -170,24 +206,34 @@ impl Store {
             return Ok(None);
         };
         let source = memory_from_row(row)?;
+        let (vector, project): (String, String) =
+            sqlx::query_as("SELECT embedding::text, project_id FROM memories WHERE memory_id = $1")
+                .bind(memory_id)
+                .fetch_one(&mut *lock)
+                .await?;
+        // The same shape as the retrieval vector channel (a materialised CTE ordered by a bound
+        // vector, with iterative scan on) so the filters never run over the index's first hits only.
         let twin_id: Option<String> = sqlx::query_scalar(
-            "SELECT o.memory_id FROM memories s JOIN LATERAL (
-                 SELECT c.memory_id, 1 - (c.embedding <=> s.embedding) AS cosine
-                   FROM memories c
-                  WHERE c.scope = 'project' AND c.project_id <> s.project_id AND c.kind = s.kind
-                    AND c.status = 'active' AND c.origin = 'agent' AND c.embedding IS NOT NULL
-                    AND (c.expires_at IS NULL OR c.expires_at > now())
-                  ORDER BY c.embedding <=> s.embedding, c.memory_id LIMIT 5) o ON true
-              WHERE s.memory_id = $1 AND o.cosine >= $2
-              ORDER BY o.cosine DESC, o.memory_id LIMIT 1",
+            "WITH c AS MATERIALIZED (
+                 SELECT m.memory_id, m.embedding <=> $1::vector AS dist
+                   FROM memories m
+                  WHERE m.embedding IS NOT NULL AND m.scope = 'project' AND m.project_id <> $2
+                    AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent'
+                    AND (m.expires_at IS NULL OR m.expires_at > now())
+                  ORDER BY m.embedding <=> $1::vector LIMIT 5)
+             SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1",
         )
-        .bind(memory_id)
+        .bind(&vector)
+        .bind(&project)
+        .bind(source.kind.as_str())
         .bind(f64::from(PROMOTE_AT))
         .fetch_optional(&mut *lock)
         .await?;
         let Some(twin_id) = twin_id else {
             return Ok(None);
         };
+        // Only a memory with a twin takes the lock, and only against promotions of its own kind.
+        lock_promotion(&mut lock, source.kind.as_str()).await?;
         let twin = memory_from_row(
             &sqlx::query(&format!("{MEMORY_SELECT} WHERE m.memory_id = $1"))
                 .bind(&twin_id)
@@ -214,15 +260,12 @@ impl Store {
         let global = match existing {
             Some(id) => id,
             None => {
+                // Committed first: the copy is saved on another connection.
+                ensure_system_owner(&self.pool).await?;
                 let input = global_copy(&source, &twin);
-                self.save_as(
-                    &source.owner,
-                    input,
-                    &WorkContext::default(),
-                    Origin::System,
-                )
-                .await?
-                .id
+                self.save_as(SYSTEM_OWNER, input, &WorkContext::default(), Origin::System)
+                    .await?
+                    .id
             }
         };
         let mut added = 0;
@@ -233,13 +276,8 @@ impl Store {
         }
         lock.commit().await?;
         if added > 0 {
-            let owner: String =
-                sqlx::query_scalar("SELECT owner_id FROM memories WHERE memory_id = $1")
-                    .bind(&global)
-                    .fetch_one(&self.pool)
-                    .await?;
             self.record_audit(
-                &owner,
+                &source.owner,
                 None,
                 "memory_promoted",
                 Some(&global),
@@ -255,72 +293,81 @@ impl Store {
     /// live when the copy links to it, it is project-scoped, `active` or `stale`, unexpired and not
     /// forgotten. Safe to run often. Returns `(withdrawn, revived)`.
     pub async fn reconcile_promoted(&self) -> Result<(usize, usize)> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(PROMOTE_LOCK).execute(&mut *tx).await?;
-        let counted = "WITH counted AS (
-               SELECT g.memory_id, g.owner_id, g.expires_at,
+        let (mut withdrawn_total, mut revived_total) = (0, 0);
+        for kind in PROMOTED_KINDS {
+            let mut tx = self.pool.begin().await?;
+            lock_promotion(&mut tx, kind).await?;
+            let counted = "WITH counted AS (
+               SELECT g.memory_id, g.expires_at,
                       (SELECT count(DISTINCT s.memory_id) FROM links l JOIN memories s ON s.memory_id = l.target_id
                         WHERE l.source_id = g.memory_id AND l.relation = 'relates' AND l.origin = 'auto'
                           AND s.scope = 'project' AND s.status IN ('active','stale')
                           AND (s.expires_at IS NULL OR s.expires_at > now())) AS live
                  FROM memories g
-                WHERE g.origin = 'system' AND g.scope = 'global' AND g.kind IN ('rule','gotcha')
+                WHERE g.origin = 'system' AND g.scope = 'global' AND g.kind = $1
                   AND g.status IN ('active','stale'))";
-        let withdrawn = sqlx::query(&format!(
-            "{counted} UPDATE memories m SET expires_at = now(), updated_at = now() FROM counted c
-              WHERE m.memory_id = c.memory_id AND c.live < 2 AND (c.expires_at IS NULL OR c.expires_at > now())
-              RETURNING m.memory_id, m.owner_id, c.live"
-        ))
-        .fetch_all(&mut *tx)
-        .await?;
-        let revived = sqlx::query(&format!(
-            "{counted} UPDATE memories m SET expires_at = NULL, updated_at = now() FROM counted c
-              WHERE m.memory_id = c.memory_id AND c.live >= 2 AND c.expires_at <= now()
-              RETURNING m.memory_id"
-        ))
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        for row in &withdrawn {
-            let (id, owner, live): (String, String, i64) = (
-                row.try_get("memory_id")?,
-                row.try_get("owner_id")?,
-                row.try_get("live")?,
-            );
-            self.record_audit(
-                &owner,
-                None,
-                "memory_withdrawn",
-                Some(&id),
-                serde_json::json!({"global_id": id, "live": live}),
-            )
+            let withdrawn = sqlx::query(&format!(
+                "{counted} UPDATE memories m SET expires_at = now(), updated_at = now() FROM counted c
+                  WHERE m.memory_id = c.memory_id AND c.live < 2 AND (c.expires_at IS NULL OR c.expires_at > now())
+                  RETURNING m.memory_id, c.live"
+            ))
+            .bind(kind)
+            .fetch_all(&mut *tx)
             .await?;
+            // Only an active copy comes back; one flagged wrong (stale) lapses with the age sweep.
+            let revived = sqlx::query(&format!(
+                "{counted} UPDATE memories m SET expires_at = NULL, updated_at = now() FROM counted c
+                  WHERE m.memory_id = c.memory_id AND m.status = 'active' AND c.live >= 2 AND c.expires_at <= now()
+                  RETURNING m.memory_id"
+            ))
+            .bind(kind)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            for row in &withdrawn {
+                let (id, live): (String, i64) = (row.try_get("memory_id")?, row.try_get("live")?);
+                // The copy has no person as owner: its sources' owners see the withdrawal.
+                let owners: Vec<String> = sqlx::query_scalar(
+                    "SELECT DISTINCT s.owner_id FROM links l JOIN memories s ON s.memory_id = l.target_id
+                      WHERE l.source_id = $1 AND l.relation = 'relates' AND l.origin = 'auto'",
+                )
+                .bind(&id)
+                .fetch_all(&self.pool)
+                .await?;
+                for owner in owners {
+                    self.record_audit(
+                        &owner,
+                        None,
+                        "memory_withdrawn",
+                        Some(&id),
+                        serde_json::json!({"global_id": id, "live": live}),
+                    )
+                    .await?;
+                }
+            }
+            withdrawn_total += withdrawn.len();
+            revived_total += revived.len();
         }
-        Ok((withdrawn.len(), revived.len()))
+        Ok((withdrawn_total, revived_total))
     }
 }
 
-/// The global copy: the newer source's text, the evidence of both (the redaction in `save_as`
-/// runs over all of it again).
+/// The global copy: the newer source's text only. No evidence is copied (paths, commits and URLs
+/// belong to a project; the hidden links to the sources already record where it came from), and
+/// the redaction in `save_as` runs over the text again.
 fn global_copy(a: &Memory, b: &Memory) -> SaveInput {
-    let (newer, older) = if (a.created_us, &a.id) >= (b.created_us, &b.id) {
-        (a, b)
+    let newer = if (a.created_us, &a.id) >= (b.created_us, &b.id) {
+        a
     } else {
-        (b, a)
+        b
     };
-    let mut evidence = newer.evidence.clone();
-    for item in &older.evidence {
-        if evidence.len() < LIST_MAX_ITEMS && !evidence.contains(item) {
-            evidence.push(item.clone());
-        }
-    }
     SaveInput {
         kind: newer.kind,
         title: newer.title.clone(),
         summary: newer.summary.clone(),
         reason: newer.reason.clone(),
         fields: Some(newer.fields.to_json()),
-        evidence,
+        evidence: Vec::new(),
         supersedes: None,
         contradicts: None,
         scope: Some(Scope::Global),
@@ -371,7 +418,7 @@ async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()
         .bind(evidence_hash(&newer_evidence))
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE memories SET status = 'superseded', updated_at = now() WHERE memory_id = $1 AND status IN ('active','stale')")
+    sqlx::query("UPDATE memories SET status = 'superseded', stale_cause = NULL, status_changed_at = now(), updated_at = now() WHERE memory_id = $1 AND status IN ('active','stale')")
         .bind(older)
         .execute(&mut *tx)
         .await?;

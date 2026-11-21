@@ -169,10 +169,14 @@ pub fn repo_facts(top: &Path, files: &[String], symbols: &[String]) -> Option<Re
         ],
     )?;
     let known: std::collections::HashSet<&str> = listed.split('\0').collect();
-    let (files_present, files_missing): (Vec<String>, Vec<String>) = files
-        .iter()
-        .cloned()
-        .partition(|file| known.contains(file.as_str()));
+    let (mut files_present, mut files_missing) = (Vec::new(), Vec::new());
+    for file in files {
+        if known.contains(file.as_str()) || top.join(file).exists() {
+            files_present.push(file.clone());
+        } else if !undecidable(top, file, &known) {
+            files_missing.push(file.clone());
+        }
+    }
     let commit = git(top, &["rev-parse", "HEAD"]).filter(|c| !c.is_empty());
     let current = git(top, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let merged_branches = git_raw(
@@ -204,6 +208,23 @@ pub fn repo_facts(top: &Path, files: &[String], symbols: &[String]) -> Option<Re
         symbols_present,
         merged_branches,
     })
+}
+
+/// A name that is not in the checkout says nothing about the memory that cites it, when it points
+/// outside the checkout, is gitignored (so another machine may not have it), or is written
+/// relative to a subdirectory (it is the tail of a tracked path). Such a name is left unreported.
+fn undecidable(top: &Path, file: &str, known: &std::collections::HashSet<&str>) -> bool {
+    let outside = file.starts_with(['/', '~'])
+        || file.contains(':')
+        || file.split('/').any(|part| part == "..");
+    outside
+        || git_run(
+            top,
+            &["check-ignore", "-q", "--no-index", "--", file],
+            GIT_TIMEOUT,
+        )
+        .is_none_or(|(code, _)| code != Some(1))
+        || known.iter().any(|path| path.ends_with(&format!("/{file}")))
 }
 
 /// The symbols that occur as whole words in tracked files; `None` on a timeout or a git error.
@@ -344,6 +365,44 @@ mod tests {
         ] {
             assert_eq!(repository_name(origin, top), name, "{origin}");
         }
+    }
+
+    #[test]
+    fn a_name_git_cannot_vouch_for_is_never_reported_missing() {
+        let dir = std::env::temp_dir().join(format!("cairn-git-facts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/x/src")).unwrap();
+        std::fs::write(dir.join("crates/x/src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "local.toml\n").unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@example.test"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "x"]);
+        let asked: Vec<String> = [
+            "crates/x/src/a.rs",
+            "gone/file.rs",
+            "config/local.toml",
+            "src/a.rs",
+            "/etc/nginx/nginx.conf",
+            "../other/README.md",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let facts = repo_facts(&dir, &asked, &[]).unwrap();
+        assert_eq!(facts.files_present, ["crates/x/src/a.rs"]);
+        assert_eq!(facts.files_missing, ["gone/file.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
