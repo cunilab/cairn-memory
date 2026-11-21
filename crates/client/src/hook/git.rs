@@ -24,6 +24,13 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// `.git/index.lock` and would fail another agent's `git add` in the same checkout. A call that
 /// does not finish in two seconds is killed.
 fn git_raw(cwd: &Path, args: &[&str]) -> Option<String> {
+    let (code, text) = git_run(cwd, args, GIT_TIMEOUT)?;
+    (code == Some(0)).then_some(text)
+}
+
+/// The exit code (`None` when a signal ended it) and stdout of a call; `None` when it could not
+/// start or did not finish within `timeout` (which also stops the rest of this hook's git calls).
+fn git_run(cwd: &Path, args: &[&str], timeout: Duration) -> Option<(Option<i32>, String)> {
     if STUCK.load(Ordering::Relaxed) {
         return None;
     }
@@ -42,7 +49,7 @@ fn git_raw(cwd: &Path, args: &[&str]) -> Option<String> {
         let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = Instant::now() + GIT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait().ok()? {
             Some(status) => break status,
@@ -56,9 +63,7 @@ fn git_raw(cwd: &Path, args: &[&str]) -> Option<String> {
         }
     };
     let bytes = reader.join().ok()?.ok()?;
-    status
-        .success()
-        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+    Some((status.code(), String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 pub fn top_level(cwd: &Path) -> Option<PathBuf> {
@@ -134,6 +139,85 @@ fn project_id(top: &Path) -> Option<String> {
         warn("invalid .cairn/project.json project id");
     }
     id
+}
+
+const SYMBOL_GREP_TIMEOUT: Duration = Duration::from_millis(1500);
+const MERGED_BRANCHES_MAX: usize = 50;
+
+/// What the checkout answers to a brief's `check` (CM-SPEC-008 §7.2).
+pub struct RepoFacts {
+    pub commit: Option<String>,
+    pub files_missing: Vec<String>,
+    pub files_present: Vec<String>,
+    pub symbols_missing: Vec<String>,
+    pub symbols_present: Vec<String>,
+    pub merged_branches: Vec<String>,
+}
+
+/// Files are looked up among tracked and untracked-but-not-ignored paths (one process), symbols
+/// with one `git grep` (a timeout leaves them unreported), and merged branches from
+/// `git branch --merged HEAD` minus the current one. `None` when git cannot list the files.
+pub fn repo_facts(top: &Path, files: &[String], symbols: &[String]) -> Option<RepoFacts> {
+    let listed = git_raw(
+        top,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )?;
+    let known: std::collections::HashSet<&str> = listed.split('\0').collect();
+    let (files_present, files_missing): (Vec<String>, Vec<String>) = files
+        .iter()
+        .cloned()
+        .partition(|file| known.contains(file.as_str()));
+    let commit = git(top, &["rev-parse", "HEAD"]).filter(|c| !c.is_empty());
+    let current = git(top, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let merged_branches = git_raw(
+        top,
+        &["branch", "--merged", "HEAD", "--format=%(refname:short)"],
+    )
+    .map(|names| {
+        names
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && !name.starts_with('(') && *name != current)
+            .take(MERGED_BRANCHES_MAX)
+            .map(str::to_owned)
+            .collect()
+    })
+    .unwrap_or_default();
+    let (symbols_present, symbols_missing) = match symbol_matches(top, symbols) {
+        Some(found) => symbols
+            .iter()
+            .cloned()
+            .partition(|symbol| found.contains(symbol.as_str())),
+        None => Default::default(),
+    };
+    Some(RepoFacts {
+        commit,
+        files_missing,
+        files_present,
+        symbols_missing,
+        symbols_present,
+        merged_branches,
+    })
+}
+
+/// The symbols that occur as whole words in tracked files; `None` on a timeout or a git error.
+fn symbol_matches(top: &Path, symbols: &[String]) -> Option<std::collections::HashSet<String>> {
+    if symbols.is_empty() {
+        return Some(Default::default());
+    }
+    let mut args = vec!["grep", "-h", "-o", "-w", "-F"];
+    for symbol in symbols {
+        args.extend(["-e", symbol]);
+    }
+    // Exit 1 means "no match", which is an answer.
+    let (code, text) = git_run(top, &args, SYMBOL_GREP_TIMEOUT)?;
+    matches!(code, Some(0 | 1)).then(|| text.lines().map(str::to_owned).collect())
 }
 
 /// `git status` paths (untracked included) then the last five commits' files: repo-relative,

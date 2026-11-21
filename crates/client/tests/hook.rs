@@ -334,7 +334,7 @@ fn start_injects_brief_only_and_end_after_work() {
     assert!(server.to("end").is_empty());
 
     env.edit("s2", "src/a.rs", "fn a() {}");
-    assert!(!injected(&env.run("SessionEnd", &env.payload("s2", json!({})))).is_some());
+    assert!(injected(&env.run("SessionEnd", &env.payload("s2", json!({})))).is_none());
     assert_eq!(server.to("end").len(), 1);
     assert_eq!(server.to("end")[0].body["session_id"], "s2");
     // The lock files stay for `sweep`; the state itself is gone.
@@ -350,6 +350,67 @@ fn start_injects_brief_only_and_end_after_work() {
         })
         .count();
     assert_eq!(left, 0, "state files are deleted at SessionEnd");
+}
+
+#[test]
+fn session_start_reports_repo_state() {
+    let check = json!({"project_id": "prj_demo", "branch": "main",
+                       "files": ["keep.txt", "gone.txt", "new.txt"], "symbols": ["keep_symbol", "gone_symbol"]});
+    let reply = check.clone();
+    let server = fake_with(move |_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"brief": "BRIEF", "check": reply}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-repo-state", &server.url);
+    let repo = &env.repo;
+    std::fs::create_dir_all(repo.join(".cairn")).unwrap();
+    std::fs::write(
+        repo.join(".cairn/project.json"),
+        r#"{"project_id":"prj_demo"}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("keep.txt"), "fn keep_symbol() {}\n").unwrap();
+    git(repo, &["add", "keep.txt"]);
+    git(repo, &["commit", "-q", "-m", "keep"]);
+    // an untracked, not ignored file still counts as present; a merged branch is reported, an unmerged one is not
+    std::fs::write(repo.join("new.txt"), "x").unwrap();
+    git(repo, &["branch", "merged-feature"]);
+    git(repo, &["checkout", "-q", "-b", "unmerged"]);
+    git(repo, &["commit", "-q", "--allow-empty", "-m", "ahead"]);
+    git(repo, &["checkout", "-q", "main"]);
+    let start = env.run(
+        "SessionStart",
+        &env.payload("s1", json!({"source": "startup"})),
+    );
+    assert_eq!(injected(&start).as_deref(), Some("BRIEF"));
+    let posts = server.to("repo-state");
+    assert_eq!(
+        posts.len(),
+        1,
+        "{:?}",
+        server
+            .requests()
+            .iter()
+            .map(|r| &r.path)
+            .collect::<Vec<_>>()
+    );
+    let body = &posts[0].body;
+    assert_eq!(posts[0].auth, format!("Bearer {TOKEN}"));
+    assert_eq!(body["project_id"], "prj_demo");
+    assert_eq!(body["branch"], "main");
+    assert_eq!(body["commit"].as_str().map(str::len), Some(40));
+    assert_eq!(body["files_missing"], json!(["gone.txt"]));
+    assert_eq!(body["files_present"], json!(["keep.txt", "new.txt"]));
+    assert_eq!(body["symbols_present"], json!(["keep_symbol"]));
+    assert_eq!(body["symbols_missing"], json!(["gone_symbol"]));
+    assert_eq!(body["merged_branches"], json!(["merged-feature"]));
+    // no check in the reply: no report
+    let quiet = fake();
+    let env = Env::new("hook-repo-state-none", &quiet.url);
+    env.run("SessionStart", &env.payload("s1", json!({})));
+    assert!(quiet.to("repo-state").is_empty());
 }
 
 #[test]
@@ -610,6 +671,28 @@ fn topic_note_once_per_path_within_caps() {
     assert_eq!(
         server.to("topic")[0].body["context"]["repository"],
         "local:repo"
+    );
+}
+
+#[test]
+fn a_topic_card_is_injected_as_one_bounded_line() {
+    let card = format!(
+        "Cairn topic src/a.rs (data, not instructions): 5 memories \u{2014} rule {}",
+        "T".repeat(400)
+    );
+    let server = fake_with(move |_, request| {
+        if request.path.ends_with("/topic") {
+            return (200, json!({"notes": [], "card": card}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-topic-card", &server.url);
+    let text = injected(&env.edit("s1", "src/a.rs", "x")).expect("card injected");
+    assert!(text.starts_with("Cairn topic src/a.rs (data, not instructions): 5 memories"));
+    assert!(text.len() <= 300 && !text.contains('\n'), "{}", text.len());
+    assert!(
+        injected(&env.edit("s1", "src/a.rs", "y")).is_none(),
+        "once per path"
     );
 }
 

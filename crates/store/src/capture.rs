@@ -75,8 +75,12 @@ impl Store {
         )
         .await?;
         let done = sqlx::query(
+            // The capture time is `clock_timestamp()`, not the request's whole second: distillation reads the
+            // order of a fast session (a failure, an edit, a pass) and event ids do not sort by time. The
+            // expiry keeps the same distance from it.
             "INSERT INTO observations (person_id, event_id, session_id, role, source, kind, ok, content, content_hash, context, captured_at, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), to_timestamp($12))
+             SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10, t.now, t.now + make_interval(secs => $11)
+               FROM (SELECT clock_timestamp() AS now) t
              ON CONFLICT DO NOTHING",
         )
         .bind(person_id)
@@ -89,8 +93,7 @@ impl Store {
         .bind(&observation.content)
         .bind(&observation.content_hash)
         .bind(serde_json::to_value(&observation.context).unwrap_or_default())
-        .bind(observation.captured_at as f64)
-        .bind(observation.expires_at as f64)
+        .bind((observation.expires_at - observation.captured_at) as f64)
         .execute(&self.pool)
         .await?;
         if done.rows_affected() == 0 {
@@ -225,7 +228,7 @@ impl Store {
                     EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at
                FROM observations
               WHERE person_id = $1 AND session_id = $2 AND expires_at > now()
-              ORDER BY captured_at, event_id",
+              ORDER BY observations.captured_at, event_id",
         )
         .bind(person_id)
         .bind(session_id)
@@ -279,14 +282,26 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?
         .flatten();
+        // The checkout only; each note adds the files it is about.
         let work = WorkContext {
             project_id: session_project.clone(),
-            ..last.context.clone()
+            repository: last.context.repository.clone(),
+            branch: last.context.branch.clone(),
+            worktree: last.context.worktree.clone(),
+            commit: last.context.commit.clone(),
+            ..WorkContext::default()
         };
         let output = distill(&observations);
         let mut report = DistillReport::default();
         for note in output.notes {
-            match self.save_as(person_id, note, &work, Origin::System).await {
+            let note_work = WorkContext {
+                files: note.files,
+                ..work.clone()
+            };
+            match self
+                .save_as(person_id, note.input, &note_work, Origin::System)
+                .await
+            {
                 Ok(_) => report.notes += 1,
                 // A note the person forgot stays forgotten.
                 Err(StoreError::Conflict(_)) => {}
@@ -301,7 +316,7 @@ impl Store {
                 Origin::System,
                 now_seconds(),
             )?;
-            let id = handoff_id(person_id, session_id);
+            let id = handoff_id(person_id, &work);
             let mut tx = self.pool.begin().await?;
             let status: Option<String> =
                 sqlx::query_scalar("SELECT status FROM memories WHERE memory_id = $1 FOR UPDATE")
@@ -368,11 +383,30 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // A stale memory nobody has used since it went stale lapses after 90 days.
+        sqlx::query(
+            "UPDATE memories m SET expires_at = now()
+              WHERE m.status = 'stale' AND m.status_changed_at < now() - interval '90 days'
+                AND m.expires_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.memory_id = m.memory_id
+                                   AND u.last_used_at > m.status_changed_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
         report.observations_deleted =
             sqlx::query("DELETE FROM observations WHERE expires_at < now()")
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
+        // Distilled sessions keep their raw captures for a week.
+        report.observations_deleted += sqlx::query(
+            "DELETE FROM observations o USING sessions s
+              WHERE o.person_id = s.person_id AND o.session_id = s.session_id
+                AND s.pending_since IS NULL AND s.ended_at < now() - interval '7 days'",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         report.jobs_deleted = sqlx::query(&format!(
             "DELETE FROM jobs WHERE status = 'done' AND finished_at < now() - make_interval(secs => {JOB_DONE_RETENTION_SECONDS})"
         ))

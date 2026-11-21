@@ -11,6 +11,7 @@ pub mod jobs;
 pub mod link;
 pub mod memory;
 pub mod project;
+pub mod repo;
 pub mod retrieve;
 #[cfg(feature = "testing")]
 pub mod testing;

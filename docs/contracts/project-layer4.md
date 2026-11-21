@@ -46,7 +46,7 @@ is a `400`. A note defaults to `personal`.
 
 An identical save by the same owner (same kind, title, summary, reason and fields after redaction)
 returns the existing id with `deduplicated: true`; evidence is merged. A save that matches a forgotten
-memory is `409 forgotten`. Notes expire after 90 days and handoffs after 14. A correction is a new save with
+memory is `409 forgotten`. Notes expire after 90 days and handoffs after 14; a system-written gotcha or fact after 180 days of not being used. A correction is a new save with
 `supersedes`; the old memory stays as history. `POST /feedback` with `helpful` or `wrong` updates usage and
 can mark a memory `stale`.
 

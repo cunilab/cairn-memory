@@ -2,7 +2,6 @@
 
 use crate::capture::WorkContext;
 use crate::memory::{Kind, Memory, Scope};
-use crate::process::distill::handoff_id;
 use serde::Deserialize;
 
 /// What the caller is working on, and the kind it asks for. With no field set, nothing is
@@ -18,7 +17,7 @@ pub struct Filter {
 }
 
 /// A memory of another kind never matches. Global memories always match. A project memory matches the context's project. A handoff
-/// matches its own session and repository, branch and worktree; other personal memories match.
+/// matches the repository, branch and worktree it was written for; other personal memories match.
 pub fn matches(memory: &Memory, filter: &Filter) -> bool {
     if filter.kind.is_some_and(|kind| kind != memory.kind) {
         return false;
@@ -36,11 +35,6 @@ pub fn matches(memory: &Memory, filter: &Filter) -> bool {
         Scope::Personal => {
             if memory.kind != Kind::Handoff {
                 return true;
-            }
-            if let Some(session) = &filter.session_id
-                && memory.id != handoff_id(&memory.owner, session)
-            {
-                return false;
             }
             filter.context.as_ref().is_none_or(|c| {
                 c.repository
@@ -96,14 +90,17 @@ mod tests {
     }
 
     #[test]
-    fn handoffs_match_their_session() {
+    fn handoffs_match_their_checkout() {
         let mut h = memory("h", Kind::Handoff, Scope::Personal);
-        h.id = handoff_id(&h.owner, "s1");
-        let for_session = |s: &str| Filter {
-            session_id: Some(s.into()),
+        h.context.branch = Some("main".into());
+        let on = |b: &str| Filter {
+            context: Some(WorkContext {
+                branch: Some(b.into()),
+                ..WorkContext::default()
+            }),
             ..Filter::default()
         };
-        assert!(matches(&h, &for_session("s1")));
-        assert!(!matches(&h, &for_session("s2")));
+        assert!(matches(&h, &on("main")));
+        assert!(!matches(&h, &on("other")));
     }
 }

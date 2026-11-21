@@ -4,6 +4,7 @@ use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
 use cairn_core::capture::ObservationInput;
+use cairn_store::repo::RepoState;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -74,4 +75,15 @@ pub async fn checkpoint(
     Ok(Json(
         json!({"status": if queued { "stored" } else { "unchanged" }}),
     ))
+}
+
+/// The hook's answer to the brief's `check`: which cited files and symbols exist on the default
+/// branch, and which branches were merged. Replies `{stale, revived, promoted}`.
+pub async fn repo_state(
+    State(state): State<AppState>,
+    Device(account): Device,
+    Json(body): Json<RepoState>,
+) -> Result<Json<Value>, ApiError> {
+    let report = state.store.repo_state(&account.person_id, &body).await?;
+    Ok(Json(json!(report)))
 }

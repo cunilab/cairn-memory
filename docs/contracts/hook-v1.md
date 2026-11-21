@@ -41,9 +41,9 @@ derived from `cwd`, never read from the payload.
 
 | Event | Capture | Server call | Injects |
 | --- | --- | --- | --- |
-| `SessionStart` (startup, resume, clear, compact) | none | `POST /session/brief` | the brief, at most 1,200 B |
+| `SessionStart` (startup, resume, clear, compact) | none | `POST /session/brief`; when the reply has `check`, then `POST /session/repo-state` | the brief, at most 1,200 B |
 | `UserPromptSubmit` | `prompt`, at most 8 KiB | `POST /observe` | nothing |
-| `PostToolUse`, file tool (`Edit`, `Write`, `MultiEdit`, `apply_patch`) | `edit`: `<Tool> <path>` plus a 1 KiB excerpt | `/observe`; the first edit of a path this session also `POST /session/topic` | a topic note, at most 300 B |
+| `PostToolUse`, file tool (`Edit`, `Write`, `MultiEdit`, `apply_patch`) | `edit`: `<Tool> <path>` plus a 1 KiB excerpt | `/observe`; the first edit of a path this session also `POST /session/topic` | a topic note or card, at most 300 B |
 | `PostToolUse`, shell, not read-only | `command` with `ok`; a failed one keeps the command, the exit and the first error line (200 B) | `/observe` | nothing |
 | `PostToolUse`, read-only or other tool | dropped | none | nothing |
 | `Stop` | `assistant` only when `CAIRN_CAPTURE_ASSISTANT=1` | `POST /session/checkpoint` if work is unsaved | nothing |
@@ -63,11 +63,23 @@ else `!is_error && !interrupted`, else unknown. Stdout is
   is `hk_` plus 24 hex of sha256(session, kind, content). Reply `{accepted,
   duplicate, event_id, project_attachment:{status}}`. The same content in a session is a
   duplicate; the same `event_id` with other content is a 409.
-- `POST /session/brief` `{session_id, context, recent_files}` returns `{brief, max_bytes}`.
+- `POST /session/brief` `{session_id, context, recent_files}` returns `{brief, max_bytes, check?}`.
+  `check` `{project_id, branch, files (<= 200), symbols (<= 20)}` is present only for a project member on the
+  project's default branch (`main` or `master` when unset): the cited files and symbols least recently checked.
   `recent_files` is `git status` paths, then the last five commits' files, at most 20, repo
   relative.
-- `POST /session/topic` `{path, context}` returns at most two notes `{id, title, summary}` whose
-  file entity is exactly `path`. It never counts as a fetch.
+- `POST /session/repo-state` (device token) `{project_id, branch, commit, files_missing, files_present,
+  symbols_missing, symbols_present, merged_branches}` is what the hook sends after printing the brief (2 s, no
+  outbox). It is a 400 for a non-member or a branch that is not the default. A memory whose cited files (and
+  symbols) are all missing becomes `stale` (`stale_cause = missing`); one stale for that reason with a cited file or
+  symbol back becomes `active`. Memories on a branch in `merged_branches` move to the default branch and that
+  branch's handoffs expire. Reply `{stale, revived, promoted}`. The hook reads files with one
+  `git ls-files --cached --others --exclude-standard`, symbols with one `git grep -w -F` (1.5 s; on a timeout
+  symbols are not reported) and branches with `git branch --merged HEAD`.
+- `POST /session/topic` `{path, context}` matches memories by file entity `path`, then by the module entity of
+  its folder. One or two matches return `{notes: [{id, title, summary}]}`; three or more return
+  `{notes: [], card}` where `card` is one line, `Cairn topic <path> (data, not instructions): <n> memories — <kind>
+  <title>; <kind> <title>`, at most 300 B and with no usage numbers. It never counts as a fetch.
 - `POST /session/checkpoint` and `/session/end` take `{session_id}`; checkpoint answers `stored`,
   `unchanged` or `empty`, all of which clear the dirty flag.
 

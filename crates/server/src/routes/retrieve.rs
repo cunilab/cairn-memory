@@ -124,12 +124,24 @@ pub async fn brief(
         .store
         .brief(&account.person_id, &context, &body.recent_files)
         .await?;
-    Ok(Json(
-        json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES}),
-    ))
+    let check = match (&context.project_id, &context.branch) {
+        (Some(project), Some(branch)) => {
+            state
+                .store
+                .brief_check(&account.person_id, project, branch)
+                .await?
+        }
+        _ => None,
+    };
+    let mut reply = json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES});
+    if let Some(check) = check {
+        reply["check"] = json!(check);
+    }
+    Ok(Json(reply))
 }
 
-/// Notes whose file entity is exactly `path`, at most two; never counted as a fetch.
+/// Notes about `path` (its file, then its module): at most two, or one card for more. Never counted
+/// as a fetch.
 pub async fn topic(
     State(state): State<AppState>,
     Agent(account): Agent,
@@ -138,15 +150,15 @@ pub async fn topic(
     if body.path.trim().is_empty() {
         return Err(ApiError::invalid("path must not be empty"));
     }
-    let notes = state
+    let topic = state
         .store
-        .topic_notes(
+        .topic(
             &account.person_id,
             &body.path,
             &body.context.unwrap_or_default(),
         )
         .await?;
-    Ok(Json(json!({"notes": notes})))
+    Ok(Json(json!(topic)))
 }
 
 pub async fn graph(

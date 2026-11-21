@@ -147,7 +147,7 @@ fn normalize_path(path: &str, worktree: Option<&str>) -> String {
 }
 
 /// Collapses spaces, cuts at the first pipe, `&&`, `;` or `>`, keeps the first three words.
-fn normalize_command(command: &str) -> String {
+pub fn normalize_command(command: &str) -> String {
     let cut = ["|", "&&", ";", ">"]
         .iter()
         .filter_map(|stop| command.find(stop))
@@ -224,7 +224,7 @@ fn is_test_path(path: &str) -> bool {
 }
 
 /// The parent directory, unless it is empty or only a generic top-level name.
-fn module_of(path: &str) -> Option<String> {
+pub fn module_of(path: &str) -> Option<String> {
     let (parent, _) = path.rsplit_once('/')?;
     (!parent.is_empty() && !GENERIC_MODULES.contains(&parent)).then(|| parent.to_owned())
 }

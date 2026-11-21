@@ -359,6 +359,9 @@ async fn promotion_creates_one_global_across_owners() {
         (Scope::Global, "Provider replays webhook events")
     );
     assert!(seen.links.is_empty(), "{:?}", seen.links);
+    // A promoted gotcha is system-made but has no 180-day clock: it lives while two sources do,
+    // so the age sweep cannot expire it for the reconcile pass to revive.
+    assert_eq!(seen.expires_at, None);
     assert!(store.get(&stranger, &one).await.is_err());
     // Only the owner of the copy can forget it, and the audit trail has the promotion.
     assert!(store.forget(&stranger, global).await.is_err());

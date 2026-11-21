@@ -117,7 +117,7 @@ pub fn prepare_save(
             commit: work.commit.clone(),
         },
         entities,
-        expires_at: expires_at(input.kind, now),
+        expires_at: expires_at(input.kind, origin == Origin::System, scope, now),
         supersedes: input.supersedes,
         contradicts: input.contradicts,
     })

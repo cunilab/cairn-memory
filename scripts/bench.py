@@ -273,8 +273,19 @@ def main():
                        GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
         run(["git", "init", "-q", "-b", "main"], cwd=repo, env=git_env)
         run(["git", "remote", "add", "origin", "https://example.test/bench/harbor.git"], cwd=repo, env=git_env)
-        (repo / "README.md").write_text("harbor\n")
+        # The files the corpus cites exist on the default branch (step 6c §7), so SessionStart's git check
+        # leaves the memories active. They are committed first and four empty commits follow, so
+        # `recent_files` (status + the last five commits) is still just README.md as before.
+        for memory in corpus:
+            for name in memory.get("context", {}).get("files", []):
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text("\n")
         run(["git", "add", "."], cwd=repo, env=git_env)
+        run(["git", "commit", "-q", "--allow-empty", "-m", "corpus files"], cwd=repo, env=git_env)
+        for n in range(4):
+            run(["git", "commit", "-q", "--allow-empty", "-m", f"empty {n}"], cwd=repo, env=git_env)
+        (repo / "README.md").write_text("harbor\n")
+        run(["git", "add", "README.md"], cwd=repo, env=git_env)
         run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=git_env)
         run([cairn_exe, "init", "Harbor"], cwd=repo, env=env)
         project_id = json.loads((repo / ".cairn" / "project.json").read_text())["project_id"]
@@ -512,17 +523,47 @@ def main():
             events.append(dict(hook("PostToolUse", tool_name="Edit",
                                     tool_input={"file_path": path, "old_string": "a", "new_string": "b"},
                                     tool_response={"success": True}), file=path))
+        # A failed `cargo test`, an edit, then it passes: step 6 distills a fail -> fix gotcha from it.
+        bash = lambda exit_code, **response: hook("PostToolUse", tool_name="Bash", tool_input={"command": "cargo test"},
+                                                  tool_response=dict(exit_code=exit_code, **response))
+        events.append(dict(bash(1, stderr="error[E0308]: mismatched types in src/billing/money.rs"), file="cargo test (exit 1)"))
+        events.append(dict(hook("PostToolUse", tool_name="Edit",
+                                tool_input={"file_path": "src/billing/money.rs", "old_string": "b", "new_string": "fixed"},
+                                tool_response={"success": True}), file="src/billing/money.rs"))
+        events.append(dict(bash(0, stdout="test result: ok"), file="cargo test (exit 0)"))
         events.append(hook("PreCompact", trigger="auto"))
         events.append(hook("Stop", stop_hook_active=False))
         total = sum(e["injected_bytes"] for e in events)
         usage_delta = int(sql("select coalesce(sum(fetched), 0) from cairn.usage") or 0) - fetched_before
+        # SessionEnd injects nothing; it closes the session. Wait for the distill job and the link jobs its
+        # notes queue, then count what the scripted session distilled. This runs after the usage delta is
+        # taken: the recall searches below count as fetches.
+        hook("SessionEnd", reason="other")
+        for _ in range(120):
+            if int(sql("select count(*) from cairn.jobs where kind = 'distill' and status in ('pending','running')") or 0) == 0:
+                break
+            time.sleep(0.25)
+        settle()
+        system = "origin = 'system' and scope = 'personal'"
+        distilled = {"notes": int(sql(f"select count(*) from cairn.memories where {system} and kind <> 'handoff'") or 0),
+                     "gotcha": int(sql(f"select count(*) from cairn.memories where {system} and kind = 'gotcha'") or 0),
+                     "handoff": int(sql("select count(*) from cairn.memories where kind = 'handoff'") or 0) > 0}
+        mcp = Mcp(cairn_exe, repo, env)
+        mcp.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "bench", "version": "0"}})
+        session_titles = 0
+        for query in ("session", "handoff", "cargo test"):
+            shaped, _, _ = mcp.tool("memory_search", query=query, limit=10)
+            session_titles += sum(1 for card in (shaped.get("results") or [])
+                                  if re.match(r"^(Session|Handoff) [0-9a-f-]{8,}", card.get("title", "")))
+        mcp.close()
+        mcp = None
         session_bytes = {
             "events": events,
             "total_injected_bytes": total,
             "total_injected_tokens_est": est_tokens(total),
             "session_start_bytes": events[0]["injected_bytes"],
             "post_tool_use_bytes": sum(e["injected_bytes"] for e in events[1:-1]),
-            "note": "SessionStart + 10 Edit PostToolUse on distinct files + PreCompact + Stop, bytes of additionalContext",
+            "note": "SessionStart + 10 Edit PostToolUse on distinct files + a failing and a passing cargo test around one more edit + PreCompact + Stop, bytes of additionalContext",
         }
 
         # Fixed per-session cost for an agent that loads the whole MCP surface eagerly vs deferred.
@@ -544,6 +585,8 @@ def main():
             "mcp_surface": surface,
             "session_injection": session_bytes,
             "links": link_stats,
+            "distilled": distilled,
+            "session_titles_in_recall": session_titles,
             "usage_after_hooks_delta": usage_delta,
             "fixed_session_cost": fixed,
             "recall": recall,
@@ -565,6 +608,12 @@ def main():
             sys.exit(1)
         if args.max_weak_hits is not None and weak_hits > args.max_weak_hits:
             print(f"FAIL: weak queries returned {weak_hits} cards, above --max-weak-hits {args.max_weak_hits}", file=sys.stderr)
+            sys.exit(1)
+        if session_titles != 0:
+            print(f"FAIL: {session_titles} recalled card(s) are titled `Session <id>` or `Handoff <id>`", file=sys.stderr)
+            sys.exit(1)
+        if not (distilled["gotcha"] >= 1 and distilled["handoff"]):
+            print(f"FAIL: the scripted session distilled {distilled}; expected a fail->fix gotcha and a handoff", file=sys.stderr)
             sys.exit(1)
         ratio = link_stats["durable_with_link_ratio"]
         if args.min_link_ratio is not None and (ratio is None or ratio < args.min_link_ratio):
@@ -649,6 +698,8 @@ def print_table(r):
     h, hz = r["recall_holdout"], r["zero_hit_holdout"]
     rows.append(("holdout hit@5 / MRR@10", f"{h['hit_at_5']:.3f} / {h['mrr_at_10']:.3f}  (n={h['questions']}, precision {h['precision_at_5']})"))
     ln = r["links"]
+    rows.append(("scripted session distilled", f"{r['distilled']['notes']} notes ({r['distilled']['gotcha']} gotcha), handoff {r['distilled']['handoff']}; "
+                 f"{r['session_titles_in_recall']} recalled cards titled Session/Handoff <id>"))
     rows.append(("durable memories with >=1 link", f"{ln['durable_with_link_ratio']}  ({ln['with_link']} of {ln['durable']}; with distractors {ln['all_memories']['durable_with_link_ratio']})"))
     rows.append(("corpus", f"{r['corpus']['memories']} fixture + {r['corpus']['distractors']} distractor memories, set {r['corpus']['question_set']}"))
     rows.append(("holdout zero-hit correct", f"{hz['correct_zero_hit']}/{hz['queries']}"))

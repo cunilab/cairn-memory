@@ -39,6 +39,11 @@ pub fn topic(path: &str, notes: &[(String, String)]) -> String {
     if any { text } else { String::new() }
 }
 
+/// A server-built topic card: one line, at most 300 bytes, cut on a character boundary.
+pub fn card(card: &str) -> String {
+    truncate(&one_line(card), TOPIC_MAX_BYTES).to_owned()
+}
+
 /// The host's context-injection reply.
 pub fn output(event: &str, text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})

@@ -1,12 +1,13 @@
 use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
 use crate::memory::{MEMORY_COLUMNS, MEMORY_SELECT, memory_from_row, searchable, visible};
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::Memory;
+use cairn_core::memory::{Kind, Memory};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
-use cairn_core::retrieve::brief::session_brief;
+use cairn_core::process::entities::module_of;
+use cairn_core::retrieve::brief::{session_brief, topic_card};
 use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
@@ -131,6 +132,14 @@ pub struct TopicNote {
     pub id: String,
     pub title: String,
     pub summary: String,
+}
+
+/// The reply to `/session/topic`: notes for one or two memories, or a single card for more.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Topic {
+    pub notes: Vec<TopicNote>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
 }
 
 /// Candidate channels for hybrid search. Each returns `(memory_id, score)` for memories the
@@ -684,20 +693,20 @@ impl Store {
         ))
     }
 
-    /// Up to two active, visible notes whose file entity is exactly `path`, the caller's project
-    /// first. Handoffs are never topic notes and nothing is counted as fetched.
-    pub async fn topic_notes(
-        &self,
-        person_id: &str,
-        path: &str,
-        context: &WorkContext,
-    ) -> Result<Vec<TopicNote>> {
+    /// The active, visible memories about `path`: those with a file entity exactly `path` first, then
+    /// those with the module entity of its folder; the caller's project first. Up to two come back
+    /// as notes; three or more as one card naming the first two. Handoffs are never topic notes
+    /// and nothing is counted as fetched.
+    pub async fn topic(&self, person_id: &str, path: &str, context: &WorkContext) -> Result<Topic> {
         let rows = sqlx::query(&format!(
-            "SELECT m.memory_id, m.title, m.summary FROM memories m
+            "SELECT m.memory_id, m.kind, m.title, m.summary, count(*) OVER () AS total
+               FROM memories m
+               JOIN entities e ON e.memory_id = m.memory_id
               WHERE {} AND m.status = 'active' AND m.kind <> 'handoff'
-                AND EXISTS (SELECT 1 FROM entities e
-                             WHERE e.memory_id = m.memory_id AND e.kind = 'file' AND e.name = $2)
-              ORDER BY (m.project_id IS NOT NULL AND m.project_id = $3) DESC,
+                AND ((e.kind = 'file' AND e.name = $2) OR (e.kind = 'module' AND e.name = $4))
+              GROUP BY m.memory_id
+              ORDER BY bool_or(e.kind = 'file') DESC,
+                       (m.project_id IS NOT NULL AND m.project_id = $3) DESC,
                        m.updated_at DESC, m.memory_id
               LIMIT 2",
             visible("m", "$1")
@@ -705,9 +714,38 @@ impl Store {
         .bind(person_id)
         .bind(path)
         .bind(&context.project_id)
+        .bind(module_of(path))
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
+        let total = match rows.first() {
+            Some(row) => row.try_get::<i64, _>("total")?,
+            None => 0,
+        };
+        if total >= 3 {
+            let kinds = rows
+                .iter()
+                .map(|r| {
+                    r.try_get::<String, _>("kind")?
+                        .parse::<Kind>()
+                        .map_err(StoreError::Validation)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let titles = rows
+                .iter()
+                .map(|r| r.try_get::<String, _>("title"))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let first: Vec<(Kind, &str)> = kinds
+                .iter()
+                .copied()
+                .zip(titles.iter().map(String::as_str))
+                .collect();
+            return Ok(Topic {
+                notes: Vec::new(),
+                card: Some(topic_card(path, total as usize, &first)),
+            });
+        }
+        let notes = rows
+            .iter()
             .map(|r| {
                 Ok(TopicNote {
                     id: r.try_get("memory_id")?,
@@ -715,7 +753,8 @@ impl Store {
                     summary: r.try_get("summary")?,
                 })
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        Ok(Topic { notes, card: None })
     }
 
     /// Nodes are the memories the person can see; edges are the links between them.

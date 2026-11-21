@@ -1,44 +1,269 @@
-use crate::capture::Observation;
+use super::entities::normalize_command;
+use crate::capture::{CaptureKind, Observation, WorkContext};
 use crate::id::sha256_hex;
-use crate::memory::validate::{LIST_ITEM_MAX, LIST_MAX_ITEMS, SUMMARY_MAX, TITLE_MAX};
-use crate::memory::{Kind, SaveInput, Scope};
+use crate::memory::validate::validate_quality;
+use crate::memory::validate::{
+    FIELD_TEXT_MAX, LIST_ITEM_MAX, LIST_MAX_ITEMS, SUMMARY_MAX, TITLE_MAX,
+};
+use crate::memory::{Fields, Kind, SaveInput, Scope};
 use serde_json::{Map, Value, json};
 
 const MAX_TYPED_NOTES: usize = 64;
+const MAX_GOTCHAS: usize = 3;
+const HANDOFF_FILES_MAX: usize = 20;
+/// Normalised commands starting with one of these are "the test command" (D3).
+const TEST_COMMANDS: [&str; 11] = [
+    "cargo test",
+    "cargo nextest",
+    "npm test",
+    "npm run test",
+    "pnpm test",
+    "yarn test",
+    "pytest",
+    "python -m pytest",
+    "go test",
+    "make test",
+    "just test",
+];
 
-/// Rule-based output of one session: typed notes from `Decision:`-style lines, and a handoff.
-/// Both are plain `SaveInput`s, so they pass the same validation as an agent's save.
+/// One distilled note and the files it is about (its entity context).
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub input: SaveInput,
+    pub files: Vec<String>,
+}
+
+/// Rule-based output of one session: typed notes from `Decision:`-style lines, a fail-then-fix
+/// gotcha, a test-command fact, and a handoff. All are plain `SaveInput`s built to pass the same
+/// validation and quality rules as an agent's save.
 #[derive(Clone, Debug, Default)]
 pub struct Distilled {
-    pub notes: Vec<SaveInput>,
+    pub notes: Vec<Note>,
     pub handoff: Option<SaveInput>,
 }
 
-/// One handoff per (owner, session): the id is derived, so a later distill upserts it.
-pub fn handoff_id(person_id: &str, session_id: &str) -> String {
-    format!("hnd_{}", &sha256_hex(&[person_id, session_id])[..32])
+/// One handoff per (owner, project-or-repository, branch, worktree): the id is derived, so a
+/// later distill in the same checkout replaces it.
+pub fn handoff_id(person_id: &str, ctx: &WorkContext) -> String {
+    let place = ctx
+        .project_id
+        .as_deref()
+        .or(ctx.repository.as_deref())
+        .unwrap_or("");
+    let parts = [
+        person_id,
+        place,
+        ctx.branch.as_deref().unwrap_or(""),
+        ctx.worktree.as_deref().unwrap_or(""),
+    ];
+    format!("hnd_{}", &sha256_hex(&parts)[..32])
 }
 
 pub fn distill(observations: &[Observation]) -> Distilled {
-    let usable: Vec<&Observation> = observations
+    let text: Vec<&Observation> = observations
         .iter()
-        .filter(|o| !is_tool_payload(o))
+        .filter(|o| matches!(o.kind, CaptureKind::Prompt | CaptureKind::Assistant))
         .collect();
-    let session_id = observations.first().map_or("", |o| o.session_id.as_str());
+    let mut notes: Vec<Note> = typed_notes(&text)
+        .into_iter()
+        .map(|(input, files)| Note { input, files })
+        .collect();
+    let failures = failures(observations);
+    notes.extend(gotchas(observations, &failures));
+    notes.extend(test_fact(observations));
+    // System saves skip the agent quality check, so what would fail it is not worth keeping.
+    notes.retain(|n| passes_quality(&n.input));
     Distilled {
-        notes: typed_notes(&usable),
-        handoff: handoff(&usable, session_id),
+        notes,
+        handoff: handoff(observations, &failures),
     }
 }
 
-fn handoff(observations: &[&Observation], session_id: &str) -> Option<SaveInput> {
+fn passes_quality(input: &SaveInput) -> bool {
+    Fields::parse(input.kind, input.fields.clone())
+        .is_ok_and(|fields| validate_quality(input, &fields).is_ok())
+}
+
+/// One failed command and what followed it.
+struct Failure<'a> {
+    key: String,
+    observation: &'a Observation,
+    index: usize,
+}
+
+fn command_text(o: &Observation) -> &str {
+    o.context
+        .commands
+        .first()
+        .map(String::as_str)
+        .or_else(|| o.content.lines().next())
+        .unwrap_or("")
+}
+
+/// The first two words of the normalised command: `cargo test` for `cargo test --workspace`.
+fn key_of(o: &Observation) -> String {
+    normalize_command(command_text(o))
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The text after `exit <n>: ` (or `failed: `) on the second line of a failed command capture.
+fn error_line(o: &Observation) -> Option<String> {
+    let line = o.content.lines().nth(1)?;
+    let (head, rest) = line.split_once(": ")?;
+    (head.starts_with("exit ") || head == "failed").then(|| rest.trim().to_owned())
+}
+
+fn failures(observations: &[Observation]) -> Vec<Failure<'_>> {
+    observations
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.kind == CaptureKind::Command && o.ok == Some(false))
+        .map(|(index, o)| Failure {
+            key: key_of(o),
+            observation: o,
+            index,
+        })
+        .filter(|f| !f.key.is_empty())
+        .collect()
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// D2: for each failed key, the first later passing command with an edit between them.
+fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut notes = Vec::new();
+    for failure in failures {
+        if notes.len() >= MAX_GOTCHAS || seen.contains(&failure.key.as_str()) {
+            continue;
+        }
+        let Some(pass) = observations[failure.index + 1..].iter().position(|o| {
+            o.kind == CaptureKind::Command && o.ok == Some(true) && key_of(o) == failure.key
+        }) else {
+            continue;
+        };
+        let pass = failure.index + 1 + pass;
+        let edits: Vec<&Observation> = observations[failure.index + 1..pass]
+            .iter()
+            .filter(|o| o.kind == CaptureKind::Edit)
+            .collect();
+        if edits.is_empty() {
+            continue;
+        }
+        seen.push(&failure.key);
+        let mut files = Vec::new();
+        let mut evidence = vec![failure.observation.event_id.clone()];
+        for edit in &edits {
+            for file in &edit.context.files {
+                push_unique(&mut files, file);
+            }
+            push_unique(&mut evidence, &edit.event_id);
+        }
+        push_unique(&mut evidence, &observations[pass].event_id);
+        let key = &failure.key;
+        let names: Vec<&str> = files.iter().take(2).map(|f| basename(f)).collect();
+        let error = error_line(failure.observation).filter(|e| e.chars().count() >= 20);
+        let edited: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+        let symptom = error_line(failure.observation)
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| format!("`{key}` exited non-zero"));
+        let fix = format!(
+            "Edited {}",
+            files
+                .iter()
+                .take(5)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        notes.push(Note {
+            input: SaveInput {
+                kind: Kind::Gotcha,
+                title: clip(
+                    &format!("`{key}` failed until {} changed", names.join(", ")),
+                    TITLE_MAX,
+                ),
+                summary: clip(
+                    &error.unwrap_or_else(|| {
+                        format!(
+                            "`{key}` failed, then passed after editing {}.",
+                            edited.join(", ")
+                        )
+                    }),
+                    SUMMARY_MAX,
+                ),
+                reason:
+                    "Seen in one session: the command failed, files were edited, then it passed."
+                        .to_owned(),
+                fields: Some(json!({
+                    "symptom": clip(&symptom, FIELD_TEXT_MAX),
+                    "fix": clip(&fix, FIELD_TEXT_MAX),
+                })),
+                evidence,
+                supersedes: None,
+                contradicts: None,
+                scope: Some(Scope::Personal),
+            },
+            files,
+        });
+    }
+    notes
+}
+
+/// D3: the first passing test command of the session.
+fn test_fact(observations: &[Observation]) -> Option<Note> {
+    let passed = observations.iter().find(|o| {
+        o.kind == CaptureKind::Command && o.ok == Some(true) && {
+            let command = normalize_command(command_text(o));
+            TEST_COMMANDS.iter().any(|t| {
+                command == *t || command.strip_prefix(t).is_some_and(|r| r.starts_with(' '))
+            })
+        }
+    })?;
+    let command = normalize_command(command_text(passed));
+    Some(Note {
+        input: SaveInput {
+            kind: Kind::Fact,
+            title: clip(
+                &format!("Tests run with `{}`", clip(&command, 50)),
+                TITLE_MAX,
+            ),
+            summary: clip(
+                &format!("`{command}` is the test command that passed in this repository."),
+                SUMMARY_MAX,
+            ),
+            reason: "Observed a passing run in a session.".to_owned(),
+            fields: Some(json!({ "source": "session capture" })),
+            evidence: vec![passed.event_id.clone()],
+            supersedes: None,
+            contradicts: None,
+            scope: Some(Scope::Personal),
+        },
+        files: Vec::new(),
+    })
+}
+
+/// D4: what the next session needs: edited files, marker lines from prompts, failures still open.
+fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<SaveInput> {
     let mut next_steps = Vec::new();
     let mut open = Vec::new();
     let mut files = Vec::new();
     let mut evidence = Vec::new();
     for observation in observations {
-        for file in &observation.context.files {
-            push_unique(&mut files, file);
+        if observation.kind == CaptureKind::Edit {
+            for file in &observation.context.files {
+                if files.len() < HANDOFF_FILES_MAX {
+                    push_unique(&mut files, file);
+                }
+            }
+        }
+        if observation.kind != CaptureKind::Prompt {
+            continue;
         }
         for line in observation.content.lines() {
             let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -80,17 +305,47 @@ fn handoff(observations: &[&Observation], session_id: &str) -> Option<SaveInput>
             }
         }
     }
-    if next_steps.is_empty() && open.is_empty() {
+    let mut seen: Vec<&str> = Vec::new();
+    for failure in failures {
+        let later_pass = observations[failure.index + 1..].iter().any(|o| {
+            o.kind == CaptureKind::Command && o.ok == Some(true) && key_of(o) == failure.key
+        });
+        if later_pass || seen.contains(&failure.key.as_str()) {
+            continue;
+        }
+        seen.push(&failure.key);
+        let error = error_line(failure.observation).unwrap_or_default();
+        push_unique(
+            &mut open,
+            &format!("`{}` still failing: {error}", failure.key),
+        );
+        push_unique(&mut evidence, &failure.observation.event_id);
+    }
+    let last = observations.last()?;
+    let edited = observations.iter().any(|o| o.kind == CaptureKind::Edit);
+    if !edited && next_steps.is_empty() && open.is_empty() {
         return None;
     }
+    let place = last
+        .context
+        .branch
+        .clone()
+        .or_else(|| {
+            last.context
+                .repository
+                .as_deref()
+                .map(|r| basename(r.strip_prefix("local:").unwrap_or(r)).to_owned())
+        })
+        .unwrap_or_else(|| "workspace".to_owned());
     Some(SaveInput {
         kind: Kind::Handoff,
-        title: clip(&format!("Handoff {session_id}"), TITLE_MAX),
+        title: clip(&format!("Handoff: {place}"), TITLE_MAX),
         summary: clip(
             &format!(
-                "{} next steps; {} open items recorded in session captures.",
-                next_steps.len(),
-                open.len()
+                "{} files edited; {} open items; last activity {}.",
+                files.len(),
+                open.len(),
+                date(last.captured_at)
             ),
             SUMMARY_MAX,
         ),
@@ -103,7 +358,21 @@ fn handoff(observations: &[&Observation], session_id: &str) -> Option<SaveInput>
     })
 }
 
-fn typed_notes(observations: &[&Observation]) -> Vec<SaveInput> {
+/// `YYYY-MM-DD` (UTC) of an epoch second, by the civil-from-days algorithm.
+fn date(seconds: i64) -> String {
+    let z = seconds.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn typed_notes(observations: &[&Observation]) -> Vec<(SaveInput, Vec<String>)> {
     let mut notes: Vec<Draft> = Vec::new();
     'sources: for observation in observations {
         let mut current: Option<Draft> = None;
@@ -120,7 +389,7 @@ fn typed_notes(observations: &[&Observation]) -> Vec<SaveInput> {
                     break 'sources;
                 }
                 if !value.is_empty() {
-                    current = Some(Draft::new(kind, value, &observation.event_id));
+                    current = Some(Draft::new(kind, value, observation));
                 }
             } else if let Some(draft) = current.as_mut()
                 && draft.take_field(&label, value)
@@ -135,7 +404,7 @@ fn typed_notes(observations: &[&Observation]) -> Vec<SaveInput> {
             break;
         }
     }
-    notes.into_iter().map(Draft::into_input).collect()
+    notes.into_iter().map(Draft::into_note).collect()
 }
 
 fn typed_kind(label: &str) -> Option<Kind> {
@@ -155,16 +424,18 @@ struct Draft {
     reason: String,
     fields: Map<String, Value>,
     event_id: String,
+    files: Vec<String>,
 }
 
 impl Draft {
-    fn new(kind: Kind, value: &str, event_id: &str) -> Self {
+    fn new(kind: Kind, value: &str, observation: &Observation) -> Self {
         Self {
             kind,
             value: value.to_owned(),
             reason: String::new(),
             fields: Map::new(),
-            event_id: event_id.to_owned(),
+            event_id: observation.event_id.clone(),
+            files: observation.context.files.clone(),
         }
     }
 
@@ -207,13 +478,17 @@ impl Draft {
         true
     }
 
-    fn into_input(self) -> SaveInput {
-        SaveInput {
+    fn into_note(self) -> (SaveInput, Vec<String>) {
+        let input = SaveInput {
             kind: self.kind,
             title: clip(&self.value, TITLE_MAX),
-            summary: clip(&self.value, SUMMARY_MAX),
+            // The summary may not repeat the title (quality rule), so it says where it came from.
+            summary: clip(
+                &format!("{} noted in a session: {}", self.kind.as_str(), self.value),
+                SUMMARY_MAX,
+            ),
             // Provenance only; no cause is invented.
-            reason: if self.reason.is_empty() {
+            reason: if self.reason.chars().count() < 10 {
                 "Distilled from a captured session note.".to_owned()
             } else {
                 self.reason
@@ -223,7 +498,8 @@ impl Draft {
             supersedes: None,
             contradicts: None,
             scope: Some(Scope::Personal),
-        }
+        };
+        (input, self.files)
     }
 }
 
@@ -244,61 +520,87 @@ fn push_unique(list: &mut Vec<String>, value: &str) -> bool {
     true
 }
 
-/// Tool output stays an observation; it never becomes a note or a next step.
-fn is_tool_payload(observation: &Observation) -> bool {
-    let role = observation.role.trim().to_ascii_lowercase();
-    let source = observation
-        .source
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['_', '-'], "");
-    if matches!(source.as_str(), "posttooluse" | "pretooluse")
-        && role != "user"
-        && role != "assistant"
-    {
-        return true;
-    }
-    let body = observation.content.trim();
-    role == "tool"
-        && ((body.starts_with('{') && body.ends_with('}'))
-            || (body.starts_with('[') && body.ends_with(']')))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::WorkContext;
+    use crate::capture::{CaptureKind, WorkContext};
+    use crate::memory::validate::validate_quality;
+    use crate::memory::{Fields, Kind};
 
-    fn obs(id: &str, role: &str, source: &str, content: &str) -> Observation {
+    fn ob(
+        id: &str,
+        kind: CaptureKind,
+        content: &str,
+        ok: Option<bool>,
+        files: &[&str],
+    ) -> Observation {
+        let command =
+            (kind == CaptureKind::Command).then(|| content.lines().next().unwrap_or("").to_owned());
         Observation {
             event_id: id.into(),
             session_id: "s1".into(),
             content: content.into(),
-            role: role.into(),
-            source: source.into(),
-            kind: crate::capture::CaptureKind::Command,
-            ok: None,
+            role: kind.role().into(),
+            source: kind.as_str().into(),
+            kind,
+            ok,
             content_hash: String::new(),
             context: WorkContext {
-                files: vec!["a.rs".into()],
+                files: files.iter().map(|f| (*f).to_owned()).collect(),
+                commands: command.into_iter().collect(),
+                branch: Some("feat/x".into()),
+                repository: Some("github.com/acme/shop".into()),
                 ..WorkContext::default()
             },
-            captured_at: 0,
+            captured_at: 1_790_000_000,
             expires_at: 0,
         }
     }
 
+    fn prompt(id: &str, text: &str) -> Observation {
+        ob(id, CaptureKind::Prompt, text, None, &[])
+    }
+
+    fn fail(id: &str, cmd: &str, error: &str) -> Observation {
+        ob(
+            id,
+            CaptureKind::Command,
+            &format!("{cmd}\nexit 101: {error}"),
+            Some(false),
+            &[],
+        )
+    }
+
+    fn pass(id: &str, cmd: &str) -> Observation {
+        ob(id, CaptureKind::Command, cmd, Some(true), &[])
+    }
+
+    fn edit(id: &str, file: &str) -> Observation {
+        ob(
+            id,
+            CaptureKind::Edit,
+            &format!("Edit {file}\nx"),
+            None,
+            &[file],
+        )
+    }
+
+    fn quality(input: &SaveInput) {
+        let fields = Fields::parse(input.kind, input.fields.clone()).expect("fields");
+        assert_eq!(validate_quality(input, &fields), Ok(()), "{input:?}");
+    }
+
     #[test]
     fn typed_notes_take_following_metadata_only() {
-        let o = obs(
+        let d = distill(&[ob(
             "e1",
-            "assistant",
-            "hook",
+            CaptureKind::Assistant,
             "Decision: use pgvector\nReason: one database\nAlternative: qdrant\nSome prose\nRule: no mocks\nFix: ignored for a rule",
-        );
-        let d = distill(&[o]);
+            None,
+            &[],
+        )]);
         assert_eq!(d.notes.len(), 2);
-        let decision = &d.notes[0];
+        let decision = &d.notes[0].input;
         assert_eq!(
             (decision.kind, decision.reason.as_str()),
             (Kind::Decision, "one database")
@@ -309,40 +611,245 @@ mod tests {
         );
         assert_eq!(decision.evidence, vec!["e1".to_owned()]);
         assert_eq!(decision.scope, Some(Scope::Personal));
-        assert!(d.notes[1].reason.starts_with("Distilled"));
+        assert!(d.notes[1].input.reason.starts_with("Distilled"));
+    }
+
+    #[test]
+    fn typed_lines_in_tool_captures_are_ignored() {
+        let d = distill(&[ob(
+            "e1",
+            CaptureKind::Command,
+            "echo\nDecision: from a tool",
+            None,
+            &[],
+        )]);
+        assert!(d.notes.is_empty());
+    }
+
+    #[test]
+    fn distill_fail_fix_gotcha() {
+        let d = distill(&[
+            fail(
+                "c1",
+                "cargo test --workspace",
+                "error[E0308]: mismatched types in src/billing/money.rs",
+            ),
+            edit("e1", "src/billing/money.rs"),
+            pass("c2", "cargo test"),
+        ]);
+        let gotcha = d
+            .notes
+            .iter()
+            .find(|n| n.input.kind == Kind::Gotcha)
+            .expect("gotcha");
+        let input = &gotcha.input;
+        assert_eq!(input.title, "`cargo test` failed until money.rs changed");
+        assert_eq!(
+            input.summary,
+            "error[E0308]: mismatched types in src/billing/money.rs"
+        );
+        let fields = input.fields.as_ref().unwrap();
+        assert_eq!(fields["fix"], "Edited src/billing/money.rs");
+        assert_eq!(
+            fields["symptom"],
+            "error[E0308]: mismatched types in src/billing/money.rs"
+        );
+        assert!(fields.get("cause").is_none(), "no cause is invented");
+        assert_eq!(input.evidence, ["c1", "e1", "c2"]);
+        assert_eq!(gotcha.files, ["src/billing/money.rs"]);
+        // a short error line falls back to the generated summary
+        let d = distill(&[
+            fail("c1", "go test ./...", "boom"),
+            edit("e1", "a.go"),
+            pass("c2", "go test"),
+        ]);
+        let g = d
+            .notes
+            .iter()
+            .find(|n| n.input.kind == Kind::Gotcha)
+            .unwrap();
+        assert_eq!(
+            g.input.summary,
+            "`go test` failed, then passed after editing a.go."
+        );
+        assert_eq!(g.input.fields.as_ref().unwrap()["symptom"], "boom");
+    }
+
+    #[test]
+    fn distill_no_gotcha_without_edit_between() {
+        let none = |obs: &[Observation]| {
+            distill(obs)
+                .notes
+                .iter()
+                .all(|n| n.input.kind != Kind::Gotcha)
+        };
+        assert!(none(&[
+            fail("c1", "cargo test", "error: nope nope nope nope"),
+            pass("c2", "cargo test")
+        ]));
+        // the edit comes before the failure
+        assert!(none(&[
+            edit("e1", "a.rs"),
+            fail("c1", "cargo test", "x"),
+            pass("c2", "cargo test")
+        ]));
+        // another command passed, not the same key
+        assert!(none(&[
+            fail("c1", "cargo test", "x"),
+            edit("e1", "a.rs"),
+            pass("c2", "cargo build")
+        ]));
+    }
+
+    #[test]
+    fn distill_ignores_ok_none() {
+        let unknown = ob("c1", CaptureKind::Command, "cargo test\nfailed", None, &[]);
+        let d = distill(&[
+            unknown.clone(),
+            edit("e1", "a.rs"),
+            ob("c2", CaptureKind::Command, "cargo test", None, &[]),
+        ]);
+        assert!(d.notes.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn distill_test_command_fact_dedupes() {
+        let d = distill(&[
+            pass("c1", "cargo test --workspace -q"),
+            pass("c2", "cargo test --workspace -q"),
+        ]);
+        let facts: Vec<_> = d
+            .notes
+            .iter()
+            .filter(|n| n.input.kind == Kind::Fact)
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(
+            facts[0].input.title,
+            "Tests run with `cargo test --workspace`"
+        );
+        assert_eq!(
+            facts[0].input.fields.as_ref().unwrap()["source"],
+            "session capture"
+        );
+        assert_eq!(facts[0].input.evidence, ["c1"]);
+        // identity: the same session distilled twice gives the same fact input
+        let again = distill(&[pass("c1", "cargo test --workspace -q")]);
+        assert_eq!(again.notes[0].input.title, facts[0].input.title);
+        assert!(distill(&[pass("c1", "cargo build")]).notes.is_empty());
         assert!(
-            d.notes[1]
-                .fields
-                .as_ref()
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .is_empty()
+            distill(&[ob(
+                "c1",
+                CaptureKind::Command,
+                "cargo test\nexit 1: x",
+                Some(false),
+                &[]
+            )])
+            .notes
+            .is_empty()
         );
     }
 
     #[test]
-    fn handoff_collects_next_steps_and_skips_tool_payloads() {
+    fn distill_handoff_title_has_no_session_id() {
         let d = distill(&[
-            obs("e1", "user", "hook", "TODO: wire the worker\nall done here"),
-            obs("e2", "tool", "hook", "{\"todo\": \"from a tool\"}"),
+            prompt("p1", "TODO: wire the worker"),
+            edit("e1", "src/a.rs"),
+            fail("c1", "cargo test", "error: still broken"),
         ]);
-        let handoff = d.handoff.expect("handoff");
-        assert_eq!(handoff.kind, Kind::Handoff);
-        let fields = handoff.fields.unwrap();
+        let h = d.handoff.expect("handoff");
+        assert_eq!(h.title, "Handoff: feat/x");
+        assert_eq!(
+            h.summary,
+            "1 files edited; 2 open items; last activity 2026-09-21."
+        );
+        let fields = h.fields.unwrap();
         assert_eq!(fields["next_steps"][0], "TODO: wire the worker");
-        assert_eq!(fields["files"][0], "a.rs");
-        assert_eq!(handoff.evidence, vec!["e1".to_owned()]);
-    }
-
-    #[test]
-    fn nothing_to_hand_off_gives_none() {
+        assert_eq!(
+            fields["open_questions"][1],
+            "`cargo test` still failing: error: still broken"
+        );
+        assert_eq!(fields["files"][0], "src/a.rs");
+        // no branch: repository basename, then "workspace"
+        let mut o = edit("e1", "a.rs");
+        o.context.branch = None;
+        assert_eq!(
+            distill(&[o.clone()]).handoff.unwrap().title,
+            "Handoff: shop"
+        );
+        o.context.repository = None;
+        assert_eq!(distill(&[o]).handoff.unwrap().title, "Handoff: workspace");
+        // a failure that later passed is not open; nothing to say → none
         assert!(
-            distill(&[obs("e1", "user", "hook", "hello")])
+            distill(&[prompt("p1", "hello"), pass("c1", "ls -l")])
                 .handoff
                 .is_none()
         );
-        assert_eq!(handoff_id("p", "s"), handoff_id("p", "s"));
-        assert_ne!(handoff_id("p", "s"), handoff_id("p", "t"));
+        let d = distill(&[fail("c1", "cargo test", "x"), pass("c2", "cargo test")]);
+        assert!(d.handoff.is_none());
+    }
+
+    #[test]
+    fn handoff_id_per_checkout() {
+        let ctx = |branch: &str, wt: &str| WorkContext {
+            project_id: Some("proj".into()),
+            repository: Some("r".into()),
+            branch: Some(branch.into()),
+            worktree: Some(wt.into()),
+            ..WorkContext::default()
+        };
+        let id = handoff_id("p", &ctx("main", "wt-1"));
+        assert_eq!(id, handoff_id("p", &ctx("main", "wt-1")));
+        assert!(id.starts_with("hnd_") && id.len() == 36);
+        for other in [
+            handoff_id("q", &ctx("main", "wt-1")),
+            handoff_id("p", &ctx("dev", "wt-1")),
+            handoff_id("p", &ctx("main", "wt-2")),
+            handoff_id("p", &WorkContext::default()),
+        ] {
+            assert_ne!(id, other);
+        }
+        // the project id wins over the repository name
+        let mut c = ctx("main", "wt-1");
+        c.repository = Some("other".into());
+        assert_eq!(id, handoff_id("p", &c));
+    }
+
+    #[test]
+    fn system_outputs_pass_quality() {
+        let d = distill(&[
+            prompt(
+                "p1",
+                "TODO: wire the worker\nDecision: use pgvector\nReason: one database\nGotcha: lock timeouts under load\nFix: retry\nProcedure: ship a release\nStep: build\nStep: push\nGotcha: lock\nProcedure: one step only\nStep: build",
+            ),
+            fail("c1", "cargo test", "boom"),
+            edit(
+                "e1",
+                "src/very/long/path/to/a/module/file_with_a_long_name.rs",
+            ),
+            pass("c2", "cargo test"),
+        ]);
+        let mut inputs: Vec<&SaveInput> = d.notes.iter().map(|n| &n.input).collect();
+        inputs.extend(d.handoff.as_ref());
+        assert!(
+            inputs.iter().any(|i| i.kind == Kind::Gotcha)
+                && inputs.iter().any(|i| i.kind == Kind::Handoff)
+        );
+        assert!(inputs.iter().any(|i| i.kind == Kind::Fact));
+        // typed lines that cannot pass (gotcha `lock`, a one-step procedure) are dropped, not saved
+        assert_eq!(
+            d.notes.iter().filter(|n| n.input.title == "lock").count(),
+            0
+        );
+        assert_eq!(
+            d.notes
+                .iter()
+                .filter(|n| n.input.title == "one step only")
+                .count(),
+            0
+        );
+        for input in inputs {
+            quality(input);
+        }
     }
 }

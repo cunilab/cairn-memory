@@ -13,6 +13,12 @@ fn observation(event: &str, session: &str, content: &str) -> ObservationInput {
     .unwrap()
 }
 
+fn prompt(event: &str, session: &str, content: &str) -> ObservationInput {
+    let mut input = observation(event, session, content);
+    input.kind = cairn_core::capture::CaptureKind::Prompt;
+    input
+}
+
 #[tokio::test]
 async fn capture_is_idempotent_and_changed_content_is_409() {
     let Some(db) = TestDb::new().await else {
@@ -114,7 +120,7 @@ async fn ending_a_session_queues_distill_and_distill_writes_notes_and_one_handof
     db.store
         .capture(
             &me,
-            observation(
+            prompt(
                 "e1",
                 "s1",
                 "Decision: use pgvector\nReason: one database\nTODO: wire the worker",

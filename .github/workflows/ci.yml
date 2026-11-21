@@ -31,6 +31,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: no human review queue (tables, routes, pages)
+        # bench_distractors.py is generated corpus text, not code ("Reference for reviews.").
+        run: |
+          if grep -rniE 'similarity.review|review_queue|reviews' --exclude=bench_distractors.py crates apps/web/app apps/web/components scripts; then
+            echo "the human review queue is gone (CM-SPEC-008 P11); do not bring it back" >&2
+            exit 1
+          fi
       - name: cairn-core stays pure (no sqlx, tokio, axum or reqwest)
         run: |
           tree="$(cargo tree -p cairn-core -e normal --locked)"

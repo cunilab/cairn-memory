@@ -40,13 +40,17 @@ flowchart TD
     Attach -->|no| Personal[Stay personal]
     Obs --> End[Session end or checkpoint]
     End --> Job[distill job]
-    Job --> Handoff[one handoff note per session]
+    Job --> Handoff[one handoff per repo, branch and worktree]
+    Job --> Notes[typed notes, fail-then-fix gotcha, test command fact]
 ```
 
 Capture is always personal. A failed project attachment never fails the capture; the reply carries
 `project_attachment.status` (`attached` or `personal`). Event ids are stable: an identical replay is
 acknowledged and a changed replay is a conflict. The hook keeps a bounded outbox for outages. Observations
-are raw evidence and are never recalled directly; they expire and are swept.
+are raw evidence and are never recalled directly; they expire and are swept, and are deleted a week after their
+session is distilled. At session start the hook also answers the brief's `check` (which cited files and symbols still
+exist on the default branch, which branches are merged) with `POST /session/repo-state`, which marks memories stale or
+active again and moves merged-branch memories to the default branch.
 
 ## Save
 

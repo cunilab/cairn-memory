@@ -756,7 +756,7 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
             .unwrap()
     };
     assert_eq!(fetched().await, 0);
-    store.topic_notes(&me, "src/usage.rs", &work).await.unwrap();
+    store.topic(&me, "src/usage.rs", &work).await.unwrap();
     store.brief(&me, &work, &[]).await.unwrap();
     assert_eq!(fetched().await, 0, "topic and brief never count");
     let cards = store
@@ -1298,28 +1298,18 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         project_id: Some(project.project_id.clone()),
         ..WorkContext::default()
     };
-    let notes = store.topic_notes(&me, "src/a.rs", &context).await.unwrap();
-    let ids: Vec<_> = notes.iter().map(|n| n.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [ours.as_str(), newest.as_str()],
-        "project first, newest next, at most 2"
-    );
-    assert_eq!(notes[0].summary, "Project rule summary for the test");
+    // Four memories name the file, so one card names the first two: project first, newest next.
+    let topic = store.topic(&me, "src/a.rs", &context).await.unwrap();
+    assert!(topic.notes.is_empty());
+    let card = topic.card.expect("card");
     assert!(
-        store
-            .topic_notes(&me, "src/a", &context)
-            .await
-            .unwrap()
-            .is_empty()
+        card.contains("4 memories \u{2014} rule Project rule; fact Personal three"),
+        "{card}"
     );
-    assert!(
-        store
-            .topic_notes(&stranger, "src/a.rs", &context)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    for (who, path) in [(&me, "src/a"), (&stranger, "src/a.rs")] {
+        let topic = store.topic(who, path, &context).await.unwrap();
+        assert!(topic.notes.is_empty() && topic.card.is_none());
+    }
 
     // Handoffs and inactive notes are never topic notes; asking never counts as a fetch.
     sqlx::query("UPDATE memories SET kind = 'handoff' WHERE memory_id = $1")
@@ -1332,11 +1322,12 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .execute(store.pool())
         .await
         .unwrap();
-    let notes = store
-        .topic_notes(&me, "src/a.rs", &WorkContext::default())
+    let topic = store
+        .topic(&me, "src/a.rs", &WorkContext::default())
         .await
         .unwrap();
-    assert!(notes.iter().all(|n| n.id != newest && n.id != ours));
+    assert!(topic.card.is_none() && topic.notes.len() == 2);
+    assert!(topic.notes.iter().all(|n| n.id != newest && n.id != ours));
     let fetched: i64 = sqlx::query_scalar("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
         .fetch_one(store.pool())
         .await

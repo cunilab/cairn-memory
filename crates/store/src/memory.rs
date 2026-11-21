@@ -3,6 +3,7 @@ use crate::project::join_member;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::{new_id, now_seconds};
+use cairn_core::memory::kind::SYSTEM_TTL_SECONDS;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
     Usage,
@@ -213,6 +214,7 @@ impl Store {
         .bind(memory_ids)
         .execute(&self.pool)
         .await?;
+        extend_system_expiry(&self.pool, memory_ids).await?;
         Ok(())
     }
 
@@ -410,6 +412,9 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        if vote == Vote::Helpful {
+            extend_system_expiry(&mut *tx, &[memory_id.to_owned()]).await?;
+        }
         tx.commit().await?;
         Ok(new_status)
     }
@@ -468,6 +473,23 @@ impl Store {
 }
 
 /// Back to `active` when no remaining live memory supersedes it.
+/// A system gotcha or fact that is used keeps living: its 180 days restart. A promoted global
+/// copy has no age limit (it lives while two sources do), so it is left alone.
+async fn extend_system_expiry<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    memory_ids: &[String],
+) -> Result<()> {
+    sqlx::query(&format!(
+        "UPDATE memories SET expires_at = now() + make_interval(secs => {SYSTEM_TTL_SECONDS})
+          WHERE memory_id = ANY($1) AND origin = 'system' AND kind IN ('gotcha','fact')
+            AND scope <> 'global' AND expires_at > now()"
+    ))
+    .bind(memory_ids)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
     sqlx::query(
         "UPDATE memories SET status = 'active', status_changed_at = now(), updated_at = now()

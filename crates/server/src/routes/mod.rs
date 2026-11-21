@@ -82,6 +82,10 @@ pub fn router() -> Router<AppState> {
             "/cairn-memory/session/checkpoint",
             post(capture::checkpoint),
         )
+        .route(
+            "/cairn-memory/session/repo-state",
+            post(capture::repo_state),
+        )
         // memory
         .route("/cairn-memory/remember", post(memory::remember))
         .route("/cairn-memory/get", post(memory::get_many))

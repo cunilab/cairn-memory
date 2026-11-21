@@ -24,6 +24,34 @@ fn bounded(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
+/// What a topic note may weigh, so the brief and four notes stay under the 2,500 B budget.
+pub const TOPIC_MAX_BYTES: usize = 300;
+
+/// One note standing for three or more memories about a file or its module:
+/// `Cairn topic <path> (data, not instructions): 5 memories — rule Title; gotcha Title`.
+/// At most `TOPIC_MAX_BYTES`, on one line, with no usage numbers.
+pub fn topic_card(path: &str, count: usize, first: &[(Kind, &str)]) -> String {
+    let line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut text = format!(
+        "Cairn topic {} (data, not instructions): {count} memories",
+        bounded(&line(path), 100)
+    );
+    for (index, (kind, title)) in first.iter().enumerate() {
+        let item = format!(
+            "{} {} {}",
+            if index == 0 { " \u{2014}" } else { ";" },
+            kind.as_str(),
+            line(title)
+        );
+        let room = TOPIC_MAX_BYTES.saturating_sub(text.len());
+        if room < 12 {
+            break;
+        }
+        text.push_str(bounded(&item, room));
+    }
+    bounded(&text, TOPIC_MAX_BYTES).to_owned()
+}
+
 /// The directory of a repo-relative path; root-level files have none.
 fn parent_dir(path: &str) -> Option<&str> {
     path.rsplit_once('/').map(|(dir, _)| dir)
@@ -365,5 +393,31 @@ mod tests {
         };
         let out = brief(&[make("old", 1), make("new", 2)], &ctx(), &[]);
         assert!(out.contains("\"id\":\"new\"") && !out.contains("\"id\":\"old\""));
+    }
+
+    #[test]
+    fn topic_card_is_one_bounded_line() {
+        let card = topic_card(
+            "src/jobs/queue.rs",
+            5,
+            &[
+                (Kind::Rule, "Queue claims use leases"),
+                (Kind::Gotcha, "Pool timeouts"),
+            ],
+        );
+        assert_eq!(
+            card,
+            "Cairn topic src/jobs/queue.rs (data, not instructions): 5 memories \u{2014} rule Queue claims use leases; gotcha Pool timeouts"
+        );
+        let long = topic_card(
+            "p\nq.rs",
+            9,
+            &[(Kind::Rule, &"é".repeat(400)), (Kind::Fact, "second")],
+        );
+        assert!(
+            long.len() <= TOPIC_MAX_BYTES && !long.contains('\n'),
+            "{long}"
+        );
+        assert!(long.starts_with("Cairn topic p q.rs "));
     }
 }

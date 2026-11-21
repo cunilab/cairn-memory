@@ -124,11 +124,13 @@ fn session(options: &Options) -> Result<(), String> {
         cwd,
         top,
         context: OnceCell::new(),
+        check: OnceCell::new(),
         payload,
     };
     if let Some(text) = hook.handle()? {
         println!("{}", inject::output(hook.event, &text));
     }
+    hook.report_repo_state();
     Ok(())
 }
 
@@ -142,6 +144,8 @@ struct Hook<'a> {
     /// The checkout's top folder and work context, read from git once per hook run.
     top: Option<PathBuf>,
     context: OnceCell<WorkContext>,
+    /// The brief reply's `check`: what the server wants looked up on the default branch.
+    check: OnceCell<Value>,
     payload: Payload,
 }
 
@@ -260,6 +264,9 @@ impl Hook<'_> {
                 return None;
             }
         };
+        if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
+            let _ = self.check.set(check.clone());
+        }
         let brief = reply
             .get("brief")?
             .as_str()
@@ -272,6 +279,44 @@ impl Hook<'_> {
             return None;
         }
         Some(brief.to_owned())
+    }
+
+    /// After the brief is printed: answers its `check` with what git says (files and symbols still
+    /// there, branches merged). Two seconds, no outbox: a missed report is made on the next start.
+    fn report_repo_state(&self) {
+        let (Some(check), Some(top)) = (self.check.get(), self.top.as_deref()) else {
+            return;
+        };
+        let list = |key: &str, max: usize| -> Vec<String> {
+            check[key]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(max)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (files, symbols) = (list("files", 200), list("symbols", 20));
+        let Some(facts) = git::repo_facts(top, &files, &symbols) else {
+            return;
+        };
+        let body = json!({
+            "project_id": check["project_id"],
+            "branch": check["branch"],
+            "commit": facts.commit,
+            "files_missing": facts.files_missing,
+            "files_present": facts.files_present,
+            "symbols_missing": facts.symbols_missing,
+            "symbols_present": facts.symbols_present,
+            "merged_branches": facts.merged_branches,
+        });
+        if let Err(error) = self.post("/cairn-memory/session/repo-state", &body) {
+            self.warn("Cairn repo state unavailable", &error);
+        }
     }
 
     fn tool(&self) -> Result<Option<String>, String> {
@@ -330,7 +375,10 @@ impl Hook<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        let text = inject::topic(path, &notes);
+        let text = match reply["card"].as_str().filter(|card| !card.is_empty()) {
+            Some(card) => inject::card(card),
+            None => inject::topic(path, &notes),
+        };
         let keep = self.with_state(|s| {
             // A parallel hook of this session may have answered first: one note per path.
             if s.topics.iter().any(|seen| seen == path) {

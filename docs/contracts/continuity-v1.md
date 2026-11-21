@@ -70,15 +70,30 @@ text and replaced when the text changes.
 
 ## Session handoff retrieval
 
-### Session-end distillation (v0.1.4)
+### Session-end distillation (v0.1.6)
 
-`POST session/end` and `session/checkpoint` enqueue a `distill` job, and the worker writes, with no model: one
-`handoff` per (owner, session), upserted under a derived id, and up to 64 `note` memories from lines that begin
-`Decision:`, `Gotcha:`, `Procedure:`, `Rule:` or `Fact:` (case-insensitive). The handoff carries next steps, open
-questions and the files touched. Output goes through the same validation and redaction as an agent's save, with
-origin `system`. A handoff is personal, expires after 14 days, and is project-attached when the session was; a
-note expires after 90 days. Prose without a marker creates no typed note. Re-ending an unchanged session changes
-nothing.
+`POST session/end` and `session/checkpoint` enqueue a `distill` job, and the worker writes, with no model and
+from typed captures (`kind`, `ok`, `context.files`, `context.commands`), all as origin `system`, scope
+`personal` (project attached when the session was), through the same redaction as an agent's save and built to
+pass the agent quality rules (anything that would not is dropped):
+
+- **Labelled lines**: up to 64 notes from `Decision:`, `Gotcha:`, `Procedure:`, `Rule:` or `Fact:` lines of
+  `prompt` and `assistant` captures only (tool output is never a note).
+- **Fail then fix gotcha** (at most 3, one per command key): a failed command (`ok = false`), later an edit, then
+  the same command (first two words) passing. Title `` `cargo test` failed until money.rs changed ``, fields
+  `symptom` (the error line) and `fix` (`Edited <files>`); no cause is invented. A capture with unknown `ok` never
+  makes one.
+- **Test command fact**: the first passing `cargo test`, `npm test`, `pytest`, `go test`, ... of the session:
+  title `` Tests run with `cargo test --workspace` ``; the same command later dedupes by identity.
+- **Handoff**: one per (owner, project or repository, branch, worktree), replaced on each distill (a forgotten
+  one stays forgotten). Next steps and open questions come from marker lines of `prompt` captures plus commands
+  that failed and never passed again; `files` are the edited files. Title `Handoff: <branch>` (never a session id).
+
+Expiry: a handoff after 14 days (immediately when its branch is merged into the default branch, see hook-v1); a
+note after 90 days; a system gotcha or fact after 180 days, restarted by each `get`, search return or helpful
+vote; agent-written decisions, rules, gotchas, procedures, facts and preferences never expire by age; a `stale`
+memory nobody used since it went stale expires after 90 days. A promoted global copy has no age limit (it lives
+while two sources do). Raw observations of a distilled session are deleted 7 days after it ended.
 
 ### Empty-session close (v0.1.6)
 
@@ -95,7 +110,8 @@ a job with a 120-second lease; five failed attempts quarantine it (status `quara
 240 seconds, and permanent errors (a vector that is not a finite normalized 384-vector, for example) quarantine it
 at once. An admin can requeue or discard a quarantined job from the console (`GET /admin/jobs`,
 `POST /admin/jobs/{id}/requeue`, `POST /admin/jobs/{id}/discard`). Finished jobs are deleted after a day. The
-sweep also deletes expired memories 30 days after their expiry and expired observations.
+sweep also deletes expired memories 30 days after their expiry and expired observations. The sweep puts a job
+that has been quarantined for an hour back to pending with one attempt left.
 
 ### Consolidation
 

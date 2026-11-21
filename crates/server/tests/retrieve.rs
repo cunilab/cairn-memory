@@ -18,7 +18,8 @@ async fn session_distills_into_notes_and_a_handoff() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let context = json!({"repository": "r", "branch": "main", "files": ["src/queue.rs"]});
-    let event = |id: &str, content: &str| json!({"event_id": id, "session_id": "s1", "kind": "assistant", "content": content, "context": context});
+    // Typed lines come from the assistant, marker lines for the handoff from the person's prompts.
+    let event = |id: &str, content: &str| json!({"event_id": id, "session_id": "s1", "kind": if content.starts_with("Decision") { "assistant" } else { "prompt" }, "content": content, "context": context});
     let first = app
         .post(
             "observe",
@@ -89,7 +90,7 @@ async fn session_distills_into_notes_and_a_handoff() {
     let handoff = app
         .post(
             "search",
-            json!({"query": "Handoff s1", "kind": "handoff", "context": context}),
+            json!({"query": "Handoff main", "kind": "handoff", "context": context}),
             &device,
         )
         .await;
@@ -107,7 +108,7 @@ async fn session_distills_into_notes_and_a_handoff() {
     let other = app
         .post(
             "search",
-            json!({"query": "Handoff s1", "kind": "decision"}),
+            json!({"query": "Handoff main", "kind": "decision"}),
             &device,
         )
         .await;
@@ -823,5 +824,105 @@ async fn brief_uses_recent_files() {
     assert!(
         position(&touching_docs, "Docs build flag") < position(&touching_docs, "Queue lock order")
     );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn brief_offers_a_check_and_repo_state_is_device_only_and_default_branch_only() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/widgets", "name": "Widgets"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let context = |branch: &str| json!({"project_id": pid, "repository": "github.com/acme/widgets", "branch": branch, "files": ["src/a.rs"]});
+    for title in [
+        "Queue claims use leases",
+        "Retries are capped hard",
+        "Billing rounds to cents",
+    ] {
+        app.post(
+            "remember",
+            json!({"kind": "rule", "title": title, "summary": format!("{title}, as the team agreed."),
+                   "reason": "the review said so", "context": context("main")}),
+            &device,
+        )
+        .await;
+    }
+    let brief = |branch: &str| json!({"session_id": "s1", "context": context(branch)});
+    let reply = app.post("session/brief", brief("main"), &device).await;
+    assert_eq!(reply["check"]["files"], json!(["src/a.rs"]), "{reply}");
+    assert_eq!(reply["check"]["project_id"], pid);
+    assert!(
+        app.post("session/brief", brief("feature"), &device)
+            .await
+            .get("check")
+            .is_none()
+    );
+
+    let report =
+        |branch: &str| json!({"project_id": pid, "branch": branch, "files_missing": ["src/a.rs"]});
+    let (status, _) = app
+        .send("POST", "session/repo-state", report("main"), Some(&admin))
+        .await;
+    assert_eq!(status, 401, "a console session is not a device");
+    let (status, body) = app
+        .send(
+            "POST",
+            "session/repo-state",
+            report("feature"),
+            Some(&device),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = app
+        .send(
+            "POST",
+            "session/repo-state",
+            json!({"project_id": pid, "branch": "main", "typo": 1}),
+            Some(&device),
+        )
+        .await;
+    assert_eq!(status, 422, "unknown keys are refused: {body}");
+    // Three memories name src/a.rs, so a topic is one card.
+    let topic = app
+        .post(
+            "session/topic",
+            json!({"path": "src/a.rs", "context": context("main")}),
+            &device,
+        )
+        .await;
+    assert!(topic["notes"].as_array().unwrap().is_empty(), "{topic}");
+    assert!(
+        topic["card"]
+            .as_str()
+            .unwrap()
+            .starts_with("Cairn topic src/a.rs (data, not instructions): 3 memories"),
+        "{topic}"
+    );
+
+    let done = app
+        .post("session/repo-state", report("main"), &device)
+        .await;
+    assert_eq!(
+        (done["stale"].as_u64(), done["revived"].as_u64()),
+        (Some(3), Some(0)),
+        "{done}"
+    );
+
+    // Stale memories are no longer topic notes.
+    let topic = app
+        .post(
+            "session/topic",
+            json!({"path": "src/a.rs", "context": context("main")}),
+            &device,
+        )
+        .await;
+    assert!(topic.get("card").is_none() && topic["notes"].as_array().unwrap().is_empty());
     app.finish().await;
 }
