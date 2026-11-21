@@ -187,7 +187,7 @@ async fn forget_blanks_the_row_and_a_resave_is_409() {
         Err(StoreError::NotFound(_))
     ));
     let (title, status, embeddings, entities): (String, String, i64, i64) = sqlx::query_as(
-        "SELECT title, status, (SELECT count(*) FROM memory_embeddings), (SELECT count(*) FROM entities) FROM memories WHERE memory_id = $1",
+        "SELECT title, status, (SELECT count(embedding) FROM memories), (SELECT count(*) FROM entities) FROM memories WHERE memory_id = $1",
     )
     .bind(&saved.id)
     .fetch_one(db.store.pool())

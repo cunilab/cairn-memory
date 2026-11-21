@@ -21,6 +21,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         status: Status::Active,
         expires_at: None,
         created_at: 0,
+        created_us: 0,
         updated_at: 0,
         evidence_hash: String::new(),
         identity_hash: String::new(),

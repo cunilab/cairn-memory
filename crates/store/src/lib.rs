@@ -28,6 +28,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_capture",
         include_str!("../../../migrations/0002_capture.sql"),
     ),
+    (
+        "0003_retrieval",
+        include_str!("../../../migrations/0003_retrieval.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

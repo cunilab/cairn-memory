@@ -57,15 +57,17 @@ async fn meaning_finds_memories_and_never_crosses_people() {
     let alice_id = person(&app.get("auth/me", &alice).await);
     let bob_id = person(&app.get("auth/me", &bob).await);
     let store = &app.db.store;
+    let alice_projects = store.member_projects(&alice_id).await.unwrap();
+    let bob_projects = store.member_projects(&bob_id).await.unwrap();
     let candidates = store
-        .vector_candidates(&alice_id, &vector, 50)
+        .vector_candidates(&alice_id, &alice_projects, &vector, 50)
         .await
         .unwrap();
     assert_eq!(candidates.first().map(|(id, _)| id), Some(&mine));
     // ...and the visibility rule is applied to what it returns: bob gets nothing of alice's.
     assert!(
         store
-            .vector_candidates(&bob_id, &vector, 50)
+            .vector_candidates(&bob_id, &bob_projects, &vector, 50)
             .await
             .unwrap()
             .is_empty()

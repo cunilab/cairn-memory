@@ -50,8 +50,7 @@ only `memory` and each other.
 | --- | --- | --- |
 | `accounts`, `web_sessions`, `devices`, `audit_events` | `account`, `device` | Tokens are stored as hashes; audit rows are metadata only |
 | `projects`, `project_members` | `project` | A repository joins a project through the committed `.cairn/project.json` id; the owner is also a member row |
-| `memories`, `links`, `entities`, `usage` | `memory` | `kind` (decision, rule, gotcha, procedure, fact, preference, note, handoff), `scope` (personal, project, global), `status` (active, stale, superseded, forgotten). `links` carry supersedes, contradicts, relates, causes, fixes, depends_on |
-| `memory_embeddings` | `embed` | 384-dimension MiniLM vectors with an HNSW index; keyed by a source hash |
+| `memories`, `links`, `entities`, `usage` | `memory`, `embed` | The row also holds the 384-dimension MiniLM `embedding` (with `embedding_model` and the `embedding_source` hash) under a partial HNSW index. `kind` (decision, rule, gotcha, procedure, fact, preference, note, handoff), `scope` (personal, project, global), `status` (active, stale, superseded, forgotten). `links` carry supersedes, contradicts, relates, causes, fixes, depends_on |
 | `sessions`, `observations` | `capture` | Raw evidence; never recalled directly; expired and swept |
 | `jobs` | `process::jobs` | `embed`, `distill`, `consolidate`; one status column; leases and backoff |
 

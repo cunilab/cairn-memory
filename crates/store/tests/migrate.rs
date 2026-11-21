@@ -12,14 +12,17 @@ async fn migrate_twice_is_a_no_op() {
         .fetch_all(db.store.pool())
         .await
         .unwrap();
-    assert_eq!(versions, ["0001_foundation", "0002_capture"]);
+    assert_eq!(
+        versions,
+        ["0001_foundation", "0002_capture", "0003_retrieval"]
+    );
     let tables: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
     )
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 16);
+    assert_eq!(tables, 15);
     // Everything lives in the test schema, nothing leaks into public.
     let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs')")
         .fetch_one(db.store.pool())

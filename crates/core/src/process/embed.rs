@@ -42,7 +42,7 @@ pub fn embedding_text(memory: &Memory) -> String {
     )
 }
 
-/// Stored as `memory_embeddings.source_hash`; a changed text means the vector is stale.
+/// Stored as `memories.embedding_source`; a changed text means the vector is stale.
 pub fn source_hash(text: &str) -> String {
     sha256_hex(&[text])
 }

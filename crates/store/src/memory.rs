@@ -26,17 +26,40 @@ pub(crate) fn visible(alias: &str, me: &str) -> String {
     )
 }
 
-pub(crate) const MEMORY_SELECT: &str =
-    "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
+/// The search rule (CM-SPEC-007 §3): live (`active` or `stale`), not expired, and owned, global, or
+/// in one of the reader's projects. `me` is a person bind (`$1`), `projects` a `text[]` bind of the
+/// reader's project ids, loaded once per request. A plain column predicate, so the vector channel
+/// can apply it inside the HNSW scan.
+pub(crate) fn searchable(alias: &str, me: &str, projects: &str) -> String {
+    format!(
+        "({a}.status IN ('active','stale') AND ({a}.expires_at IS NULL OR {a}.expires_at > now())
+          AND ({a}.owner_id = {me} OR {a}.scope = 'global'
+               OR ({a}.scope = 'project' AND {a}.project_id = ANY({projects}))))",
+        a = alias
+    )
+}
+
+macro_rules! memory_columns {
+    () => {
+        "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
+    (EXTRACT(EPOCH FROM m.created_at) * 1000000)::bigint AS created_us,
     EXTRACT(EPOCH FROM m.updated_at)::bigint AS updated_at,
     to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts,
     COALESCE(u.fetched, 0) AS fetched, COALESCE(u.helpful, 0) AS helpful,
-    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at
-    FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id";
+    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at"
+    };
+}
+
+/// The columns of `memory_from_row`, for a caller that adds its own columns and joins.
+pub(crate) const MEMORY_COLUMNS: &str = memory_columns!();
+pub(crate) const MEMORY_SELECT: &str = concat!(
+    memory_columns!(),
+    " FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id"
+);
 
 fn parse<T: std::str::FromStr<Err = String>>(row: &PgRow, column: &str) -> Result<T> {
     row.try_get::<String, _>(column)?
@@ -71,6 +94,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         status: parse(row, "status")?,
         expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
+        created_us: row.try_get("created_us")?,
         updated_at: row.try_get("updated_at")?,
         evidence_hash: row.try_get("evidence_hash")?,
         identity_hash: row.try_get("identity_hash")?,
@@ -410,16 +434,13 @@ impl Store {
         sqlx::query(
             "UPDATE memories SET status = 'forgotten', title = '', summary = '', reason = '', fields = '{}',
                     evidence = '{}', evidence_count = 0, repo = NULL, repo_branch = NULL,
-                    repo_worktree = NULL, repo_commit = NULL, updated_at = now()
+                    repo_worktree = NULL, repo_commit = NULL, embedding = NULL, embedding_model = NULL,
+                    embedding_source = NULL, updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("DELETE FROM memory_embeddings WHERE memory_id = $1")
-            .bind(memory_id)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query("DELETE FROM entities WHERE memory_id = $1")
             .bind(memory_id)
             .execute(&mut *tx)

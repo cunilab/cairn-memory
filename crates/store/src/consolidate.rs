@@ -33,9 +33,8 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         let subject = sqlx::query(
-            "SELECT m.owner_id, m.scope, m.project_id, m.kind, m.status, e.embedding::text AS embedding
-               FROM memories m JOIN memory_embeddings e USING (memory_id)
-              WHERE m.memory_id = $1 FOR UPDATE OF m",
+            "SELECT owner_id, scope, project_id, kind, status, embedding::text AS embedding
+               FROM memories WHERE memory_id = $1 AND embedding IS NOT NULL FOR UPDATE",
         )
         .bind(memory_id)
         .fetch_optional(&mut *tx)
@@ -53,9 +52,9 @@ impl Store {
         // window to other people's nearest vectors first.
         let neighbours = sqlx::query(
             "WITH cohort AS MATERIALIZED (
-                 SELECT m.memory_id, m.created_at, e.embedding
-                   FROM memories m JOIN memory_embeddings e ON e.memory_id = m.memory_id
-                  WHERE m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
+                 SELECT m.memory_id, m.created_at, m.embedding
+                   FROM memories m
+                  WHERE m.embedding IS NOT NULL AND m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
                     AND m.memory_id <> $6 AND m.status IN ('active','stale')
                     AND (m.expires_at IS NULL OR m.expires_at > now()))
              SELECT c.memory_id, 1 - (c.embedding <=> $1::vector) AS cosine,

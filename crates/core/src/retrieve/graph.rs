@@ -94,7 +94,7 @@ pub fn build(memories: &[Memory], links: &[Link], filter: &GraphFilter, cap: usi
         candidates.sort_by(|a, b| {
             let d = |m: &Memory| degree.get(m.id.as_str()).copied().unwrap_or(0);
             d(a).cmp(&d(b))
-                .then(a.created_at.cmp(&b.created_at))
+                .then(a.created_us.cmp(&b.created_us))
                 .then(a.id.cmp(&b.id))
         });
         let removed: HashSet<String> = candidates

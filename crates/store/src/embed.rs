@@ -27,7 +27,7 @@ impl Store {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
               WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
-                AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.memory_id)
+                AND m.embedding IS NULL
               ORDER BY m.created_at, m.memory_id LIMIT $1"
         ))
         .bind(limit)
@@ -44,7 +44,7 @@ impl Store {
             let ids: Vec<String> = sqlx::query_scalar(
                 "SELECT m.memory_id FROM memories m
                   WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
-                    AND NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.memory_id)
+                    AND m.embedding IS NULL
                     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'embed' AND j.job_key = m.memory_id
                                        AND j.status IN ('pending', 'running'))
                   ORDER BY m.created_at, m.memory_id LIMIT $1",
@@ -117,13 +117,10 @@ impl Store {
         validate_vector(vector)?;
         let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
-            "INSERT INTO memory_embeddings (memory_id, model, source_hash, embedding)
-             SELECT memory_id, $2, $3, $4::vector FROM memories WHERE memory_id = $1 AND status <> 'forgotten'
-             ON CONFLICT (memory_id) DO UPDATE
-                SET model = EXCLUDED.model, source_hash = EXCLUDED.source_hash,
-                    embedding = EXCLUDED.embedding, created_at = now()
-              WHERE memory_embeddings.source_hash IS DISTINCT FROM EXCLUDED.source_hash
-                 OR memory_embeddings.model IS DISTINCT FROM EXCLUDED.model",
+            "UPDATE memories SET embedding = $4::vector, embedding_model = $2, embedding_source = $3
+              WHERE memory_id = $1 AND status <> 'forgotten'
+                AND (embedding IS NULL OR embedding_source IS DISTINCT FROM $3
+                     OR embedding_model IS DISTINCT FROM $2)",
         )
         .bind(memory_id)
         .bind(model_label())
@@ -140,11 +137,12 @@ impl Store {
     }
 
     pub async fn embedding_source_hash(&self, memory_id: &str) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar("SELECT source_hash FROM memory_embeddings WHERE memory_id = $1")
-                .bind(memory_id)
-                .fetch_optional(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT embedding_source FROM memories WHERE memory_id = $1",
         )
+        .bind(memory_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
     }
 }

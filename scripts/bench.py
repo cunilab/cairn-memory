@@ -160,10 +160,11 @@ def main():
     corpus = json.loads((FIXTURES / "corpus.json").read_text())["memories"]
     spec = json.loads((FIXTURES / "questions.json").read_text())
     questions, weak = spec["questions"], spec["weak_queries"]
+    holdout = json.loads((FIXTURES / "questions-holdout.json").read_text())
     by_key = {m["key"]: m for m in corpus}
 
     # Fixture self-check: paraphrase questions share no content word with any gold memory.
-    for q in questions:
+    for q in questions + holdout["questions"]:
         for key in q["gold"]:
             assert key in by_key, f"{q['id']}: unknown gold {key}"
         if q["kind"] == "paraphrase":
@@ -258,25 +259,21 @@ def main():
         for memory in corpus:
             body = {k: v for k, v in memory.items() if k != "key"}
             body.update(scope="project", context=context)
-            if memory["kind"] in ("rule", "decision"):
-                # created_at has one-second resolution and the session brief ranks rules and decisions by it
-                # (ties fall back to id). Without a boundary between saves, which ones the brief shows would
-                # depend on where the wall-clock second changes during the load.
-                time.sleep(1.0 - (time.time() % 1.0) + 0.02)
             reply = http.call("/remember", body, device)
             ids[memory["key"]] = reply["id"]
         assert len(set(ids.values())) == len(corpus), "a corpus memory was merged into another on save"
 
         def settle():
-            # Search embeds the query with try_lock and silently drops to lexical-only while the background
-            # embedding job holds the model, so wait until every memory has its vector before measuring.
-            if not model_dir:
-                return
+            # Measure only once every memory has its vector and the embed and consolidate jobs are done:
+            # consolidation supersedes and links near-duplicates, which changes what search returns, so a
+            # search that races it makes two runs differ.
+            missing = "(select count(*) from cairn.memories where embedding is null)" if model_dir else "0"
+            busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate') and status in ('pending','running'))"
             for _ in range(240):
-                if int(sql("select count(*) from cairn.memories m left join cairn.memory_embeddings e using (memory_id) where e.memory_id is null") or 0) == 0:
+                if int(sql(f"select {missing} + {busy}") or 0) == 0:
                     return
                 time.sleep(0.25)
-            raise RuntimeError("embeddings were not produced")
+            raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
         key_of = {v: k for k, v in ids.items()}
@@ -348,6 +345,28 @@ def main():
                 shaped, wire, _ = mcp.tool(tool, query=w["query"], limit=5)
                 rows.append({"id": w["id"], "hits": len(result_ids(shaped)), "bytes": wire, "top": [key_of.get(m, "?") for m in result_ids(shaped)]})
             zero[tool] = {"queries": len(weak), "correct_zero_hit": sum(1 for r in rows if r["hits"] == 0), "rows": rows}
+
+        # Holdout set: same measurements, reported next to the main set and never used to tune it.
+        recall_holdout = {"questions": len(holdout["questions"]), "per_question": []}
+        hits, ranks = [], []
+        for q in holdout["questions"]:
+            gold = {ids[k] for k in q["gold"]}
+            shaped, _, _ = mcp.tool("memory_search", query=q["query"], limit=5)
+            top5 = result_ids(shaped)
+            deep, _, _ = mcp.tool("memory_search", query=q["query"], limit=10)
+            ranked = result_ids(deep)
+            rank = next((i + 1 for i, mid in enumerate(ranked) if mid in gold), None)
+            hits.append(1.0 if gold & set(top5) else 0.0)
+            ranks.append(1.0 / rank if rank else 0.0)
+            recall_holdout["per_question"].append({"id": q["id"], "gold": q["gold"], "first_gold_rank_in_10": rank,
+                                                   "top5": [key_of.get(m, "?") for m in top5]})
+        recall_holdout["hit_at_5"] = round(sum(hits) / len(hits), 4)
+        recall_holdout["mrr_at_10"] = round(sum(ranks) / len(ranks), 4)
+        rows = []
+        for w in holdout["weak_queries"]:
+            shaped, wire, _ = mcp.tool("memory_search", query=w["query"], limit=5)
+            rows.append({"id": w["id"], "hits": len(result_ids(shaped)), "bytes": wire, "top": [key_of.get(m, "?") for m in result_ids(shaped)]})
+        zero_holdout = {"queries": len(rows), "correct_zero_hit": sum(1 for r in rows if r["hits"] == 0), "rows": rows}
 
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
@@ -425,6 +444,8 @@ def main():
             "fixed_session_cost": fixed,
             "recall": recall,
             "zero_hit": zero,
+            "recall_holdout": recall_holdout,
+            "zero_hit_holdout": zero_holdout,
             "call_bytes": calls,
             "per_question_memory_search": per_question,
         }
@@ -470,6 +491,9 @@ def print_table(r):
                      f"{t['recall_at_5']:.3f} / {t['hit_at_5']:.3f} / {t['mrr_at_10']:.3f}  (n={t['questions']}, mean {t['bytes_per_call']['mean_bytes']} B/call)"))
     for tool, z in r["zero_hit"].items():
         rows.append((f"{tool} zero-hit correct", f"{z['correct_zero_hit']}/{z['queries']}"))
+    h, hz = r["recall_holdout"], r["zero_hit_holdout"]
+    rows.append(("holdout hit@5 / MRR@10", f"{h['hit_at_5']:.3f} / {h['mrr_at_10']:.3f}  (n={h['questions']})"))
+    rows.append(("holdout zero-hit correct", f"{hz['correct_zero_hit']}/{hz['queries']}"))
     c = r["call_bytes"]
     rows.append(("bytes: search (mean, limit 5)", f"{c['memory_search']['mean_bytes']}"))
     rows.append(("bytes: search kind=handoff (limit 2)", f"{c['memory_search_kind_handoff']['bytes']}  ({c['memory_search_kind_handoff']['results']} results)"))

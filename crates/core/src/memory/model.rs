@@ -106,6 +106,9 @@ pub struct Memory {
     /// Unix seconds.
     pub expires_at: Option<i64>,
     pub created_at: i64,
+    /// Microsecond creation time for tie-breaks; `created_at` has one-second resolution.
+    #[serde(skip)]
+    pub created_us: i64,
     pub updated_at: i64,
     #[serde(skip)]
     pub evidence_hash: String,

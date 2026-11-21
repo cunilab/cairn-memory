@@ -83,7 +83,7 @@ flowchart LR
 ```
 
 One ranking serves personal, project and global memories; the visibility rule runs in the same query before
-any id leaves the store. `kind=handoff` on `/search` finds the caller's own handoffs.
+any id leaves the store (for the vector channel, inside the HNSW index scan). `kind=handoff` on `/search` finds the caller's own handoffs.
 The session brief is the latest handoff plus up to three project rules and decisions and two personal
 preferences, at most 4,096 bytes.
 

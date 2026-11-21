@@ -30,7 +30,7 @@ pub fn session_brief(memories: &[Memory], context: &WorkContext) -> String {
     eligible.sort_by(|a, b| {
         rank::multiplier(&b.usage)
             .total_cmp(&rank::multiplier(&a.usage))
-            .then(b.created_at.cmp(&a.created_at))
+            .then(b.created_us.cmp(&a.created_us))
             .then(a.id.cmp(&b.id))
     });
     let same_branch =

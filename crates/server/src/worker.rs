@@ -63,22 +63,19 @@ impl LocalEmbeddings {
         Ok(Self(Arc::new(Mutex::new(model))))
     }
 
-    /// One query vector, or `None` while the background job holds the model (search then runs
-    /// without the semantic channel rather than waiting).
+    /// One query vector. Waits for the model lock (an embedding job holds it for one batch), so a
+    /// search never silently drops its semantic channel; `None` only on a poisoned lock or an
+    /// inference error.
     pub async fn query(&self, query: &str) -> Option<Vec<f32>> {
         let model = self.0.clone();
         let query = query.chars().take(8192).collect::<String>();
         match tokio::task::spawn_blocking(move || {
-            let Ok(mut model) = model.try_lock() else {
-                return Ok(None);
-            };
-            model
-                .embed(vec![query], Some(1))
-                .map(|mut vectors| vectors.pop())
+            let mut model = model.lock().ok()?;
+            model.embed(vec![query], Some(1)).ok()?.pop()
         })
         .await
         {
-            Ok(Ok(vector)) => vector,
+            Ok(Some(vector)) => Some(vector),
             _ => {
                 eprintln!("semantic query unavailable; using lexical/entity/link recall");
                 None
