@@ -4,9 +4,9 @@
 
 use crate::{
     Error, MAX_RESPONSE_BYTES, config_path, create_private_dir, is_loopback, normalize_url,
-    selected_config_path, write_private,
+    write_private,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, IsTerminal, Read};
@@ -23,9 +23,6 @@ const API_URL: &str = "https://api.github.com/repos/cunilab/cairn-memory/release
 const API_ENV: &str = "CAIRN_UPDATE_URL";
 const NO_CHECK_ENV: &str = "CAIRN_NO_UPDATE_CHECK";
 const SUMS_ASSET: &str = "SHA256SUMS";
-const HOOK_ASSETS: [&str; 2] = ["cairn_hook.py", "cairn_outbox.py"];
-/// Records the SHA-256 of each hook script this module installed, to spot local edits.
-const HOOK_STATE: &str = "installed.json";
 /// The targets `release.yml` builds; keep the two lists together. Linux uses musl so one
 /// static binary runs on any glibc or musl distribution.
 const TARGETS: [&str; 4] = [
@@ -136,13 +133,6 @@ fn api_url() -> Result<String, Error> {
         }
         None => Ok(API_URL.to_owned()),
     }
-}
-
-/// The release that matches the running binary's version, next to the `latest` endpoint.
-fn tag_url(api: &str) -> Result<String, Error> {
-    api.strip_suffix("/latest")
-        .map(|base| format!("{base}/tags/v{VERSION}"))
-        .ok_or_else(|| Error::Config("the update URL must end in /latest".to_owned()))
 }
 
 /// Updates must travel over https. Plain http is allowed to a loopback host in debug builds
@@ -275,95 +265,6 @@ fn download_verified(
 fn download_sums(agent: &ureq::Agent, release: &Release) -> Result<String, Error> {
     let sums = fetch(agent, release.url(SUMS_ASSET)?, MAX_API_BYTES)?;
     Ok(String::from_utf8_lossy(&sums).into_owned())
-}
-
-fn download_hooks(
-    agent: &ureq::Agent,
-    release: &Release,
-    sums: &str,
-) -> Result<Vec<(&'static str, Vec<u8>)>, Error> {
-    HOOK_ASSETS
-        .iter()
-        .map(|name| Ok((*name, download_verified(agent, release, sums, name)?)))
-        .collect()
-}
-
-fn hook_dir() -> Result<PathBuf, Error> {
-    // Same selected file as `cairn setup`. A later CAIRN_CONFIG changes the
-    // credential the hook reads, not this installer-owned script directory.
-    let path = selected_config_path()?;
-    Ok(path.with_file_name("hook"))
-}
-
-/// Writes the scripts and records their checksums. A script that differs from the one this
-/// module installed last time (or from anything it can vouch for) was edited by the user:
-/// its content is kept as `<name>.bak` before it is replaced. Returns one note per backup.
-fn write_hooks(dir: &Path, files: &[(&str, Vec<u8>)]) -> Result<Vec<String>, Error> {
-    let io = |error: io::Error| Error::Config(format!("cannot write {}: {error}", dir.display()));
-    create_private_dir(dir).map_err(io)?;
-    let state_path = dir.join(HOOK_STATE);
-    let mut state: Map<String, Value> = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let mut notes = Vec::new();
-    for (name, body) in files {
-        let path = dir.join(name);
-        let new = sha_hex(body);
-        if let Ok(existing) = fs::read(&path) {
-            let have = sha_hex(&existing);
-            if have != new && state.get(*name).and_then(Value::as_str) != Some(have.as_str()) {
-                write_private(&dir.join(format!("{name}.bak")), &existing).map_err(io)?;
-                notes.push(format!(
-                    "{name} had local changes; the previous copy is kept as {name}.bak"
-                ));
-            }
-        }
-        write_private(&path, body).map_err(io)?;
-        state.insert((*name).to_owned(), json!(new));
-    }
-    write_private(&state_path, Value::Object(state).to_string().as_bytes()).map_err(io)?;
-    Ok(notes)
-}
-
-fn hooks_message(dir: &Path, notes: Vec<String>) -> String {
-    let mut lines = vec![format!("Hook scripts installed in {}", dir.display())];
-    lines.extend(notes);
-    lines.join("\n")
-}
-
-/// `cairn setup`: installs the hook scripts of the release that matches this binary's version,
-/// never another one. Returns what to print.
-pub fn install_hooks() -> Result<String, Error> {
-    let api = api_url()?;
-    let release = fetch_release(&agent(&api, API_TIMEOUT), &tag_url(&api)?)?;
-    if release.version != current() {
-        return Err(Error::Request(format!(
-            "the release for v{VERSION} reports version {}",
-            show(release.version)
-        )));
-    }
-    let agent = agent(&api, DOWNLOAD_TIMEOUT);
-    let sums = download_sums(&agent, &release)?;
-    let dir = hook_dir()?;
-    let notes = write_hooks(&dir, &download_hooks(&agent, &release, &sums)?)?;
-    Ok(hooks_message(&dir, notes))
-}
-
-/// Explicit agent setup can install this binary's embedded, version-matched scripts offline.
-pub fn install_bundled_hooks() -> Result<String, Error> {
-    let dir = hook_dir()?;
-    let files = [
-        (
-            "cairn_hook.py",
-            include_bytes!("../../../scripts/cairn_hook.py").to_vec(),
-        ),
-        (
-            "cairn_outbox.py",
-            include_bytes!("../../../scripts/cairn_outbox.py").to_vec(),
-        ),
-    ];
-    Ok(hooks_message(&dir, write_hooks(&dir, &files)?))
 }
 
 fn unique_old_path(exe: &Path) -> PathBuf {
@@ -505,13 +406,7 @@ fn replace_exe(exe: &Path, body: &[u8], expected: &str) -> Result<(), Error> {
 }
 
 /// Checks (and, unless `check_only`, installs) the latest release; returns what to print.
-fn run(
-    api: &str,
-    target: &str,
-    exe: &Path,
-    hooks: &Path,
-    check_only: bool,
-) -> Result<String, Error> {
+fn run(api: &str, target: &str, exe: &Path, check_only: bool) -> Result<String, Error> {
     let release = fetch_release(&agent(api, API_TIMEOUT), api)?;
     let newer = release.version > current();
     if check_only {
@@ -532,8 +427,7 @@ fn run(
     }
     let agent = agent(api, DOWNLOAD_TIMEOUT);
     let sums = download_sums(&agent, &release)?;
-    // Download and verify everything before touching the installed files. The hook scripts
-    // come from this same release, which is the version of the binary after the update.
+    // Download and verify before touching the installed file.
     let binary = if newer {
         Some(download_verified(
             &agent,
@@ -544,17 +438,14 @@ fn run(
     } else {
         None
     };
-    let scripts = download_hooks(&agent, &release, &sums)?;
     if let Some(binary) = binary {
         replace_exe(exe, &binary, &show(release.version))?;
     }
-    let notes = write_hooks(hooks, &scripts)?;
-    let headline = if newer {
+    Ok(if newer {
         format!("Updated cairn {VERSION} -> {}", show(release.version))
     } else {
         format!("cairn {VERSION} is already the latest release")
-    };
-    Ok(format!("{headline}\n{}", hooks_message(hooks, notes)))
+    })
 }
 
 /// `cairn update [--check]`.
@@ -562,10 +453,13 @@ pub fn update(check_only: bool) -> Result<(), Error> {
     let exe = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
         .map_err(|error| Error::Config(format!("cannot locate the cairn executable: {error}")))?;
-    println!(
-        "{}",
-        run(&api_url()?, TARGET, &exe, &hook_dir()?, check_only)?
-    );
+    println!("{}", run(&api_url()?, TARGET, &exe, check_only)?);
+    if !check_only {
+        // The hook commands name the executable; keep them pointing at it.
+        for line in crate::setup::refresh(&exe) {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -694,29 +588,20 @@ mod tests {
         format!("#!/bin/sh\necho 'cairn {version}'\n").into_bytes()
     }
 
-    const HOOK: &[u8] = b"print('hook')";
-    const OUTBOX: &[u8] = b"print('outbox')";
-
     /// A mock release `tag` serving `binary`, whose checksum is `binary_sum`.
     fn release(tag: &str, binary: Vec<u8>, binary_sum: String) -> String {
         let name = asset_name(LINUX).unwrap();
         mock(|base| {
-            let sums = format!(
-                "{binary_sum}  {name}\n{}  cairn_hook.py\n{}  cairn_outbox.py\n",
-                sha_hex(HOOK),
-                sha_hex(OUTBOX)
-            );
+            let sums = format!("{binary_sum}  {name}\n");
             let asset = |file: &str| json!({"name": file, "browser_download_url": format!("{base}/dl/{file}")});
             let listing = json!({
                 "tag_name": tag,
-                "assets": [asset(&name), asset("SHA256SUMS"), asset("cairn_hook.py"), asset("cairn_outbox.py")],
+                "assets": [asset(&name), asset("SHA256SUMS")],
             });
             vec![
                 ("/latest".to_owned(), listing.to_string().into_bytes()),
                 (format!("/dl/{name}"), binary),
                 ("/dl/SHA256SUMS".to_owned(), sums.into_bytes()),
-                ("/dl/cairn_hook.py".to_owned(), HOOK.to_vec()),
-                ("/dl/cairn_outbox.py".to_owned(), OUTBOX.to_vec()),
             ]
         })
     }
@@ -836,35 +721,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn update_installs_a_verified_release_and_refreshes_the_hooks() {
+    fn update_installs_a_verified_release() {
         let dir = temp_dir("install");
         let exe = dir.join("cairn");
         fs::write(&exe, "old").unwrap();
         fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o750)).unwrap();
-        let hooks = dir.join("config").join("hook");
         let binary = fake_binary("99.0.0");
         let base = release("v99.0.0", binary.clone(), sha_hex(&binary));
         let api = format!("{base}/latest");
 
-        let report = run(&api, LINUX, &exe, &hooks, true).unwrap();
+        let report = run(&api, LINUX, &exe, true).unwrap();
         assert!(report.contains("cairn 99.0.0 is available"), "{report}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
-        assert!(!hooks.exists());
 
-        let report = run(&api, LINUX, &exe, &hooks, false).unwrap();
+        let report = run(&api, LINUX, &exe, false).unwrap();
         assert!(
             report.starts_with(&format!("Updated cairn {VERSION} -> 99.0.0")),
             "{report}"
         );
         assert_eq!(fs::read(&exe).unwrap(), binary);
-        assert_eq!(fs::read(hooks.join("cairn_hook.py")).unwrap(), HOOK);
-        assert_eq!(fs::read(hooks.join("cairn_outbox.py")).unwrap(), OUTBOX);
         assert!(!dir.join("cairn.new").exists());
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         // The original exe's bits are kept, not forced to 0755.
         assert_eq!(mode(&exe), 0o750);
-        assert_eq!(mode(&hooks), 0o700);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -884,15 +764,13 @@ mod tests {
             let dir = temp_dir("selfcheck");
             let exe = dir.join("cairn");
             old_exe(&exe);
-            let hooks = dir.join("hook");
             let base = release("v99.0.0", binary.clone(), sha_hex(&binary));
             let started = Instant::now();
-            let error = run(&format!("{base}/latest"), LINUX, &exe, &hooks, false).unwrap_err();
+            let error = run(&format!("{base}/latest"), LINUX, &exe, false).unwrap_err();
             assert!(error.to_string().contains(why), "{error}");
             assert!(started.elapsed() < Duration::from_secs(4));
             assert_eq!(fs::read(&exe).unwrap(), b"old");
             assert!(!dir.join("cairn.new").exists());
-            assert!(!hooks.exists());
             let _ = fs::remove_dir_all(&dir);
         }
     }
@@ -902,12 +780,10 @@ mod tests {
         let dir = temp_dir("badsum");
         let exe = dir.join("cairn");
         fs::write(&exe, "old").unwrap();
-        let hooks = dir.join("hook");
         let base = release("v99.0.0", fake_binary("99.0.0"), sha_hex(b"something else"));
-        let error = run(&format!("{base}/latest"), LINUX, &exe, &hooks, false).unwrap_err();
+        let error = run(&format!("{base}/latest"), LINUX, &exe, false).unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
-        assert!(!hooks.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -916,30 +792,26 @@ mod tests {
         let dir = temp_dir("latest");
         let exe = dir.join("cairn");
         fs::write(&exe, "old").unwrap();
-        let hooks = dir.join("hook");
         let base = release(
             &format!("v{VERSION}"),
             fake_binary(VERSION),
             sha_hex(&fake_binary(VERSION)),
         );
         let api = format!("{base}/latest");
-        let report = run(&api, LINUX, &exe, &hooks, true).unwrap();
+        let report = run(&api, LINUX, &exe, true).unwrap();
         assert_eq!(report, format!("cairn {VERSION} is up to date"));
-        let report = run(&api, LINUX, &exe, &hooks, false).unwrap();
+        let report = run(&api, LINUX, &exe, false).unwrap();
         assert!(report.contains("already the latest release"), "{report}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
-        assert_eq!(fs::read(hooks.join("cairn_hook.py")).unwrap(), HOOK);
 
-        // A build ahead of the latest release has no matching scripts: nothing is written.
-        let hooks = dir.join("other-hook");
+        // A build ahead of the latest release is left alone.
         let base = release(
             "v0.0.1",
             fake_binary("0.0.1"),
             sha_hex(&fake_binary("0.0.1")),
         );
-        let report = run(&format!("{base}/latest"), LINUX, &exe, &hooks, false).unwrap();
+        let report = run(&format!("{base}/latest"), LINUX, &exe, false).unwrap();
         assert!(report.contains("newer than the latest release"), "{report}");
-        assert!(!hooks.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -947,52 +819,20 @@ mod tests {
     fn an_unreachable_or_odd_release_is_an_error() {
         let dir = temp_dir("errors");
         let exe = dir.join("cairn");
-        let hooks = dir.join("hook");
         let missing = mock(|_| vec![]);
-        assert!(run(&format!("{missing}/latest"), LINUX, &exe, &hooks, true).is_err());
+        assert!(run(&format!("{missing}/latest"), LINUX, &exe, true).is_err());
         let prerelease = mock(|_| {
             vec![(
                 "/latest".to_owned(),
                 br#"{"tag_name":"v1.0.0-rc1","assets":[]}"#.to_vec(),
             )]
         });
-        let error = run(&format!("{prerelease}/latest"), LINUX, &exe, &hooks, true).unwrap_err();
+        let error = run(&format!("{prerelease}/latest"), LINUX, &exe, true).unwrap_err();
         assert!(
             error.to_string().contains("not vMAJOR.MINOR.PATCH"),
             "{error}"
         );
-        assert_eq!(
-            tag_url("https://x.test/r/releases/latest").unwrap(),
-            format!("https://x.test/r/releases/tags/v{VERSION}")
-        );
-        assert!(tag_url("https://x.test/r/releases").is_err());
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn hook_scripts_are_not_overwritten_silently() {
-        let dir = temp_dir("hooks").join("hook");
-        let v1 = [("cairn_hook.py", b"one".to_vec())];
-        let v2 = [("cairn_hook.py", b"two".to_vec())];
-        let v3 = [("cairn_hook.py", b"three".to_vec())];
-        assert!(write_hooks(&dir, &v1).unwrap().is_empty());
-        // Untouched since our install: replaced without a backup.
-        assert!(write_hooks(&dir, &v2).unwrap().is_empty());
-        assert!(!dir.join("cairn_hook.py.bak").exists());
-        // The user edits it: the next install keeps their copy and says so.
-        fs::write(dir.join("cairn_hook.py"), "mine").unwrap();
-        let notes = write_hooks(&dir, &v3).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("cairn_hook.py.bak"), "{notes:?}");
-        assert_eq!(fs::read(dir.join("cairn_hook.py.bak")).unwrap(), b"mine");
-        assert_eq!(fs::read(dir.join("cairn_hook.py")).unwrap(), b"three");
-        // A script of unknown origin (no record) that differs is also backed up.
-        fs::remove_file(dir.join(HOOK_STATE)).unwrap();
-        fs::write(dir.join("cairn_hook.py"), "stranger").unwrap();
-        assert_eq!(write_hooks(&dir, &v1).unwrap().len(), 1);
-        // The same content again is not a change.
-        assert!(write_hooks(&dir, &v1).unwrap().is_empty());
-        let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]
@@ -1123,35 +963,6 @@ mod tests {
             None
         );
         assert_eq!(calls.get(), before);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn bundled_hooks_follow_the_selected_config_parent() {
-        let dir = temp_dir("hooks-parent");
-        let config = dir.join("alt").join("cairn.json");
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
-        struct Restore;
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe { std::env::remove_var("CAIRN_CONFIG") }
-            }
-        }
-        let _restore = Restore;
-        unsafe { std::env::set_var("CAIRN_CONFIG", &config) }
-        let message = install_bundled_hooks().unwrap();
-        let hooks = dir.join("alt").join("hook");
-        assert!(message.contains(&hooks.display().to_string()), "{message}");
-        assert!(hooks.join("cairn_hook.py").is_file());
-        assert!(hooks.join("cairn_outbox.py").is_file());
-        let authored = hooks.join("cairn_hook.py");
-        fs::write(&authored, b"local edit").unwrap();
-        // A second install keeps the authored bytes beside the replacement.
-        install_bundled_hooks().unwrap();
-        assert_eq!(
-            fs::read(hooks.join("cairn_hook.py.bak")).unwrap(),
-            b"local edit"
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

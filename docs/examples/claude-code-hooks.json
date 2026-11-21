@@ -1,27 +1,24 @@
 {
-  "env": {
-    "CAIRN_OUTBOX": "/absolute/path/to/cairn-outbox.json"
-  },
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
-            "timeout": 20
+            "command": "cairn hook UserPromptSubmit --agent claude",
+            "timeout": 5
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit",
+        "matcher": "Bash|Edit|Write|MultiEdit|apply_patch",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
-            "timeout": 20
+            "command": "cairn hook PostToolUse --agent claude",
+            "timeout": 10
           }
         ]
       }
@@ -31,8 +28,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
-            "timeout": 20
+            "command": "cairn hook Stop --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cairn hook PreCompact --agent claude",
+            "timeout": 10
           }
         ]
       }
@@ -42,8 +50,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
-            "timeout": 20
+            "command": "cairn hook SessionEnd --agent claude",
+            "timeout": 3
           }
         ]
       }
@@ -53,8 +61,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.config/cairn/hook/cairn_hook.py --agent claude",
-            "timeout": 20
+            "command": "cairn hook SessionStart --agent claude",
+            "timeout": 10
           }
         ]
       }

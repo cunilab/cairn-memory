@@ -171,8 +171,8 @@ routes apply the same active-account check as the agent routes, so a device of a
 | --- | --- | --- | --- |
 | Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `403` |
 | Identity | `auth/me` | yes | yes |
-| Capture | `session/start`, `session/end`, `session/checkpoint`, `session/brief`, `observe`, `sync/push` | start, end, checkpoint: yes; `observe` and `sync/push`: `401` (device only) | yes |
-| Recall | `search`, `get`, `context`, `session/brief`, `graph`, `diagnose` | yes | yes |
+| Capture | `session/start`, `session/end`, `session/checkpoint`, `session/brief`, `session/topic`, `observe` | start, end, checkpoint: yes; `observe`: `401` (device only) | yes |
+| Recall | `search`, `get`, `session/brief`, `session/topic`, `graph`, `diagnose` | yes | yes |
 | Memory | `remember`, `memories`, `feedback`, `forget`, `delete`, `contradict`, `supersede`, `links`, `export` | yes | yes |
 | Projects | `projects` (list), `projects/init`, `projects/{id}/rename`, `projects/{id}/members`, `projects/{id}/memories`, `projects/{id}/branches`, `projects/{id}/conflicts` | yes | yes |
 | Ownership transfer | `projects/{id}/ownership` | owner or admin, to an existing member | `403` |
@@ -196,10 +196,10 @@ CLI command or MCP tool. The tool table is in [mcp-layer1](mcp-layer1.md).
 ## Limitations
 
 The server is PostgreSQL only; the file-backed adapter and the import and sync pull routes were removed in
-0.1.6. `POST /cairn-memory/observe` and `sync/push` take a device token only; a web session gets `401`.
-Session start, end and checkpoint accept a web session or a device token. The hook delivers every capture by
-posting `sync/push`; with `CAIRN_OUTBOX` unset it does not enqueue. The opt-in device queue is the
-[hook contract](./hook-v1.md), which owns the client rule.
+0.1.6. `POST /cairn-memory/observe` takes a device token only; a web session gets `401`.
+Session start, end and checkpoint accept a web session or a device token. The `cairn hook` command delivers every
+capture by posting `observe` and keeps a device-bound outbox for outages; the
+[hook contract](./hook-v1.md) owns the client rule.
 
 An account forgets only a memory it owns; a foreign, forgotten or unknown id fails with `404` and nothing is
 written. Memory ids are unique across the schema, so a save never reuses another person's id.
@@ -226,5 +226,5 @@ Layer 3 boundary.
   on web-only routes and `401` after the device is revoked). Unit tests in `crates/client/src/lib.rs` cover the
   config file mode, environment override, loopback-only `http`, redirect refusal, and that the token is absent
   from output and errors.
-- `scripts/smoke_web.sh` and `scripts/smoke_hook_auth.py` run the same boundary over HTTP.
+- `scripts/smoke_web.sh` runs the same boundary over HTTP; `crates/client/tests/hook.rs` runs the hook against a real server.
 - The 30-day session expiry is implemented but has no test that builds an expired session.

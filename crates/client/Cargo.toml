@@ -11,6 +11,7 @@ path = "src/bin/cairn.rs"
 
 [dependencies]
 cairn-core = { path = "../core" }
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

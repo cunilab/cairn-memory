@@ -355,6 +355,14 @@ when an ADR, specification, or implementation resolves them.
 - **Reason:** A stale env pair was overriding `config.json` and failing as a silent HTTP 401.
 - **Evidence:** `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`; `crates/client/src/lib.rs`; `scripts/cairn_hook.py`; `cargo test -p cairn-client --lib`; `cargo test -p cairn-client --test agent_flow`; `python3 scripts/smoke_hook_auth.py`; `python3 scripts/test_agent_hooks.py`; `./scripts/smoke_mcp.sh`; `./scripts/smoke_full_flow.sh`
 
+### 2026-11-21 — The agent hook is the Rust `cairn hook`; Python is gone
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** Hook, outbox and agent setup are Rust (`cairn hook <Event>`, `crates/client/src/{hook,setup}`); `cairn setup --agent` writes `<exe> hook <Event> --agent <a> --config <cfg> --cairn-managed` and replaces old `python3 cairn_hook.py` entries. `/sync/push` and `/context` are deleted; capture is `POST /observe` with a typed `kind`. The older entries above that name `cairn_hook.py`, `cairn_outbox.py`, `sync/push` or their smokes record the retired design.
+- **Reason:** Two languages with hand-synced redaction and setup copies (A7); no Python at runtime.
+- **Evidence:** `docs/specs/0.1.6-step4-capture.md`; `docs/contracts/hook-v1.md`; `crates/client/tests/{hook,setup}.rs`
+
 ## Entry template
 
 ```md

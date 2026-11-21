@@ -50,10 +50,10 @@ Releases are tags on `main` published as GitHub Releases ([release process](docs
 ```bash
 cairn --version
 cairn update --check   # report only
-cairn update           # install the latest release and refresh the hook scripts
+cairn update           # install the latest release and refresh the hook commands
 ```
 
-`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` of the release that matches the installed binary into `hook/` beside the config file (see [examples](docs/examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. The hook is the `cairn hook` command of the same binary, so there are no scripts to keep in step: after replacing the executable `cairn update` rewrites the hook commands of every agent that already has a Cairn hook (see [examples](docs/examples/README.md)). Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
 
 ## Agent CLI and MCP
 
@@ -62,12 +62,9 @@ People use the web console. Agents use the `cairn` CLI, the hooks, and `cairn mc
 ```bash
 cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --bind 127.0.0.1:3111
 printf %s "<device-token>" | cargo run -p cairn-client --bin cairn -- setup http://127.0.0.1:3111
-cargo run -p cairn-client --bin cairn -- start session-1
-cargo run -p cairn-client --bin cairn -- capture session-1 event-1 "The session middleware validates the signed cookie before loading the user."
-cargo run -p cairn-client --bin cairn -- end session-1
-cargo run -p cairn-client --bin cairn -- context "signed cookie" 5
-cargo run -p cairn-client --bin cairn -- forget event-1
-cargo run -p cairn-client --bin cairn -- export /tmp/cairn-memory-export.json
+cargo run -p cairn-client --bin cairn -- save '{"kind":"fact","scope":"personal","title":"Session cookie","summary":"The session middleware validates the signed cookie before loading the user.","reason":"read in the auth code","fields":{"statement":"cookie checked first","source":"auth.rs"}}'
+cargo run -p cairn-client --bin cairn -- search "signed cookie" --limit 5
+cargo run -p cairn-client --bin cairn -- forget <memory-id>
 ```
 
 For an installed agent, opt in to its hooks/instructions and MCP registration:
@@ -79,15 +76,16 @@ printf %s "<device-token>" | cairn setup https://cairn.example.test --agent open
 cairn setup https://cairn.example.test --agent codex --remove
 ```
 
-Python 3 is required; Codex/OpenCode setup also needs that agent's installed CLI.
-Plain URL-only setup keeps its existing behavior. Repeating setup/removal preserves
+Codex/OpenCode setup also needs that agent's installed CLI. Setup writes
+`cairn hook <Event> --agent <agent> --config <file> --cairn-managed` commands (no Python),
+replaces older Cairn-managed entries, and does not need the network. Repeating setup/removal preserves
 unrelated agent config; removal reads no token and keeps the Cairn credentials.
-Claude Code and Codex receive a short start note plus a bounded data-fenced brief,
-compact save instructions once after first work, and a guarded Stop request only
-after new work. In Codex, review/trust the hooks through `/hooks` before they run.
-OpenCode V2 gets a marked global `AGENTS.md` block and MCP registration, using its
-native CLI to preserve JSONC comments; this adapter has no automatic hook brief or
-Stop request. [Capabilities, official references and limits](docs/contracts/hook-v1.md#agent-instructions-and-setup-v014).
+Claude Code and Codex receive the bounded data-fenced brief at session start and after
+compaction; their prompts, edits and commands are captured, and a checkpoint is saved at Stop
+(and, for Claude, before compaction). In Codex, review/trust the hooks through `/hooks` before they run.
+OpenCode V2 gets a marked global `AGENTS.md` block, the MCP registration (through its native
+CLI, which keeps JSONC comments) and a plugin that runs `cairn hook`.
+[Hook events, setup and limits](docs/contracts/hook-v1.md#setup).
 
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in the selected config file with mode `0600`. `CAIRN_CONFIG` selects that file; otherwise it is `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`). `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored, with one stderr warning that does not print their values. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 
@@ -184,20 +182,20 @@ CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
 
 `CAIRN_API_URL` defaults to `http://127.0.0.1:3111`. `./scripts/smoke_web.sh` checks login, the project list, and the common project decision list (the member joins by a capture that carries the project id).
 
-For automatic hook capture, send one JSON object to the portable adapter:
+Automatic capture is `cairn hook <Event>`, which `cairn setup --agent` installs into the agent. To try it, send one event on stdin:
 
 ```bash
-printf '%s\n' '{"sessionId":"session-1","content":"The test passed.","role":"tool","source":"PostToolUse"}' \
-  | python3 scripts/cairn_hook.py
+printf '%s' '{"session_id":"s1","cwd":"'"$PWD"'","prompt":"fix the retry bug"}' \
+  | cairn hook UserPromptSubmit --agent claude
 ```
 
-The adapter reads the server URL and device token from the selected config file. An unmanaged hook uses `--config`, else `CAIRN_CONFIG`, else the default file. An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise its setup-time `--config`. It posts `sync/push` there. An optional path prefix such as `https://host/agent` is kept. Cairn handles redaction, persistence, and duplicate delivery. A reused event id with different content is a `409`.
+The hook reads the server URL and device token from the selected config file. An unmanaged hook uses `--config`, else `CAIRN_CONFIG`, else the default file. An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise its setup-time `--config`. It posts typed captures to `observe`; a path prefix such as `https://host/agent` is kept, and a capture that cannot be delivered waits in a device-bound outbox. The server redacts again, deduplicates, and answers `409` for a reused event id with different content.
 
 Assistant text is skipped by default; opt in with `CAIRN_CAPTURE_ASSISTANT=1`.
 Place a regular `.cairnignore` file in a folder to skip it and its descendants.
 Lookup stops at the Git root, or filesystem root outside Git. Skips make no
 network or outbox writes. The hook scrubs secrets before truncating content;
-see the [hook contract](docs/contracts/hook-v1.md#capture-hygiene-v014).
+see the [hook contract](docs/contracts/hook-v1.md#events).
 
 Session end (including idle close) saves one handoff and explicitly labelled
 decision/gotcha/procedure/rule/fact notes, without an LLM. Re-ending does not duplicate them. Project captures
@@ -213,7 +211,6 @@ export CAIRN_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:55432/postgres  
 cargo test --workspace            # each test gets its own schema; set CAIRN_TEST_REQUIRE_DB=1 to fail instead of skip
 ./scripts/smoke_mcp.sh
 ./scripts/smoke_web.sh
-python3 scripts/smoke_hook_auth.py
 ```
 
 Add `CAIRN_TEST_EMBEDDING_MODEL_DIR=<pinned MiniLM directory>` to run the semantic tests. The smoke

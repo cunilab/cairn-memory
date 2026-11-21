@@ -33,7 +33,7 @@ ownership routes. A password reset revokes web sessions, not device tokens.
 ```mermaid
 flowchart TD
     Hook[Hook event] --> Redact[Redact secrets and work context]
-    Redact --> Post[POST observe or sync/push]
+    Redact --> Post[POST observe]
     Post --> Obs[(observations under a session)]
     Post --> Attach{project id in the request and known?}
     Attach -->|yes| Join[Join the project, idempotently]

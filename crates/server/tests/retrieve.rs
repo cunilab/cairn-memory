@@ -19,8 +19,6 @@ async fn session_distills_into_notes_and_a_handoff() {
     let device = app.device(&admin, "laptop").await;
     let context = json!({"repository": "r", "branch": "main", "files": ["src/queue.rs"]});
     let event = |id: &str, content: &str| json!({"event_id": id, "session_id": "s1", "kind": "assistant", "content": content, "context": context});
-    // The Python hook's shape, until step 4 chunk 3 deletes `sync/push`.
-    let legacy = |id: &str, content: &str| json!({"eventId": id, "sessionId": "s1", "role": "assistant", "source": "hook", "content": content, "context": context, "importance": "high"});
     let first = app
         .post(
             "observe",
@@ -37,8 +35,8 @@ async fn session_distills_into_notes_and_a_handoff() {
     );
     let replay = app
         .post(
-            "sync/push",
-            legacy(
+            "observe",
+            event(
                 "e1",
                 "Decision: use SKIP LOCKED for the queue\nReason: one datastore",
             ),
@@ -176,11 +174,20 @@ async fn brief_shows_the_caller_their_own_rules_only() {
         save(&app, owner, json!({"title": title, "summary": title, "reason": "evidence", "scope": scope, "kind": kind, "context": context})).await;
     }
     let (status, _) = app
-        .send("POST", "session/brief", json!({"context": context}), None)
+        .send(
+            "POST",
+            "session/brief",
+            json!({"session_id": "b1", "context": context}),
+            None,
+        )
         .await;
     assert_eq!(status, 401);
     let reply = app
-        .post("session/brief", json!({"context": context}), &device)
+        .post(
+            "session/brief",
+            json!({"session_id": "b1", "context": context}),
+            &device,
+        )
         .await;
     let text = reply["brief"].as_str().unwrap();
     assert!(text.len() <= reply["max_bytes"].as_u64().unwrap() as usize);
@@ -189,7 +196,11 @@ async fn brief_shows_the_caller_their_own_rules_only() {
     }
     assert!(!text.contains("private-hidden"));
     let text = app
-        .post("session/brief", json!({"context": context}), &other)
+        .post(
+            "session/brief",
+            json!({"session_id": "b1", "context": context}),
+            &other,
+        )
         .await["brief"]
         .as_str()
         .unwrap()
@@ -237,11 +248,7 @@ async fn search_ranks_filters_and_never_leaks() {
         .0 == 404
     );
     let global_hit = app
-        .post(
-            "context",
-            json!({"query": "idempotency keys retries"}),
-            &bob,
-        )
+        .post("search", json!({"query": "idempotency keys retries"}), &bob)
         .await;
     assert_eq!(ids(&global_hit), vec![global.clone()]);
     // Bob joins the project; now he finds the decision, with its reason and fields.
@@ -557,7 +564,7 @@ async fn job_queue_is_admin_only_and_idle_worker_is_a_no_op() {
 }
 
 #[tokio::test]
-async fn observe_is_typed_and_deduped_and_sync_push_maps_the_old_shape() {
+async fn observe_is_typed_and_deduped() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
@@ -585,38 +592,6 @@ async fn observe_is_typed_and_deduped_and_sync_push_maps_the_old_shape() {
     );
     assert_eq!(again["event_id"], "c2");
 
-    for (id, role) in [
-        ("l1", "user"),
-        ("l2", "assistant"),
-        ("l3", "tool"),
-        ("l4", "agent"),
-    ] {
-        app.post(
-            "sync/push",
-            json!({"eventId": id, "sessionId": "s", "role": role, "source": "hook", "content": format!("legacy {role}")}),
-            &device,
-        )
-        .await;
-    }
-    let rows: Vec<(String, String, String, String, Option<bool>)> = sqlx::query_as(
-        "SELECT event_id, kind, role, source, ok FROM observations WHERE event_id LIKE 'l%' ORDER BY event_id",
-    )
-    .fetch_all(app.db.store.pool())
-    .await
-    .unwrap();
-    let rows: Vec<_> = rows
-        .iter()
-        .map(|r| (r.0.as_str(), r.1.as_str(), r.2.as_str(), r.3.as_str(), r.4))
-        .collect();
-    assert_eq!(
-        rows,
-        [
-            ("l1", "prompt", "user", "prompt", None),
-            ("l2", "assistant", "assistant", "assistant", None),
-            ("l3", "command", "tool", "command", None),
-            ("l4", "command", "tool", "command", None),
-        ]
-    );
     let ok: Option<bool> = sqlx::query_scalar("SELECT ok FROM observations WHERE event_id = 'c1'")
         .fetch_one(app.db.store.pool())
         .await
@@ -705,10 +680,14 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
             .await
             .unwrap();
     assert_eq!(files, json!(["src/queue.rs", "token=[REDACTED]"]));
-    // The Python hook sends no session id and still gets a brief.
-    let old = app
-        .post("session/brief", json!({"context": {}}), &device)
+    let (status, _) = app
+        .send(
+            "POST",
+            "session/brief",
+            json!({"context": {}}),
+            Some(&device),
+        )
         .await;
-    assert!(old["brief"].is_string());
+    assert!((400..500).contains(&status), "a brief needs a session id");
     app.finish().await;
 }

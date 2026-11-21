@@ -100,7 +100,8 @@ fn project_check() -> Check {
 }
 
 /// Agents whose config directory exists; each must carry a Cairn-managed MCP entry and hook.
-/// Paths and markers mirror `scripts/cairn_setup.py`.
+/// Paths and markers mirror `setup`; a hook command that still names the retired Python script
+/// counts as stale.
 fn agent_checks(home: &Path) -> Vec<Check> {
     let dir = |var: &str, default: PathBuf| env::var_os(var).map_or(default, PathBuf::from);
     let claude = dir("CLAUDE_CONFIG_DIR", home.join(".claude"));
@@ -140,6 +141,7 @@ fn agent_checks(home: &Path) -> Vec<Check> {
             .iter()
             .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(marker)))
     };
+    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py");
     let mut checks = Vec::new();
     for (agent, folder, mcp, hooks) in &agents {
         if !folder.is_dir() {
@@ -154,7 +156,13 @@ fn agent_checks(home: &Path) -> Vec<Check> {
                 format!("{agent} has no Cairn MCP entry; run cairn setup"),
             )
         });
-        checks.push(if has(hooks, "--cairn-managed") {
+        checks.push(if stale(hooks) {
+            check(
+                "warn",
+                "hooks",
+                format!("{agent} hook still runs the retired Python script; run cairn setup"),
+            )
+        } else if has(hooks, "--cairn-managed") {
             check("ok", "hooks", format!("{agent} hook present"))
         } else {
             check(

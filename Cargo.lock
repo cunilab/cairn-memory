@@ -187,6 +187,7 @@ dependencies = [
  "cairn-core",
  "cairn-server",
  "cairn-store",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

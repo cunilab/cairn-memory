@@ -3,7 +3,7 @@
 
 use cairn_client::tools::{self, Tool};
 use cairn_client::{
-    Client, Config, Error, doctor, hook, mcp, project, selected_config_path, update,
+    Client, Config, Error, doctor, hook, mcp, project, selected_config_path, setup, update,
     warn_ignored_legacy_config,
 };
 use serde_json::{Map, Value, json};
@@ -134,7 +134,7 @@ fn setup(args: &[String]) -> Result<(), Error> {
         }
         _ => usage(),
     };
-    if agent.is_some_and(|a| !cairn_client::agents::AGENTS.contains(&a)) {
+    if agent.is_some_and(|a| !setup::AGENTS.contains(&a)) {
         return Err(Error::Input(
             "agent must be claude, codex or opencode".into(),
         ));
@@ -142,7 +142,7 @@ fn setup(args: &[String]) -> Result<(), Error> {
     if remove {
         println!(
             "{}",
-            cairn_client::agents::configure(agent.expect("remove has an agent"), true)?
+            setup::configure(agent.expect("remove has an agent"), true)?
         );
         return Ok(());
     }
@@ -151,20 +151,12 @@ fn setup(args: &[String]) -> Result<(), Error> {
     let path = selected_config_path()?;
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
+    setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
     if let Some(agent) = agent {
-        println!("{}", update::install_bundled_hooks()?);
-        println!("{}", cairn_client::agents::configure(agent, false)?);
+        println!("{}", setup::configure(agent, false)?);
         if agent == "codex" {
             println!("Review and trust the installed hooks with /hooks in Codex before they run.");
         }
-        return Ok(());
-    }
-    // Offline URL-only setup still retains its valid credentials.
-    match update::install_hooks() {
-        Ok(message) => println!("{message}"),
-        Err(error) => eprintln!(
-            "cairn: warning: hook scripts were not installed ({error}); `cairn update` retries"
-        ),
     }
     Ok(())
 }

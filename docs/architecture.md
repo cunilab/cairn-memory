@@ -25,13 +25,12 @@ are in [`archive/`](README.md#archive) and the ADRs.
 | `cairn-core` | Pure types and logic, no IO and no `sqlx`, `tokio`, `axum` or `reqwest`. Areas `memory`, `capture`, `process`, `retrieve`, `project`, `account`, each with a README |
 | `cairn-store` | Every SQL query behind `Store`; the visibility rule, transactions, migrations, jobs; `TestDb` for tests |
 | `cairn-server` | Axum routes under `/cairn-memory`, authentication, `{error, code}` errors, and the background worker with the local MiniLM model |
-| `cairn-client` | The `cairn` CLI and `cairn mcp` stdio server (one tool table), project file, hook and agent setup, `cairn update` |
+| `cairn-client` | The `cairn` CLI and `cairn mcp` stdio server (one tool table), project file, `cairn hook`, agent setup, `cairn update` |
 | `apps/web` | Next.js console: dashboard, memories, graph, projects, jobs, devices, accounts |
-| `scripts/cairn_hook.py` | The agent hook: redacts, posts with a device token, keeps a bounded outbox for outages |
 
 ```mermaid
 flowchart LR
-    Hook[cairn_hook.py] -->|device token| API
+    Hook[cairn hook] -->|device token| API
     CLI[cairn CLI / cairn mcp] -->|device token| API
     Web[Next.js console] -->|web session| API
     API[cairn-server routes] --> Store[cairn-store]
@@ -71,7 +70,7 @@ the memory is global, or it is project-scoped and the caller is a member of that
 3. **Process.** The worker embeds new memories, then runs `consolidate`: a neighbour with the same owner,
    scope, project and kind and cosine ≥ 0.92 is superseded by the newer memory; 0.75–0.92 adds a
    `relates` link. Nothing is queued for a human.
-4. **Recall.** `/search` (also `/context`, the same handler, for the hook until step 4) runs lexical, entity and vector
+4. **Recall.** `/search` runs lexical, entity and vector
    channels over visible rows, fuses them (RRF), applies the relevance floor and usage multipliers, then
    packs compact results with `more: n` for what was cut. `kind=handoff` finds handoffs, `kind=decision` replaces
    why-changed, and the session brief reads handoffs and links.

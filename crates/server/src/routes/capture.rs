@@ -3,41 +3,9 @@ use crate::auth::{Agent, Device};
 use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
-use cairn_core::capture::{CaptureKind, ObservationInput, WorkContext};
+use cairn_core::capture::ObservationInput;
 use serde::Deserialize;
 use serde_json::{Value, json};
-
-/// The Python hook's capture, for `/sync/push` until step 4 chunk 3 deletes it. Keys beyond
-/// these (`importance`, `lifecycle`, `source`) are ignored; the role picks the kind.
-#[derive(Deserialize)]
-pub struct LegacyObservation {
-    #[serde(rename = "eventId", alias = "event_id")]
-    event_id: String,
-    #[serde(rename = "sessionId", alias = "session_id")]
-    session_id: String,
-    content: String,
-    role: String,
-    #[serde(default)]
-    context: WorkContext,
-}
-
-impl From<LegacyObservation> for ObservationInput {
-    fn from(old: LegacyObservation) -> Self {
-        let kind = match old.role.trim().to_ascii_lowercase().as_str() {
-            "user" => CaptureKind::Prompt,
-            "assistant" => CaptureKind::Assistant,
-            _ => CaptureKind::Command,
-        };
-        Self {
-            event_id: old.event_id,
-            session_id: old.session_id,
-            kind,
-            ok: None,
-            content: old.content,
-            context: old.context,
-        }
-    }
-}
 
 #[derive(Deserialize)]
 pub struct SessionRef {
@@ -54,14 +22,6 @@ pub async fn observe(
     let input = serde_json::from_value(body)
         .map_err(|error| ApiError::invalid(format!("invalid capture: {error}")))?;
     capture(state, device, input).await
-}
-
-pub async fn sync_push(
-    state: State<AppState>,
-    device: Device,
-    Json(body): Json<LegacyObservation>,
-) -> Result<Json<Value>, ApiError> {
-    capture(state, device, body.into()).await
 }
 
 /// `project_attachment.status` is `attached` when the capture's project id names a project the

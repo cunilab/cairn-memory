@@ -36,11 +36,9 @@ pub struct Search {
     context: Option<WorkContext>,
 }
 
-/// `session_id` is optional only for the Python hook, until step 4 chunk 3 deletes it.
 #[derive(Deserialize)]
 pub struct Brief {
-    #[serde(default, rename = "sessionId", alias = "session_id")]
-    session_id: Option<String>,
+    session_id: String,
     #[serde(default)]
     context: Option<WorkContext>,
     #[serde(default)]
@@ -72,7 +70,7 @@ async fn vector(state: &AppState, query: &str) -> Option<Vec<f32>> {
     }
 }
 
-/// `/search`, and `/context` for the hook until step 4: cards, not rows.
+/// `/search`: cards, not rows.
 pub async fn search(
     State(state): State<AppState>,
     Agent(account): Agent,
@@ -104,12 +102,15 @@ pub async fn brief(
     Json(body): Json<Brief>,
 ) -> Result<Json<Value>, ApiError> {
     let context = body.context.unwrap_or_default();
-    if let Some(session_id) = &body.session_id {
-        state
-            .store
-            .record_session_files(&account.person_id, session_id, &context, &body.recent_files)
-            .await?;
-    }
+    state
+        .store
+        .record_session_files(
+            &account.person_id,
+            &body.session_id,
+            &context,
+            &body.recent_files,
+        )
+        .await?;
     let brief = state.store.brief(&account.person_id, &context).await?;
     Ok(Json(
         json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES}),

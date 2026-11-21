@@ -61,7 +61,7 @@ Terminate TLS at Traefik. Agents refuse plain `http` for any host that is not lo
 Every agent client takes the base URL with the path prefix:
 
 - CLI and MCP: `cairn setup https://cairn.example.test/agent` (token on stdin). `CAIRN_CONFIG` selects the file; otherwise setup uses the default config path.
-- Hook: the same file, or `--config` for an installed hook ([hook contract](./contracts/hook-v1.md)). A `CAIRN_OUTBOX` queue is bound to that exact base, so changing the prefix needs a new queue file.
+- Hook: the same file, or `--config` for an installed hook ([hook contract](./contracts/hook-v1.md)). The hook outbox is bound to that exact base, so changing the prefix starts a new queue file.
 
 A trailing slash is dropped. Create the first account in the console on first visit, then create a device there for each machine ([account rules](./contracts/auth-layer3.md)).
 

@@ -1,7 +1,7 @@
 # Publishes a GitHub Release when a vX.Y.Z tag is pushed. The tag must equal the workspace
 # version and point at a commit on main. Assets are raw binaries (no archives) so
 # `cairn update` needs no unpacking: cairn-<target>[.exe], cairn-server-<target>[.exe],
-# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them. The image jobs then build
+# and SHA256SUMS over all of them. The image jobs then build
 # each platform natively and the manifest jobs publish ghcr.io/cunilab/cairn-memory-server and
 # cairn-memory-web (vX.Y.Z and latest, linux/amd64 and linux/arm64).
 name: Release
@@ -92,10 +92,9 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Add hook scripts and checksums
+      - name: Add checksums
         working-directory: dist
         run: |
-          cp ../scripts/cairn_hook.py ../scripts/cairn_outbox.py .
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS .
           cat SHA256SUMS

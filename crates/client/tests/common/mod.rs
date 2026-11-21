@@ -111,9 +111,7 @@ pub fn command(config_home: &Path) -> Command {
         .env_remove("CAIRN_CONFIG")
         .env_remove("CAIRN_OUTBOX")
         .env_remove("CAIRN_CAPTURE_ASSISTANT")
-        .env("CAIRN_NO_UPDATE_CHECK", "1")
-        // `setup` fetches the hook scripts; keep tests off the network (refused at once).
-        .env("CAIRN_UPDATE_URL", "http://127.0.0.1:1/releases/latest");
+        .env("CAIRN_NO_UPDATE_CHECK", "1");
     command
 }
 

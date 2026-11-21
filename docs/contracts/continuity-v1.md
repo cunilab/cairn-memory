@@ -21,7 +21,7 @@ repository-name matching.
 
 ## Retrieval filters
 
-`/search` and `/context` (kept for the hook until step 4) are one handler and take the same body:
+`/search` takes this body:
 
 ```json
 {"query": "cache decision", "kind": "decision", "limit": 5,

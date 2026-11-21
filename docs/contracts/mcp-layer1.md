@@ -99,7 +99,7 @@ cairn feedback <id> helpful|wrong               cairn forget <id>
 The five verbs call the same tools and print the same compact JSON plus a newline; `save` reads one
 `SaveInput` object from its argument or stdin. `doctor` is read-only and prints `ok|warn|fail  <check>  <detail>`
 per check (config, server, semantic, device, project, agents, hooks), exiting 1 on any `fail`. `hook` runs the
-installed Python hook until step 4 replaces it. Account and device management stay in the web console.
+capture and injection hook ([hook contract](./hook-v1.md)). Account and device management stay in the web console.
 
 ## Evidence
 

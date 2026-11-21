@@ -20,13 +20,13 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [Phase 0 evidence](./evidence.md) | CM-EVIDENCE-001 | Recorded Phase 0 artifacts, source snapshot, checks, and limitations |
 | [AgentMemory compatibility baseline](./contracts/agentmemory-baseline.md) | CM-CONTRACT-001 | Upstream REST, MCP, hook, CLI, environment, lifecycle, and portability contracts |
 | [Layer 1 MCP compatibility contract](./contracts/mcp-layer1.md) | CM-CONTRACT-002 | Device-token network CLI and MCP stdio proxy, tool manifest, and limitations |
-| [Layer 1 hook capture adapter](./contracts/hook-v1.md) | CM-CONTRACT-005 | Portable automatic hook ingestion and normalized capture fields |
+| [Layer 1 hook capture adapter](./contracts/hook-v1.md) | CM-CONTRACT-005 | `cairn hook` events, typed capture, injection budget, outbox and setup |
 | [Layer 2 branch-aware continuity](./contracts/continuity-v1.md) | CM-CONTRACT-006 | Memory scopes, context-aware retrieval, and omitted-result recovery |
 | [Layer 3 self-hosted account authentication](./contracts/auth-layer3.md) | CM-CONTRACT-008 | Account bootstrap, hashed sessions, logout, and device ownership |
 | [Layer 4 project promotion](./contracts/project-layer4.md) | CM-CONTRACT-009 | Project registration and explicit evidence-backed promotion |
 | [0.1.6 foundation specification](./specs/0.1.6-foundation.md) | CM-SPEC-004 | Schema, Rust model, module map, routes, test strategy and build order of the 0.1.6 rewrite |
 | [Rust idioms and review rules](./RUST_IDIOMS.md) | CM-STD-002 | Rust quality rules for every agent and contributor |
-| [Hook setup examples](./examples/README.md) | CM-GUIDE-002 | Claude Code hook wiring for `cairn_hook.py` |
+| [Hook setup examples](./examples/README.md) | CM-GUIDE-002 | Claude Code hook wiring for `cairn hook` |
 | [Phase 0 fixtures](./fixtures/phase-0/README.md) | CM-GUIDE-003 | Redacted contract fixtures and the golden corpus |
 | [Release process](./release.md) | CM-REL-001 | Trunk-based flow, required checks, cutting a release, and how clients update |
 | [Deployment layout](./deploy.md) | CM-DEPLOY-001 | Dokploy and Traefik layout for PostgreSQL, `cairn-server`, and the console, with the `/agent` API path |

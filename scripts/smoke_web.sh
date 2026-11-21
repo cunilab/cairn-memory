@@ -531,10 +531,10 @@ if [ -z "$new_token" ] || [ "$new_token" = "$old_token" ]; then
   exit 1
 fi
 old_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -H "authorization: Bearer ${old_token}" -d '{"context":{}}' \
+  -H "authorization: Bearer ${old_token}" -d '{"session_id":"smoke","context":{}}' \
   "${api}/cairn-memory/session/brief")"
 new_code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \
-  -H "authorization: Bearer ${new_token}" -d '{"context":{}}' \
+  -H "authorization: Bearer ${new_token}" -d '{"session_id":"smoke","context":{}}' \
   "${api}/cairn-memory/session/brief")"
 if [ "$old_code" != "401" ] || [ "$new_code" != "200" ]; then
   printf '%s\n' "rotated token status old=${old_code} new=${new_code}" >&2
