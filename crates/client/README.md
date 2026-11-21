@@ -6,8 +6,10 @@ token from one shared tool table; the crate holds no account session and opens n
 `.cairn/project.json`, installs the hooks, configures agents and runs `cairn update`.
 
 ## Entry points
-- `bin/cairn.rs` (commands), `mcp::run_stdio`, `tools` (the tool table and its REST mapping).
-- `present` (agent-facing result shaping), `project` (project file and repository identity).
+- `bin/cairn.rs` (commands), `mcp::run_stdio`, `tools` (the five-tool table: `tools/list`, CLI verbs,
+  instruction text, REST mapping).
+- `present` (MCP result envelope), `doctor` (read-only health checks), `hook` (stub that runs the
+  installed Python hook), `project` (project file and repository identity).
 - `agents::configure`, `update` (verified self-update), `Config`, `Client`.
 
 ## Depends on

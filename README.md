@@ -53,7 +53,7 @@ cairn update --check   # report only
 cairn update           # install the latest release and refresh the hook scripts
 ```
 
-`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` of the release that matches the installed binary into `hook/` beside the config file (see [examples](docs/examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
+`cairn update` verifies every download against the release's `SHA256SUMS` and replaces the running executable; if its directory is not writable it says so and changes nothing. `cairn setup` and `cairn update` also install `cairn_hook.py` and `cairn_outbox.py` of the release that matches the installed binary into `hook/` beside the config file (see [examples](docs/examples/README.md)); a script you edited is kept as `<name>.bak` and the command says so. Before swapping, the new binary must run `--version` and report the expected version. Interactive commands print a one-line notice, at most one check per day, when a newer release exists; set `CAIRN_NO_UPDATE_CHECK=1` to turn it off. `cairn mcp` and the hooks never check or update. Limits and the trust model: [ADR 0012](docs/adr/0012-github-releases-and-self-update.md).
 
 ## Agent CLI and MCP
 
@@ -114,10 +114,14 @@ Agents save a structured record with required title, summary, reason and scope:
 
 ```sh
 cairn save '{"scope":"personal","kind":"preference","title":"Concise answers","summary":"Use short paragraphs.","reason":"Reduce reading time.","preference":"concise"}'
-# Or pipe one JSON record to cairn save / cairn lesson.
-cairn memories
-cairn memory memory-id
+# Or pipe one JSON record: cairn save - < record.json
+cairn search "job queue" --kind decision --limit 3
+cairn get memory-id
+cairn feedback memory-id helpful
+cairn forget memory-id
 ```
+
+The agent CLI is `setup`, `init`, `update`, `doctor`, `mcp`, `hook`, `version` and the five verbs `search`, `get`, `save`, `feedback`, `forget`; the same five are the only MCP tools. `cairn doctor` checks config, server, device token, project file and agent wiring without writing anything. Contract: [docs/contracts/mcp-layer1.md](docs/contracts/mcp-layer1.md).
 
 Common fields and typed decision/rule/gotcha/procedure/fact/preference fields are available through CLI, MCP and REST, and visible in the console's Memories list/detail. See [the record contract](docs/contracts/project-layer4.md#memory-scopes-and-record). Existing lexical recall searches title, summary, details and reason; later ADR 0014 stages are still planned. Project owners/admins can transfer ownership to a member. Project identity and shared records are read online; export is not a project backup. Development stores require a reset for this pre-release schema.
 
@@ -138,7 +142,7 @@ migrate; everything lives in its schema `cairn` (`--schema` picks another one). 
 cargo run -p cairn-server -- --database-url "$CAIRN_DATABASE_URL" --bind 127.0.0.1:3111
 ```
 
-It serves health, self-hosted accounts, trusted devices, projects (init, rename, ownership, members, derived branches and conflicts), session capture, typed memory saves (`/remember`: a decision, rule, gotcha, procedure, fact, preference or note with per-kind `fields`, `supersedes` and `contradicts`), search, context, resume, unresolved-work, why-changed, helpful/wrong feedback, forget, typed links, the readable memory graph, export, diagnostics and the admin job queue under `/cairn-memory/`. Background jobs distill sessions into notes and a handoff, embed memories, and consolidate near-duplicates automatically (cosine 0.92 or more supersedes the older memory; 0.75 to 0.92 adds a `relates` link). A correction is a save with `supersedes`.
+It serves health, self-hosted accounts, trusted devices, projects (init, rename, ownership, members, derived branches and conflicts), session capture, typed memory saves (`/remember`: a decision, rule, gotcha, procedure, fact, preference or note with per-kind `fields`, `supersedes` and `contradicts`), search, get, helpful/wrong feedback, forget, the readable memory graph, export, diagnostics and the admin job queue under `/cairn-memory/`. Background jobs distill sessions into notes and a handoff, embed memories, and consolidate near-duplicates automatically (cosine 0.92 or more supersedes the older memory; 0.75 to 0.92 adds a `relates` link). A correction is a save with `supersedes`.
 
 Hybrid recall combines full text, code entities, one-hop evidence and typed memory links, and local
 MiniLM embeddings with reciprocal-rank fusion, type weights and pinned boosts.
@@ -171,7 +175,7 @@ The MCP server runs over stdio as a proxy to the same REST API, using the config
 cargo run -p cairn-client --bin cairn -- mcp
 ```
 
-It supports the memory tools over newline-delimited JSON-RPC, including session capture, recall, resume, unresolved-work, why-changed, explicit save, diagnostics, forget, and export. The Next.js console is `apps/web`.
+It supports five memory tools over newline-delimited JSON-RPC: search, get, save, feedback and forget. The Next.js console is `apps/web`.
 
 ```bash
 cd apps/web
