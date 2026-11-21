@@ -10,16 +10,21 @@ mod outbox;
 mod readonly;
 mod state;
 
-use crate::{Client, Config, Error, selected_config_path};
+use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::capture::{WorkContext, redact_work_context};
+use cairn_core::id::now_seconds;
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
+use std::cell::OnceCell;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const OBSERVE: &str = "/cairn-memory/observe";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// After a request got no answer, further requests are skipped (captures go straight to the
+/// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
+const DOWN_SECONDS: i64 = 30;
 
 struct Options {
     event: String,
@@ -97,7 +102,8 @@ fn session(options: &Options) -> Result<(), String> {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().map_err(|e| format!("no working folder: {e}"))?,
     };
-    if git::ignored(&cwd) {
+    let top = git::top_level(&cwd);
+    if git::ignored(&cwd, top.as_deref()) {
         return Ok(());
     }
     let session_id = payload
@@ -116,6 +122,8 @@ fn session(options: &Options) -> Result<(), String> {
         key,
         session_id,
         cwd,
+        top,
+        context: OnceCell::new(),
         payload,
     };
     if let Some(text) = hook.handle()? {
@@ -131,6 +139,9 @@ struct Hook<'a> {
     key: String,
     session_id: String,
     cwd: PathBuf,
+    /// The checkout's top folder and work context, read from git once per hook run.
+    top: Option<PathBuf>,
+    context: OnceCell<WorkContext>,
     payload: Payload,
 }
 
@@ -167,8 +178,45 @@ impl Hook<'_> {
         }
     }
 
+    fn work_context(&self) -> WorkContext {
+        self.context
+            .get_or_init(|| git::work_context(&self.cwd, self.top.as_deref()))
+            .clone()
+    }
+
+    /// `<config_dir>/server-down.json`: `{"origin", "until"}` while the server is not asked.
+    fn down_file(&self) -> PathBuf {
+        self.config_dir.join("server-down.json")
+    }
+
+    fn server_is_down(&self) -> bool {
+        let down: Value = std::fs::read_to_string(self.down_file())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        down["origin"] == self.config.url.as_str() && down["until"].as_i64() > Some(now_seconds())
+    }
+
     fn post(&self, path: &str, body: &Value) -> Result<Value, Error> {
-        Client::with_timeout(self.config.clone(), REQUEST_TIMEOUT).post(path, body)
+        if self.server_is_down() {
+            return Err(Error::Request(format!(
+                "server did not answer; not asked again for {DOWN_SECONDS} s"
+            )));
+        }
+        let result = Client::with_timeout(self.config.clone(), REQUEST_TIMEOUT).post(path, body);
+        match &result {
+            // Only "no answer" (timeout, refused, unreachable); a 5xx answers quickly.
+            Err(Error::Request(_)) => {
+                let down =
+                    json!({"origin": self.config.url, "until": now_seconds() + DOWN_SECONDS});
+                let _ = write_private(&self.down_file(), down.to_string().as_bytes());
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(self.down_file());
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     fn state_dir(&self) -> PathBuf {
@@ -199,7 +247,7 @@ impl Hook<'_> {
         state::sweep(&self.state_dir());
         let body = json!({
             "session_id": self.session_id,
-            "context": git::work_context(&self.cwd),
+            "context": self.work_context(),
             "recent_files": git::recent_files(&self.cwd),
         });
         let reply = match self.post("/cairn-memory/session/brief", &body) {
@@ -223,8 +271,6 @@ impl Hook<'_> {
             );
             return None;
         }
-        // A new context (start, resume, compaction) starts its budget with the brief.
-        self.with_state(|s| s.injected_bytes = brief.len() as u32);
         Some(brief.to_owned())
     }
 
@@ -240,12 +286,15 @@ impl Hook<'_> {
             });
         }
         if tool.is_file_tool() {
-            let path = tool
-                .file_path()
-                .and_then(|path| git::repo_relative(path, &self.cwd));
-            let Some(path) = path else { return Ok(None) };
-            self.capture(Some(tool.edit(&path)))?;
-            return Ok(self.topic(&path));
+            let mut notes = Vec::new();
+            for (given, new_text) in tool.edits() {
+                let Some(path) = git::repo_relative(&given, &self.cwd, self.top.as_deref()) else {
+                    continue;
+                };
+                self.capture(Some(tool.edit(&path, &new_text)))?;
+                notes.extend(self.topic(&path));
+            }
+            return Ok((!notes.is_empty()).then(|| notes.join("\n")));
         }
         self.capture(tool.command()).map(|()| None)
     }
@@ -255,12 +304,11 @@ impl Hook<'_> {
         let wanted = self.with_state(|s| {
             !s.topics.iter().any(|seen| seen == path)
                 && s.topics_injected < inject::TOPICS_PER_SESSION
-                && s.injected_bytes as usize + inject::TOPIC_MAX_BYTES <= inject::TOTAL_MAX_BYTES
         })?;
         if !wanted {
             return None;
         }
-        let body = json!({"path": path, "context": git::work_context(&self.cwd)});
+        let body = json!({"path": path, "context": self.work_context()});
         let reply = match self.post("/cairn-memory/session/topic", &body) {
             Ok(reply) => reply,
             // Not marked seen: the next edit of this path asks again.
@@ -284,29 +332,37 @@ impl Hook<'_> {
             .unwrap_or_default();
         let text = inject::topic(path, &notes);
         let keep = self.with_state(|s| {
-            s.remember_topic(path);
-            let fits = s.topics_injected < inject::TOPICS_PER_SESSION
-                && s.injected_bytes as usize + text.len() <= inject::TOTAL_MAX_BYTES;
-            if !text.is_empty() && fits {
-                s.topics_injected += 1;
-                s.injected_bytes += text.len() as u32;
+            // A parallel hook of this session may have answered first: one note per path.
+            if s.topics.iter().any(|seen| seen == path) {
+                return false;
             }
-            !text.is_empty() && fits
+            s.remember_topic(path);
+            let fits = !text.is_empty() && s.topics_injected < inject::TOPICS_PER_SESSION;
+            if fits {
+                s.topics_injected += 1;
+            }
+            fits
         });
         keep.unwrap_or(false).then_some(text)
     }
 
     /// Sends one typed capture unless this session already sent the same content. A transient
-    /// failure queues the same body for replay; a rejection is reported and dropped.
+    /// failure queues the same body for replay; a rejection is reported and dropped. The repeat
+    /// check remembers a capture only once it is sent or queued, so one that never left is sent
+    /// again after the cause (a bad token, a busy outbox) is fixed.
     fn capture(&self, capture: Option<Capture>) -> Result<(), String> {
         let Some(capture) = capture else {
             return Ok(());
         };
-        if self.with_state(|s| s.remember_capture(&capture.content_hash())) == Some(false) {
+        let hash = capture.content_hash();
+        if self.with_state(|s| s.capture_hashes.contains(&hash)) == Some(true) {
             return Ok(());
         }
-        let event_id = capture.event_id(&self.session_id, self.payload.tool_use_id());
-        let mut context: WorkContext = git::work_context(&self.cwd);
+        let remember = || {
+            self.with_state(|s| s.remember_capture(&hash));
+        };
+        let event_id = capture.event_id(&self.session_id);
+        let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
         let mut body = json!({
             "event_id": event_id,
@@ -320,6 +376,7 @@ impl Hook<'_> {
         }
         let error = match self.post(OBSERVE, &body) {
             Ok(_) => {
+                remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
                     outbox.replay(&self.config, &event_id);
                 }
@@ -336,6 +393,7 @@ impl Hook<'_> {
         let outbox = outbox::Outbox::open(&self.config, &self.config_dir)
             .ok_or("outbox is bound to another server or device; the capture was not retained")?;
         let dropped = outbox.enqueue(&event_id, &body, &error)?;
+        remember();
         if dropped > 0 {
             eprintln!("cairn hook: outbox full; dropped {dropped} oldest capture(s)");
         }

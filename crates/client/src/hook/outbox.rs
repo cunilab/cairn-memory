@@ -1,13 +1,15 @@
 //! The offline outbox: captures that could not be delivered wait in
 //! `<config_dir>/outbox.json`, bound to one origin and device, and are replayed after the next
-//! successful POST (CM-SPEC-006 §4). Never waits on its lock; the host is never blocked.
+//! successful POST (CM-SPEC-006 §4). The lock is held only to read or write the file, never
+//! while a request is in flight, so a capture that fails during a replay is still kept.
 
 use super::OBSERVE;
 use crate::{Client, Config, Error, create_private_dir, write_private};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,6 +18,7 @@ const CAP: usize = 256;
 const MAX_ATTEMPTS: u32 = 10;
 const REPLAY_LIMIT: usize = 20;
 const REPLAY_BUDGET: Duration = Duration::from_secs(2);
+const LOCK_WAIT: Duration = Duration::from_secs(1);
 const BUSY: &str = "outbox is busy; the capture was not retained";
 
 #[derive(Serialize, Deserialize)]
@@ -88,7 +91,8 @@ impl Outbox {
             .then_some(queue)
     }
 
-    fn lock(&self) -> Result<File, String> {
+    /// Waits up to `wait` for the lock; the holder only reads or writes one small file.
+    fn lock(&self, wait: Duration) -> Result<File, String> {
         let mut name = self.path.file_name().unwrap_or_default().to_os_string();
         name.push(".lock");
         let lock_path = self.path.with_file_name(name);
@@ -103,8 +107,16 @@ impl Outbox {
         let lock = options
             .open(&lock_path)
             .map_err(|error| format!("cannot open outbox lock: {error}"))?;
-        lock.try_lock().map_err(|_| BUSY.to_owned())?;
-        Ok(lock)
+        let started = Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(lock),
+                Err(TryLockError::WouldBlock) if started.elapsed() < wait => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return Err(BUSY.to_owned()),
+            }
+        }
     }
 
     fn write(&self, queue: &Queue) -> Result<(), String> {
@@ -114,7 +126,7 @@ impl Outbox {
 
     /// Appends one event; at 256 the oldest is dropped. `Ok(dropped)` counts those.
     pub fn enqueue(&self, event_id: &str, body: &Value, error: &Error) -> Result<usize, String> {
-        let _lock = self.lock()?;
+        let _lock = self.lock(LOCK_WAIT)?;
         let mut queue = self
             .read()
             .ok_or("outbox is bound to another server or device")?;
@@ -138,50 +150,72 @@ impl Outbox {
     }
 
     /// Best effort after a delivered capture: oldest first, at most 20 events, at most 2 s,
-    /// skipping the event just sent. Never an error.
+    /// skipping the event just sent. Never an error. The lock covers the read and the final
+    /// write only; an event queued meanwhile stays, and one delivered twice is dropped by the
+    /// server (same event id).
     pub fn replay(&self, config: &Config, skip_event_id: &str) {
         if !self.path.exists() {
             return;
         }
-        let Ok(_lock) = self.lock() else { return };
-        let Some(mut queue) = self.read() else { return };
+        let batch: Vec<Pending> = {
+            let Ok(_lock) = self.lock(Duration::ZERO) else {
+                return;
+            };
+            let Some(queue) = self.read() else { return };
+            queue
+                .events
+                .into_iter()
+                .filter(|pending| pending.event_id != skip_event_id)
+                .take(REPLAY_LIMIT)
+                .collect()
+        };
         let deadline = Instant::now() + REPLAY_BUDGET;
-        let (mut tried, mut stopped, mut changed) = (0, false, false);
-        let mut kept = Vec::new();
-        for mut pending in std::mem::take(&mut queue.events) {
+        let mut done = HashSet::new();
+        let mut failed: Option<(String, String)> = None;
+        for pending in batch {
             let left = deadline.saturating_duration_since(Instant::now());
-            if stopped
-                || tried >= REPLAY_LIMIT
-                || left.is_zero()
-                || pending.event_id == skip_event_id
-            {
-                kept.push(pending);
-                continue;
+            if left.is_zero() {
+                break;
             }
-            tried += 1;
             let client = Client::with_timeout(config.clone(), left);
             match client.post(OBSERVE, &pending.body) {
-                Ok(_) | Err(Error::Status { status: 409, .. }) => changed = true,
-                Err(Error::Status { status: 401, .. }) => {
-                    stopped = true;
-                    kept.push(pending);
+                Ok(_) | Err(Error::Status { status: 409, .. }) => {
+                    done.insert(pending.event_id);
                 }
+                Err(Error::Status { status: 401, .. }) => break,
                 Err(error) if retryable(&error) => {
-                    stopped = true;
-                    pending.attempts += 1;
-                    pending.last_error = Some(error.to_string().chars().take(200).collect());
-                    changed = true;
-                    if pending.attempts < MAX_ATTEMPTS {
-                        kept.push(pending);
-                    }
+                    failed = Some((
+                        pending.event_id,
+                        error.to_string().chars().take(200).collect(),
+                    ));
+                    break;
                 }
                 // Any other 4xx will never be accepted.
-                Err(_) => changed = true,
+                Err(_) => {
+                    done.insert(pending.event_id);
+                }
             }
         }
-        queue.events = kept;
-        if changed {
-            let _ = self.write(&queue);
+        if done.is_empty() && failed.is_none() {
+            return;
         }
+        let Ok(_lock) = self.lock(LOCK_WAIT) else {
+            return;
+        };
+        let Some(mut queue) = self.read() else { return };
+        queue.events.retain_mut(|pending| {
+            if done.contains(&pending.event_id) {
+                return false;
+            }
+            match &failed {
+                Some((id, error)) if *id == pending.event_id => {
+                    pending.attempts += 1;
+                    pending.last_error = Some(error.clone());
+                    pending.attempts < MAX_ATTEMPTS
+                }
+                _ => true,
+            }
+        });
+        let _ = self.write(&queue);
     }
 }

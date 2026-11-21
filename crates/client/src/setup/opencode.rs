@@ -19,7 +19,10 @@ fn render(exe: &str, config: &str) -> String {
 }
 
 pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
-    require_cli("opencode")?;
+    // Removal edits files only, so it works after the `opencode` CLI is uninstalled.
+    if !ctx.remove {
+        require_cli("opencode")?;
+    }
     let xdg = ctx
         .dir("XDG_CONFIG_HOME")
         .unwrap_or_else(|| ctx.home.join(".config"));

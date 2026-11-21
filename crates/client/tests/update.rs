@@ -1,15 +1,19 @@
 //! The real `cairn` binary: `--version` and `update --check` against a local release listing.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The binary with its own temporary home (see `common::isolate`).
 fn cairn() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cairn"));
-    command
-        .env_remove("CAIRN_URL")
-        .env_remove("CAIRN_DEVICE_TOKEN");
-    command
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    common::command(&common::temp_dir(&format!(
+        "update-{}",
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    )))
 }
 
 /// Answers every request with a release listing for `tag`.
@@ -124,10 +128,7 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let copy = dir.join("cairn");
     std::fs::copy(env!("CARGO_BIN_EXE_cairn"), &copy).unwrap();
     let mut update = Command::new(&copy);
-    update
-        .env_remove("CAIRN_URL")
-        .env_remove("CAIRN_DEVICE_TOKEN")
-        .env_remove("CAIRN_CONFIG");
+    common::isolate(&mut update, &home);
     setup_env(&mut update);
     let output = update
         .arg("update")

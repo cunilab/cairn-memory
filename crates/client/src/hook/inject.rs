@@ -6,9 +6,8 @@ use serde_json::{Value, json};
 /// The server caps the brief at the same number; a longer one is dropped, never cut.
 pub const BRIEF_MAX_BYTES: usize = 1200;
 pub const TOPIC_MAX_BYTES: usize = 300;
+/// With the brief this is at most 1,200 + 4 x 300 bytes in one context, under the 2,500 B budget.
 pub const TOPICS_PER_SESSION: u8 = 4;
-/// Hard ceiling for brief plus topic notes in one context.
-pub const TOTAL_MAX_BYTES: usize = 2500;
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")

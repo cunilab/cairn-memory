@@ -102,17 +102,44 @@ pub fn web(url: &str, token: &str) -> Client {
     Client::new(Config::new(url, token).unwrap())
 }
 
+/// The real binary with a clean environment, see [`isolate`].
 pub fn command(config_home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    isolate(&mut command, config_home);
     command
+}
+
+/// No inherited `CAIRN_*` variable of the developer (their URL, token, config or outbox), and
+/// `HOME`, `XDG_CONFIG_HOME` and the other config roots inside `config_home`, which must be
+/// under the temporary directory. A test that would reach a path outside it fails here, before
+/// anything is spawned.
+pub fn isolate(command: &mut Command, config_home: &Path) {
+    let temporary = std::env::temp_dir().canonicalize().unwrap();
+    // The folder may not exist yet: resolve its nearest existing ancestor.
+    let existing = config_home
+        .ancestors()
+        .find(|dir| dir.exists())
+        .and_then(|dir| dir.canonicalize().ok());
+    let inside = existing.is_some_and(|home| home.starts_with(&temporary));
+    assert!(
+        inside,
+        "{} is not inside the temporary directory {}",
+        config_home.display(),
+        temporary.display()
+    );
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("CAIRN_") {
+            command.env_remove(name);
+        }
+    }
+    command
+        .env("HOME", config_home)
+        .env("USERPROFILE", config_home)
+        .env("APPDATA", config_home)
         .env("XDG_CONFIG_HOME", config_home)
-        .env_remove("CAIRN_URL")
-        .env_remove("CAIRN_DEVICE_TOKEN")
-        .env_remove("CAIRN_CONFIG")
-        .env_remove("CAIRN_OUTBOX")
-        .env_remove("CAIRN_CAPTURE_ASSISTANT")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .env("CAIRN_NO_UPDATE_CHECK", "1");
-    command
 }
 
 /// Runs `command` with `input` as its whole stdin.

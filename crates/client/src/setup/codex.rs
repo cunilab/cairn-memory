@@ -1,6 +1,6 @@
 //! Codex: hook commands in `hooks.json`; the MCP entry goes through `codex mcp add/remove`.
 
-use super::{Ctx, Plan, R, add_args, hook_config, json_config, native, owned, pretty};
+use super::{Ctx, Plan, R, add_args, hooks_text, native, owned, which};
 use serde_json::{Value, json};
 
 const EVENTS: [(&str, u32); 5] = [
@@ -16,8 +16,16 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         .dir("CODEX_HOME")
         .unwrap_or_else(|| ctx.home.join(".codex"));
     let path = folder.join("hooks.json");
-    let mut root = json_config(&path)?;
-    hook_config(&mut root, ctx, &EVENTS)?;
+    let text = hooks_text(&path, ctx, &EVENTS)?;
+    if ctx.remove && which("codex").is_none() {
+        // The CLI is gone: the hook file is still cleaned, its MCP entry is not ours to reach.
+        eprintln!("cairn: note: the codex CLI is not installed; its MCP entry was not removed");
+        return Ok(Plan {
+            files: vec![(path, text)],
+            native: None,
+            after: None,
+        });
+    }
     let listed = native("codex", &["list".into(), "--json".into()], &ctx.home)?;
     let entries = match serde_json::from_str::<Value>(&listed) {
         Ok(Value::Array(entries)) => entries,
@@ -40,7 +48,7 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         Some(add_args(vec!["add".into(), "cairn".into()], ctx))
     };
     Ok(Plan {
-        files: vec![(path, pretty(root))],
+        files: vec![(path, text)],
         native: command,
         after: None,
     })

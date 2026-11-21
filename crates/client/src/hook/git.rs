@@ -4,28 +4,61 @@
 use cairn_core::capture::WorkContext;
 use cairn_core::id::sha256_hex;
 use serde_json::Value;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 const RECENT_FILES_MAX: usize = 20;
 
-pub fn git(cwd: &Path, args: &[&str]) -> Option<String> {
+const GIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Set when one call timed out: the rest of this hook skips git instead of waiting again.
+static STUCK: AtomicBool = AtomicBool::new(false);
+
+fn git(cwd: &Path, args: &[&str]) -> Option<String> {
     git_raw(cwd, args).map(|text| text.trim().to_owned())
 }
 
+/// Read-only: `GIT_OPTIONAL_LOCKS=0` keeps `git status` from refreshing the index, which takes
+/// `.git/index.lock` and would fail another agent's `git add` in the same checkout. A call that
+/// does not finish in two seconds is killed.
 fn git_raw(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    if STUCK.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut child = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(cwd)
         .args(args)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    output
-        .status
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                STUCK.store(true, Ordering::Relaxed);
+                return None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?.ok()?;
+    status
         .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn top_level(cwd: &Path) -> Option<PathBuf> {
@@ -61,8 +94,8 @@ fn repository_name(origin: &str, top: &Path) -> String {
 /// Repository, branch, an opaque id of this checkout and the committed project id; empty
 /// outside a repository. A broken `.cairn/project.json` keeps the capture personal and says
 /// so on stderr.
-pub fn work_context(cwd: &Path) -> WorkContext {
-    let Some(top) = top_level(cwd) else {
+pub fn work_context(cwd: &Path, top: Option<&Path>) -> WorkContext {
+    let Some(top) = top else {
         return WorkContext::default();
     };
     let origin = git(cwd, &["config", "--get", "remote.origin.url"]).unwrap_or_default();
@@ -70,8 +103,8 @@ pub fn work_context(cwd: &Path) -> WorkContext {
         .filter(|branch| !branch.is_empty() && branch != "HEAD");
     let hash = sha256_hex(&[&top.to_string_lossy()]);
     WorkContext {
-        project_id: project_id(&top),
-        repository: Some(repository_name(&origin, &top)),
+        project_id: project_id(top),
+        repository: Some(repository_name(&origin, top)),
         branch,
         worktree: Some(format!("wt-{}", &hash[..16])),
         ..WorkContext::default()
@@ -170,18 +203,18 @@ fn resolve(path: &Path) -> PathBuf {
 }
 
 /// A structured tool path as a `/`-separated path inside the checkout, else `None`.
-pub fn repo_relative(value: &str, cwd: &Path) -> Option<String> {
+pub fn repo_relative(value: &str, cwd: &Path, top: Option<&Path>) -> Option<String> {
     if value.is_empty() || value.contains('\n') || value.len() > 512 {
         return None;
     }
-    let top = top_level(cwd)?;
+    let top = top?;
     let given = Path::new(value);
     let absolute = if given.is_absolute() {
         given.to_path_buf()
     } else {
         cwd.join(given)
     };
-    let relative = resolve(&absolute).strip_prefix(&top).ok()?.to_path_buf();
+    let relative = resolve(&absolute).strip_prefix(top).ok()?.to_path_buf();
     let text = relative
         .components()
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
@@ -191,14 +224,13 @@ pub fn repo_relative(value: &str, cwd: &Path) -> Option<String> {
 }
 
 /// `.cairnignore` in the folder or any ancestor up to the git top (every ancestor outside git).
-pub fn ignored(cwd: &Path) -> bool {
+pub fn ignored(cwd: &Path, top: Option<&Path>) -> bool {
     let folder = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let top = top_level(&folder);
     for parent in folder.ancestors() {
         if parent.join(".cairnignore").is_file() {
             return true;
         }
-        if top.as_deref() == Some(parent) {
+        if top == Some(parent) {
             break;
         }
     }
@@ -231,6 +263,42 @@ mod tests {
     }
 
     #[test]
+    fn reading_the_status_never_rewrites_the_index() {
+        // A plain `git status` refreshes stale stat data and takes `.git/index.lock` to save it,
+        // which would fail another agent's `git add` in the same checkout.
+        let dir = std::env::temp_dir().join(format!("cairn-git-locks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@example.test"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "same").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "one"]);
+        // Same content, newer mtime: a refresh would rewrite the index.
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("a.txt"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        let before = std::fs::read(dir.join(".git/index")).unwrap();
+        recent_files(&dir);
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_missing_file_resolves_inside_the_checkout_only() {
         let dir = std::env::temp_dir().join(format!("cairn-git-resolve-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -244,21 +312,17 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert_eq!(
-            repo_relative("src/new.rs", &dir).as_deref(),
-            Some("src/new.rs")
-        );
-        assert_eq!(
-            repo_relative("src/../a/./b.rs", &dir).as_deref(),
-            Some("a/b.rs")
-        );
+        let top = top_level(&dir);
+        let relative = |value: &str| repo_relative(value, &dir, top.as_deref());
+        assert_eq!(relative("src/new.rs").as_deref(), Some("src/new.rs"));
+        assert_eq!(relative("src/../a/./b.rs").as_deref(), Some("a/b.rs"));
         let absolute = dir.join("src/x.rs");
         assert_eq!(
-            repo_relative(&absolute.to_string_lossy(), &dir).as_deref(),
+            relative(&absolute.to_string_lossy()).as_deref(),
             Some("src/x.rs")
         );
-        assert_eq!(repo_relative("../outside.rs", &dir), None);
-        assert_eq!(repo_relative("/etc/passwd", &dir), None);
+        assert_eq!(relative("../outside.rs"), None);
+        assert_eq!(relative("/etc/passwd"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

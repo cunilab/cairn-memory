@@ -32,7 +32,7 @@ HTTP 401 names the config path, never the token.
 ## Payload
 
 Snake_case keys on stdin: `session_id` (required), `cwd`, `source`, `prompt`, `tool_name`,
-`tool_input` (`file_path`/`filePath`/`path`, `command`/`cmd`), `tool_response`, `tool_use_id`,
+`tool_input` (`file_path`/`filePath`/`path`, `command`/`cmd`, an `apply_patch` text), `tool_response`,
 `last_assistant_message`. Codex sends Claude's names; the OpenCode plugin maps its own events to
 them. Context (repository, branch, worktree, project id from `.cairn/project.json`, git state) is
 derived from `cwd`, never read from the payload.
@@ -60,7 +60,7 @@ else `!is_error && !interrupted`, else unknown. Stdout is
 
 - `POST /cairn-memory/observe` (device token only): `{event_id, session_id, kind, ok?, content,
   context}`. `kind` is `prompt | edit | command | assistant`; unknown keys are a 400. `event_id`
-  is `hk_` plus 24 hex of sha256(session, kind, content, tool_use_id). Reply `{accepted,
+  is `hk_` plus 24 hex of sha256(session, kind, content). Reply `{accepted,
   duplicate, event_id, project_attachment:{status}}`. The same content in a session is a
   duplicate; the same `event_id` with other content is a 409.
 - `POST /session/brief` `{session_id, context, recent_files}` returns `{brief, max_bytes}`.
@@ -85,8 +85,9 @@ fingerprint of the device token. A capture is queued on a network error, timeout
 events (the oldest goes first) and 10 attempts each. After any successful POST up to 20 queued
 events replay, oldest first, within 2 s; 2xx and 409 remove an event, a 401 stops the replay. A
 file bound to another origin or token is never read or appended to: the hook uses
-`outbox.<device>.json` beside it. A busy lock never blocks the host: the capture is sent
-directly and nothing replays. Requests follow no redirects, use https (http only on loopback)
+`outbox.<device>.json` beside it. The lock is held only to read or write the file, never during a request; a lock still busy after
+1 s means the capture is reported and not retained. After a request got no answer the server is
+not asked for 30 s (`server-down.json`): captures go straight to the outbox. Requests follow no redirects, use https (http only on loopback)
 and send the token only to the configured origin.
 
 ## State
@@ -112,7 +113,9 @@ native command or writes anything. No file it writes holds the device token.
 | Codex | `$CODEX_HOME` or `~/.codex` `hooks.json`; trust it with `/hooks` | `codex mcp add/remove` | the same without PreCompact |
 | OpenCode V2 | plugin `$XDG_CONFIG_HOME/opencode/plugins/cairn/index.js`, which spawns `cairn hook` | `opencode mcp add --global`; marked block in `AGENTS.md` | prompt, context, compaction, `execute.after`, idle |
 
-Codex and OpenCode setup need their native CLI on `PATH` (20 s timeout per command). Removal of the
+Codex and OpenCode setup need their native CLI on `PATH` (20 s timeout per command); removal does
+not (hook files are still cleaned). Claude, Codex and OpenCode files are edited by span: other
+bytes, key order and comments stay. Removal of the
 OpenCode entry edits `opencode.json[c]` by token span, keeping comments and other bytes.
 `cairn setup` also deletes the retired `hook/cairn_*.py` files it recorded (an edited copy stays
 with a note), the old `hook-state.sqlite3`, and leaves a version 2 Python outbox alone.

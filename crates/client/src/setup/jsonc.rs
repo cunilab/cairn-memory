@@ -163,6 +163,156 @@ pub fn remove_cairn(text: &str, root: &Node, allow_trailing: bool) -> Result<Str
     Ok(cut(text.to_owned(), cuts))
 }
 
+/// A member by name, or an array item by index (written as digits).
+fn child<'a>(node: &'a Node, segment: &str) -> Option<&'a Node> {
+    if node.value.is_array() {
+        node.items.get(segment.parse::<usize>().ok()?)
+    } else {
+        node.member(segment)
+    }
+}
+
+fn find<'a>(root: &'a Node, path: &[&str]) -> Option<&'a Node> {
+    path.iter()
+        .try_fold(root, |node, segment| child(node, segment))
+}
+
+fn child_count(node: &Node) -> usize {
+    node.members.len() + node.items.len()
+}
+
+/// The whitespace that starts the line holding `at`.
+fn line_indent(text: &str, at: usize) -> &str {
+    let start = text[..at].rfind('\n').map_or(0, |newline| newline + 1);
+    let line = &text[start..at];
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+}
+
+fn render(value: &Value, indent: &str) -> String {
+    serde_json::to_string_pretty(value)
+        .expect("a JSON value serializes")
+        .replace('\n', &format!("\n{indent}"))
+}
+
+/// Adds `value` (under `key` for an object) after the last child, on its own line when the last
+/// child is on one. An empty `{}` or `[]` is opened onto lines.
+fn insert(text: &str, container: &Node, key: Option<&str>, value: &Value) -> String {
+    let base = line_indent(text, container.start);
+    let entry = |indent: &str| {
+        let value = render(value, indent);
+        match key {
+            Some(key) => format!("{}: {value}", Value::from(key)),
+            None => value,
+        }
+    };
+    let mut out = text.to_owned();
+    let last = container
+        .members
+        .last()
+        .map(|member| &member.1)
+        .or(container.items.last());
+    let Some(last) = last else {
+        let inner = format!("{base}  ");
+        let (open, close) = if container.value.is_array() {
+            ('[', ']')
+        } else {
+            ('{', '}')
+        };
+        let body = format!("{open}\n{inner}{}\n{base}{close}", entry(&inner));
+        out.replace_range(container.start..container.end, &body);
+        return out;
+    };
+    let own_line = text[..last.key_start]
+        .trim_end_matches([' ', '\t'])
+        .ends_with('\n');
+    let indent = if own_line {
+        line_indent(text, last.key_start)
+    } else {
+        ""
+    };
+    let separator = if own_line {
+        format!("\n{indent}")
+    } else {
+        " ".to_owned()
+    };
+    match last.comma {
+        Some(comma) => out.insert_str(comma.1, &format!("{separator}{},", entry(indent))),
+        None => out.insert_str(last.end, &format!(",{separator}{}", entry(indent))),
+    }
+    out
+}
+
+/// Sets the value at `path` (member names, array indexes as digits): replaces it in place, or
+/// adds it as a new last member, creating the missing objects on the way. Every other byte stays.
+pub fn put(text: &str, path: &[&str], value: &Value) -> Result<String, String> {
+    let root = read(text)?;
+    if let Some(node) = find(&root, path) {
+        if node.value == *value {
+            return Ok(text.to_owned());
+        }
+        let mut out = text.to_owned();
+        out.replace_range(
+            node.start..node.end,
+            &render(value, line_indent(text, node.start)),
+        );
+        return Ok(out);
+    }
+    let (mut node, mut depth) = (&root, 0);
+    while let Some(next) = child(node, path[depth]) {
+        if !next.value.is_object() {
+            return Err(format!("{} must be an object", path[depth]));
+        }
+        (node, depth) = (next, depth + 1);
+    }
+    let wrapped = path[depth + 1..].iter().rev().fold(
+        value.clone(),
+        |inner, key| serde_json::json!({ *key: inner }),
+    );
+    Ok(insert(text, node, Some(path[depth]), &wrapped))
+}
+
+/// Appends `value` to the array at `path`, creating it when it is missing.
+pub fn push(text: &str, path: &[&str], value: &Value) -> Result<String, String> {
+    let root = read(text)?;
+    match find(&root, path) {
+        Some(array) if array.value.is_array() => Ok(insert(text, array, None, value)),
+        Some(_) => Err(format!("{} must be an array", path.last().unwrap_or(&""))),
+        None => put(text, path, &Value::Array(vec![value.clone()])),
+    }
+}
+
+/// Removes the member or item at `path` with its separator and line; a missing path changes
+/// nothing. A container this would leave empty goes too (never the root), so removing what was
+/// added restores the file.
+pub fn delete(text: &str, path: &[&str]) -> Result<String, String> {
+    let root = read(text)?;
+    let mut chain = vec![&root];
+    for segment in path {
+        match child(chain[chain.len() - 1], segment) {
+            Some(next) => chain.push(next),
+            None => return Ok(text.to_owned()),
+        }
+    }
+    let mut level = path.len();
+    while level > 1 && child_count(chain[level - 1]) == 1 {
+        level -= 1;
+    }
+    let node = chain[level];
+    let before = text[..node.key_start].trim_end_matches([' ', '\t']);
+    let line_start = before
+        .strip_suffix("\r\n")
+        .or_else(|| before.strip_suffix('\n'))
+        .map_or(node.key_start, str::len);
+    let (start, end) = match (node.comma, node.previous_comma) {
+        (Some(comma), _) => (line_start, comma.1),
+        (None, Some(previous)) => (previous.0, node.end),
+        (None, None) => (line_start, node.end),
+    };
+    let mut out = text.to_owned();
+    out.replace_range(start..end, "");
+    Ok(out)
+}
+
 /// The retired single-file plugin entry only; another package using the same option stays.
 fn retired_plugin(entry: &Value) -> bool {
     let package = entry.get("package").and_then(Value::as_str);
@@ -258,6 +408,32 @@ mod tests {
                 assert_eq!(result, text);
             }
         }
+    }
+
+    #[test]
+    fn put_push_and_delete_edit_by_span_and_round_trip() {
+        let text = "{\n\t\"b\": 1e3,\n\t\"a\": {\"x\": [1, 2]}\n}\n";
+        let added = put(text, &["m", "cairn"], &json!({"k": 1})).unwrap();
+        assert!(added.starts_with("{\n\t\"b\": 1e3,\n\t\"a\": {\"x\": [1, 2]},\n\t\"m\": {"));
+        assert_eq!(read(&added).unwrap().value["m"]["cairn"]["k"], 1);
+        let pushed = push(&added, &["a", "x"], &json!(3)).unwrap();
+        assert!(pushed.contains("[1, 2, 3]"), "{pushed}");
+        let replaced = put(&pushed, &["a", "x", "0"], &json!("one")).unwrap();
+        assert!(replaced.contains("[\"one\", 2, 3]"), "{replaced}");
+        // Removing what was added gives back the original bytes.
+        assert_eq!(delete(&added, &["m", "cairn"]).unwrap(), text);
+        let popped = delete(&pushed, &["a", "x", "2"]).unwrap();
+        assert_eq!(delete(&popped, &["m"]).unwrap(), text);
+        // Nothing to do: the very same text.
+        assert_eq!(delete(text, &["m", "cairn"]).unwrap(), text);
+        assert_eq!(put(text, &["a", "x"], &json!([1, 2])).unwrap(), text);
+        // An empty object opens onto lines; a scalar in the way is refused.
+        assert_eq!(
+            put("{}\n", &["h"], &json!({"e": []})).unwrap(),
+            "{\n  \"h\": {\n    \"e\": []\n  }\n}\n"
+        );
+        assert!(put(text, &["b", "c"], &json!(1)).is_err());
+        assert!(push(text, &["b"], &json!(1)).is_err());
     }
 
     #[test]

@@ -20,13 +20,33 @@ function sessionDirectory(session) {
   return typeof session.directory === "string" ? session.directory : ""
 }
 
+// Paths stay short single lines. Command and edit text are kept (the hook redacts, then clips
+// them to 1 KiB): without the text every edit of one file looks like the same capture.
 function structuredInput(input) {
   const out = {}
   if (!input || typeof input !== "object") return out
-  for (const key of ["file_path", "filePath", "path", "file", "command", "cmd"]) {
+  for (const key of ["file_path", "filePath", "path", "file"]) {
     const value = input[key]
     if (typeof value === "string" && value && value.length <= 512 && !value.includes("\n")) out[key] = value
   }
+  for (const key of ["command", "cmd", "new_string", "newString", "content", "patch", "patchText", "input"]) {
+    const value = input[key]
+    if (typeof value === "string" && value) out[key] = value.slice(0, 2048)
+  }
+  return out
+}
+
+// The result, when the host exposes one: an exit code and an error flag let the hook tell a
+// failed command from a good one.
+function structuredResponse(event) {
+  const out = {}
+  if (!event || typeof event !== "object") return out
+  const output = event.output || event.result || event.tool_response
+  const meta = (output && typeof output === "object" && output.metadata) || event.metadata || {}
+  const code = [meta.exit, meta.exitCode, meta.exit_code, event.exitCode].find((value) => Number.isInteger(value))
+  if (code !== undefined) out.exit_code = code
+  const error = [event.isError, output && output.isError, meta.isError].find((value) => typeof value === "boolean")
+  if (error !== undefined) out.is_error = error
   return out
 }
 
@@ -124,7 +144,7 @@ export default {
         if (!directory || ignored(directory)) return
         const name = event && (event.tool || event.name || "")
         const input = structuredInput(event && (event.input || event.args || event.tool_input))
-        const text = await runHook({ hook_event_name: "PostToolUse", session_id: sessionID, cwd: directory, tool_name: name, tool_input: input, tool_use_id: event && (event.callID || event.id) })
+        const text = await runHook({ hook_event_name: "PostToolUse", session_id: sessionID, cwd: directory, tool_name: name, tool_input: input, tool_response: structuredResponse(event) })
         queue(sessionID, text)
       }) } catch (error) {}
     }

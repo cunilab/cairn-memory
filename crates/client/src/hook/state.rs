@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 const TOPICS_MAX: usize = 64;
 const HASHES_MAX: usize = 512;
 const STALE: Duration = Duration::from_secs(7 * 86_400);
+const LOCK_STALE: Duration = Duration::from_secs(86_400);
 const LOCK_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Default, Serialize, Deserialize)]
@@ -25,8 +26,7 @@ pub struct SessionState {
     /// Paths already looked up for topic notes.
     pub topics: Vec<String>,
     pub capture_hashes: Vec<String>,
-    /// Brief plus topic notes injected into the current context.
-    pub injected_bytes: u32,
+    /// Topic notes injected so far; the cap is `inject::TOPICS_PER_SESSION`.
     pub topics_injected: u8,
 }
 
@@ -62,7 +62,8 @@ pub fn key(origin: &str, token: &str, agent: &str, session_id: &str) -> String {
 /// The state of one session, locked until dropped.
 pub struct Locked {
     path: PathBuf,
-    lock_path: PathBuf,
+    /// The state as read, to skip writing a visit that changed nothing.
+    original: Vec<u8>,
     _lock: File,
     pub state: SessionState,
 }
@@ -91,45 +92,63 @@ impl Locked {
             }
         }
         let path = dir.join(format!("{key}.json"));
-        let state = fs::read_to_string(&path)
+        let state: SessionState = fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        let original = serde_json::to_vec(&state).unwrap_or_default();
         Ok(Self {
             path,
-            lock_path,
+            original,
             _lock: lock,
             state,
         })
     }
 
+    /// Writes the state unless it is what was read.
     pub fn save(&self) -> Result<(), String> {
         let body = serde_json::to_vec(&self.state).map_err(|error| error.to_string())?;
+        if body == self.original {
+            return Ok(());
+        }
         write_private(&self.path, &body)
             .map_err(|error| format!("cannot write {}: {error}", self.path.display()))
     }
 
-    /// SessionEnd: the files go; the lock is released when `self` drops.
+    /// SessionEnd: the state goes. The lock file stays (another process may be waiting on it);
+    /// `sweep` removes it later.
     pub fn delete(self) {
         let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.lock_path);
     }
 }
 
-/// Removes state files untouched for seven days (sessions that never ended).
+fn age(path: &Path) -> Option<Duration> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    SystemTime::now().duration_since(modified).ok()
+}
+
+/// Removes the files of sessions that never ended: a state file untouched for seven days, and
+/// with it its lock; a lock whose state is gone only once it is a day old (a session that just
+/// started has a lock and no state yet, and an active old session keeps its lock because its
+/// state file is fresh).
 pub fn sweep(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age > STALE);
-        if old {
-            let _ = fs::remove_file(entry.path());
+        let path = entry.path();
+        let is_lock = path.extension().is_some_and(|ext| ext == "lock");
+        let state = path.with_extension("json");
+        let remove = if is_lock {
+            match age(&state) {
+                Some(state_age) => state_age > STALE,
+                None => age(&path).is_some_and(|lock_age| lock_age > LOCK_STALE),
+            }
+        } else {
+            age(&path).is_some_and(|state_age| state_age > STALE)
+        };
+        if remove {
+            let _ = fs::remove_file(&path);
         }
     }
 }
@@ -182,7 +201,57 @@ mod tests {
         let again = Locked::open(&dir, "k").unwrap();
         assert_eq!(again.state.generation, 7);
         again.delete();
-        assert!(!dir.join("k.json").exists() && !dir.join("k.lock").exists());
+        assert!(!dir.join("k.json").exists());
+        assert!(
+            dir.join("k.lock").exists(),
+            "the lock file stays: another process may wait on it"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unchanged_state_is_not_rewritten() {
+        let dir = dir("unchanged");
+        Locked::open(&dir, "k").unwrap().save().unwrap();
+        assert!(
+            !dir.join("k.json").exists(),
+            "a read-only visit writes nothing"
+        );
+        let mut locked = Locked::open(&dir, "k").unwrap();
+        locked.state.generation = 1;
+        locked.save().unwrap();
+        assert!(dir.join("k.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_keeps_what_an_active_session_still_uses() {
+        let dir = dir("sweep");
+        fs::create_dir_all(&dir).unwrap();
+        let age = |name: &str, days: u64| {
+            let file = File::options()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join(name))
+                .unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(days * 86_400))
+                .unwrap();
+        };
+        // An active session older than seven days is told apart by its fresh state file.
+        age("live.json", 0);
+        age("live.lock", 30);
+        // A finished session leaves an old lock and no state; a forgotten one leaves both old.
+        age("done.lock", 2);
+        age("lost.json", 30);
+        age("lost.lock", 30);
+        // A lock whose state is gone but which was just created is a session being started.
+        age("new.lock", 0);
+        sweep(&dir);
+        let left = |name: &str| dir.join(name).exists();
+        assert!(left("live.json") && left("live.lock"));
+        assert!(!left("done.lock") && !left("lost.json") && !left("lost.lock"));
+        assert!(left("new.lock"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

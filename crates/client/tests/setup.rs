@@ -44,17 +44,30 @@ impl Home {
     }
 
     fn setup(&self, agent: &str, remove: bool) -> Output {
+        let mut cmd = self.command(agent, remove);
+        cmd.env("CLAUDE_CONFIG_DIR", self.dir.join(".claude"));
+        with_stdin(&mut cmd, SECRET)
+    }
+
+    /// Like `setup`, but without `CLAUDE_CONFIG_DIR`: Claude's files are the default
+    /// `~/.claude/settings.json` and `~/.claude.json`.
+    fn setup_default_claude(&self, remove: bool) -> Output {
+        let mut cmd = self.command("claude", remove);
+        cmd.env_remove("CLAUDE_CONFIG_DIR");
+        with_stdin(&mut cmd, SECRET)
+    }
+
+    fn command(&self, agent: &str, remove: bool) -> std::process::Command {
         let mut cmd = command(&self.dir.join(".config"));
         cmd.env("HOME", &self.dir)
             .env("USERPROFILE", &self.dir)
             .env("PATH", &self.path)
             .env("CODEX_HOME", self.dir.join(".codex"))
-            .env("CLAUDE_CONFIG_DIR", self.dir.join(".claude"))
             .args(["setup", "http://127.0.0.1:9", "--agent", agent]);
         if remove {
             cmd.arg("--remove");
         }
-        with_stdin(&mut cmd, SECRET)
+        cmd
     }
 
     fn ok(&self, agent: &str, remove: bool) {
@@ -452,4 +465,113 @@ fn opencode_setup_writes_only_marked_entries_idempotently() {
             path.display()
         );
     }
+}
+
+fn read(home: &Home, relative: &str) -> String {
+    fs::read_to_string(home.dir.join(relative)).unwrap()
+}
+
+#[test]
+fn claude_setup_edits_only_its_own_bytes_in_the_default_files() {
+    // Tab indentation, unsorted keys and numbers serde would rewrite (1e3, 0.10): everything
+    // outside our entries must come back byte for byte, also after remove.
+    let home = Home::new("claude-bytes", false);
+    let settings = "{\n\t\"zeta\": 1e3,\n\t\"alpha\": {\"b\": 2, \"a\": [1, 2]},\n\t\"hooks\": {\n\t\t\"PostToolUse\": [\n\t\t\t{\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"my-helper\"}]}\n\t\t]\n\t}\n}\n";
+    let state = "{\n  \"numStartups\": 0.10,\n  \"projects\": {\"/z\": {}, \"/a\": {}},\n  \"mcpServers\": {\n    \"other\": {\"command\": \"x\"}\n  }\n}\n";
+    home.write(".claude/settings.json", settings);
+    home.write(".claude.json", state);
+    let output = home.setup_default_claude(false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (new_settings, new_state) = (
+        read(&home, ".claude/settings.json"),
+        read(&home, ".claude.json"),
+    );
+    let at = |text: &str, needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {text}"))
+    };
+    assert!(at(&new_settings, "\"zeta\": 1e3") < at(&new_settings, "\"alpha\""));
+    assert!(at(&new_settings, "\"alpha\"") < at(&new_settings, "\"hooks\""));
+    assert!(new_settings.contains(
+        "{\"matcher\": \"Read\", \"hooks\": [{\"type\": \"command\", \"command\": \"my-helper\"}]}"
+    ));
+    assert!(new_state.contains("\"numStartups\": 0.10,"));
+    assert!(at(&new_state, "\"/z\"") < at(&new_state, "\"/a\""));
+    assert!(new_state.contains("\"other\": {\"command\": \"x\"}"));
+    let parsed: Value = serde_json::from_str(&new_state).unwrap();
+    assert_eq!(parsed["mcpServers"]["cairn"]["command"], EXE);
+    assert!(home.dir.join(".claude.json").exists());
+
+    // The same setup again changes nothing.
+    let before = (new_settings.clone(), new_state.clone());
+    assert!(home.setup_default_claude(false).status.success());
+    assert_eq!(
+        before,
+        (
+            read(&home, ".claude/settings.json"),
+            read(&home, ".claude.json")
+        )
+    );
+
+    assert!(home.setup_default_claude(true).status.success());
+    assert_eq!(read(&home, ".claude/settings.json"), settings);
+    assert_eq!(read(&home, ".claude.json"), state);
+}
+
+#[test]
+fn claude_remove_leaves_nothing_behind_and_creates_nothing() {
+    // On a home that never had Cairn: no file, no directory, no empty `hooks`.
+    let home = Home::new("claude-empty-remove", false);
+    assert!(home.setup_default_claude(true).status.success());
+    assert!(!home.dir.join(".claude").exists() && !home.dir.join(".claude.json").exists());
+
+    // Install into files with nothing of ours, then remove: the objects Cairn created go too.
+    home.write(".claude/settings.json", "{\"theme\": \"dark\"}\n");
+    home.write(".claude.json", "{\"userID\": \"u1\"}\n");
+    assert!(home.setup_default_claude(false).status.success());
+    assert!(read(&home, ".claude/settings.json").contains("\"hooks\""));
+    assert!(home.setup_default_claude(true).status.success());
+    for (file, keep) in [
+        (".claude/settings.json", "theme"),
+        (".claude.json", "userID"),
+    ] {
+        let value: Value = serde_json::from_str(&read(&home, file)).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 1, "{file}: {value}");
+        assert!(value.get(keep).is_some());
+    }
+}
+
+#[test]
+fn remove_still_cleans_the_files_after_the_host_cli_is_gone() {
+    let home = Home::new("cli-gone", true);
+    for agent in ["codex", "opencode"] {
+        home.ok(agent, false);
+    }
+    assert!(home.dir.join(".codex/hooks.json").exists());
+    assert!(
+        home.dir
+            .join(".config/opencode/plugins/cairn/index.js")
+            .exists()
+    );
+    // `codex` and `opencode` are uninstalled.
+    fs::remove_dir_all(home.dir.join("bin")).unwrap();
+    fs::create_dir(home.dir.join("bin")).unwrap();
+    for agent in ["codex", "opencode"] {
+        home.ok(agent, true);
+    }
+    let hooks = read(&home, ".codex/hooks.json");
+    assert!(!hooks.contains("--cairn-managed"), "{hooks}");
+    assert!(
+        !home
+            .dir
+            .join(".config/opencode/plugins/cairn/index.js")
+            .exists()
+    );
+    let agents =
+        fs::read_to_string(home.dir.join(".config/opencode/AGENTS.md")).unwrap_or_default();
+    assert!(!agents.contains("cairn:begin"));
 }

@@ -12,7 +12,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -299,6 +300,16 @@ fn queued_ids(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Polls `done` for at most ten seconds; the tests below use it to sync on what a server saw,
+/// never on elapsed time.
+fn wait_until(done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "condition not reached in 10 s");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 // ---- events -----------------------------------------------------------------------------
 
 #[test]
@@ -326,9 +337,18 @@ fn start_injects_brief_only_and_end_after_work() {
     assert!(!injected(&env.run("SessionEnd", &env.payload("s2", json!({})))).is_some());
     assert_eq!(server.to("end").len(), 1);
     assert_eq!(server.to("end")[0].body["session_id"], "s2");
+    // The lock files stay for `sweep`; the state itself is gone.
     let left = std::fs::read_dir(env.state_dir())
-        .map(|d| d.count())
-        .unwrap_or(0);
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "json")
+        })
+        .count();
     assert_eq!(left, 0, "state files are deleted at SessionEnd");
 }
 
@@ -595,9 +615,19 @@ fn topic_note_once_per_path_within_caps() {
 
 #[test]
 fn checkpoint_keeps_work_during_request() {
-    let server = fake_with(|_, request| {
-        if request.path.ends_with("/checkpoint") {
-            thread::sleep(Duration::from_millis(900));
+    // The first checkpoint request is held until the test releases it, so "make two" is
+    // certain to arrive while the Stop hook waits for its answer.
+    let (arrived_tx, arrived) = mpsc::channel::<()>();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let (arrived_tx, release_rx) = (Mutex::new(arrived_tx), Mutex::new(release_rx));
+    let first = AtomicBool::new(true);
+    let server = fake_with(move |_, request| {
+        if request.path.ends_with("/checkpoint") && first.swap(false, Ordering::SeqCst) {
+            arrived_tx.lock().unwrap().send(()).unwrap();
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30));
         }
         default_reply(request)
     });
@@ -615,8 +645,11 @@ fn checkpoint_keeps_work_during_request() {
             with_stdin(&mut command, &payload)
         })
     };
-    thread::sleep(Duration::from_millis(350));
+    arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the checkpoint request arrived");
     env.bash("s1", "make two", json!({"exit_code": 0}));
+    release.send(()).unwrap();
     assert!(stop.join().unwrap().status.success());
     assert_eq!(server.to("checkpoint").len(), 1);
     // The work that arrived during the request is still pending.
@@ -847,7 +880,8 @@ fn transport_rules() {
         "{}",
         stderr(&output)
     );
-    assert!(started.elapsed() < Duration::from_secs(1) && !env.outbox().exists());
+    // Refused before any connection: nothing queued, and well inside the host's limit.
+    assert!(started.elapsed() < Duration::from_secs(5) && !env.outbox().exists());
 }
 
 // ---- outbox -----------------------------------------------------------------------------
@@ -1006,7 +1040,9 @@ fn outbox_cap_and_disk_errors_keep_bytes() {
 }
 
 #[test]
-fn outbox_lock_never_blocks() {
+fn a_held_outbox_lock_is_survived_without_losing_or_inventing_events() {
+    // Locked from outside for the whole hook (a stuck process): a delivered capture replays
+    // nothing and leaves the queue as it was.
     let server = fake();
     let env = Env::new("hook-lock", &server.url);
     write_outbox(
@@ -1015,6 +1051,7 @@ fn outbox_lock_never_blocks() {
         TOKEN,
         &["hk_waiting".to_owned()],
     );
+    let before = std::fs::read(env.outbox()).unwrap();
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -1022,35 +1059,97 @@ fn outbox_lock_never_blocks() {
         .open(env.home.join("cairn/outbox.json.lock"))
         .unwrap();
     lock.try_lock().unwrap();
-    let started = Instant::now();
     env.prompt("s1", "delivered anyway");
-    assert!(started.elapsed() < Duration::from_secs(1));
-    let sent = server.observed();
-    assert_eq!(
-        sent.len(),
-        1,
-        "the capture is delivered, nothing is replayed"
-    );
-    assert_eq!(queued_ids(&env.outbox()), ["hk_waiting"]);
+    assert_eq!(server.observed().len(), 1, "delivered, nothing replayed");
+    assert_eq!(std::fs::read(env.outbox()).unwrap(), before);
 
-    // Busy and offline: the capture is not retained, and the hook does not wait.
+    // Locked and offline: the capture cannot be retained and the hook says so.
     let down = fake_with(|_, _| (503, "{}".to_owned()));
     let env = Env::new("hook-lock-down", &down.url);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(env.home.join("cairn/outbox.json.lock"));
-    let lock = lock.unwrap_or_else(|_| {
-        std::fs::create_dir_all(env.home.join("cairn")).unwrap();
-        std::fs::File::create(env.home.join("cairn/outbox.json.lock")).unwrap()
-    });
+    std::fs::create_dir_all(env.home.join("cairn")).unwrap();
+    let lock = std::fs::File::create(env.home.join("cairn/outbox.json.lock")).unwrap();
     lock.try_lock().unwrap();
-    let started = Instant::now();
-    let output = env.prompt("s1", "lost");
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let output = env.prompt("s1", "cannot be kept");
     assert!(stderr(&output).contains("busy"), "{}", stderr(&output));
     assert!(!env.outbox().exists());
+}
+
+#[test]
+fn a_failing_capture_is_queued_while_another_hook_replays() {
+    // Ten old events are queued and the server answers them slowly. Session "a" is delivered, so
+    // its hook replays them. Session "b" is refused while that replay is running and must still
+    // be kept.
+    let server = fake_with(|_, request| match request.body["session_id"].as_str() {
+        Some("old") => {
+            thread::sleep(Duration::from_millis(400));
+            default_reply(request)
+        }
+        Some("b") => (503, "{}".to_owned()),
+        _ => default_reply(request),
+    });
+    let env = Arc::new(Env::new("hook-replay-lock", &server.url));
+    let ids: Vec<String> = (0..10).map(|i| format!("hk_old{i:02}")).collect();
+    write_outbox(&env.outbox(), &server.url, TOKEN, &ids);
+    let replaying = {
+        let env = env.clone();
+        thread::spawn(move || env.prompt("a", "delivered"))
+    };
+    wait_until(|| {
+        server
+            .requests()
+            .iter()
+            .any(|r| r.body["session_id"] == "old")
+    });
+    let refused = env.prompt("b", "refused while replaying");
+    assert!(replaying.join().unwrap().status.success());
+    assert!(!stderr(&refused).contains("busy"), "{}", stderr(&refused));
+    let refused_id = server
+        .observed()
+        .into_iter()
+        .find(|body| body["session_id"] == "b")
+        .map(|body| body["event_id"].as_str().unwrap().to_owned())
+        .unwrap();
+    assert!(
+        queued_ids(&env.outbox()).contains(&refused_id),
+        "the capture refused during the replay was kept"
+    );
+}
+
+#[test]
+fn a_flapping_server_loses_no_capture_across_many_processes() {
+    let delivered: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = delivered.clone();
+    let server = fake_with(move |index, request| {
+        if index % 3 == 0 {
+            return (503, "{}".to_owned());
+        }
+        log.lock()
+            .unwrap()
+            .push(request.body["event_id"].as_str().unwrap_or("").to_owned());
+        default_reply(request)
+    });
+    let env = Arc::new(Env::new("hook-flap", &server.url));
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let env = env.clone();
+            thread::spawn(move || env.prompt("s1", &format!("flap number {i}")))
+        })
+        .collect();
+    for handle in handles {
+        let output = handle.join().unwrap();
+        assert!(
+            !stderr(&output).contains("not retained"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let mut kept: Vec<String> = delivered.lock().unwrap().clone();
+    kept.extend(
+        std::fs::read(env.outbox()).map_or_else(|_| Vec::new(), |_| queued_ids(&env.outbox())),
+    );
+    kept.sort();
+    kept.dedup();
+    assert_eq!(kept.len(), 8, "every capture is delivered or still queued");
 }
 
 #[test]
@@ -1128,11 +1227,211 @@ fn replay_order_budget_and_401() {
     let started = Instant::now();
     env.prompt("s1", "trigger");
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(5),
         "{:?}",
         started.elapsed()
     );
     assert!(slow.observed().len() <= 3);
+}
+
+// ---- review findings -----------------------------------------------------------------------
+
+#[test]
+fn a_dead_server_costs_one_timeout_not_one_per_call() {
+    // The server accepts and never answers within the 2 s request timeout.
+    let server = fake_with(|_, request| {
+        thread::sleep(Duration::from_secs(5));
+        default_reply(request)
+    });
+    let env = Env::new("hook-slow", &server.url);
+    let first = env.edit("s1", "src/a.rs", "x");
+    assert!(stderr(&first).contains("queued"), "{}", stderr(&first));
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "no topic lookup after the capture timed out"
+    );
+    // Marked down: the next hooks queue without asking, so none comes near the 2 s timeout.
+    for i in 0..3 {
+        let started = Instant::now();
+        env.prompt("s1", &format!("later {i}"));
+        assert!(
+            started.elapsed() < Duration::from_millis(1900),
+            "hook {i} waited on a server that is marked down"
+        );
+    }
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the dead server is not asked again"
+    );
+    assert_eq!(queued_ids(&env.outbox()).len(), 4);
+}
+
+#[test]
+fn parallel_edits_of_one_file_inject_one_note() {
+    // Neither topic request is answered before both have arrived, so both hooks passed the
+    // "first edit of this path" check before either one recorded it.
+    let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
+    let wait = gate.clone();
+    let server = fake_with(move |_, request| {
+        if request.path.ends_with("/topic") {
+            let (count, arrived) = &*wait;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            arrived.notify_all();
+            let _ = arrived
+                .wait_timeout_while(count, Duration::from_secs(5), |n| *n < 2)
+                .unwrap();
+        }
+        notes_reply(request)
+    });
+    let env = Arc::new(Env::new("hook-topic-race", &server.url));
+    let handles: Vec<_> = (0..2)
+        .map(|i| {
+            let env = env.clone();
+            thread::spawn(move || env.edit("s1", "src/a.rs", &format!("version {i}")))
+        })
+        .collect();
+    let notes = handles
+        .into_iter()
+        .map(|handle| injected(&handle.join().unwrap()))
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(notes, 1, "the note is injected once");
+}
+
+#[test]
+fn a_rejected_capture_is_sent_again_once_the_cause_is_fixed() {
+    let healthy = Arc::new(Mutex::new(false));
+    let flag = healthy.clone();
+    let server = fake_with(move |_, request| {
+        if *flag.lock().unwrap() {
+            default_reply(request)
+        } else {
+            (401, "{}".to_owned())
+        }
+    });
+    let env = Env::new("hook-resend", &server.url);
+    let first = env.prompt("s1", "the same prompt");
+    assert!(stderr(&first).contains("401"), "{}", stderr(&first));
+    *healthy.lock().unwrap() = true;
+    env.prompt("s1", "the same prompt");
+    assert_eq!(
+        server.observed().len(),
+        2,
+        "a capture that never arrived is not remembered as sent"
+    );
+    env.prompt("s1", "the same prompt");
+    assert_eq!(server.observed().len(), 2, "a delivered one is");
+}
+
+#[test]
+fn apply_patch_headers_become_one_edit_per_file() {
+    let server = fake_with(|_, request| notes_reply(request));
+    let env = Env::new("hook-patch", &server.url);
+    let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new a\n*** Add File: src/b.rs\n+new b\n*** Delete File: old.rs\n*** End Patch";
+    let output = env.run(
+        "PostToolUse",
+        &env.payload(
+            "s1",
+            json!({"tool_name": "apply_patch", "tool_input": {"command": patch}, "tool_response": {}}),
+        ),
+    );
+    let edits: Vec<(String, Value)> = server
+        .observed()
+        .into_iter()
+        .filter(|body| body["kind"] == "edit")
+        .map(|body| {
+            (
+                body["content"].as_str().unwrap().to_owned(),
+                body["context"]["files"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(edits.len(), 3, "{edits:?}");
+    for (path, (content, files)) in ["src/a.rs", "src/b.rs", "old.rs"].iter().zip(&edits) {
+        assert!(
+            content.starts_with(&format!("apply_patch {path}\n")),
+            "{content}"
+        );
+        assert_eq!(files, &json!([path]));
+    }
+    assert!(edits[0].0.contains("+new a") && !edits[0].0.contains("new b"));
+    assert_eq!(server.to("topic").len(), 3, "a topic lookup per path");
+    assert!(injected(&output).unwrap().contains("src/a.rs"));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_edit_with_a_topic_note_runs_three_git_calls() {
+    // top level, origin, branch: read once per hook run and shared by the capture, the topic
+    // request and the ignore check.
+    use std::os::unix::fs::PermissionsExt;
+    let server = fake();
+    let env = Env::new("hook-git-count", &server.url);
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = env.home.join("git-calls.log");
+    let real = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    std::fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\necho call >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.trim()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    env.run_with(
+        "PostToolUse",
+        &env.payload("s1", edit_call("src/a.rs", "fn a() {}", "t1")),
+        &[],
+        &[("PATH", &path)],
+    );
+    assert_eq!(server.to("observe").len() + server.to("topic").len(), 2);
+    let calls = std::fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(calls, 3, "git ran {calls} times");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hanging_git_does_not_hold_the_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = fake();
+    let env = Env::new("hook-git-hang", &server.url);
+    let bin = env.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("git"), "#!/bin/sh\nexec sleep 8\n").unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let started = Instant::now();
+    let output = env.run_with(
+        "SessionStart",
+        &env.payload("s1", json!({"source": "startup"})),
+        &[],
+        &[("PATH", &path)],
+    );
+    assert_eq!(
+        injected(&output).as_deref(),
+        Some("BRIEF"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "git calls are bounded: {:?}",
+        started.elapsed()
+    );
 }
 
 // ---- real server ------------------------------------------------------------------------

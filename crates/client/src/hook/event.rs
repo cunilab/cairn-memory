@@ -57,10 +57,6 @@ impl Payload {
         self.text("cwd")
     }
 
-    pub fn tool_use_id(&self) -> Option<&str> {
-        self.text("tool_use_id")
-    }
-
     pub fn tool(&self) -> Option<Tool<'_>> {
         let name = self.text("tool_name")?;
         Some(Tool {
@@ -113,14 +109,10 @@ impl Capture {
         }
     }
 
-    /// `hk_` + 24 hex of sha256(session, kind, content, tool_use_id): a retry keeps its id.
-    pub fn event_id(&self, session_id: &str, tool_use_id: Option<&str>) -> String {
-        let hash = sha256_hex(&[
-            session_id,
-            self.kind.as_str(),
-            &self.content,
-            tool_use_id.unwrap_or(""),
-        ]);
+    /// `hk_` + 24 hex of sha256(session, kind, content): a retry keeps its id, and the server
+    /// drops a second identical capture of the session by the same content anyway.
+    pub fn event_id(&self, session_id: &str) -> String {
+        let hash = sha256_hex(&[session_id, self.kind.as_str(), &self.content]);
         format!("hk_{}", &hash[..24])
     }
 
@@ -128,6 +120,27 @@ impl Capture {
     pub fn content_hash(&self) -> String {
         sha256_hex(&[self.kind.as_str(), &self.content])[..16].to_owned()
     }
+}
+
+/// The files an `apply_patch` text touches, each with its own lines (header excluded).
+fn patch_sections(patch: &str) -> Vec<(String, String)> {
+    const HEADERS: [&str; 3] = ["*** Add File: ", "*** Update File: ", "*** Delete File: "];
+    let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in patch.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(path) = HEADERS.iter().find_map(|header| line.strip_prefix(header)) {
+            sections.push((path.trim().to_owned(), Vec::new()));
+        } else if line.starts_with("*** End Patch") {
+            break;
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push(line);
+        }
+    }
+    sections
+        .into_iter()
+        .filter(|(path, _)| !path.is_empty())
+        .map(|(path, body)| (path, body.join("\n")))
+        .collect()
 }
 
 /// A tool call, with the tool name canonical.
@@ -165,15 +178,27 @@ impl Tool<'_> {
     }
 
     /// The structured path argument; the file itself is never read.
-    pub fn file_path(&self) -> Option<&str> {
+    fn file_path(&self) -> Option<&str> {
         ["file_path", "filePath", "path"]
             .iter()
             .find_map(|key| self.input_text(key))
     }
 
-    /// `"<Tool> <path>\n"` plus the new text, redacted then clipped to 1 KiB.
-    pub fn edit(&self, path: &str) -> Capture {
-        let new_text = match self.input.and_then(|input| input.get("edits")) {
+    /// Every edited file with its new text: the structured path, else the `*** Add|Update|Delete
+    /// File:` headers of an `apply_patch` text (Codex sends the patch as `command`).
+    pub fn edits(&self) -> Vec<(String, String)> {
+        if let Some(path) = self.file_path() {
+            return vec![(path.to_owned(), self.new_text())];
+        }
+        ["command", "patch", "patchText", "input", "cmd"]
+            .iter()
+            .find_map(|key| self.input_text(key))
+            .map(patch_sections)
+            .unwrap_or_default()
+    }
+
+    fn new_text(&self) -> String {
+        match self.input.and_then(|input| input.get("edits")) {
             Some(Value::Array(edits)) => edits
                 .iter()
                 .filter_map(|edit| edit.get("new_string")?.as_str())
@@ -181,9 +206,11 @@ impl Tool<'_> {
                 .join("\n"),
             _ => [
                 "new_string",
+                "newString",
                 "new_str",
                 "content",
                 "patch",
+                "patchText",
                 "input",
                 "command",
             ]
@@ -191,13 +218,17 @@ impl Tool<'_> {
             .find_map(|key| self.input_text(key))
             .unwrap_or_default()
             .to_owned(),
-        };
+        }
+    }
+
+    /// `"<Tool> <path>\n"` plus the new text, redacted then clipped to 1 KiB.
+    pub fn edit(&self, path: &str, new_text: &str) -> Capture {
         let mut capture = Capture::new(
             CaptureKind::Edit,
             format!(
                 "{} {path}\n{}",
                 self.name,
-                text_of(&new_text, EXCERPT_MAX_BYTES)
+                text_of(new_text, EXCERPT_MAX_BYTES)
             ),
         );
         capture.files = vec![path.to_owned()];
@@ -279,15 +310,30 @@ mod tests {
     }
 
     #[test]
-    fn ids_change_with_the_tool_use_id() {
+    fn ids_follow_session_kind_and_content() {
         let capture = Capture::new(CaptureKind::Command, "cargo test".into());
-        let (a, b) = (
-            capture.event_id("s", Some("t1")),
-            capture.event_id("s", Some("t2")),
+        let id = capture.event_id("s");
+        assert_eq!(id, capture.event_id("s"));
+        assert_ne!(id, capture.event_id("other"));
+        assert_ne!(
+            id,
+            Capture::new(CaptureKind::Prompt, "cargo test".into()).event_id("s")
         );
-        assert_ne!(a, b);
-        assert_eq!(a, capture.event_id("s", Some("t1")));
-        assert!(a.starts_with("hk_") && a.len() == 27);
+        assert!(id.starts_with("hk_") && id.len() == 27);
+    }
+
+    #[test]
+    fn patch_headers_give_one_section_per_file() {
+        let patch = "*** Begin Patch\r\n*** Update File: a.rs\r\n@@\r\n-x\r\n+y\r\n*** Add File:  dir/b.rs \n+new\n*** Delete File: c.rs\n*** End Patch\n*** Update File: ignored.rs\n";
+        assert_eq!(
+            patch_sections(patch),
+            [
+                ("a.rs".to_owned(), "@@\n-x\n+y".to_owned()),
+                ("dir/b.rs".to_owned(), "+new".to_owned()),
+                ("c.rs".to_owned(), String::new()),
+            ]
+        );
+        assert!(patch_sections("no headers here").is_empty());
     }
 
     #[test]
@@ -328,7 +374,10 @@ mod tests {
             json!({"tool_name": "Edit", "tool_input": {"file_path": "a.rs",
             "new_string": format!("token={secret}\n{}", "x".repeat(3000))}}),
         );
-        let capture = p.tool().unwrap().edit("a.rs");
+        let tool = p.tool().unwrap();
+        let (path, text) = tool.edits().remove(0);
+        assert_eq!(path, "a.rs");
+        let capture = tool.edit("a.rs", &text);
         assert!(capture.content.starts_with("Edit a.rs\n"));
         assert!(!capture.content.contains(&secret));
         assert!(capture.content.len() <= "Edit a.rs\n".len() + EXCERPT_MAX_BYTES);

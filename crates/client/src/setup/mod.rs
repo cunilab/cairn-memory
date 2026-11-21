@@ -107,70 +107,54 @@ pub(crate) fn read(path: &Path) -> R<String> {
     }
 }
 
-pub(crate) fn json_config(path: &Path) -> R<Map<String, Value>> {
+/// `path` as a host JSON file: edits run on its text by span (`jsonc::put`, `push`, `delete`),
+/// so every other byte, key order and number spelling stays. `change` gets the text (`{}` for a
+/// missing or empty file) and the parsed root; an edit that changes nothing returns the file as
+/// it is, so a no-op never creates it.
+pub(crate) fn edit_json(
+    path: &Path,
+    change: impl FnOnce(&str, &Map<String, Value>) -> R<String>,
+) -> R<String> {
     let raw = read(path)?;
-    if raw.trim().is_empty() {
-        return Ok(Map::new());
-    }
+    let base = if raw.trim().is_empty() { "{}\n" } else { &raw };
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    match serde_json::from_str(&raw) {
-        Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Err(format!("{name} must contain a JSON object")),
-        Err(error) => Err(format!("{name} is not valid JSON: {error}")),
-    }
+    let root = match serde_json::from_str(base) {
+        Ok(Value::Object(map)) => map,
+        Ok(_) => return Err(format!("{name} must contain a JSON object")),
+        Err(error) => return Err(format!("{name} is not valid JSON: {error}")),
+    };
+    let edited = change(base, &root)?;
+    Ok(if edited == base { raw } else { edited })
 }
 
-pub(crate) fn pretty(root: Map<String, Value>) -> String {
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&Value::Object(root)).expect("a JSON map serializes")
-    )
-}
-
-pub(crate) fn object_at<'a>(
-    root: &'a mut Map<String, Value>,
-    keys: &[&str],
-) -> R<&'a mut Map<String, Value>> {
-    let mut node = root;
-    for key in keys {
-        node = node
-            .entry(*key)
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| format!("{key} must be an object"))?;
-    }
-    Ok(node)
-}
-
-pub(crate) fn set_mcp(
-    root: &mut Map<String, Value>,
-    keys: &[&str],
-    value: Value,
-    remove: bool,
-) -> R<()> {
-    let entries = object_at(root, keys)?;
-    if entries
-        .get("cairn")
-        .is_some_and(|existing| !owned(existing))
-    {
-        return Err(UNMARKED.into());
-    }
-    if remove {
-        entries.remove("cairn");
-    } else {
-        entries.insert("cairn".into(), value);
-    }
-    Ok(())
+/// The `mcpServers.cairn` entry of a Claude file: set, or removed. An entry that is not ours is
+/// refused, also on removal.
+pub(crate) fn mcp_text(path: &Path, entry: &Value, remove: bool) -> R<String> {
+    edit_json(path, |text, root| {
+        let servers = match root.get("mcpServers") {
+            None => None,
+            Some(Value::Object(servers)) => Some(servers),
+            Some(_) => return Err("mcpServers must be an object".into()),
+        };
+        if servers
+            .and_then(|servers| servers.get("cairn"))
+            .is_some_and(|existing| !owned(existing))
+        {
+            return Err(UNMARKED.into());
+        }
+        let path = ["mcpServers", "cairn"];
+        if remove {
+            jsonc::delete(text, &path)
+        } else {
+            jsonc::put(text, &path, entry)
+        }
+    })
 }
 
 /// Replaces the Cairn hook handlers of every event; other handlers and groups stay. The
 /// `--cairn-managed` marker also finds the retired Python hook's entries, so a re-setup
-/// replaces them.
-pub(crate) fn hook_config(
-    root: &mut Map<String, Value>,
-    ctx: &Ctx,
-    events: &[(&str, u32)],
-) -> R<()> {
+/// replaces them. Only the touched groups change in the file.
+pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<String> {
     const ALL: [&str; 6] = [
         "SessionStart",
         "UserPromptSubmit",
@@ -179,53 +163,77 @@ pub(crate) fn hook_config(
         "PreCompact",
         "SessionEnd",
     ];
-    let hooks = object_at(root, &["hooks"])?;
-    for event in ALL {
-        let groups = match hooks.get(event) {
-            None => Vec::new(),
-            Some(Value::Array(groups)) => groups.clone(),
-            Some(_) => return Err(format!("{event} must be an array")),
+    let managed = |handler: &Value| {
+        handler
+            .get("command")
+            .map_or(String::new(), Value::to_string)
+            .contains(MANAGED_FLAG)
+    };
+    edit_json(path, |text, root| {
+        let none = Map::new();
+        let hooks = match root.get("hooks") {
+            None => &none,
+            Some(Value::Object(hooks)) => hooks,
+            Some(_) => return Err("hooks must be an object".into()),
         };
-        let mut kept = Vec::new();
-        for group in groups {
-            let handlers = group.get("hooks").and_then(Value::as_array);
-            let (Some(group_map), Some(handlers)) = (group.as_object(), handlers) else {
-                return Err(format!("invalid {event} hook group"));
+        let mut text = text.to_owned();
+        for event in ALL {
+            let groups = match hooks.get(event) {
+                None => &[][..],
+                Some(Value::Array(groups)) => groups,
+                Some(_) => return Err(format!("{event} must be an array")),
             };
-            if handlers.iter().any(|h| !h.is_object()) {
-                return Err(format!("invalid {event} hook handler"));
+            let (mut rewritten, mut dropped) = (Vec::new(), Vec::new());
+            for (index, group) in groups.iter().enumerate() {
+                let handlers = group.get("hooks").and_then(Value::as_array);
+                let (true, Some(handlers)) = (group.is_object(), handlers) else {
+                    return Err(format!("invalid {event} hook group"));
+                };
+                if handlers.iter().any(|h| !h.is_object()) {
+                    return Err(format!("invalid {event} hook handler"));
+                }
+                let others: Vec<Value> = handlers.iter().filter(|h| !managed(h)).cloned().collect();
+                if others.len() == handlers.len() {
+                    continue;
+                }
+                if others.is_empty() {
+                    dropped.push(index);
+                } else {
+                    rewritten.push((index, others));
+                }
             }
-            let others: Vec<Value> = handlers
-                .iter()
-                .filter(|h| {
-                    !h.get("command")
-                        .map_or(String::new(), Value::to_string)
-                        .contains(MANAGED_FLAG)
-                })
-                .cloned()
-                .collect();
-            if !others.is_empty() {
-                let mut group = group_map.clone();
-                group.insert("hooks".into(), Value::Array(others));
-                kept.push(Value::Object(group));
+            let wanted = match (ctx.remove, events.iter().find(|e| e.0 == event)) {
+                (false, Some((_, timeout))) => {
+                    let handler = json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
+                    let mut group = json!({"hooks": [handler]});
+                    if event == "PostToolUse" {
+                        group["matcher"] =
+                            json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch");
+                    }
+                    Some(group)
+                }
+                _ => None,
+            };
+            // Already exactly ours: leave the file's bytes alone.
+            if rewritten.is_empty()
+                && dropped.len() == usize::from(wanted.is_some())
+                && wanted.as_ref() == dropped.first().map(|index| &groups[*index])
+            {
+                continue;
+            }
+            for (index, others) in rewritten {
+                let at = ["hooks", event, &index.to_string(), "hooks"];
+                text = jsonc::put(&text, &at, &Value::Array(others))?;
+            }
+            for index in dropped.iter().rev() {
+                text = jsonc::delete(&text, &["hooks", event, &index.to_string()])?;
+            }
+            if let Some(group) = wanted {
+                text = jsonc::push(&text, &["hooks", event], &group)?;
             }
         }
-        if let (false, Some((_, timeout))) = (ctx.remove, events.iter().find(|e| e.0 == event)) {
-            let handler =
-                json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
-            let mut group = json!({"hooks": [handler]});
-            if event == "PostToolUse" {
-                group["matcher"] = json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch");
-            }
-            kept.push(group);
-        }
-        if kept.is_empty() {
-            hooks.remove(event);
-        } else {
-            hooks.insert(event.into(), Value::Array(kept));
-        }
-    }
-    Ok(())
+        Ok(text)
+    })
 }
 
 /// The instruction block between markers; one block at most, replaced in place on re-setup.
