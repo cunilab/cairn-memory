@@ -40,6 +40,18 @@ pub(crate) fn searchable(alias: &str, me: &str, projects: &str) -> String {
     )
 }
 
+/// `visible`, but an expired memory still counts: the console lists expired ones when asked, and
+/// the audit log names memories that have since expired.
+pub(crate) fn visible_even_if_expired(alias: &str, me: &str) -> String {
+    format!(
+        "({a}.status <> 'forgotten'
+          AND ({a}.owner_id = {me} OR {a}.scope = 'global'
+               OR ({a}.scope = 'project' AND {a}.project_id IN
+                    (SELECT project_id FROM project_members WHERE person_id = {me}))))",
+        a = alias
+    )
+}
+
 macro_rules! memory_columns {
     () => {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
@@ -135,6 +147,12 @@ pub struct ListFilter {
     /// 1..=500, default 100.
     pub limit: Option<i64>,
     pub cursor: Option<String>,
+    /// The branch the memory was saved on.
+    pub branch: Option<String>,
+    /// A web search over title, summary, reason and fields. Never counts a fetch.
+    pub q: Option<String>,
+    /// Memories past `expires_at` (and not yet swept) instead of live ones; `statuses` is ignored.
+    pub expired: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +169,19 @@ impl Store {
         input: SaveInput,
         work: &WorkContext,
     ) -> Result<Saved> {
-        self.save_as(person_id, input, work, Origin::Agent).await
+        self.save_from(person_id, input, work, None).await
+    }
+
+    /// `save`, remembering which of the person's devices made it (the console shows its name).
+    pub async fn save_from(
+        &self,
+        person_id: &str,
+        input: SaveInput,
+        work: &WorkContext,
+        device_id: Option<&str>,
+    ) -> Result<Saved> {
+        self.save_as(person_id, input, work, Origin::Agent, device_id)
+            .await
     }
 
     pub(crate) async fn save_as(
@@ -160,11 +190,20 @@ impl Store {
         input: SaveInput,
         work: &WorkContext,
         origin: Origin,
+        device_id: Option<&str>,
     ) -> Result<Saved> {
         let project_id = self.context_project(person_id, work).await?;
         let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
         let mut tx = self.pool.begin().await?;
-        let saved = insert_memory(&mut tx, person_id, project_id.as_deref(), &new, None).await?;
+        let saved = insert_memory(
+            &mut tx,
+            person_id,
+            project_id.as_deref(),
+            &new,
+            None,
+            device_id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(saved)
     }
@@ -230,19 +269,34 @@ impl Store {
             }
             None => (None, None),
         };
-        let statuses: Vec<String> = filter
-            .statuses
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
+        let statuses: Vec<String> = if filter.expired {
+            Vec::new()
+        } else {
+            filter
+                .statuses
+                .iter()
+                .map(|s| s.as_str().to_owned())
+                .collect()
+        };
+        // A promoted global copy lapses for everyone at once; it is nobody's to see as expired.
+        let scope = if filter.expired {
+            format!(
+                "{} AND m.expires_at <= now() AND NOT (m.origin = 'system' AND m.scope = 'global')",
+                visible_even_if_expired("m", "$1")
+            )
+        } else {
+            visible("m", "$1")
+        };
+        let q = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-             WHERE {} AND ($2::text IS NULL OR m.project_id = $2)
+             WHERE {scope} AND ($2::text IS NULL OR m.project_id = $2)
                AND ($3::text IS NULL OR m.scope = $3) AND ($4::text IS NULL OR m.kind = $4)
                AND (cardinality($5::text[]) = 0 OR m.status = ANY($5))
                AND ($6::text IS NULL OR (m.updated_at, m.memory_id) < ($6::timestamptz, $7::text))
-             ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8",
-            visible("m", "$1")
+               AND ($9::text IS NULL OR m.repo_branch = $9)
+               AND ($10::text IS NULL OR m.search_tsv @@ websearch_to_tsquery('english', $10))
+             ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8"
         ))
         .bind(person_id)
         .bind(&filter.project_id)
@@ -252,6 +306,8 @@ impl Store {
         .bind(cursor_ts)
         .bind(cursor_id)
         .bind(limit + 1)
+        .bind(&filter.branch)
+        .bind(q)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| match &error {
@@ -422,7 +478,8 @@ impl Store {
     /// Owner only. The row stays as `forgotten` with its text blanked and `identity_hash` kept, so
     /// saving the same thing again is a 409. Embedding, entity and link rows are deleted, and a
     /// memory this one superseded comes back unless another live memory also supersedes it.
-    pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<()> {
+    /// True when this call forgot it, false when it already was forgotten.
+    pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let status: Option<String> = sqlx::query_scalar(
             "SELECT status FROM memories WHERE memory_id = $1 AND owner_id = $2 FOR UPDATE",
@@ -433,7 +490,7 @@ impl Store {
         .await?;
         match status.as_deref() {
             None => return Err(StoreError::NotFound("memory".into())),
-            Some("forgotten") => return Ok(()),
+            Some("forgotten") => return Ok(false),
             _ => {}
         }
         let restored: Vec<String> = sqlx::query_scalar(
@@ -468,7 +525,7 @@ impl Store {
             restore_if_unsuperseded(&mut tx, &target).await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -566,6 +623,7 @@ pub(crate) async fn insert_memory(
     project_id: Option<&str>,
     new: &NewMemory,
     fixed_id: Option<&str>,
+    device_id: Option<&str>,
 ) -> Result<Saved> {
     let project_id = if new.scope == Scope::Global {
         None
@@ -576,8 +634,8 @@ pub(crate) async fn insert_memory(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -600,6 +658,7 @@ pub(crate) async fn insert_memory(
     .bind(&new.context.commit)
     .bind(new.expires_at.map(|t| t as f64))
     .bind(new.origin.as_str())
+    .bind(device_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {

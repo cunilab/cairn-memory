@@ -11,6 +11,7 @@ pub mod setup;
 pub mod tools;
 pub mod update;
 
+use cairn_core::account::{ClientKind, client_user_agent};
 use serde_json::{Value, json};
 use std::fmt;
 use std::fs;
@@ -267,7 +268,15 @@ impl Client {
     }
 
     pub fn with_timeout(config: Config, timeout: Duration) -> Self {
+        Self::identified(config, timeout, "", ClientKind::Cli)
+    }
+
+    /// A client that says who it is on every request, `User-Agent: cairn/<version> (<agent>;
+    /// <kind>)`, so the console can show each device's client version and check-ins. `agent` is
+    /// `claude`, `codex` or `opencode` when the caller knows its host, else empty.
+    pub fn identified(config: Config, timeout: Duration, agent: &str, kind: ClientKind) -> Self {
         let mut builder = ureq::Agent::config_builder()
+            .user_agent(client_user_agent(env!("CARGO_PKG_VERSION"), agent, kind))
             .max_redirects(0)
             .max_redirects_will_error(false)
             .http_status_as_error(false)
@@ -581,6 +590,32 @@ mod tests {
             assert!(Config::new(bad, TOKEN).is_err(), "{bad}");
         }
         assert!(Config::new("https://cairn.example.test", "  ").is_err());
+    }
+
+    #[test]
+    fn requests_say_which_client_and_agent_they_come_from() {
+        for (agent, kind, expected) in [
+            ("", ClientKind::Cli, "cairn/VERSION (cli)"),
+            ("claude", ClientKind::Hook, "cairn/VERSION (claude; hook)"),
+            ("", ClientKind::Mcp, "cairn/VERSION (mcp)"),
+            ("not-an-agent", ClientKind::Hook, "cairn/VERSION (hook)"),
+        ] {
+            let (url, request) =
+                serve_once("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_owned());
+            let client = Client::identified(
+                Config::new(&url, TOKEN).unwrap(),
+                Duration::from_secs(5),
+                agent,
+                kind,
+            );
+            client.get("/cairn-memory/auth/me").unwrap();
+            let sent = request.recv().unwrap().to_ascii_lowercase();
+            let expected = expected.replace("VERSION", env!("CARGO_PKG_VERSION"));
+            assert!(
+                sent.contains(&format!("user-agent: {expected}")),
+                "{expected}: {sent}"
+            );
+        }
     }
 
     #[test]

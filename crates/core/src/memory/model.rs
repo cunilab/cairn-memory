@@ -100,8 +100,8 @@ pub struct Memory {
     pub context: Context,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<Entity>,
-    /// Outgoing and incoming.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Outgoing and incoming. The console shows them through `MemoryView`, which adds the other end.
+    #[serde(skip)]
     pub links: Vec<Link>,
     pub status: Status,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).

@@ -8,10 +8,15 @@ mod health;
 mod memory;
 mod project;
 mod retrieve;
+mod stats;
 
 use crate::AppState;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
+
+/// An import file of 5,000 memories is a few MB; axum's default limit is 2 MB.
+const IMPORT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -40,14 +45,7 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/devices/rotate", post(device::rotate))
         // admin
         .route("/cairn-memory/admin/jobs", get(admin::jobs))
-        .route(
-            "/cairn-memory/admin/jobs/{job_id}/requeue",
-            post(admin::requeue),
-        )
-        .route(
-            "/cairn-memory/admin/jobs/{job_id}/discard",
-            post(admin::discard),
-        )
+        .route("/cairn-memory/stats", get(stats::stats))
         // project
         .route("/cairn-memory/projects", get(project::list))
         .route("/cairn-memory/projects/init", post(project::init))
@@ -90,6 +88,11 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/remember", post(memory::remember))
         .route("/cairn-memory/get", post(memory::get_many))
         .route("/cairn-memory/memories", get(memory::list))
+        .route("/cairn-memory/memories/export", get(memory::export))
+        .route(
+            "/cairn-memory/memories/import",
+            post(memory::import).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
+        )
         .route("/cairn-memory/memories/{id}", get(memory::get))
         .route("/cairn-memory/feedback", post(memory::feedback))
         .route("/cairn-memory/forget", post(memory::forget))

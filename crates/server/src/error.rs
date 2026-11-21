@@ -33,11 +33,18 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "validation", message)
     }
 
-    pub fn rate_limited() -> Self {
+    /// The console's cue to send the person to sign in: a missing, unknown, expired or revoked
+    /// web session, or a device token on a console route. The web switches on this code.
+    pub fn session_required(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "session_required", message)
+    }
+
+    /// A failed sign-in or a wrong current password; one text for every cause.
+    pub fn invalid_credentials() -> Self {
         Self::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "authentication rate limit exceeded",
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "invalid account credentials",
         )
     }
 }

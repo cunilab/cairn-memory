@@ -7,6 +7,7 @@
 
 use crate::{Client, Config, Error};
 use crate::{present, tools};
+use cairn_core::account::ClientKind;
 use serde_json::{Map, Value, json};
 use std::io::{self, BufRead, Write};
 
@@ -60,7 +61,7 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(config: Config) -> Self {
         Self {
-            client: Client::new(config),
+            client: Client::identified(config, crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
             initialized: false,
         }
     }

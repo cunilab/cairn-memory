@@ -138,7 +138,7 @@ async fn repo_state_marks_stale_and_revives() {
         status(&db, &a, &gone).await,
         (Status::Stale, Some("feedback".to_owned()))
     );
-    let audit = store.list_audit(&a, 10).await.unwrap();
+    let audit = store.list_audit(&a, &Default::default()).await.unwrap();
     assert!(audit.iter().any(|e| e.action == "repo_state"));
     db.finish().await;
 }

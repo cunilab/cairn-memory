@@ -224,7 +224,8 @@ for web_only in "GET devices" "POST devices/revoke" "GET auth/audit"; do
   device_denied="$(curl -sS -o /dev/null -w '%{http_code}' -X "${web_only%% *}" \
     -H 'content-type: application/json' -H "authorization: Bearer ${device_token}" \
     -d '{"deviceId":"x"}' "${api}/cairn-memory/${web_only#* }")"
-  if [ "$device_denied" != "403" ]; then
+  # A device token is not a console session: 401 session_required, like any other non-session bearer.
+  if [ "$device_denied" != "401" ]; then
     printf '%s\n' "device token on ${web_only}: ${device_denied}" >&2
     exit 1
   fi

@@ -4,6 +4,7 @@ use cairn_core::project::{Project, default_project_name, validate_project_text};
 use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};
+use std::collections::HashMap;
 
 const PROJECT_COLUMNS: &str = "project_id, owner_id, repository, name, default_branch,
     EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
@@ -21,12 +22,36 @@ fn project_from_row(row: &PgRow) -> Result<Project> {
     })
 }
 
+/// The latest handoff the reader may see for a branch: where work stopped.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BranchHandoff {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    pub fields: serde_json::Value,
+    pub updated_at: i64,
+    pub device_name: Option<String>,
+}
+
 /// Derived from `memories.repo_branch`; there is no branch table.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BranchSummary {
     pub branch: String,
+    /// Project memories saved on the branch (a handoff is not counted).
     pub memories: i64,
     pub last_updated: i64,
+    pub handoff: Option<BranchHandoff>,
+}
+
+/// What the project list shows next to each project.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProjectCounts {
+    /// Live project memories (active or stale).
+    pub memories: i64,
+    pub stale: i64,
+    pub members: i64,
+    /// The latest memory change or session in the project.
+    pub last_activity_at: Option<i64>,
 }
 
 /// A pair of live project memories joined by a `contradicts` link.
@@ -42,6 +67,8 @@ pub struct Member {
     pub email: String,
     pub is_owner: bool,
     pub joined_at: i64,
+    /// The member's latest session or project memory in this project.
+    pub last_active_at: Option<i64>,
 }
 
 /// Idempotent. False when the project does not exist.
@@ -239,7 +266,13 @@ impl Store {
     pub async fn project_members(&self, person_id: &str, project_id: &str) -> Result<Vec<Member>> {
         self.require_member(person_id, project_id).await?;
         let rows = sqlx::query(&format!(
-            "SELECT m.person_id, a.email, (p.owner_id = m.person_id) AS is_owner, {} AS joined_at
+            "SELECT m.person_id, a.email, (p.owner_id = m.person_id) AS is_owner, {} AS joined_at,
+                    EXTRACT(EPOCH FROM greatest(
+                        (SELECT max(s.started_at) FROM sessions s
+                          WHERE s.project_id = m.project_id AND s.person_id = m.person_id),
+                        (SELECT max(x.created_at) FROM memories x
+                          WHERE x.project_id = m.project_id AND x.owner_id = m.person_id
+                            AND x.scope = 'project')))::bigint AS last_active_at
                FROM project_members m
                JOIN accounts a USING (person_id)
                JOIN projects p USING (project_id)
@@ -256,12 +289,14 @@ impl Store {
                     email: r.try_get("email")?,
                     is_owner: r.try_get("is_owner")?,
                     joined_at: r.try_get("joined_at")?,
+                    last_active_at: r.try_get("last_active_at")?,
                 })
             })
             .collect()
     }
 
-    /// Distinct branches of the project's live memories visible to the person.
+    /// Distinct branches of the project's live memories visible to the person, each with the
+    /// person's latest handoff there. A branch that has only a handoff is listed too.
     pub async fn project_branches(
         &self,
         person_id: &str,
@@ -269,23 +304,91 @@ impl Store {
     ) -> Result<Vec<BranchSummary>> {
         self.require_member(person_id, project_id).await?;
         let rows = sqlx::query(&format!(
-            "SELECT m.repo_branch AS branch, count(*) AS memories, max({}) AS last_updated
+            "SELECT m.repo_branch AS branch, count(*) FILTER (WHERE m.kind <> 'handoff') AS memories,
+                    max({}) AS last_updated
                FROM memories m
-              WHERE m.project_id = $1 AND m.scope = 'project' AND m.repo_branch IS NOT NULL
+              WHERE m.project_id = $1 AND m.repo_branch IS NOT NULL
+                AND (m.scope = 'project' OR (m.kind = 'handoff' AND m.owner_id = $2))
                 AND m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
               GROUP BY m.repo_branch ORDER BY max(m.updated_at) DESC, m.repo_branch",
             epoch!("m.updated_at")
         ))
         .bind(project_id)
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut handoffs: HashMap<String, BranchHandoff> = HashMap::new();
+        for r in sqlx::query(&format!(
+            "SELECT DISTINCT ON (m.repo_branch) m.repo_branch AS branch, m.memory_id, m.title, m.summary, m.fields,
+                    {} AS updated_at, CASE WHEN m.owner_id = $1 THEN d.name END AS device_name
+               FROM memories m LEFT JOIN devices d ON d.device_id = m.device_id AND d.person_id = m.owner_id
+              WHERE m.project_id = $2 AND m.kind = 'handoff' AND m.repo_branch IS NOT NULL AND {}
+              ORDER BY m.repo_branch, m.updated_at DESC, m.memory_id DESC",
+            epoch!("m.updated_at"),
+            crate::memory::visible("m", "$1")
+        ))
+        .bind(person_id)
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            handoffs.insert(
+                r.try_get("branch")?,
+                BranchHandoff {
+                    id: r.try_get("memory_id")?,
+                    title: r.try_get("title")?,
+                    summary: r.try_get("summary")?,
+                    fields: r.try_get("fields")?,
+                    updated_at: r.try_get("updated_at")?,
+                    device_name: r.try_get("device_name")?,
+                },
+            );
+        }
+        rows.iter()
+            .map(|r| {
+                let branch: String = r.try_get("branch")?;
+                Ok(BranchSummary {
+                    handoff: handoffs.remove(&branch),
+                    branch,
+                    memories: r.try_get("memories")?,
+                    last_updated: r.try_get("last_updated")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Counts for the projects `project_ids` (which the caller already knows the person is in).
+    pub async fn project_counts(
+        &self,
+        project_ids: &[String],
+    ) -> Result<HashMap<String, ProjectCounts>> {
+        let rows = sqlx::query(
+            "SELECT p.project_id,
+                    (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
+                        AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS memories,
+                    (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
+                        AND m.status = 'stale' AND (m.expires_at IS NULL OR m.expires_at > now())) AS stale,
+                    (SELECT count(*) FROM project_members pm WHERE pm.project_id = p.project_id) AS members,
+                    EXTRACT(EPOCH FROM greatest(
+                        (SELECT max(m.updated_at) FROM memories m
+                          WHERE m.project_id = p.project_id AND m.scope = 'project' AND m.status <> 'forgotten'),
+                        (SELECT max(s.started_at) FROM sessions s WHERE s.project_id = p.project_id)))::bigint AS last_activity_at
+               FROM projects p WHERE p.project_id = ANY($1)",
+        )
+        .bind(project_ids)
         .fetch_all(&self.pool)
         .await?;
         rows.iter()
             .map(|r| {
-                Ok(BranchSummary {
-                    branch: r.try_get("branch")?,
-                    memories: r.try_get("memories")?,
-                    last_updated: r.try_get("last_updated")?,
-                })
+                Ok((
+                    r.try_get("project_id")?,
+                    ProjectCounts {
+                        memories: r.try_get("memories")?,
+                        stale: r.try_get("stale")?,
+                        members: r.try_get("members")?,
+                        last_activity_at: r.try_get("last_activity_at")?,
+                    },
+                ))
             })
             .collect()
     }

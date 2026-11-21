@@ -1,5 +1,5 @@
 use crate::AppState;
-use crate::auth::{Agent, Device};
+use crate::auth::{Agent, Device, DeviceCaller};
 use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
@@ -17,7 +17,7 @@ pub struct SessionRef {
 /// A typed capture. Unknown keys are a 400, so a client learns about a misnamed field.
 pub async fn observe(
     state: State<AppState>,
-    device: Device,
+    device: DeviceCaller,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let input = serde_json::from_value(body)
@@ -29,11 +29,14 @@ pub async fn observe(
 /// person belongs to, else `personal`. The hook and the CLI print a warning for a broken file.
 async fn capture(
     State(state): State<AppState>,
-    Device(account): Device,
+    DeviceCaller { account, device_id }: DeviceCaller,
     input: ObservationInput,
 ) -> Result<Json<Value>, ApiError> {
     let project_id = input.context.project_id.clone();
-    let result = state.store.capture(&account.person_id, input).await?;
+    let result = state
+        .store
+        .capture_from(&account.person_id, input, Some(&device_id))
+        .await?;
     let attached = match project_id {
         Some(id) => state.store.is_member(&account.person_id, &id).await?,
         None => false,

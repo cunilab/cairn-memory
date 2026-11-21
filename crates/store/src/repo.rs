@@ -249,7 +249,8 @@ impl Store {
             (&revive, "active", None),
         ] {
             sqlx::query(
-                "UPDATE memories SET status = $2, stale_cause = $3, status_changed_at = now(), updated_at = now()
+                "UPDATE memories SET status = $2, stale_cause = $3, status_changed_at = now(), updated_at = now(),
+                        missing_entities = '{}'
                   WHERE memory_id = ANY($1)",
             )
             .bind(ids)
@@ -257,6 +258,27 @@ impl Store {
             .bind(cause)
             .execute(&mut *tx)
             .await?;
+        }
+        // Which cited files and symbols were found gone, for "why stale".
+        for id in &stale {
+            let Some(m) = cited.get(id) else { continue };
+            let mut gone: Vec<&str> = m
+                .files
+                .iter()
+                .filter(|f| files_missing.contains(f.as_str()))
+                .chain(
+                    m.symbols
+                        .iter()
+                        .filter(|s| symbols_missing.contains(s.as_str())),
+                )
+                .map(String::as_str)
+                .collect();
+            gone.sort_unstable();
+            sqlx::query("UPDATE memories SET missing_entities = $2 WHERE memory_id = $1")
+                .bind(id)
+                .bind(&gone)
+                .execute(&mut *tx)
+                .await?;
         }
         // Handoffs first (they are not promoted), then everything else moves to the default branch.
         sqlx::query(
@@ -269,29 +291,32 @@ impl Store {
         .bind(person_id)
         .execute(&mut *tx)
         .await?;
-        let promoted = sqlx::query(
+        let promoted: Vec<String> = sqlx::query_scalar(
             "UPDATE memories SET repo_branch = $3, updated_at = now()
-              WHERE project_id = $1 AND kind <> 'handoff' AND repo_branch = ANY($2) AND owner_id = $4",
+              WHERE project_id = $1 AND kind <> 'handoff' AND repo_branch = ANY($2) AND owner_id = $4
+              RETURNING memory_id",
         )
         .bind(&state.project_id)
         .bind(&merged)
         .bind(&state.branch)
         .bind(person_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected() as usize;
+        .fetch_all(&mut *tx)
+        .await?;
         tx.commit().await?;
         let report = RepoStateReport {
             stale: stale.len(),
             revived: revive.len(),
-            promoted,
+            promoted: promoted.len(),
         };
         self.record_audit(
             person_id,
             None,
             "repo_state",
             Some(&state.project_id),
-            serde_json::json!({"stale": report.stale, "revived": report.revived, "promoted": report.promoted}),
+            serde_json::json!({
+                "stale": report.stale, "revived": report.revived, "promoted": report.promoted,
+                "ids": {"stale": stale, "revived": revive, "promoted": promoted},
+            }),
         )
         .await?;
         Ok(report)

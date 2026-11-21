@@ -11,6 +11,7 @@ use cairn_core::retrieve::graph::{Graph, GraphFilter};
 use cairn_core::retrieve::pack::{BUDGET_DEFAULT, Cards};
 use cairn_store::export::Export;
 use cairn_store::retrieve::Diagnostics;
+use cairn_store::usage::Lookup;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -102,7 +103,29 @@ pub async fn search(
             &filter,
         )
         .await?;
-    Ok(Json(json!(cards)))
+    let reply = json!(cards);
+    record(
+        &state,
+        &account.person_id,
+        Lookup::Search,
+        &reply,
+        !cards.results.is_empty(),
+    )
+    .await;
+    Ok(Json(reply))
+}
+
+/// Counts one lookup for the dashboard: how big the answer was and whether it found anything.
+/// A failure to count never fails the lookup.
+async fn record(state: &AppState, person_id: &str, lookup: Lookup, reply: &Value, hit: bool) {
+    let bytes = reply.to_string().len();
+    if let Err(error) = state
+        .store
+        .record_retrieval(person_id, lookup, bytes, hit)
+        .await
+    {
+        eprintln!("retrieval usage not recorded: {error}");
+    }
 }
 
 pub async fn brief(
@@ -137,6 +160,14 @@ pub async fn brief(
     if let Some(check) = check {
         reply["check"] = json!(check);
     }
+    record(
+        &state,
+        &account.person_id,
+        Lookup::Brief,
+        &reply,
+        !brief.trim().is_empty(),
+    )
+    .await;
     Ok(Json(reply))
 }
 
@@ -158,7 +189,16 @@ pub async fn topic(
             &body.context.unwrap_or_default(),
         )
         .await?;
-    Ok(Json(json!(topic)))
+    let reply = json!(topic);
+    record(
+        &state,
+        &account.person_id,
+        Lookup::Topic,
+        &reply,
+        !topic.notes.is_empty() || topic.card.is_some(),
+    )
+    .await;
+    Ok(Json(reply))
 }
 
 pub async fn graph(

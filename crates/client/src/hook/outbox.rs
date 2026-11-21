@@ -5,6 +5,7 @@
 
 use super::OBSERVE;
 use crate::{Client, Config, Error, create_private_dir, write_private};
+use cairn_core::account::ClientKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -153,7 +154,7 @@ impl Outbox {
     /// skipping the event just sent. Never an error. The lock covers the read and the final
     /// write only; an event queued meanwhile stays, and one delivered twice is dropped by the
     /// server (same event id).
-    pub fn replay(&self, config: &Config, skip_event_id: &str) {
+    pub fn replay(&self, config: &Config, agent: &str, skip_event_id: &str) {
         if !self.path.exists() {
             return;
         }
@@ -177,7 +178,7 @@ impl Outbox {
             if left.is_zero() {
                 break;
             }
-            let client = Client::with_timeout(config.clone(), left);
+            let client = Client::identified(config.clone(), left, agent, ClientKind::Hook);
             match client.post(OBSERVE, &pending.body) {
                 Ok(_) | Err(Error::Status { status: 409, .. }) => {
                     done.insert(pending.event_id);

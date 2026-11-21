@@ -125,9 +125,15 @@ async fn devices_register_rotate_revoke_and_audit() {
         )
         .await
         .unwrap();
-    let audit = store.list_audit(&me, 10).await.unwrap();
+    let audit = store.list_audit(&me, &Default::default()).await.unwrap();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0].action, "device_revoked");
-    assert!(store.list_audit(&other, 10).await.unwrap().is_empty());
+    assert!(
+        store
+            .list_audit(&other, &Default::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     db.finish().await;
 }

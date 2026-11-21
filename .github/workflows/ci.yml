@@ -38,6 +38,12 @@ jobs:
             echo "the human review queue is gone (CM-SPEC-008 P11); do not bring it back" >&2
             exit 1
           fi
+      - name: no rate limiter, no human job controls (owner decisions, CM-SPEC-009)
+        run: |
+          if grep -rniE 'rate_limited|AuthRateLimiter|requeue_job|discard_job|jobs/\{job_id\}' crates/server/src crates/store/src; then
+            echo "Cairn has no auth rate limiter or lockout, and jobs are read-only (retried automatically)" >&2
+            exit 1
+          fi
       - name: cairn-core stays pure (no sqlx, tokio, axum or reqwest)
         run: |
           tree="$(cargo tree -p cairn-core -e normal --locked)"

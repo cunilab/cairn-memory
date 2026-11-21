@@ -1,51 +1,20 @@
 //! Who is calling. A web session and a device token both resolve to an account; some actions
 //! take only the web session. Extractors keep the check in each handler's signature.
+//!
+//! Error codes are the contract with the web: `session_required` means "sign in again" (no
+//! session, an unknown or expired or revoked one, or a device token on a console route);
+//! `unauthorized` is a device token that is revoked or not valid.
 
 use crate::AppState;
 use crate::error::ApiError;
 use axum::extract::FromRequestParts;
-use axum::http::HeaderMap;
 use axum::http::request::Parts;
-use cairn_core::account::{ADMIN_ONLY_ERROR, Account, DEVICE_TOKEN_PREFIX, WEB_ONLY_ERROR};
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use axum::http::{HeaderMap, header::USER_AGENT};
+use cairn_core::account::{ADMIN_ONLY_ERROR, Account, DEVICE_TOKEN_PREFIX, parse_user_agent};
 
-/// The console treats this 401 text as "sign in again".
+/// The text sent with `session_required`; the code, not the text, is what clients switch on.
 const EXPIRED_SESSION: &str = "account session is expired or revoked";
-const ATTEMPT_LIMIT: u32 = 10;
-const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
-const PRUNE_AT: usize = 1024;
-
-#[derive(Default)]
-pub struct AuthRateLimiter {
-    attempts: Mutex<HashMap<String, (Instant, u32)>>,
-}
-
-impl AuthRateLimiter {
-    /// Ten tries per key per minute. Keys come from callers who are not signed in, so expired
-    /// windows are dropped to keep the map bounded.
-    pub fn allow(&self, operation: &str, email: &str) -> bool {
-        let key = format!("{operation}:{}", email.trim().to_ascii_lowercase());
-        let now = Instant::now();
-        let mut attempts = self
-            .attempts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if attempts.len() >= PRUNE_AT {
-            attempts.retain(|_, (started, _)| now.duration_since(*started) < ATTEMPT_WINDOW);
-        }
-        let entry = attempts.entry(key).or_insert((now, 0));
-        if now.duration_since(entry.0) >= ATTEMPT_WINDOW {
-            *entry = (now, 0);
-        }
-        if entry.1 >= ATTEMPT_LIMIT {
-            return false;
-        }
-        entry.1 += 1;
-        true
-    }
-}
+const BEARER_REQUIRED: &str = "Bearer token is required";
 
 pub fn optional_token(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -55,31 +24,68 @@ pub fn optional_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|value| !value.trim().is_empty())
 }
 
+/// For a device-token route.
 pub fn token(headers: &HeaderMap) -> Result<&str, ApiError> {
-    optional_token(headers).ok_or_else(|| ApiError::unauthorized("Bearer token is required"))
+    optional_token(headers).ok_or_else(|| ApiError::unauthorized(BEARER_REQUIRED))
+}
+
+/// For a route the console calls: no bearer means no session.
+pub fn web_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    optional_token(headers).ok_or_else(|| ApiError::session_required(BEARER_REQUIRED))
+}
+
+/// An account reached by web session or device token; `device_id` is set for a device.
+pub struct Caller {
+    pub account: Account,
+    pub device_id: Option<String>,
+}
+
+/// An account reached by an active device token.
+pub struct DeviceCaller {
+    pub account: Account,
+    pub device_id: String,
 }
 
 impl AppState {
     /// A web session, or an active device token, resolved to its account.
-    pub async fn agent(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
-        let token = token(headers)?;
+    pub async fn caller(&self, headers: &HeaderMap) -> Result<Caller, ApiError> {
+        let token = web_token(headers)?;
         if let Ok(account) = self.store.session_account(token).await {
-            return Ok(account);
+            return Ok(Caller {
+                account,
+                device_id: None,
+            });
         }
         match self.store.authenticate_device(token).await {
-            Ok((_, account)) => Ok(account),
+            Ok((device, account)) => {
+                self.note_client(headers, &device.device_id).await;
+                Ok(Caller {
+                    account,
+                    device_id: Some(device.device_id),
+                })
+            }
             Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
                 Err(ApiError::unauthorized("device is revoked"))
             }
-            Err(_) => Err(ApiError::unauthorized(EXPIRED_SESSION)),
+            Err(_) => Err(ApiError::session_required(EXPIRED_SESSION)),
         }
     }
 
+    pub async fn agent(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
+        Ok(self.caller(headers).await?.account)
+    }
+
     /// An active device token only: captures come from agents, never from a console session.
-    pub async fn device(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
+    pub async fn device_caller(&self, headers: &HeaderMap) -> Result<DeviceCaller, ApiError> {
         let token = token(headers)?;
         match self.store.authenticate_device(token).await {
-            Ok((_, account)) => Ok(account),
+            Ok((device, account)) => {
+                self.note_client(headers, &device.device_id).await;
+                Ok(DeviceCaller {
+                    account,
+                    device_id: device.device_id,
+                })
+            }
             Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
                 Err(ApiError::unauthorized("device is revoked"))
             }
@@ -87,16 +93,17 @@ impl AppState {
         }
     }
 
-    /// A web session only. A device token reaches 403, any other bearer 401.
+    pub async fn device(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
+        Ok(self.device_caller(headers).await?.account)
+    }
+
+    /// A web session only. A device token is not one, so it is sent to sign in like any other
+    /// bearer that is not a session.
     pub async fn web(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
-        let token = token(headers)?;
-        match self.store.session_account(token).await {
-            Ok(account) => Ok(account),
-            Err(_) if token.starts_with(DEVICE_TOKEN_PREFIX) => {
-                Err(ApiError::forbidden(WEB_ONLY_ERROR))
-            }
-            Err(_) => Err(ApiError::unauthorized(EXPIRED_SESSION)),
-        }
+        self.store
+            .session_account(web_token(headers)?)
+            .await
+            .map_err(|_| ApiError::session_required(EXPIRED_SESSION))
     }
 
     pub async fn admin(&self, headers: &HeaderMap) -> Result<Account, ApiError> {
@@ -112,17 +119,24 @@ impl AppState {
     pub fn reject_device_bearer(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         match optional_token(headers) {
             Some(t) if t.starts_with(DEVICE_TOKEN_PREFIX) => {
-                Err(ApiError::forbidden(WEB_ONLY_ERROR))
+                Err(ApiError::forbidden(cairn_core::account::WEB_ONLY_ERROR))
             }
             _ => Ok(()),
         }
     }
 
-    pub fn throttle(&self, operation: &str, email: &str) -> Result<(), ApiError> {
-        if self.limiter.allow(operation, email) {
-            Ok(())
-        } else {
-            Err(ApiError::rate_limited())
+    /// Remembers which client a device is (`User-Agent: cairn/<version> (<agent>; <kind>)`), for
+    /// the console's device health. Never fails a request.
+    async fn note_client(&self, headers: &HeaderMap, device_id: &str) {
+        let Some(info) = headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_user_agent)
+        else {
+            return;
+        };
+        if let Err(error) = self.store.note_client(device_id, &info).await {
+            eprintln!("could not record the device client: {error}");
         }
     }
 }
@@ -154,17 +168,22 @@ extractor!(Device, device);
 extractor!(Web, web);
 extractor!(Admin, admin);
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl FromRequestParts<AppState> for Caller {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        state.caller(&parts.headers).await
+    }
+}
 
-    #[test]
-    fn limiter_stops_the_eleventh_try() {
-        let limiter = AuthRateLimiter::default();
-        for _ in 0..10 {
-            assert!(limiter.allow("login", "A@x.io"));
-        }
-        assert!(!limiter.allow("login", " a@x.io "));
-        assert!(limiter.allow("login", "b@x.io"));
+impl FromRequestParts<AppState> for DeviceCaller {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        state.device_caller(&parts.headers).await
     }
 }

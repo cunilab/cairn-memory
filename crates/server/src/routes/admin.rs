@@ -1,29 +1,11 @@
 use crate::AppState;
 use crate::auth::Admin;
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use cairn_store::jobs::JobSnapshot;
 
+/// Read-only: Cairn retries a quarantined job by itself, after each upgrade and once a day.
 pub async fn jobs(State(state): State<AppState>, Admin(_): Admin) -> ApiResult<JobSnapshot> {
     Ok(Json(state.store.job_snapshot().await?))
-}
-
-pub async fn requeue(
-    State(state): State<AppState>,
-    Admin(_): Admin,
-    Path(job_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    state.store.requeue_job(&job_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn discard(
-    State(state): State<AppState>,
-    Admin(_): Admin,
-    Path(job_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    state.store.discard_job(&job_id).await?;
-    Ok(StatusCode::NO_CONTENT)
 }

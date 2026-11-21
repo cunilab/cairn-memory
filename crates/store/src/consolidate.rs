@@ -114,6 +114,10 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         let mut subject_superseded = false;
+        let subject_owner: String = subject.try_get("owner_id")?;
+        // Newer memory -> the duplicates it absorbed, for one `memory_merged` event each.
+        let mut merged: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for row in neighbours {
             let neighbour: String = row.try_get("memory_id")?;
             let cosine = row.try_get::<f64, _>("cosine")? as f32;
@@ -150,6 +154,10 @@ impl Store {
                     supersede(&mut tx, newer, older).await?;
                     subject_superseded = older == memory_id;
                     out.superseded.push(older.to_owned());
+                    merged
+                        .entry(newer.to_owned())
+                        .or_default()
+                        .push(older.to_owned());
                 }
                 Band::Supersede => {}
                 Band::Relate => {
@@ -170,6 +178,16 @@ impl Store {
             }
         }
         tx.commit().await?;
+        for (into, older) in merged.into_iter().filter(|_| subject_owner != SYSTEM_OWNER) {
+            self.record_audit(
+                &subject_owner,
+                None,
+                "memory_merged",
+                Some(&into),
+                serde_json::json!({"into": into, "merged": older}),
+            )
+            .await?;
+        }
         out.promoted = self.promote_memory(memory_id).await?;
         // A copy's source count only changes when something is promoted or superseded here; the
         // sweep covers every other change.
@@ -263,9 +281,15 @@ impl Store {
                 // Committed first: the copy is saved on another connection.
                 ensure_system_owner(&self.pool).await?;
                 let input = global_copy(&source, &twin);
-                self.save_as(SYSTEM_OWNER, input, &WorkContext::default(), Origin::System)
-                    .await?
-                    .id
+                self.save_as(
+                    SYSTEM_OWNER,
+                    input,
+                    &WorkContext::default(),
+                    Origin::System,
+                    None,
+                )
+                .await?
+                .id
             }
         };
         let mut added = 0;
@@ -281,7 +305,7 @@ impl Store {
                 None,
                 "memory_promoted",
                 Some(&global),
-                serde_json::json!({"global_id": global, "sources": [source.id, twin.id]}),
+                serde_json::json!({"global_id": global, "sources": [source.id, twin.id], "ids": [source.id, twin.id]}),
             )
             .await?;
         }

@@ -13,8 +13,12 @@ pub mod memory;
 pub mod project;
 pub mod repo;
 pub mod retrieve;
+pub mod stats;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod transfer;
+pub mod usage;
+pub mod view;
 
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
@@ -37,6 +41,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0004_processing",
         include_str!("../../../migrations/0004_processing.sql"),
+    ),
+    (
+        "0005_console",
+        include_str!("../../../migrations/0005_console.sql"),
     ),
 ];
 

@@ -52,7 +52,10 @@ async fn main() {
             eprintln!("failed to open Cairn PostgreSQL storage: {error}");
             process::exit(1);
         });
-    let mut state = AppState::new(store, embeddings);
+    // The address agents are given (`cairn setup <url>`); without it the console shows the
+    // address it was reached on.
+    let mut state =
+        AppState::new(store, embeddings).with_public_url(env::var("CAIRN_PUBLIC_URL").ok());
     state.debug_scores = env::var("CAIRN_DEBUG_SCORES").as_deref() == Ok("1");
     worker::spawn(&state);
     let listener = tokio::net::TcpListener::bind(address)

@@ -404,7 +404,7 @@ async fn promotion_creates_one_global_across_owners() {
     // Nobody can forget the copy, and the audit trail has the promotion.
     assert!(store.forget(&stranger, global).await.is_err());
     assert!(store.forget(&a, global).await.is_err());
-    let audit = store.list_audit(&a, 20).await.unwrap();
+    let audit = store.list_audit(&a, &Default::default()).await.unwrap();
     assert!(
         audit.iter().any(|e| e.action == "memory_promoted"),
         "{audit:?}"
@@ -524,7 +524,7 @@ async fn promotion_withdrawn_below_two_live_sources() {
             "withdrawn copy is hidden"
         );
     }
-    let audit = store.list_audit(&b, 20).await.unwrap();
+    let audit = store.list_audit(&b, &Default::default()).await.unwrap();
     assert!(
         audit.iter().any(|e| e.action == "memory_withdrawn"),
         "{audit:?}"
@@ -594,8 +594,17 @@ async fn quarantined_jobs_retry_without_a_human() {
         1,
         "too soon to retry"
     );
+    // The cool-down is a day, not an hour.
     sqlx::query(
-        "UPDATE jobs SET finished_at = now() - interval '2 hours' WHERE status = 'quarantined'",
+        "UPDATE jobs SET finished_at = now() - interval '23 hours' WHERE status = 'quarantined'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.sweep().await.unwrap();
+    assert_eq!(store.job_snapshot().await.unwrap().quarantined, 1);
+    sqlx::query(
+        "UPDATE jobs SET finished_at = now() - interval '25 hours' WHERE status = 'quarantined'",
     )
     .execute(store.pool())
     .await
@@ -614,6 +623,113 @@ async fn quarantined_jobs_retry_without_a_human() {
         )
         .await
         .unwrap();
+    assert_eq!(store.job_snapshot().await.unwrap().quarantined, 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn consolidation_records_memory_merged_for_the_owner() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let (a, b) = (db.person("a").await, db.person("b").await);
+    let older = store
+        .save(&a, rule("Money is integer cents"), &WorkContext::default())
+        .await
+        .unwrap()
+        .id;
+    let newer = store
+        .save(
+            &a,
+            rule("Money is stored as cents"),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    for (id, hash, vector) in [
+        (&older, "h1", tilted(1.0, 1)),
+        (&newer, "h2", tilted(0.97, 2)),
+    ] {
+        store.upsert_embedding(id, hash, &vector).await.unwrap();
+    }
+    store.consolidate_memory(&older).await.unwrap();
+    store.consolidate_memory(&newer).await.unwrap();
+    let events = store.list_audit(&a, &Default::default()).await.unwrap();
+    let merged: Vec<_> = events
+        .iter()
+        .filter(|e| e.action == "memory_merged")
+        .collect();
+    assert_eq!(merged.len(), 1, "{events:?}");
+    assert_eq!(merged[0].subject_id.as_deref(), Some(newer.as_str()));
+    assert_eq!(merged[0].metadata["into"], newer.as_str());
+    assert_eq!(merged[0].metadata["merged"], serde_json::json!([older]));
+    assert_eq!(merged[0].titles[&newer], "Money is stored as cents");
+    assert!(
+        store
+            .list_audit(&b, &Default::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn quarantined_jobs_retry_once_after_an_upgrade() {
+    use cairn_core::process::jobs::{JobEnd, JobKind};
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    store.enqueue_job(JobKind::Link, "mem_x").await.unwrap();
+    let job = store.claim_jobs(JobKind::Link, 1).await.unwrap().remove(0);
+    store
+        .settle_job(
+            &job.job_id,
+            job.claim_id.as_deref().unwrap(),
+            JobEnd::Quarantine("bad".into()),
+        )
+        .await
+        .unwrap();
+    // The first start only records the version; a restart on the same version retries nothing.
+    for _ in 0..2 {
+        assert_eq!(
+            store
+                .retry_quarantined_after_upgrade("0.1.5")
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(store.job_snapshot().await.unwrap().quarantined, 1);
+    // A new version retries it at once, whatever its age, and only once.
+    assert_eq!(
+        store
+            .retry_quarantined_after_upgrade("0.1.6")
+            .await
+            .unwrap(),
+        1
+    );
+    let snapshot = store.job_snapshot().await.unwrap();
+    assert_eq!((snapshot.pending, snapshot.quarantined), (1, 0));
+    let job = store.claim_jobs(JobKind::Link, 1).await.unwrap().remove(0);
+    store
+        .settle_job(
+            &job.job_id,
+            job.claim_id.as_deref().unwrap(),
+            JobEnd::Quarantine("still bad".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .retry_quarantined_after_upgrade("0.1.6")
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(store.job_snapshot().await.unwrap().quarantined, 1);
     db.finish().await;
 }
@@ -898,7 +1014,7 @@ async fn quarantined_twins_of_one_key_do_not_fail_the_sweep() {
     }
     assert_eq!(store.job_snapshot().await.unwrap().quarantined, 2);
     sqlx::query(
-        "UPDATE jobs SET finished_at = now() - interval '2 hours' WHERE status = 'quarantined'",
+        "UPDATE jobs SET finished_at = now() - interval '25 hours' WHERE status = 'quarantined'",
     )
     .execute(store.pool())
     .await

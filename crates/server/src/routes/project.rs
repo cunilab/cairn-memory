@@ -1,5 +1,5 @@
 use crate::AppState;
-use crate::auth::{Agent, Web};
+use crate::auth::{Agent, Caller, Web};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -17,6 +17,10 @@ pub struct Listed {
     #[serde(flatten)]
     project: Project,
     role: &'static str,
+    memories: i64,
+    stale: i64,
+    members: i64,
+    last_activity_at: Option<i64>,
 }
 
 /// A roster row; the console reads `role`.
@@ -26,6 +30,7 @@ pub struct MemberRow {
     email: String,
     role: &'static str,
     joined_at: i64,
+    last_active_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -64,16 +69,25 @@ pub struct Paging {
 
 pub async fn list(State(state): State<AppState>, Agent(account): Agent) -> ApiResult<Vec<Listed>> {
     let projects = state.store.list_projects(&account.person_id).await?;
+    let ids: Vec<String> = projects.iter().map(|p| p.project_id.clone()).collect();
+    let mut counts = state.store.project_counts(&ids).await?;
     Ok(Json(
         projects
             .into_iter()
-            .map(|project| Listed {
-                role: if project.owner_id == account.person_id {
-                    "owner"
-                } else {
-                    "member"
-                },
-                project,
+            .map(|project| {
+                let c = counts.remove(&project.project_id).unwrap_or_default();
+                Listed {
+                    role: if project.owner_id == account.person_id {
+                        "owner"
+                    } else {
+                        "member"
+                    },
+                    memories: c.memories,
+                    stale: c.stale,
+                    members: c.members,
+                    last_activity_at: c.last_activity_at,
+                    project,
+                }
             })
             .collect(),
     ))
@@ -82,9 +96,10 @@ pub async fn list(State(state): State<AppState>, Agent(account): Agent) -> ApiRe
 /// `cairn init`: with a committed project id the caller joins it; otherwise one is created.
 pub async fn init(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Json(body): Json<Init>,
 ) -> ApiResult<Initialized> {
+    let account = caller.account;
     let (project, created) = match body.project_id.as_deref() {
         Some(id) => (
             state
@@ -100,6 +115,18 @@ pub async fn init(
                 .await?
         }
     };
+    if created {
+        state
+            .store
+            .record_audit(
+                &account.person_id,
+                caller.device_id.as_deref(),
+                "project_initialized",
+                Some(&project.project_id),
+                serde_json::json!({"repository": project.repository, "name": project.name}),
+            )
+            .await?;
+    }
     Ok(Json(Initialized {
         project_id: project.project_id,
         repository: project.repository,
@@ -194,7 +221,11 @@ pub async fn memories(
     {
         headers.insert("x-next-cursor", value);
     }
-    Ok((headers, Json(page.memories)).into_response())
+    let views = state
+        .store
+        .memory_views(&account.person_id, page.memories)
+        .await?;
+    Ok((headers, Json(views)).into_response())
 }
 
 pub async fn members(
@@ -214,6 +245,7 @@ pub async fn members(
                 email: m.email,
                 role: if m.is_owner { "owner" } else { "member" },
                 joined_at: m.joined_at,
+                last_active_at: m.last_active_at,
             })
             .collect(),
     ))

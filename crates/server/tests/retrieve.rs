@@ -544,7 +544,8 @@ async fn job_queue_is_admin_only_and_idle_worker_is_a_no_op() {
         app.send("GET", "admin/jobs", json!(null), Some(&device))
             .await
             .0,
-        403
+        401,
+        "a device token is not a console session"
     );
     // No model: the worker settles the embed job without embedding anything.
     app.settle().await;

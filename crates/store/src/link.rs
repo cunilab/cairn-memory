@@ -73,6 +73,9 @@ impl Store {
         }
         let fields = Fields::parse(kind, Some(subject.try_get("fields")?))?;
         let mut added = 0;
+        // The memories linked and the entity that joined most of them, for the Activity page.
+        let mut linked: Vec<String> = Vec::new();
+        let mut cited: Vec<String> = Vec::new();
 
         // R2 first: the specific `fixes` relation beats the generic `relates` for the same pair.
         if kind == Kind::Gotcha {
@@ -94,9 +97,10 @@ impl Store {
             .fetch_all(&mut *tx)
             .await?;
             for fixer in fixers {
-                added += usize::from(
-                    insert_link(&mut tx, &fixer, memory_id, Relation::Fixes, true).await?,
-                );
+                if insert_link(&mut tx, &fixer, memory_id, Relation::Fixes, true).await? {
+                    added += 1;
+                    linked.push(fixer);
+                }
             }
         } else if matches!(kind, Kind::Decision | Kind::Rule | Kind::Procedure) {
             let mine: HashSet<(String, String)> = sqlx::query(
@@ -130,16 +134,18 @@ impl Store {
             }
             matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             for (_, gotcha) in matches.into_iter().take(FIX_LIMIT) {
-                added += usize::from(
-                    insert_link(&mut tx, memory_id, &gotcha, Relation::Fixes, true).await?,
-                );
+                if insert_link(&mut tx, memory_id, &gotcha, Relation::Fixes, true).await? {
+                    added += 1;
+                    linked.push(gotcha);
+                }
             }
         }
 
         // R1: shared file, module, symbol and test entities.
         let shared = sqlx::query(&format!(
             "SELECT e2.memory_id,
-                    sum(CASE WHEN e2.kind IN ('file','symbol','test') THEN 2 WHEN e2.kind = 'module' THEN 1 ELSE 0 END) AS score
+                    sum(CASE WHEN e2.kind IN ('file','symbol','test') THEN 2 WHEN e2.kind = 'module' THEN 1 ELSE 0 END) AS score,
+                    (array_agg(e1.name ORDER BY CASE WHEN e1.kind = 'module' THEN 1 ELSE 0 END, e1.name))[1] AS entity
                FROM entities e1
                JOIN entities e2 ON e2.name = e1.name AND e2.kind = e1.kind AND e2.memory_id <> e1.memory_id
                JOIN memories o ON o.memory_id = e2.memory_id
@@ -153,13 +159,34 @@ impl Store {
         .await?;
         for row in shared {
             let (other, score): (String, i64) = (row.try_get("memory_id")?, row.try_get("score")?);
-            if score >= 1 {
-                added += usize::from(
-                    insert_link(&mut tx, memory_id, &other, Relation::Relates, true).await?,
-                );
+            if score >= 1
+                && insert_link(&mut tx, memory_id, &other, Relation::Relates, true).await?
+            {
+                added += 1;
+                cited.push(row.try_get("entity")?);
+                linked.push(other);
             }
         }
         tx.commit().await?;
+        if added > 0 {
+            let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+            for name in &cited {
+                *counts.entry(name.as_str()).or_default() += 1;
+            }
+            // Most cited first, then by name, so the same links always say the same sentence.
+            let entity = counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))
+                .map(|(name, _)| name);
+            self.record_audit(
+                &owner,
+                None,
+                "links_added",
+                Some(memory_id),
+                serde_json::json!({"count": added, "entity": entity, "ids": linked}),
+            )
+            .await?;
+        }
         Ok(added)
     }
 }

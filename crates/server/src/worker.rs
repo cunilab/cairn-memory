@@ -102,8 +102,24 @@ impl LocalEmbeddings {
     }
 }
 
-/// Starts the job loop and the sweep, after queueing memories that still lack a vector.
+/// Starts the job loop and the sweep, after queueing memories that still lack a vector. The first
+/// start of a new server version retries every quarantined job once: the upgrade may fix it.
 pub fn spawn(state: &AppState) {
+    let upgrade = state.clone();
+    tokio::spawn(async move {
+        match upgrade
+            .store
+            .retry_quarantined_after_upgrade(crate::VERSION)
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => println!(
+                "retrying {n} quarantined job(s) after the upgrade to {}",
+                crate::VERSION
+            ),
+            Err(error) => eprintln!("quarantine retry after upgrade failed: {error}"),
+        }
+    });
     let reconcile = state.clone();
     tokio::spawn(async move {
         if reconcile.embeddings.is_none() {

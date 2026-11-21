@@ -1,5 +1,6 @@
 use crate::jobs::enqueue_tx;
 use crate::memory::insert_memory;
+use crate::usage::RETRIEVAL_RETENTION_DAYS;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
 use cairn_core::capture::{
@@ -37,6 +38,16 @@ impl Store {
     /// content in the session under another event id, is a duplicate; an event id with other
     /// content is a 409.
     pub async fn capture(&self, person_id: &str, input: ObservationInput) -> Result<CaptureResult> {
+        self.capture_from(person_id, input, None).await
+    }
+
+    /// `capture`, remembering the device that sent it (a distilled session names it).
+    pub async fn capture_from(
+        &self,
+        person_id: &str,
+        input: ObservationInput,
+        device_id: Option<&str>,
+    ) -> Result<CaptureResult> {
         let mut observation = normalize_observation(&input)?;
         // A bare project id (the CLI sends only that) still inherits the session's git context.
         let bare = WorkContext {
@@ -68,10 +79,13 @@ impl Store {
             &self.pool,
             person_id,
             &observation.session_id,
-            project_id.as_deref(),
             &observation.context,
-            &[],
-            true,
+            SessionTouch {
+                project_id: project_id.as_deref(),
+                recent_files: &[],
+                pending: true,
+                device_id,
+            },
         )
         .await?;
         let done = sqlx::query(
@@ -158,10 +172,13 @@ impl Store {
             &self.pool,
             person_id,
             session_id,
-            None,
             &redact_work_context(work),
-            &files,
-            false,
+            SessionTouch {
+                project_id: None,
+                recent_files: &files,
+                pending: false,
+                device_id: None,
+            },
         )
         .await
     }
@@ -274,14 +291,15 @@ impl Store {
                 "session has no retained observations: {session_id}"
             )));
         };
-        let session_project: Option<String> = sqlx::query_scalar(
-            "SELECT project_id FROM sessions WHERE person_id = $1 AND session_id = $2",
+        let (session_project, session_device): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT project_id, device_id FROM sessions WHERE person_id = $1 AND session_id = $2",
         )
         .bind(person_id)
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await?
-        .flatten();
+        .unwrap_or_default();
+        let device = session_device.as_deref();
         // The checkout only; each note adds the files it is about.
         let work = WorkContext {
             project_id: session_project.clone(),
@@ -293,21 +311,26 @@ impl Store {
         };
         let output = distill(&observations);
         let mut report = DistillReport::default();
+        let mut written: Vec<String> = Vec::new();
         for note in output.notes {
             let note_work = WorkContext {
                 files: note.files,
                 ..work.clone()
             };
             match self
-                .save_as(person_id, note.input, &note_work, Origin::System)
+                .save_as(person_id, note.input, &note_work, Origin::System, device)
                 .await
             {
-                Ok(_) => report.notes += 1,
+                Ok(saved) => {
+                    report.notes += 1;
+                    written.push(saved.id);
+                }
                 // A note the person forgot stays forgotten.
                 Err(StoreError::Conflict(_)) => {}
                 Err(error) => return Err(error),
             }
         }
+        let mut handoff_written = None;
         if let Some(handoff) = output.handoff {
             let new = prepare_save(
                 handoff,
@@ -338,9 +361,11 @@ impl Store {
                     session_project.as_deref(),
                     &new,
                     Some(&id),
+                    device,
                 )
                 .await?;
                 report.handoff = true;
+                handoff_written = Some(id.clone());
             }
             tx.commit().await?;
         }
@@ -354,6 +379,25 @@ impl Store {
         .bind(started)
         .execute(&self.pool)
         .await?;
+        if report.handoff || report.notes > 0 {
+            let ids: Vec<&String> = handoff_written.iter().chain(&written).collect();
+            self.record_audit(
+                person_id,
+                None,
+                "session_distilled",
+                handoff_written
+                    .as_deref()
+                    .or(written.first().map(String::as_str)),
+                serde_json::json!({
+                    "handoff_id": handoff_written,
+                    "branch": work.branch,
+                    "notes": report.notes,
+                    "device_id": session_device,
+                    "ids": ids,
+                }),
+            )
+            .await?;
+        }
         Ok(report)
     }
 
@@ -380,6 +424,17 @@ impl Store {
             enqueue_tx(&mut tx, JobKind::Distill, &key).await?;
         }
         report.sessions_closed = idle.len() as u64;
+        // Cairn says what lapsed, once per expiry, before the row can be swept away. A promoted
+        // copy has no person to tell; its withdrawal is reported by `reconcile_promoted`.
+        let lapsed = sqlx::query(&format!(
+            "UPDATE memories SET expiry_noted_for = expires_at
+              WHERE expires_at <= now() AND expiry_noted_for IS DISTINCT FROM expires_at
+                AND status <> 'forgotten' AND owner_id <> '{}'
+              RETURNING owner_id, memory_id, kind",
+            crate::consolidate::SYSTEM_OWNER
+        ))
+        .fetch_all(&mut *tx)
+        .await?;
         report.memories_deleted = sqlx::query(&format!(
             "DELETE FROM memories WHERE expires_at < now() - make_interval(secs => {EXPIRED_GRACE_SECONDS})"
         ))
@@ -417,12 +472,49 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        sqlx::query(&format!(
+            "DELETE FROM retrieval_log WHERE bucket < now() - interval '{RETRIEVAL_RETENTION_DAYS} days'"
+        ))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
+        self.note_expired(lapsed).await?;
         // A failed retry must not stop the reconcile pass.
         let retried = self.retry_quarantined().await;
         self.reconcile_promoted().await?;
         retried?;
         Ok(report)
+    }
+}
+
+impl Store {
+    /// One `memories_expired` event per owner for the memories a sweep saw lapse.
+    async fn note_expired(&self, lapsed: Vec<sqlx::postgres::PgRow>) -> Result<()> {
+        let mut by_owner: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        for row in lapsed {
+            by_owner
+                .entry(row.try_get("owner_id")?)
+                .or_default()
+                .push((row.try_get("memory_id")?, row.try_get("kind")?));
+        }
+        for (owner, memories) in by_owner {
+            let mut by_kind = std::collections::BTreeMap::<&str, i64>::new();
+            for (_, kind) in &memories {
+                *by_kind.entry(kind.as_str()).or_default() += 1;
+            }
+            // The count is exact; the ids (for the titles under it) stop at 50.
+            let ids: Vec<&String> = memories.iter().map(|(id, _)| id).take(50).collect();
+            self.record_audit(
+                &owner,
+                None,
+                "memories_expired",
+                None,
+                serde_json::json!({"count": memories.len(), "by_kind": by_kind, "ids": ids}),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -436,15 +528,28 @@ fn replay(same: bool, event_id: &str) -> Result<()> {
     }
 }
 
+/// What a write to a session carries besides its git state.
+struct SessionTouch<'a> {
+    project_id: Option<&'a str>,
+    recent_files: &'a [String],
+    /// A capture (not a brief) leaves distillation pending.
+    pending: bool,
+    device_id: Option<&'a str>,
+}
+
 async fn upsert_session(
     pool: &sqlx::PgPool,
     person_id: &str,
     session_id: &str,
-    project_id: Option<&str>,
     work: &WorkContext,
-    recent_files: &[String],
-    pending: bool,
+    touch: SessionTouch<'_>,
 ) -> Result<()> {
+    let SessionTouch {
+        project_id,
+        recent_files,
+        pending,
+        device_id,
+    } = touch;
     // Only the git state and the recent files are kept on the session; a later write merges
     // over the keys it carries and NULL means "nothing new to remember".
     let has_git = work.repository.is_some()
@@ -463,10 +568,11 @@ async fn upsert_session(
     }
     let context = (!context.is_empty()).then_some(serde_json::Value::Object(context));
     sqlx::query(
-        "INSERT INTO sessions (person_id, session_id, project_id, context, pending_since)
-         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb), CASE WHEN $5 THEN now() END)
+        "INSERT INTO sessions (person_id, session_id, project_id, context, pending_since, device_id)
+         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb), CASE WHEN $5 THEN now() END, $6)
          ON CONFLICT (person_id, session_id) DO UPDATE
             SET project_id = COALESCE(EXCLUDED.project_id, sessions.project_id),
+                device_id = COALESCE(EXCLUDED.device_id, sessions.device_id),
                 context = sessions.context || COALESCE($4::jsonb, '{}'::jsonb),
                 ended_at = CASE WHEN $5 THEN NULL ELSE sessions.ended_at END,
                 pending_since = CASE WHEN $5 THEN COALESCE(sessions.pending_since, now()) ELSE sessions.pending_since END",
@@ -476,6 +582,7 @@ async fn upsert_session(
     .bind(project_id)
     .bind(context)
     .bind(pending)
+    .bind(device_id)
     .execute(pool)
     .await?;
     Ok(())

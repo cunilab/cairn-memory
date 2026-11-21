@@ -8,7 +8,8 @@ use crate::memory::{Context, Entity, Fields, Kind, SaveInput, Scope};
 
 /// Who is saving. The system path (distill, promotion) may write a handoff and skips the quality
 /// rules (its outputs are built to pass them); an agent may not and does not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Origin {
     Agent,
     System,

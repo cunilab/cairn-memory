@@ -24,6 +24,8 @@ services:
       dockerfile: docker/server.Dockerfile
     environment:
       CAIRN_DATABASE_URL: postgres://cairn:${POSTGRES_PASSWORD}@postgres:5432/cairn
+      # The address agents on this machine use; the console shows it in the device setup command.
+      CAIRN_PUBLIC_URL: http://127.0.0.1:58080
     depends_on:
       postgres:
         condition: service_healthy

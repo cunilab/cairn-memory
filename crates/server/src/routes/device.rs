@@ -1,11 +1,14 @@
-use crate::AppState;
 use crate::auth::Web;
 use crate::error::{ApiError, ApiResult};
+use crate::{AppState, VERSION};
 use axum::Json;
 use axum::extract::State;
-use cairn_core::account::Device;
+use axum::http::HeaderMap;
+use cairn_core::account::{Device, DeviceHealth, device_health};
+use cairn_core::id::now_seconds;
 use cairn_store::device::DeviceRegistration;
 use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Deserialize)]
 pub struct Register {
@@ -23,8 +26,40 @@ pub struct Target {
     device_id: String,
 }
 
-pub async fn list(State(state): State<AppState>, Web(account): Web) -> ApiResult<Vec<Device>> {
-    Ok(Json(state.store.list_devices(&account.person_id).await?))
+/// A device with what the console says about it. A revoked device has no health.
+#[derive(Serialize)]
+pub struct DeviceView {
+    #[serde(flatten)]
+    device: Device,
+    health: Option<DeviceHealth>,
+    health_reason: Option<String>,
+    fix_command: Option<String>,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Web(account): Web,
+    headers: HeaderMap,
+) -> ApiResult<Vec<DeviceView>> {
+    let public_url = state.public_url(&headers);
+    let now = now_seconds();
+    Ok(Json(
+        state
+            .store
+            .list_devices(&account.person_id)
+            .await?
+            .into_iter()
+            .map(|device| {
+                let report = device_health(&device, VERSION, &public_url, now);
+                DeviceView {
+                    health: report.as_ref().map(|r| r.health),
+                    health_reason: report.as_ref().and_then(|r| r.reason.clone()),
+                    fix_command: report.and_then(|r| r.fix_command),
+                    device,
+                }
+            })
+            .collect(),
+    ))
 }
 
 pub async fn register(

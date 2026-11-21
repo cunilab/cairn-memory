@@ -29,6 +29,14 @@ impl App {
         Some(Self { db, state, router })
     }
 
+    /// A server started with `CAIRN_PUBLIC_URL` set.
+    pub async fn with_public_url(url: &str) -> Option<Self> {
+        let db = TestDb::new().await?;
+        let state = AppState::new(db.store.clone(), None).with_public_url(Some(url.to_owned()));
+        let router = router(state.clone());
+        Some(Self { db, state, router })
+    }
+
     pub async fn send(
         &self,
         method: &str,
@@ -36,12 +44,45 @@ impl App {
         body: Value,
         token: Option<&str>,
     ) -> (u16, Value) {
+        self.send_with(method, path, body, token, &[]).await
+    }
+
+    /// `send` with extra request headers (a `user-agent`, a `host`).
+    pub async fn send_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Value,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, Value) {
+        let (status, _, bytes) = self.send_raw(method, path, body, token, headers).await;
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+
+    /// Status, response headers and the raw body.
+    pub async fn send_raw(
+        &self,
+        method: &str,
+        path: &str,
+        body: Value,
+        token: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (u16, axum::http::HeaderMap, axum::body::Bytes) {
         let mut builder = Request::builder()
             .method(method)
             .uri(format!("/cairn-memory/{path}"))
             .header("content-type", "application/json");
         if let Some(token) = token {
             builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
         }
         let response = self
             .router
@@ -50,13 +91,9 @@ impl App {
             .await
             .unwrap();
         let status = response.status().as_u16();
+        let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        (status, value)
+        (status, headers, bytes)
     }
 
     /// A request that must succeed.
@@ -75,6 +112,23 @@ impl App {
 
     pub async fn get(&self, path: &str, token: &str) -> Value {
         self.ok("GET", path, Value::Null, Some(token)).await
+    }
+
+    /// Saves a memory as an agent; returns its id. `body` is the `remember` body.
+    pub async fn save(&self, token: &str, body: Value) -> String {
+        self.post("remember", body, token).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// A project the device's person owns; returns its id.
+    pub async fn project(&self, device: &str, repository: &str) -> String {
+        self.post("projects/init", json!({"repository": repository}), device)
+            .await["project_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     /// The bootstrapped admin's web session token.

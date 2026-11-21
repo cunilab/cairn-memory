@@ -1,5 +1,4 @@
 use cairn_core::process::jobs::{JOB_ATTEMPT_CAP, JobEnd, JobKind};
-use cairn_store::StoreError;
 use cairn_store::testing::TestDb;
 
 async fn make_due(db: &TestDb) {
@@ -80,7 +79,7 @@ async fn one_pending_job_per_key_and_claims_do_not_overlap() {
 }
 
 #[tokio::test]
-async fn lease_expiry_backoff_quarantine_and_requeue() {
+async fn lease_expiry_backoff_and_quarantine() {
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -150,33 +149,6 @@ async fn lease_expiry_backoff_quarantine_and_requeue() {
     );
     assert_eq!(snapshot.quarantine[0].last_error.as_deref(), Some("boom"));
 
-    // Requeue restarts the attempts; a busy key refuses.
-    store.requeue_job(&claimed.job_id).await.unwrap();
-    assert!(matches!(
-        store.requeue_job(&claimed.job_id).await,
-        Err(StoreError::NotFound(_))
-    ));
-    let again = store.claim_jobs(JobKind::Embed, 1).await.unwrap().remove(0);
-    assert_eq!(again.attempts, 1);
-    store
-        .settle_job(
-            &again.job_id,
-            again.claim_id.as_deref().unwrap(),
-            JobEnd::Quarantine("bad vector".into()),
-        )
-        .await
-        .unwrap();
-    store.enqueue_job(JobKind::Embed, "k").await.unwrap();
-    assert!(
-        matches!(
-            store.requeue_job(&again.job_id).await,
-            Err(StoreError::Conflict(_))
-        ),
-        "key already pending"
-    );
-    store.discard_job(&again.job_id).await.unwrap();
-    assert_eq!(store.job_snapshot().await.unwrap().quarantined, 0);
-    assert!(store.discard_job(&again.job_id).await.is_err());
     db.finish().await;
 }
 

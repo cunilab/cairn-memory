@@ -6,8 +6,9 @@ pub const JOB_BACKOFF_SECONDS: [i64; 4] = [30, 60, 120, 240];
 pub const JOB_POLL_SECONDS: u64 = 2;
 /// Finished jobs are deleted by the idle sweep after this long.
 pub const JOB_DONE_RETENTION_SECONDS: i64 = 24 * 60 * 60;
-/// A quarantined job is retried by the sweep this long after it was quarantined (no human requeue).
-pub const JOB_QUARANTINE_RETRY_SECONDS: i64 = 60 * 60;
+/// A quarantined job is retried by the sweep this long after it was quarantined (no human requeue),
+/// and once at the first start after a server upgrade.
+pub const JOB_QUARANTINE_RETRY_SECONDS: i64 = 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobKind {

@@ -1,13 +1,16 @@
 use crate::AppState;
-use crate::auth::Agent;
+use crate::auth::{Agent, Caller, Web};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
 use cairn_store::memory::{ListFilter, Vote};
+use cairn_store::transfer::ImportReport;
+use cairn_store::usage::Lookup;
+use cairn_store::view::MemoryView;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -59,16 +62,27 @@ pub struct ListQuery {
     kind: Option<Kind>,
     #[serde(rename = "projectId", alias = "project_id")]
     project_id: Option<String>,
-    status: Option<Status>,
+    /// A status, or `expired` for memories past `expires_at` that are not yet swept away.
+    status: Option<String>,
+    branch: Option<String>,
+    /// A web search over title, summary, reason and fields.
+    q: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportQuery {
+    /// `1` or `true`: report what would happen and write nothing.
+    dry_run: Option<String>,
 }
 
 /// The body is a `SaveInput`, plus an optional `context` (the client's git and project state).
 /// Unknown keys are a 400, so an agent learns about a misnamed field instead of losing it.
 pub async fn remember(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Json(mut body): Json<Value>,
 ) -> ApiResult<Receipt> {
+    let account = caller.account;
     let context = match body.as_object_mut().and_then(|o| o.remove("context")) {
         None | Some(Value::Null) => WorkContext::default(),
         Some(value) => {
@@ -79,7 +93,12 @@ pub async fn remember(
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let saved = state
         .store
-        .save(&account.person_id, input, &context)
+        .save_from(
+            &account.person_id,
+            input,
+            &context,
+            caller.device_id.as_deref(),
+        )
         .await?;
     Ok(Json(Receipt {
         id: saved.id,
@@ -94,6 +113,14 @@ pub async fn list(
     Agent(account): Agent,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
+    let (expired, statuses) = match query.status.as_deref() {
+        None | Some("") => (false, Vec::new()),
+        Some("expired") => (true, Vec::new()),
+        Some(other) => (
+            false,
+            vec![other.parse::<Status>().map_err(ApiError::invalid)?],
+        ),
+    };
     let page = state
         .store
         .list(
@@ -102,9 +129,12 @@ pub async fn list(
                 project_id: query.project_id,
                 scope: query.scope,
                 kind: query.kind,
-                statuses: query.status.into_iter().collect(),
+                statuses,
                 limit: query.limit,
                 cursor: query.cursor,
+                branch: query.branch.filter(|b| !b.is_empty()),
+                q: query.q,
+                expired,
             },
         )
         .await?;
@@ -114,15 +144,25 @@ pub async fn list(
     {
         headers.insert("x-next-cursor", value);
     }
-    Ok((headers, Json(page.memories)).into_response())
+    let views = state
+        .store
+        .memory_views(&account.person_id, page.memories)
+        .await?;
+    Ok((headers, Json(views)).into_response())
 }
 
+/// One memory for the console; never counts as a fetch.
 pub async fn get(
     State(state): State<AppState>,
     Agent(account): Agent,
     Path(id): Path<String>,
-) -> ApiResult<Memory> {
-    Ok(Json(state.store.get(&account.person_id, &id).await?))
+) -> ApiResult<MemoryView> {
+    let memory = state.store.get(&account.person_id, &id).await?;
+    let mut views = state
+        .store
+        .memory_views(&account.person_id, vec![memory])
+        .await?;
+    Ok(Json(views.remove(0)))
 }
 
 /// The agent read: up to 10 records in request order, each counted as a fetch.
@@ -156,7 +196,19 @@ pub async fn get_many(
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
     state.store.mark_fetched(&fetched).await?;
-    Ok(Json(Got { memories, missing }))
+    let reply = Got { memories, missing };
+    let bytes = serde_json::to_string(&reply).map_or(0, |text| text.len());
+    state
+        .store
+        .record_retrieval(
+            &account.person_id,
+            Lookup::Get,
+            bytes,
+            !reply.memories.is_empty(),
+        )
+        .await
+        .unwrap_or_else(|error| eprintln!("retrieval usage not recorded: {error}"));
+    Ok(Json(reply))
 }
 
 pub async fn feedback(
@@ -179,27 +231,109 @@ pub async fn feedback(
 /// Forget: the owner's memory is blanked and stays forgotten.
 pub async fn forget(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Json(body): Json<Target>,
 ) -> ApiResult<Value> {
-    let id = erase(&state, &account.person_id, body).await?;
+    let id = erase(&state, &caller, body).await?;
     Ok(Json(json!({"id": id, "status": "forgotten"})))
 }
 
-/// The console's delete: the same erase, no body.
+/// The console's delete: the same erase, no body. The console moves to `/forget`; this route
+/// goes when it has.
 pub async fn delete(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Json(body): Json<Target>,
 ) -> Result<StatusCode, ApiError> {
-    erase(&state, &account.person_id, body).await?;
+    erase(&state, &caller, body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn erase(state: &AppState, person_id: &str, body: Target) -> Result<String, ApiError> {
+async fn erase(state: &AppState, caller: &Caller, body: Target) -> Result<String, ApiError> {
     let id = body
         .memory_id
         .ok_or_else(|| ApiError::invalid("id is required"))?;
-    state.store.forget(person_id, &id).await?;
+    if state.store.forget(&caller.account.person_id, &id).await? {
+        state
+            .store
+            .record_audit(
+                &caller.account.person_id,
+                caller.device_id.as_deref(),
+                "memory_forgotten",
+                Some(&id),
+                json!({}),
+            )
+            .await?;
+    }
     Ok(id)
+}
+
+/// The memories the person owns, as a download. A console action: a device token cannot.
+pub async fn export(
+    State(state): State<AppState>,
+    Web(account): Web,
+) -> Result<Response, ApiError> {
+    let export = state.store.export_owned(&account.person_id).await?;
+    let body = serde_json::to_vec(&export).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let disposition = format!(
+        "attachment; filename=\"cairn-export-{}.json\"",
+        civil_date(export.exported_at)
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_owned()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, "no-store".to_owned()),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Saves what an export carries, through the normal agent save. `?dry_run=1` only reports.
+pub async fn import(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Query(query): Query<ImportQuery>,
+    Json(body): Json<Value>,
+) -> ApiResult<ImportReport> {
+    if body["version"] != 1 {
+        return Err(ApiError::invalid("version must be 1"));
+    }
+    let items = body["memories"]
+        .as_array()
+        .ok_or_else(|| ApiError::invalid("memories must be a list"))?;
+    let dry_run = matches!(query.dry_run.as_deref(), Some("1" | "true"));
+    Ok(Json(
+        state
+            .store
+            .import_memories(&account.person_id, items, dry_run)
+            .await?,
+    ))
+}
+
+/// `YYYY-MM-DD` (UTC) of epoch seconds.
+fn civil_date(seconds: i64) -> String {
+    let z = seconds.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::civil_date;
+
+    #[test]
+    fn dates_come_out_in_utc() {
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(951_782_400), "2000-02-29");
+        assert_eq!(civil_date(1_795_392_000 + 86_399), "2026-11-23");
+    }
 }

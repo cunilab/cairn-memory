@@ -11,6 +11,7 @@ mod readonly;
 mod state;
 
 use crate::{Client, Config, Error, selected_config_path, write_private};
+use cairn_core::account::ClientKind;
 use cairn_core::capture::{WorkContext, redact_work_context};
 use cairn_core::id::now_seconds;
 use event::{Capture, Payload};
@@ -117,6 +118,7 @@ fn session(options: &Options) -> Result<(), String> {
     let key = state::key(&config.url, &config.token, &options.agent, &session_id);
     let hook = Hook {
         event: &options.event,
+        agent: &options.agent,
         config,
         config_dir,
         key,
@@ -136,6 +138,8 @@ fn session(options: &Options) -> Result<(), String> {
 
 struct Hook<'a> {
     event: &'a str,
+    /// `claude`, `codex` or `opencode`: sent in the user agent so the console knows the device.
+    agent: &'a str,
     config: Config,
     config_dir: PathBuf,
     key: String,
@@ -207,7 +211,13 @@ impl Hook<'_> {
                 "server did not answer; not asked again for {DOWN_SECONDS} s"
             )));
         }
-        let result = Client::with_timeout(self.config.clone(), REQUEST_TIMEOUT).post(path, body);
+        let result = Client::identified(
+            self.config.clone(),
+            REQUEST_TIMEOUT,
+            self.agent,
+            ClientKind::Hook,
+        )
+        .post(path, body);
         match &result {
             // Only "no answer" (timeout, refused, unreachable); a 5xx answers quickly.
             Err(Error::Request(_)) => {
@@ -426,7 +436,7 @@ impl Hook<'_> {
             Ok(_) => {
                 remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
-                    outbox.replay(&self.config, &event_id);
+                    outbox.replay(&self.config, self.agent, &event_id);
                 }
                 return Ok(());
             }

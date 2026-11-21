@@ -23,6 +23,7 @@ const TOKEN: &str = "cdt_testtoken1234567890";
 struct Req {
     path: String,
     auth: String,
+    user_agent: String,
     body: Value,
 }
 
@@ -102,6 +103,14 @@ fn serve(mut stream: std::net::TcpStream, log: &Mutex<Vec<Req>>, responder: &Res
             .find_map(|line| {
                 let (name, value) = line.split_once(':')?;
                 name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim().to_owned())
+            })
+            .unwrap_or_default(),
+        user_agent: head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("user-agent")
                     .then(|| value.trim().to_owned())
             })
             .unwrap_or_default(),
@@ -325,6 +334,11 @@ fn start_injects_brief_only_and_end_after_work() {
     assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
     let brief = &server.to("brief")[0];
     assert_eq!(brief.auth, format!("Bearer {TOKEN}"));
+    // The console shows each device's client version and agent from this header.
+    assert_eq!(
+        brief.user_agent,
+        format!("cairn/{} (claude; hook)", env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(brief.body["session_id"], "s1");
     assert_eq!(brief.body["context"]["repository"], "local:repo");
     assert_eq!(brief.body["recent_files"], json!([]));

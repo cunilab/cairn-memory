@@ -1,7 +1,7 @@
 use crate::{Result, Store, StoreError, epoch};
 use cairn_core::account::{
-    Account, DEVICE_TOKEN_PREFIX, Device, DeviceStatus, device::LAST_SEEN_THROTTLE_SECONDS,
-    hash_token, random_token,
+    Account, ClientInfo, ClientKind, DEVICE_TOKEN_PREFIX, Device, DeviceStatus,
+    device::LAST_SEEN_THROTTLE_SECONDS, hash_token, random_token,
 };
 use cairn_core::id::new_id;
 use sqlx::Row;
@@ -26,12 +26,17 @@ fn device_from_row(row: &PgRow) -> Result<Device> {
         },
         created_at: row.try_get("created_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
+        agent: row.try_get("agent")?,
+        client_version: row.try_get("client_version")?,
+        last_hook_at: row.try_get("last_hook_at")?,
+        legacy_hook: row.try_get("legacy_hook")?,
     })
 }
 
 const DEVICE_COLUMNS: &str = "device_id, person_id, name, status,
     EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
-    EXTRACT(EPOCH FROM last_seen_at)::bigint AS last_seen_at";
+    EXTRACT(EPOCH FROM last_seen_at)::bigint AS last_seen_at,
+    agent, client_version, legacy_hook, EXTRACT(EPOCH FROM last_hook_at)::bigint AS last_hook_at";
 
 impl Store {
     /// A new device, or a new token for an existing active device id of the same person.
@@ -137,12 +142,14 @@ impl Store {
         let row = sqlx::query(&format!(
             "SELECT d.device_id, d.person_id, d.name, d.status,
                     {} AS created_at, {} AS last_seen_at,
+                    d.agent, d.client_version, d.legacy_hook, {} AS last_hook_at,
                     a.email, a.is_admin, a.status AS account_status,
                     {} AS account_created_at
                FROM devices d JOIN accounts a USING (person_id)
               WHERE d.token_hash = $1 AND d.status = 'active' AND a.status = 'active'",
             epoch!("d.created_at"),
             epoch!("d.last_seen_at"),
+            epoch!("d.last_hook_at"),
             epoch!("a.created_at")
         ))
         .bind(hash_token(token))
@@ -164,5 +171,33 @@ impl Store {
             created_at: row.try_get("account_created_at")?,
         };
         Ok((device_from_row(&row)?, account))
+    }
+
+    /// Remembers who a device's client says it is (`User-Agent`). A hook call is a check-in
+    /// (`last_hook_at`), at most once a minute; nothing is written when nothing changed. An MCP
+    /// or CLI call names the client but is not a check-in, and an agent already known is kept.
+    pub async fn note_client(&self, device_id: &str, info: &ClientInfo) -> Result<()> {
+        let hook = info.legacy || info.kind == Some(ClientKind::Hook);
+        sqlx::query(&format!(
+            "UPDATE devices d SET client_version = n.version, agent = n.agent, legacy_hook = n.legacy,
+                    last_hook_at = CASE WHEN $4 THEN now() ELSE d.last_hook_at END
+               FROM (SELECT x.device_id, COALESCE($2::text, x.client_version) AS version,
+                            COALESCE($3::text, x.agent) AS agent,
+                            CASE WHEN $5 THEN true WHEN $2::text IS NOT NULL THEN false ELSE x.legacy_hook END AS legacy
+                       FROM devices x WHERE x.device_id = $1) n
+              WHERE d.device_id = n.device_id
+                AND (d.client_version IS DISTINCT FROM n.version OR d.agent IS DISTINCT FROM n.agent
+                     OR d.legacy_hook IS DISTINCT FROM n.legacy
+                     OR ($4 AND (d.last_hook_at IS NULL
+                                 OR d.last_hook_at < now() - make_interval(secs => {LAST_SEEN_THROTTLE_SECONDS}))))"
+        ))
+        .bind(device_id)
+        .bind(&info.version)
+        .bind(&info.agent)
+        .bind(hook)
+        .bind(info.legacy)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

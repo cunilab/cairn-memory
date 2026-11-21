@@ -17,8 +17,8 @@ async fn shared_project_model() {
     let (status, body) = app
         .send("GET", "devices", json!(null), Some(&author_device))
         .await;
-    assert_eq!(status, 403, "{body}");
-    assert_eq!(body["code"], "forbidden");
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["code"], "session_required");
     let (status, _) = app.send("GET", "devices", json!(null), Some("nope")).await;
     assert_eq!(status, 401);
     let (status, _) = app
@@ -305,8 +305,12 @@ async fn account_errors_use_the_texts_the_console_expects() {
     );
     let (status, body) = app.send("GET", "projects", json!(null), None).await;
     assert_eq!(
-        (status, body["error"].as_str()),
-        (401, Some("Bearer token is required"))
+        (status, body["error"].as_str(), body["code"].as_str()),
+        (
+            401,
+            Some("Bearer token is required"),
+            Some("session_required")
+        )
     );
     let (status, _) = app
         .send(
@@ -331,8 +335,12 @@ async fn account_errors_use_the_texts_the_console_expects() {
     .await;
     let (status, body) = app.send("GET", "projects", json!(null), Some(&user)).await;
     assert_eq!(
-        (status, body["error"].as_str()),
-        (401, Some("account session is expired or revoked"))
+        (status, body["error"].as_str(), body["code"].as_str()),
+        (
+            401,
+            Some("account session is expired or revoked"),
+            Some("session_required")
+        )
     );
     app.finish().await;
 }
