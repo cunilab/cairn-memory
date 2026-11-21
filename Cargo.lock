@@ -199,6 +199,7 @@ version = "0.1.5"
 dependencies = [
  "argon2",
  "rand 0.8.8",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -215,6 +216,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "tokio",
  "tower",
 ]

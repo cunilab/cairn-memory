@@ -2,6 +2,9 @@
 //! widening it is a later step.
 
 use super::observation::WorkContext;
+use regex::Regex;
+use std::borrow::Cow;
+use std::sync::OnceLock;
 
 pub const REDACTED: &str = "[REDACTED]";
 
@@ -24,69 +27,55 @@ pub fn redact_work_context(context: &WorkContext) -> WorkContext {
     }
 }
 
+/// Rows 2-11 of CM-SPEC-006 §3, in application order; row 1 (PEM blocks) runs first.
+const PATTERNS: &[(&str, &str)] = &[
+    (
+        r#"(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+"#,
+        "${1} [REDACTED]",
+    ),
+    (
+        r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@",
+        "${1}[REDACTED]@",
+    ),
+    (
+        r#"(?i)(--(?:password|passwd|pass|token|secret|api-key|apikey|access-key|client-secret))(=|\s+)("[^"]*"|'[^']*'|\S+)"#,
+        "${1}${2}[REDACTED]",
+    ),
+    (
+        r#"(?i)\b((?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?key)?|client[_-]?secret|token|auth[_-]?token|password|passwd|pwd))(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)"#,
+        "${1}${2}[REDACTED]",
+    ),
+    (r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b", REDACTED),
+    (r"\bgithub_pat_[A-Za-z0-9_]{22,}\b", REDACTED),
+    (r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", REDACTED),
+    (r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", REDACTED),
+    (r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b", REDACTED),
+    (
+        r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        REDACTED,
+    ),
+    (r"\bcdt_[A-Za-z0-9_-]{16,}\b", REDACTED),
+];
+
+fn compiled() -> &'static [(Regex, &'static str)] {
+    static COMPILED: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    COMPILED.get_or_init(|| {
+        PATTERNS
+            .iter()
+            .map(|(pattern, with)| (Regex::new(pattern).expect("redaction pattern"), *with))
+            .collect()
+    })
+}
+
+/// Idempotent: `redact(redact(x)) == redact(x)`.
 pub fn redact_sensitive_content(content: &str) -> String {
-    let mut redacted = content.to_owned();
-    for marker in ["authorization: bearer ", "api_key=", "token=", "password="] {
-        redacted = redact_after_marker(&redacted, marker);
-    }
-    redacted = redact_prefixed_secret(&redacted, "sk-");
-    redact_private_key_blocks(&redacted)
-}
-
-fn redact_after_marker(content: &str, marker: &str) -> String {
-    let lower = content.to_ascii_lowercase();
-    let mut output = String::with_capacity(content.len());
-    let mut cursor = 0;
-
-    while let Some(relative) = lower[cursor..].find(marker) {
-        let start = cursor + relative;
-        let value_start = start + marker.len();
-        output.push_str(&content[cursor..value_start]);
-        let value_end = content[value_start..]
-            .find(char::is_whitespace)
-            .map(|offset| value_start + offset)
-            .unwrap_or(content.len());
-        output.push_str(REDACTED);
-        cursor = value_end;
-    }
-
-    output.push_str(&content[cursor..]);
-    output
-}
-
-// A prefix counts only where a token starts, so ordinary words such as "disk-full" stay intact.
-fn find_token_prefix(lower: &str, prefix: &str, from: usize) -> Option<usize> {
-    let mut search_from = from;
-    while let Some(relative) = lower[search_from..].find(prefix) {
-        let start = search_from + relative;
-        if !lower[..start]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_alphanumeric)
-        {
-            return Some(start);
+    let mut redacted = redact_private_key_blocks(content);
+    for (pattern, with) in compiled() {
+        if let Cow::Owned(next) = pattern.replace_all(&redacted, *with) {
+            redacted = next;
         }
-        search_from = start + prefix.len();
     }
-    None
-}
-
-fn redact_prefixed_secret(content: &str, prefix: &str) -> String {
-    let lower = content.to_ascii_lowercase();
-    let prefix = prefix.to_ascii_lowercase();
-    let mut output = String::with_capacity(content.len());
-    let mut cursor = 0;
-    while let Some(start) = find_token_prefix(&lower, &prefix, cursor) {
-        let value_end = content[start..]
-            .find(char::is_whitespace)
-            .map(|offset| start + offset)
-            .unwrap_or(content.len());
-        output.push_str(&content[cursor..start]);
-        output.push_str(REDACTED);
-        cursor = value_end;
-    }
-    output.push_str(&content[cursor..]);
-    output
+    redacted
 }
 
 const PRIVATE_KEY_LABELS: &[&str] = &[
@@ -235,12 +224,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redacts_markers_and_sk_tokens_but_not_ordinary_words() {
-        let text = "password=hunter2 and token=abc, key sk-AbC123 disk-full ok";
-        let out = redact_sensitive_content(text);
-        assert!(!out.contains("hunter2") && !out.contains("abc,") && !out.contains("AbC123"));
-        assert!(out.contains("disk-full ok"));
+    fn markers_and_patterns() {
+        // One case per row of the spec's table (CM-SPEC-006 §3): (input, text that must go).
+        let cases = [
+            ("Authorization: Bearer abc.def-123", "abc.def-123"),
+            ("authorization: basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            ("postgres://admin:hunter2@db:5432/x", "hunter2"),
+            ("run --password hunter2 --token=abc123 now", "hunter2"),
+            ("run --client-secret \"two words\" now", "two words"),
+            ("api_key=zzz111 and password: 'a b c'", "zzz111"),
+            ("SECRET_KEY = s3cr3t,", "s3cr3t"),
+            ("ghp_0123456789abcdefghijklmnopqrstuvwxyzAB", "ghp_0123"),
+            ("github_pat_0123456789abcdefghijkl_xyz", "github_pat_"),
+            ("id AKIAIOSFODNN7EXAMPLE end", "AKIAIOSFODNN7EXAMPLE"),
+            ("slack xoxb-1234567890-abcdef", "xoxb-"),
+            ("key sk-ant-0123456789abcdefghijklmn", "sk-ant-"),
+            (
+                "jwt eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4f",
+                "eyJhbGci",
+            ),
+            ("cdt_0123456789abcdefghij", "cdt_0123"),
+        ];
+        for (input, secret) in cases {
+            let out = redact_sensitive_content(input);
+            assert!(!out.contains(secret), "{input} -> {out}");
+            assert!(out.contains(REDACTED), "{input} -> {out}");
+        }
+        let out = redact_sensitive_content("token=abc, disk-full ok sk-short");
+        assert_eq!(out, "token=[REDACTED], disk-full ok sk-short");
         assert!(redact_sensitive_content("Authorization: Bearer xyz").ends_with(REDACTED));
+    }
+
+    #[test]
+    fn idempotent() {
+        let text = "Authorization: Bearer a1b2\npostgres://u:p@h/db --password x token=y sk-0123456789abcdefghij\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----";
+        let once = redact_sensitive_content(text);
+        assert_eq!(redact_sensitive_content(&once), once);
     }
 
     #[test]

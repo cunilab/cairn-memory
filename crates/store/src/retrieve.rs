@@ -30,6 +30,14 @@ pub struct Diagnostics {
     pub jobs_quarantined: i64,
 }
 
+/// One note the hook may inject when a file is first edited.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TopicNote {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+}
+
 /// Candidate channels for hybrid search. Each returns `(memory_id, score)` for memories the
 /// person may see; fusion is `cairn_core::retrieve::hybrid::fuse`.
 impl Store {
@@ -296,6 +304,40 @@ impl Store {
             .map(memory_from_row)
             .collect::<Result<Vec<_>>>()?;
         Ok(session_brief(&memories, context))
+    }
+
+    /// Up to two active, visible notes whose file entity is exactly `path`, the caller's project
+    /// first. Handoffs are never topic notes and nothing is counted as fetched.
+    pub async fn topic_notes(
+        &self,
+        person_id: &str,
+        path: &str,
+        context: &WorkContext,
+    ) -> Result<Vec<TopicNote>> {
+        let rows = sqlx::query(&format!(
+            "SELECT m.memory_id, m.title, m.summary FROM memories m
+              WHERE {} AND m.status = 'active' AND m.kind <> 'handoff'
+                AND EXISTS (SELECT 1 FROM entities e
+                             WHERE e.memory_id = m.memory_id AND e.kind = 'file' AND e.name = $2)
+              ORDER BY (m.project_id IS NOT NULL AND m.project_id = $3) DESC,
+                       m.updated_at DESC, m.memory_id
+              LIMIT 2",
+            visible("m", "$1")
+        ))
+        .bind(person_id)
+        .bind(path)
+        .bind(&context.project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(TopicNote {
+                    id: r.try_get("memory_id")?,
+                    title: r.try_get("title")?,
+                    summary: r.try_get("summary")?,
+                })
+            })
+            .collect()
     }
 
     /// Nodes are the memories the person can see; edges are the links between them.

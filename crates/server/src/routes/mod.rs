@@ -76,7 +76,7 @@ pub fn router() -> Router<AppState> {
             get(project::conflicts),
         )
         // capture
-        .route("/cairn-memory/sync/push", post(capture::observe))
+        .route("/cairn-memory/sync/push", post(capture::sync_push))
         .route("/cairn-memory/observe", post(capture::observe))
         .route("/cairn-memory/session/end", post(capture::end))
         .route(
@@ -95,6 +95,7 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/search", post(retrieve::search))
         .route("/cairn-memory/context", post(retrieve::search))
         .route("/cairn-memory/session/brief", post(retrieve::brief))
+        .route("/cairn-memory/session/topic", post(retrieve::topic))
         .route("/cairn-memory/graph", get(retrieve::graph))
         .route("/cairn-memory/export", post(retrieve::export))
         .route("/cairn-memory/diagnose", get(retrieve::diagnose))

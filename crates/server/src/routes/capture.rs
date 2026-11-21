@@ -3,22 +3,40 @@ use crate::auth::{Agent, Device};
 use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
-use cairn_core::capture::{ObservationInput, WorkContext};
+use cairn_core::capture::{CaptureKind, ObservationInput, WorkContext};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// A capture. Keys the old hook sent beyond these (`importance`, `lifecycle`) are ignored.
+/// The Python hook's capture, for `/sync/push` until step 4 chunk 3 deletes it. Keys beyond
+/// these (`importance`, `lifecycle`, `source`) are ignored; the role picks the kind.
 #[derive(Deserialize)]
-pub struct Observation {
+pub struct LegacyObservation {
     #[serde(rename = "eventId", alias = "event_id")]
     event_id: String,
     #[serde(rename = "sessionId", alias = "session_id")]
     session_id: String,
     content: String,
     role: String,
-    source: String,
     #[serde(default)]
     context: WorkContext,
+}
+
+impl From<LegacyObservation> for ObservationInput {
+    fn from(old: LegacyObservation) -> Self {
+        let kind = match old.role.trim().to_ascii_lowercase().as_str() {
+            "user" => CaptureKind::Prompt,
+            "assistant" => CaptureKind::Assistant,
+            _ => CaptureKind::Command,
+        };
+        Self {
+            event_id: old.event_id,
+            session_id: old.session_id,
+            kind,
+            ok: None,
+            content: old.content,
+            context: old.context,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -27,22 +45,33 @@ pub struct SessionRef {
     session_id: String,
 }
 
+/// A typed capture. Unknown keys are a 400, so a client learns about a misnamed field.
+pub async fn observe(
+    state: State<AppState>,
+    device: Device,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let input = serde_json::from_value(body)
+        .map_err(|error| ApiError::invalid(format!("invalid capture: {error}")))?;
+    capture(state, device, input).await
+}
+
+pub async fn sync_push(
+    state: State<AppState>,
+    device: Device,
+    Json(body): Json<LegacyObservation>,
+) -> Result<Json<Value>, ApiError> {
+    capture(state, device, body.into()).await
+}
+
 /// `project_attachment.status` is `attached` when the capture's project id names a project the
 /// person belongs to, else `personal`. The hook and the CLI print a warning for a broken file.
-pub async fn observe(
+async fn capture(
     State(state): State<AppState>,
     Device(account): Device,
-    Json(body): Json<Observation>,
+    input: ObservationInput,
 ) -> Result<Json<Value>, ApiError> {
-    let project_id = body.context.project_id.clone();
-    let input = ObservationInput {
-        event_id: body.event_id,
-        session_id: body.session_id,
-        content: body.content,
-        role: body.role,
-        source: body.source,
-        context: body.context,
-    };
+    let project_id = input.context.project_id.clone();
     let result = state.store.capture(&account.person_id, input).await?;
     let attached = match project_id {
         Some(id) => state.store.is_member(&account.person_id, &id).await?,

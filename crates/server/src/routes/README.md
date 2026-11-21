@@ -6,10 +6,10 @@ The REST handlers, one file per area. Each file owns its request and response ty
 
 ## Entry points
 - `health`: `/health`, `/livez`. `account`: `/auth/*`. `device`: `/devices*`. `admin`: `/admin/jobs*`.
-- `project`: `/projects*`. `capture`: `/sync/push`, `/observe`, `/session/*`.
+- `project`: `/projects*`. `capture`: `/sync/push` (legacy shape, until step 4 chunk 3), `/observe`, `/session/*`.
 - `memory`: `/remember`, `/get`, `/memories*`, `/feedback`, `/forget`, `/delete`.
 - `retrieve`: `/search` (and `/context`, the same handler, for the hook until step 4), `/session/brief`,
-  `/graph`, `/export`, `/diagnose`.
+  `/session/topic`, `/graph`, `/export`, `/diagnose`.
 
 ## Depends on
 `crate::auth` (extractors), `crate::error` (`{error, code}`), `cairn-store`, `cairn-core`.

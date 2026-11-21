@@ -672,3 +672,120 @@ async fn concurrent_consolidation_of_a_mutual_pair_never_fails() {
     }
     db.finish().await;
 }
+
+#[tokio::test]
+async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let stranger = db.person("stranger").await;
+    let (project, _) = store
+        .init_project(&me, "github.com/acme/cairn", None)
+        .await
+        .unwrap();
+    let project_id = project.project_id.clone();
+    let on = |file: &str, in_project: bool| WorkContext {
+        files: vec![file.to_owned()],
+        project_id: in_project.then(|| project_id.clone()),
+        ..WorkContext::default()
+    };
+    let note = |title: &str, scope: &str, kind: &str| {
+        save_input(
+            serde_json::json!({"kind": kind, "scope": scope, "title": title, "summary": format!("{title} summary"), "reason": "r"}),
+        )
+    };
+    let ours = store
+        .save(
+            &me,
+            note("Project rule", "project", "rule"),
+            &on("src/a.rs", true),
+        )
+        .await
+        .unwrap()
+        .id;
+    store
+        .save(
+            &me,
+            note("Personal one", "personal", "fact"),
+            &on("src/a.rs", false),
+        )
+        .await
+        .unwrap();
+    store
+        .save(
+            &me,
+            note("Personal two", "personal", "fact"),
+            &on("src/a.rs", false),
+        )
+        .await
+        .unwrap();
+    let newest = store
+        .save(
+            &me,
+            note("Personal three", "personal", "fact"),
+            &on("src/a.rs", false),
+        )
+        .await
+        .unwrap()
+        .id;
+    store
+        .save(
+            &me,
+            note("Other file", "personal", "fact"),
+            &on("src/ab.rs", false),
+        )
+        .await
+        .unwrap();
+
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let notes = store.topic_notes(&me, "src/a.rs", &context).await.unwrap();
+    let ids: Vec<_> = notes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [ours.as_str(), newest.as_str()],
+        "project first, newest next, at most 2"
+    );
+    assert_eq!(notes[0].summary, "Project rule summary");
+    assert!(
+        store
+            .topic_notes(&me, "src/a", &context)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .topic_notes(&stranger, "src/a.rs", &context)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Handoffs and inactive notes are never topic notes; asking never counts as a fetch.
+    sqlx::query("UPDATE memories SET kind = 'handoff' WHERE memory_id = $1")
+        .bind(&newest)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET status = 'superseded' WHERE memory_id = $1")
+        .bind(&ours)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let notes = store
+        .topic_notes(&me, "src/a.rs", &WorkContext::default())
+        .await
+        .unwrap();
+    assert!(notes.iter().all(|n| n.id != newest && n.id != ours));
+    let fetched: i64 = sqlx::query_scalar("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(fetched, 0);
+    db.finish().await;
+}

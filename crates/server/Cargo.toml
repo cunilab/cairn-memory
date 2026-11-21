@@ -18,3 +18,4 @@ sha2.workspace = true
 [dev-dependencies]
 cairn-store = { path = "../store", features = ["testing"] }
 tower.workspace = true
+sqlx.workspace = true

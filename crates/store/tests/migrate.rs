@@ -12,7 +12,7 @@ async fn migrate_twice_is_a_no_op() {
         .fetch_all(db.store.pool())
         .await
         .unwrap();
-    assert_eq!(versions, ["0001_foundation"]);
+    assert_eq!(versions, ["0001_foundation", "0002_capture"]);
     let tables: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
     )

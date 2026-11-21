@@ -7,11 +7,11 @@ use crate::retrieve::rank;
 use serde_json::{Value, json};
 
 /// UTF-8 bytes, including the data label and fence.
-pub const SESSION_BRIEF_MAX_BYTES: usize = 4096;
-const SECTION_MAX_BYTES: usize = 900;
+pub const SESSION_BRIEF_MAX_BYTES: usize = 1200;
+const SECTION_MAX_BYTES: usize = 500;
 const NOTES_PER_SECTION: usize = 3;
 const PREFERENCES: usize = 2;
-const PREFERENCES_MAX_BYTES: usize = 480;
+const PREFERENCES_MAX_BYTES: usize = 240;
 
 fn bounded(text: &str, bytes: usize) -> &str {
     let mut end = text.len().min(bytes);
@@ -172,6 +172,29 @@ mod tests {
         assert!(brief.len() <= SESSION_BRIEF_MAX_BYTES);
         assert!(brief.contains("\"id\":\"m"));
         assert!(!brief.contains("\"id\":\"other\""));
+    }
+
+    #[test]
+    fn full_brief_stays_within_twelve_hundred_bytes() {
+        let mut all = vec![];
+        let mut handoff = memory("h", Kind::Handoff, Scope::Personal);
+        handoff.context.repo = Some("r".into());
+        handoff.context.branch = Some("main".into());
+        handoff.project_id = Some("p1".into());
+        handoff.summary = "h".repeat(320);
+        all.push(handoff);
+        for i in 0..6 {
+            let mut m = memory(&format!("p{i}"), Kind::Preference, Scope::Personal);
+            m.summary = "p".repeat(320);
+            all.push(m);
+            let mut m = memory(&format!("r{i}"), Kind::Rule, Scope::Project);
+            m.summary = "r".repeat(320);
+            all.push(m);
+        }
+        let brief = session_brief(&all, &ctx());
+        assert_eq!(SESSION_BRIEF_MAX_BYTES, 1200);
+        assert!(brief.len() <= 1200, "{}", brief.len());
+        assert!(brief.contains("\"id\":\"h\""));
     }
 
     #[test]

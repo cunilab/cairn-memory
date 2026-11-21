@@ -276,6 +276,8 @@ mod tests {
             content: content.into(),
             role: role.into(),
             source: source.into(),
+            kind: crate::capture::CaptureKind::Command,
+            ok: None,
             content_hash: String::new(),
             context: WorkContext {
                 files: vec!["a.rs".into()],

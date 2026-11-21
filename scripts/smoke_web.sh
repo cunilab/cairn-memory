@@ -264,7 +264,7 @@ private_id="$(printf '%s' "$private_json" | python3 -c 'import json,sys; print(j
 
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"event_id":"evt-project","session_id":"web-project","content":"repository cache decision is ready for the project","role":"agent","source":"hook"}' \
+  -d '{"event_id":"evt-project","session_id":"web-project","kind":"prompt","content":"repository cache decision is ready for the project"}' \
   "${api}/cairn-memory/observe" >/dev/null
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
@@ -288,7 +288,7 @@ member_device="$(curl -fsS -H 'content-type: application/json' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${member_device}" \
-  -d "{\"eventId\":\"member-join\",\"sessionId\":\"member-join\",\"content\":\"joined by project file\",\"role\":\"agent\",\"source\":\"smoke\",\"context\":{\"repository\":\"cairn-demo\",\"project_id\":\"${project_id}\"}}" \
+  -d "{\"event_id\":\"member-join\",\"session_id\":\"member-join\",\"kind\":\"prompt\",\"content\":\"joined by project file\",\"context\":{\"repository\":\"cairn-demo\",\"project_id\":\"${project_id}\"}}" \
   "${api}/cairn-memory/observe" >/dev/null
 
 

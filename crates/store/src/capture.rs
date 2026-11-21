@@ -5,12 +5,16 @@ use cairn_core::capture::session::IDLE_SESSION_SECONDS;
 use cairn_core::capture::{
     CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
 };
+use cairn_core::capture::{redact_sensitive_content, redact_work_context};
 use cairn_core::id::now_seconds;
 use cairn_core::memory::kind::EXPIRED_GRACE_SECONDS;
 use cairn_core::process::distill::{distill, handoff_id};
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
 use cairn_core::process::{Origin, prepare_save};
 use sqlx::Row;
+
+const RECENT_FILES_MAX: usize = 20;
+const RECENT_FILE_MAX_BYTES: usize = 512;
 
 /// What `distill_session` wrote.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,8 +33,9 @@ pub struct SweepReport {
 }
 
 impl Store {
-    /// Stores one redacted observation. The same event id with the same content is a duplicate;
-    /// with other content it is a 409.
+    /// Stores one redacted observation. The same event id with the same content, or the same
+    /// content in the session under another event id, is a duplicate; an event id with other
+    /// content is a 409.
     pub async fn capture(&self, person_id: &str, input: ObservationInput) -> Result<CaptureResult> {
         let mut observation = normalize_observation(&input)?;
         // A bare project id (the CLI sends only that) still inherits the session's git context.
@@ -53,12 +58,8 @@ impl Store {
             duplicate,
             event_id: observation.event_id.clone(),
         };
-        if let Some(hash) = self
-            .observation_hash(person_id, &observation.event_id)
-            .await?
-        {
-            return replay(hash == observation.content_hash, &observation.event_id)
-                .map(|()| result(true));
+        if let Some(duplicate) = self.known(person_id, &observation).await? {
+            return duplicate.map(|()| result(true));
         }
         let project_id = self
             .context_project(person_id, &observation.context)
@@ -69,19 +70,22 @@ impl Store {
             &observation.session_id,
             project_id.as_deref(),
             &observation.context,
+            &[],
             true,
         )
         .await?;
         let done = sqlx::query(
-            "INSERT INTO observations (person_id, event_id, session_id, role, source, content, content_hash, context, captured_at, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, to_timestamp($9), to_timestamp($10))
-             ON CONFLICT (person_id, event_id) DO NOTHING",
+            "INSERT INTO observations (person_id, event_id, session_id, role, source, kind, ok, content, content_hash, context, captured_at, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), to_timestamp($12))
+             ON CONFLICT DO NOTHING",
         )
         .bind(person_id)
         .bind(&observation.event_id)
         .bind(&observation.session_id)
         .bind(&observation.role)
         .bind(&observation.source)
+        .bind(observation.kind.as_str())
+        .bind(observation.ok)
         .bind(&observation.content)
         .bind(&observation.content_hash)
         .bind(serde_json::to_value(&observation.context).unwrap_or_default())
@@ -90,25 +94,73 @@ impl Store {
         .execute(&self.pool)
         .await?;
         if done.rows_affected() == 0 {
-            // Lost a race with the same event id.
-            let hash = self
-                .observation_hash(person_id, &observation.event_id)
-                .await?
-                .unwrap_or_default();
-            return replay(hash == observation.content_hash, &observation.event_id)
-                .map(|()| result(true));
+            // Lost a race with the same event id or the same content.
+            if let Some(duplicate) = self.known(person_id, &observation).await? {
+                return duplicate.map(|()| result(true));
+            }
         }
-        Ok(result(false))
+        Ok(result(done.rows_affected() == 0))
     }
 
-    async fn observation_hash(&self, person_id: &str, event_id: &str) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT content_hash FROM observations WHERE person_id = $1 AND event_id = $2",
+    /// `Some` when the capture is already stored under either key: `Ok` for the same event id
+    /// with the same content or the same content in the session under another event id,
+    /// a conflict for an event id used with other content.
+    async fn known(
+        &self,
+        person_id: &str,
+        observation: &Observation,
+    ) -> Result<Option<Result<()>>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_id, content_hash FROM observations
+              WHERE person_id = $1
+                AND (event_id = $2 OR (session_id = $3 AND content_hash = $4))",
         )
         .bind(person_id)
-        .bind(event_id)
-        .fetch_optional(&self.pool)
-        .await?)
+        .bind(&observation.event_id)
+        .bind(&observation.session_id)
+        .bind(&observation.content_hash)
+        .fetch_all(&self.pool)
+        .await?;
+        let same_event = rows.iter().find(|(id, _)| *id == observation.event_id);
+        Ok(match (same_event, rows.is_empty()) {
+            (Some((_, hash)), _) => Some(replay(
+                *hash == observation.content_hash,
+                &observation.event_id,
+            )),
+            (None, false) => Some(Ok(())),
+            (None, true) => None,
+        })
+    }
+
+    /// Opens (or touches) the session a brief was served to and keeps the repo-relative files
+    /// the hook saw, redacted, at most 20, for step 5's ranking. Nothing is pending.
+    pub async fn record_session_files(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        work: &WorkContext,
+        recent_files: &[String],
+    ) -> Result<()> {
+        if session_id.trim().is_empty() {
+            return Err(StoreError::Validation(
+                "session_id must not be empty".into(),
+            ));
+        }
+        let files: Vec<String> = recent_files
+            .iter()
+            .take(RECENT_FILES_MAX)
+            .map(|file| clip(&redact_sensitive_content(file), RECENT_FILE_MAX_BYTES))
+            .collect();
+        upsert_session(
+            &self.pool,
+            person_id,
+            session_id,
+            None,
+            &redact_work_context(work),
+            &files,
+            false,
+        )
+        .await
     }
 
     async fn session_context(
@@ -168,7 +220,7 @@ impl Store {
         session_id: &str,
     ) -> Result<Vec<Observation>> {
         let rows = sqlx::query(
-            "SELECT event_id, session_id, role, source, content, content_hash, context,
+            "SELECT event_id, session_id, role, source, kind, ok, content, content_hash, context,
                     EXTRACT(EPOCH FROM captured_at)::bigint AS captured_at,
                     EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at
                FROM observations
@@ -186,6 +238,11 @@ impl Store {
                     session_id: r.try_get("session_id")?,
                     role: r.try_get("role")?,
                     source: r.try_get("source")?,
+                    kind: r
+                        .try_get::<String, _>("kind")?
+                        .parse()
+                        .map_err(StoreError::Validation)?,
+                    ok: r.try_get("ok")?,
                     content: r.try_get("content")?,
                     content_hash: r.try_get("content_hash")?,
                     context: serde_json::from_value(r.try_get("context")?).unwrap_or_default(),
@@ -343,25 +400,32 @@ async fn upsert_session(
     session_id: &str,
     project_id: Option<&str>,
     work: &WorkContext,
+    recent_files: &[String],
     pending: bool,
 ) -> Result<()> {
-    // Only the git state is kept on the session; NULL means "nothing new to remember".
+    // Only the git state and the recent files are kept on the session; a later write merges
+    // over the keys it carries and NULL means "nothing new to remember".
     let has_git = work.repository.is_some()
         || work.branch.is_some()
         || work.worktree.is_some()
         || work.commit.is_some();
-    let context = has_git.then(|| {
-        serde_json::json!({
-            "repository": work.repository, "branch": work.branch,
-            "worktree": work.worktree, "commit": work.commit,
-        })
-    });
+    let mut context = serde_json::Map::new();
+    if has_git {
+        context.insert("repository".into(), work.repository.clone().into());
+        context.insert("branch".into(), work.branch.clone().into());
+        context.insert("worktree".into(), work.worktree.clone().into());
+        context.insert("commit".into(), work.commit.clone().into());
+    }
+    if !recent_files.is_empty() {
+        context.insert("recent_files".into(), recent_files.into());
+    }
+    let context = (!context.is_empty()).then_some(serde_json::Value::Object(context));
     sqlx::query(
         "INSERT INTO sessions (person_id, session_id, project_id, context, pending_since)
          VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb), CASE WHEN $5 THEN now() END)
          ON CONFLICT (person_id, session_id) DO UPDATE
             SET project_id = COALESCE(EXCLUDED.project_id, sessions.project_id),
-                context = COALESCE($4::jsonb, sessions.context),
+                context = sessions.context || COALESCE($4::jsonb, '{}'::jsonb),
                 ended_at = CASE WHEN $5 THEN NULL ELSE sessions.ended_at END,
                 pending_since = CASE WHEN $5 THEN COALESCE(sessions.pending_since, now()) ELSE sessions.pending_since END",
     )
@@ -373,4 +437,12 @@ async fn upsert_session(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+fn clip(text: &str, max_bytes: usize) -> String {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }

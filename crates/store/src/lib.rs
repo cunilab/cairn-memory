@@ -19,10 +19,16 @@ use sqlx::{Executor, PgPool};
 use std::str::FromStr;
 
 /// `migrations/NNNN_*.sql`, applied in order. Each runs in one transaction.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_foundation",
-    include_str!("../../../migrations/0001_foundation.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_foundation",
+        include_str!("../../../migrations/0001_foundation.sql"),
+    ),
+    (
+        "0002_capture",
+        include_str!("../../../migrations/0002_capture.sql"),
+    ),
+];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on
 /// `CREATE EXTENSION`.

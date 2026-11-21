@@ -5,7 +5,7 @@ pub mod redact;
 pub mod session;
 
 pub use observation::{
-    CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
+    CaptureKind, CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
 };
 pub use redact::{REDACTED, redact_sensitive_content, redact_work_context};
 pub use session::Session;

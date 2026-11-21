@@ -7,8 +7,7 @@ use cairn_store::testing::TestDb;
 
 fn observation(event: &str, session: &str, content: &str) -> ObservationInput {
     serde_json::from_value(serde_json::json!({
-        "event_id": event, "session_id": session, "content": content, "role": "assistant",
-        "source": "hook", "importance": "high",
+        "event_id": event, "session_id": session, "content": content, "kind": "assistant",
         "context": {"repository": "github.com/acme/cairn", "branch": "main", "files": ["src/a.rs"]}
     }))
     .unwrap()
@@ -86,13 +85,13 @@ async fn bare_project_context_inherits_the_session_context() {
     };
     let me = db.person("me").await;
     let first: ObservationInput = serde_json::from_value(serde_json::json!({
-        "event_id": "e0", "session_id": "s1", "content": "x", "role": "user", "source": "cli",
+        "event_id": "e0", "session_id": "s1", "content": "x", "kind": "prompt",
         "context": {"branch": "feature"}
     }))
     .unwrap();
     db.store.capture(&me, first).await.unwrap();
     let bare: ObservationInput = serde_json::from_value(serde_json::json!({
-        "event_id": "e1", "session_id": "s1", "content": "x", "role": "user", "source": "cli"
+        "event_id": "e1", "session_id": "s1", "content": "y", "kind": "prompt"
     }))
     .unwrap();
     db.store.capture(&me, bare).await.unwrap();
@@ -249,5 +248,119 @@ async fn sweep_closes_idle_sessions_and_deletes_old_rows() {
         0,
         "closed sessions are not closed twice"
     );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn same_session_same_content_is_duplicate() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let first = db
+        .store
+        .capture(&me, observation("e1", "s1", "cargo test"))
+        .await
+        .unwrap();
+    assert!(!first.duplicate);
+    // A new event id with the same content in the same session writes nothing.
+    let again = db
+        .store
+        .capture(&me, observation("e2", "s1", "cargo test"))
+        .await
+        .unwrap();
+    assert!(again.accepted && again.duplicate);
+    assert_eq!(again.event_id, "e2");
+    assert_eq!(
+        db.store
+            .session_observations(&me, "s1")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Another session, another kind, or another person is not a duplicate.
+    assert!(
+        !db.store
+            .capture(&me, observation("e3", "s2", "cargo test"))
+            .await
+            .unwrap()
+            .duplicate
+    );
+    let mut command = observation("e4", "s1", "cargo test");
+    command.kind = cairn_core::capture::CaptureKind::Command;
+    assert!(!db.store.capture(&me, command).await.unwrap().duplicate);
+    let other = db.person("other").await;
+    assert!(
+        !db.store
+            .capture(&other, observation("e5", "s1", "cargo test"))
+            .await
+            .unwrap()
+            .duplicate
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn kind_ok_role_and_source_are_stored() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let mut input = observation("e1", "s1", "cargo test\nexit 101: boom");
+    input.kind = cairn_core::capture::CaptureKind::Command;
+    input.ok = Some(false);
+    db.store.capture(&me, input).await.unwrap();
+    db.store
+        .capture(&me, observation("e2", "s1", "done"))
+        .await
+        .unwrap();
+    let stored = db.store.session_observations(&me, "s1").await.unwrap();
+    let key = |i: usize| {
+        let o = &stored[i];
+        (o.kind.as_str(), o.ok, o.role.as_str(), o.source.as_str())
+    };
+    assert_eq!(key(0), ("command", Some(false), "tool", "command"));
+    assert_eq!(key(1), ("assistant", None, "assistant", "assistant"));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_session_keeps_recent_files_across_captures() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext {
+        repository: Some("github.com/acme/cairn".into()),
+        branch: Some("main".into()),
+        ..WorkContext::default()
+    };
+    let files = vec!["src/a.rs".to_owned(), "password=hunter2".to_owned()];
+    db.store
+        .record_session_files(&me, "s1", &work, &files)
+        .await
+        .unwrap();
+    db.store
+        .capture(&me, observation("e1", "s1", "work"))
+        .await
+        .unwrap();
+    let context: serde_json::Value = sqlx::query_scalar(
+        "SELECT context FROM sessions WHERE person_id = $1 AND session_id = 's1'",
+    )
+    .bind(&me)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(context["recent_files"][0], "src/a.rs");
+    assert!(
+        !context["recent_files"][1]
+            .as_str()
+            .unwrap()
+            .contains("hunter2")
+    );
+    assert_eq!(context["branch"], "main");
+    // A session opened by the brief has nothing to distill.
+    assert!(!db.store.end_session(&me, "unused").await.unwrap());
     db.finish().await;
 }

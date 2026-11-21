@@ -8,6 +8,7 @@ description = "Layer 1 personal memory capture and recall primitives for Cairn M
 [dependencies]
 argon2.workspace = true
 rand.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

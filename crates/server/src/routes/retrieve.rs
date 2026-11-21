@@ -36,8 +36,20 @@ pub struct Search {
     context: Option<WorkContext>,
 }
 
+/// `session_id` is optional only for the Python hook, until step 4 chunk 3 deletes it.
 #[derive(Deserialize)]
 pub struct Brief {
+    #[serde(default, rename = "sessionId", alias = "session_id")]
+    session_id: Option<String>,
+    #[serde(default)]
+    context: Option<WorkContext>,
+    #[serde(default)]
+    recent_files: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Topic {
+    path: String,
     #[serde(default)]
     context: Option<WorkContext>,
 }
@@ -91,13 +103,37 @@ pub async fn brief(
     Agent(account): Agent,
     Json(body): Json<Brief>,
 ) -> Result<Json<Value>, ApiError> {
-    let brief = state
-        .store
-        .brief(&account.person_id, &body.context.unwrap_or_default())
-        .await?;
+    let context = body.context.unwrap_or_default();
+    if let Some(session_id) = &body.session_id {
+        state
+            .store
+            .record_session_files(&account.person_id, session_id, &context, &body.recent_files)
+            .await?;
+    }
+    let brief = state.store.brief(&account.person_id, &context).await?;
     Ok(Json(
         json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES}),
     ))
+}
+
+/// Notes whose file entity is exactly `path`, at most two; never counted as a fetch.
+pub async fn topic(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Json(body): Json<Topic>,
+) -> Result<Json<Value>, ApiError> {
+    if body.path.trim().is_empty() {
+        return Err(ApiError::invalid("path must not be empty"));
+    }
+    let notes = state
+        .store
+        .topic_notes(
+            &account.person_id,
+            &body.path,
+            &body.context.unwrap_or_default(),
+        )
+        .await?;
+    Ok(Json(json!({"notes": notes})))
 }
 
 pub async fn graph(

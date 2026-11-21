@@ -18,7 +18,9 @@ async fn session_distills_into_notes_and_a_handoff() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let context = json!({"repository": "r", "branch": "main", "files": ["src/queue.rs"]});
-    let event = |id: &str, content: &str| json!({"eventId": id, "sessionId": "s1", "role": "assistant", "source": "hook", "content": content, "context": context, "importance": "high"});
+    let event = |id: &str, content: &str| json!({"event_id": id, "session_id": "s1", "kind": "assistant", "content": content, "context": context});
+    // The Python hook's shape, until step 4 chunk 3 deletes `sync/push`.
+    let legacy = |id: &str, content: &str| json!({"eventId": id, "sessionId": "s1", "role": "assistant", "source": "hook", "content": content, "context": context, "importance": "high"});
     let first = app
         .post(
             "observe",
@@ -36,7 +38,7 @@ async fn session_distills_into_notes_and_a_handoff() {
     let replay = app
         .post(
             "sync/push",
-            event(
+            legacy(
                 "e1",
                 "Decision: use SKIP LOCKED for the queue\nReason: one datastore",
             ),
@@ -551,5 +553,162 @@ async fn job_queue_is_admin_only_and_idle_worker_is_a_no_op() {
         .0,
         404
     );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn observe_is_typed_and_deduped_and_sync_push_maps_the_old_shape() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    for bad in [
+        json!({"event_id": "x", "session_id": "s", "kind": "prompt", "content": "c", "role": "user"}),
+        json!({"event_id": "x", "session_id": "s", "kind": "tool", "content": "c"}),
+        json!({"event_id": "x", "session_id": "s", "content": "c"}),
+    ] {
+        let (status, body) = app.send("POST", "observe", bad, Some(&device)).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (400, Some("validation")),
+            "{body}"
+        );
+    }
+    let command = json!({"event_id": "c1", "session_id": "s", "kind": "command", "ok": false, "content": "cargo test\nexit 101: boom"});
+    let first = app.post("observe", command.clone(), &device).await;
+    assert_eq!(first["duplicate"], false);
+    let mut again = command;
+    again["event_id"] = "c2".into();
+    let again = app.post("observe", again, &device).await;
+    assert_eq!(
+        (again["accepted"].as_bool(), again["duplicate"].as_bool()),
+        (Some(true), Some(true))
+    );
+    assert_eq!(again["event_id"], "c2");
+
+    for (id, role) in [
+        ("l1", "user"),
+        ("l2", "assistant"),
+        ("l3", "tool"),
+        ("l4", "agent"),
+    ] {
+        app.post(
+            "sync/push",
+            json!({"eventId": id, "sessionId": "s", "role": role, "source": "hook", "content": format!("legacy {role}")}),
+            &device,
+        )
+        .await;
+    }
+    let rows: Vec<(String, String, String, String, Option<bool>)> = sqlx::query_as(
+        "SELECT event_id, kind, role, source, ok FROM observations WHERE event_id LIKE 'l%' ORDER BY event_id",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|r| (r.0.as_str(), r.1.as_str(), r.2.as_str(), r.3.as_str(), r.4))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("l1", "prompt", "user", "prompt", None),
+            ("l2", "assistant", "assistant", "assistant", None),
+            ("l3", "command", "tool", "command", None),
+            ("l4", "command", "tool", "command", None),
+        ]
+    );
+    let ok: Option<bool> = sqlx::query_scalar("SELECT ok FROM observations WHERE event_id = 'c1'")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(ok, Some(false));
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let id = save(
+        &app,
+        &device,
+        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock", "summary": "Hold the lock first.", "reason": "r",
+               "fields": {"symptom": "hang", "cause": "order", "fix": "lock first"},
+               "context": {"files": ["src/queue.rs"]}}),
+    )
+    .await;
+    let reply = app
+        .post(
+            "session/topic",
+            json!({"path": "src/queue.rs", "context": {}}),
+            &device,
+        )
+        .await;
+    assert_eq!(reply["notes"].as_array().unwrap().len(), 1, "{reply}");
+    assert_eq!(
+        (
+            reply["notes"][0]["id"].as_str(),
+            reply["notes"][0]["title"].as_str(),
+            reply["notes"][0]["summary"].as_str()
+        ),
+        (
+            Some(id.as_str()),
+            Some("Queue lock"),
+            Some("Hold the lock first.")
+        )
+    );
+    let none = app
+        .post(
+            "session/topic",
+            json!({"path": "src/queue", "context": {}}),
+            &device,
+        )
+        .await;
+    assert_eq!(none["notes"], json!([]));
+    let (status, _) = app
+        .send(
+            "POST",
+            "session/topic",
+            json!({"path": " ", "context": {}}),
+            Some(&device),
+        )
+        .await;
+    assert_eq!(status, 400);
+    let (status, _) = app
+        .send(
+            "POST",
+            "session/topic",
+            json!({"path": "src/queue.rs"}),
+            None,
+        )
+        .await;
+    assert_eq!(status, 401);
+    let used: i64 = sqlx::query_scalar("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(used, 0, "a topic note is not a fetch");
+
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "s9", "context": {"branch": "main"}, "recent_files": ["src/queue.rs", "token=abc123"]}),
+            &device,
+        )
+        .await;
+    assert!(brief["brief"].as_str().unwrap().len() <= 1200);
+    assert_eq!(brief["max_bytes"], 1200);
+    let files: serde_json::Value =
+        sqlx::query_scalar("SELECT context->'recent_files' FROM sessions WHERE session_id = 's9'")
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(files, json!(["src/queue.rs", "token=[REDACTED]"]));
+    // The Python hook sends no session id and still gets a brief.
+    let old = app
+        .post("session/brief", json!({"context": {}}), &device)
+        .await;
+    assert!(old["brief"].is_string());
     app.finish().await;
 }
