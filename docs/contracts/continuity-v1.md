@@ -7,7 +7,7 @@ status: draft
 # Layer 2 Branch-Aware Continuity
 
 This contract describes retrieval and session continuity in the 0.1.6 server: scopes and filters, hybrid recall,
-the relevance floor, session handoffs, background jobs, consolidation, links, the session brief and save
+the relevance gate, session handoffs, background jobs, consolidation, links, the session brief and save
 identity. The design source is the [0.1.6 foundation specification](../specs/0.1.6-foundation.md). The
 0.1.5 text (similarity reviews, lifecycle fields, session summaries, the file store, import) is retired with its
 code.
@@ -45,9 +45,10 @@ Three channels run over the rows visible to the caller, each returning at most 5
 | Vector | cosine distance on the HNSW index, using the 384-dimension MiniLM embedding of the query; absent when no model is loaded |
 
 Channels are fused by reciprocal rank (k = 60), then one-hop link neighbours of the top hits are added
-(`supersedes` and `contradicts` are not hops). Scores are multiplied by a kind weight (rule and decision 3.0,
-handoff 1.0, every other kind 2.0) and by a feedback multiplier: each `helpful` vote adds 0.15 and each `wrong`
-vote subtracts 0.15, capped at ±0.45; fetching never raises a score. Votes count distinct people. A memory goes `stale` after `wrong` votes from two people,
+(`supersedes` and `contradicts` are not hops). A relevance gate keeps a hit with an entity match, at least half of the query's words, or enough
+embedding cosine (0.40, or 0.25 with some word in common); scores are then multiplied by `1 + a`, where `a` sums
+scope closeness, staleness, freshness, feedback (±0.05 per net `helpful`/`wrong` vote, at most ±0.10) and kind,
+capped at ±0.30 (CM-SPEC-007 §4.4); fetching never raises a score. Votes count distinct people. A memory goes `stale` after `wrong` votes from two people,
 or one from its owner; a stale memory is still returned, with `status:"stale"` on its card; superseded and forgotten memories are not returned. The vector channel takes its top candidates before the visibility join; nothing from another person
 leaves the store, because the rule is applied in the same query before ids are returned.
 
@@ -123,10 +124,10 @@ what replaced or contradicts what.
 
 ## Session-start brief (v0.1.4)
 
-`POST /session/brief` returns text of at most 4,096 bytes, fenced as data: the latest matching handoff, up to
-three project rules and decisions for the context's project, and up to two personal preferences, each section
-bounded, ordered by feedback multiplier, newest and id. Only active memories are included; global memories are
-not. The hook injects it at session start.
+`POST /session/brief` returns text of at most 1,200 bytes, fenced as data: the latest handoff for the
+context's repository, branch and worktree, the project's rules, decisions and gotchas ranked by overlap with the
+request's `recent_files`, branch, feedback and freshness (CM-SPEC-007 §4.6), and up to two personal preferences.
+Only active memories are included; global memories are not. The hook injects it at session start.
 
 ## Explicit-save identity (v0.1.6)
 

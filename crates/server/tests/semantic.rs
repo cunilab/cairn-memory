@@ -72,15 +72,13 @@ async fn meaning_finds_memories_and_never_crosses_people() {
             .unwrap()
             .is_empty()
     );
-    // At step 2 the relevance floor still drops a hit that shares no word with the query
-    // (the baseline paraphrase hit@5 is 0.0 for the same reason); step 5 changes that.
-    assert!(
-        ids(&app
-            .post("search", json!({"query": paraphrase}), &alice)
-            .await)
-        .is_empty()
-    );
-    // A query that clears the floor finds it for alice and reaches nothing for bob.
+    // The gate keeps a paraphrase on cosine alone (`semantic_paraphrase_found`), for alice only.
+    let found = app
+        .post("search", json!({"query": paraphrase}), &alice)
+        .await;
+    assert_eq!(ids(&found).first(), Some(&mine), "{found}");
+    assert!(ids(&app.post("search", json!({"query": paraphrase}), &bob).await).is_empty());
+    // A query that shares words finds it for alice and reaches nothing for bob.
     let query = json!({"query": "invoices render blank page with emoji"});
     assert_eq!(
         ids(&app.post("search", query.clone(), &alice).await).first(),

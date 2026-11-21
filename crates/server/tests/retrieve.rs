@@ -691,3 +691,137 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
     assert!((400..500).contains(&status), "a brief needs a session id");
     app.finish().await;
 }
+
+#[tokio::test]
+async fn search_budget_caps_bytes_and_kind_filters() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    for n in 0..10 {
+        save(&app, &admin, json!({"kind": "fact", "title": format!("Ledger audit trail {n}"), "summary": "Ledger audit trail entries ".repeat(8).trim(), "reason": "ops", "scope": "personal"})).await;
+    }
+    save(&app, &admin, json!({"kind": "rule", "title": "Ledger audit rule", "summary": "Audit the ledger weekly.", "reason": "ops", "scope": "personal"})).await;
+    let all = app
+        .post(
+            "search",
+            json!({"query": "ledger audit trail", "limit": 20}),
+            &admin,
+        )
+        .await;
+    assert_eq!(all["results"].as_array().unwrap().len(), 11, "{all}");
+    let small = app
+        .post(
+            "search",
+            json!({"query": "ledger audit trail", "limit": 20, "budget": 200}),
+            &admin,
+        )
+        .await;
+    assert!(
+        small.to_string().len() <= 800 + 64,
+        "{}",
+        small.to_string().len()
+    );
+    let cards = small["results"].as_array().unwrap().len();
+    assert!((1..11).contains(&cards), "{small}");
+    assert_eq!(small["more"].as_u64(), Some(11 - cards as u64));
+    let rules = app
+        .post(
+            "search",
+            json!({"query": "ledger audit trail", "kind": "rule"}),
+            &admin,
+        )
+        .await;
+    assert_eq!(rules["results"].as_array().unwrap().len(), 1, "{rules}");
+    assert_eq!(rules["results"][0]["kind"], "rule");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn only_search_and_get_count_usage() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let id = save(
+        &app,
+        &device,
+        json!({"kind": "gotcha", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail.", "reason": "r",
+               "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": {"files": ["src/usage.rs"]}}),
+    )
+    .await;
+    let fetched = || async {
+        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap()
+    };
+    app.post(
+        "session/topic",
+        json!({"path": "src/usage.rs", "context": {}}),
+        &device,
+    )
+    .await;
+    app.post(
+        "session/brief",
+        json!({"session_id": "s1", "context": {}, "recent_files": ["src/usage.rs"]}),
+        &device,
+    )
+    .await;
+    app.get("memories", &admin).await;
+    app.get("graph", &admin).await;
+    assert_eq!(fetched().await, 0, "topic, brief and web reads never count");
+    app.post("search", json!({"query": "ledger audit"}), &device)
+        .await;
+    assert_eq!(fetched().await, 1);
+    app.post("get", json!({"ids": [&id]}), &device).await;
+    assert_eq!(fetched().await, 2);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn brief_uses_recent_files() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "r", "name": "R"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let context = |file: &str| json!({"project_id": pid, "repository": "r", "files": [file]});
+    for (title, file) in [
+        ("Queue lock order", "src/jobs/queue.rs"),
+        ("Docs build flag", "docs/build.md"),
+    ] {
+        save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it.", "reason": "r",
+            "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": context(file)})).await;
+    }
+    let brief = |recent: serde_json::Value| {
+        let (app, device) = (&app, &device);
+        async move {
+            let reply = app
+                .post(
+                    "session/brief",
+                    json!({"session_id": "s1", "context": {"project_id": pid}, "recent_files": recent}),
+                    device,
+                )
+                .await;
+            reply["brief"].as_str().unwrap().to_owned()
+        }
+    };
+    let position = |text: &str, title: &str| {
+        text.find(title)
+            .unwrap_or_else(|| panic!("{title} in {text}"))
+    };
+    let touching_queue = brief(json!(["src/jobs/worker.rs"])).await;
+    assert!(
+        position(&touching_queue, "Queue lock order")
+            < position(&touching_queue, "Docs build flag")
+    );
+    let touching_docs = brief(json!(["docs/build.md"])).await;
+    assert!(
+        position(&touching_docs, "Docs build flag") < position(&touching_docs, "Queue lock order")
+    );
+    app.finish().await;
+}

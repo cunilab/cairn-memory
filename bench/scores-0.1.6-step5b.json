@@ -1,0 +1,521 @@
+{
+  "questions": [
+    {
+      "id": "q01",
+      "kind": "direct",
+      "query": "why do we use SKIP LOCKED for background jobs",
+      "gold": {
+        "dec-queue-postgres": {
+          "cosine": 0.555334210395813,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q02",
+      "kind": "direct",
+      "query": "how do clients select the API version",
+      "gold": {
+        "dec-api-versioning-header": {
+          "cosine": 0.6385106444358826,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q03",
+      "kind": "direct",
+      "query": "CORS error only in staging for the admin console",
+      "gold": {
+        "got-cors-preflight": {
+          "cosine": 0.7158553004264832,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q04",
+      "kind": "direct",
+      "query": "steps to cut a production release",
+      "gold": {
+        "proc-release": {
+          "cosine": 0.5627565979957581,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q05",
+      "kind": "direct",
+      "query": "attachment upload size limit",
+      "gold": {
+        "fact-max-upload": {
+          "cosine": 0.7755836248397827,
+          "coverage": 0.75,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q06",
+      "kind": "direct",
+      "query": "how many changed lines may a pull request have",
+      "gold": {
+        "rule-pr-small": {
+          "cosine": 0.7771729230880737,
+          "coverage": 0.6666666865348816,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q07",
+      "kind": "direct",
+      "query": "Sydney daily revenue report is off by one day",
+      "gold": {
+        "got-timezone-report": {
+          "cosine": 0.8709818124771118,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q08",
+      "kind": "direct",
+      "query": "which provider handles card payments and bank debits",
+      "gold": {
+        "fact-payment-provider": {
+          "cosine": 0.631937563419342,
+          "coverage": 0.8333333134651184,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q09",
+      "kind": "direct",
+      "query": "health check times out while PDF rendering runs",
+      "gold": {
+        "got-tokio-blocking": {
+          "cosine": 0.7049890756607056,
+          "coverage": 0.8333333134651184,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q10",
+      "kind": "direct",
+      "query": "how do I restore the database from a backup",
+      "gold": {
+        "proc-restore-backup": {
+          "cosine": 0.5055947303771973,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q11",
+      "kind": "direct",
+      "query": "what remains on the refund endpoint",
+      "gold": {
+        "hand-refund-api": {
+          "cosine": 0.6702943444252014,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q12",
+      "kind": "direct",
+      "query": "Typst invoice template fonts and right-to-left names",
+      "gold": {
+        "sess-typst": {
+          "cosine": 0.7361767888069153,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q13",
+      "kind": "direct",
+      "query": "when must a feature flag be removed after rollout",
+      "gold": {
+        "rule-feature-flag-cleanup": {
+          "cosine": 0.7474876642227173,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q14",
+      "kind": "paraphrase",
+      "query": "users paid two times when the vendor resent callbacks",
+      "gold": {
+        "got-webhook-duplicates": {
+          "cosine": 0.4945465624332428,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-webhook-replay": {
+          "cosine": 0.5189973711967468,
+          "coverage": 0.1428571492433548,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q15",
+      "kind": "paraphrase",
+      "query": "how should prices be represented to stop fractional slips",
+      "gold": {
+        "dec-money-integer-cents": {
+          "cosine": 0.45837441086769104,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-money-minor-units": {
+          "cosine": 0.39532890915870667,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q16",
+      "kind": "paraphrase",
+      "query": "which geographic area hosts the platform",
+      "gold": {
+        "fact-prod-region": {
+          "cosine": 0.4732631742954254,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q17",
+      "kind": "paraphrase",
+      "query": "who answers pages this week",
+      "gold": {
+        "fact-oncall": {
+          "cosine": 0.3938028812408447,
+          "coverage": 0.6666666865348816,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q18",
+      "kind": "paraphrase",
+      "query": "a mandatory field on the giant relation froze the rollout",
+      "gold": {
+        "got-migration-lock": {
+          "cosine": 0.35109665989875793,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      }
+    },
+    {
+      "id": "q19",
+      "kind": "paraphrase",
+      "query": "identifiers look wrong for huge numeric values in the browser",
+      "gold": {
+        "got-json-bigint": {
+          "cosine": 0.6375913619995117,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q20",
+      "kind": "paraphrase",
+      "query": "the job that fetches fiscal percentages for Europe each night",
+      "gold": {
+        "fact-vat-sync": {
+          "cosine": 0.3033105432987213,
+          "coverage": 0.1666666716337204,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q21",
+      "kind": "near_duplicate",
+      "query": "idempotency key required on payment requests",
+      "gold": {
+        "rule-idempotency-keys": {
+          "cosine": 0.7147566080093384,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-idempotency-header": {
+          "cosine": 0.7631366848945618,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q22",
+      "kind": "near_duplicate",
+      "query": "do not log customer email or card numbers",
+      "gold": {
+        "rule-log-no-pii": {
+          "cosine": 0.7833065986633301,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-log-pii": {
+          "cosine": 0.6172768473625183,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q23",
+      "kind": "near_duplicate",
+      "query": "drop a column only one release after code stops using it",
+      "gold": {
+        "rule-migrations-additive": {
+          "cosine": 0.4665435254573822,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-migration-expand-contract": {
+          "cosine": 0.4780454933643341,
+          "coverage": 0.8571428656578064,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q24",
+      "kind": "near_duplicate",
+      "query": "connection pool exhausted by a long report query",
+      "gold": {
+        "got-timeout-pool": {
+          "cosine": 0.7426967620849609,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-pool-exhaustion": {
+          "cosine": 0.7354454398155212,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    },
+    {
+      "id": "q25",
+      "kind": "near_duplicate",
+      "query": "webhook retried and the charge booked twice",
+      "gold": {
+        "got-webhook-duplicates": {
+          "cosine": 0.7708704471588135,
+          "coverage": 1.0,
+          "entity_hit": false,
+          "kept": true
+        },
+        "dup-webhook-replay": {
+          "cosine": 0.7682707905769348,
+          "coverage": 0.800000011920929,
+          "entity_hit": false,
+          "kept": true
+        }
+      }
+    }
+  ],
+  "weak": [
+    {
+      "id": "w1",
+      "query": "quantum chromodynamics lattice simulation",
+      "top3": [
+        {
+          "memory": "dec-pdf-typst",
+          "cosine": 0.09235676378011703,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-frontend-spa",
+          "cosine": 0.08525584638118744,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-monorepo-workspace",
+          "cosine": 0.08289442211389542,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w2",
+      "query": "sourdough starter hydration ratio",
+      "top3": [
+        {
+          "memory": "dist-coffee",
+          "cosine": 0.19936832785606384,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-deploy-rolling-drain",
+          "cosine": 0.167432501912117,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "sess-otel",
+          "cosine": 0.14018312096595764,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w3",
+      "query": "xyzzy plugh frobnicate",
+      "top3": [
+        {
+          "memory": "dec-deploy-rolling-drain",
+          "cosine": 0.11884415149688721,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dist-coffee",
+          "cosine": 0.1131267175078392,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "dec-frontend-spa",
+          "cosine": 0.1034177914261818,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w4",
+      "query": "Premier League fixtures this weekend",
+      "top3": [
+        {
+          "memory": "dist-offsite",
+          "cosine": 0.34635043144226074,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "got-timezone-report",
+          "cosine": 0.185241237282753,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "fact-pg-version",
+          "cosine": 0.1744823306798935,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    },
+    {
+      "id": "w5",
+      "query": "guitar tuning for drop D",
+      "top3": [
+        {
+          "memory": "hand-checkout-perf",
+          "cosine": 0.1264638751745224,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "hand-search-trgm",
+          "cosine": 0.12643153965473175,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        },
+        {
+          "memory": "rule-pr-small",
+          "cosine": 0.12227477133274078,
+          "coverage": 0.0,
+          "entity_hit": false,
+          "kept": false
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "paraphrase_best_gold_cosines_desc": [
+      0.6375913619995117,
+      0.5189973711967468,
+      0.4732631742954254,
+      0.45837441086769104,
+      0.3938028812408447,
+      0.35109665989875793,
+      0.3033105432987213
+    ],
+    "fourth_paraphrase_cosine": 0.45837441086769104,
+    "max_weak_cosine": 0.34635043144226074
+  }
+}

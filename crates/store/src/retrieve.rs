@@ -6,14 +6,15 @@ use cairn_core::memory::Memory;
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::retrieve::brief::session_brief;
-use cairn_core::retrieve::filter::{Filter, matches, passes_relevance_floor};
+use cairn_core::retrieve::filter::{Filter, matches};
+use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
-use cairn_core::retrieve::hybrid::{CANDIDATES_PER_CHANNEL, POOL, fuse, kind_weight};
-use cairn_core::retrieve::pack::{Cards, Hit, cards};
-use cairn_core::retrieve::rank::multiplier;
+use cairn_core::retrieve::hybrid::{CANDIDATES_PER_CHANNEL, POOL, fuse};
+use cairn_core::retrieve::pack::{Cards, Hit, pack};
+use cairn_core::retrieve::rank::adjust;
 use serde::Serialize;
 use sqlx::Row;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Fused hits whose neighbours are added to the candidate pool.
 const NEIGHBOUR_SEEDS: usize = 32;
@@ -26,6 +27,24 @@ pub struct Candidate {
     pub cosine: Option<f32>,
     /// Share of the query's lexemes the memory's text contains, 0.0..=1.0.
     pub coverage: f32,
+}
+
+/// One fused candidate before the gate: the numbers calibration reads (`bench.py --dump-scores`).
+#[derive(Clone, Debug, Serialize)]
+pub struct Trace {
+    pub id: String,
+    pub rrf: f32,
+    pub cosine: Option<f32>,
+    pub coverage: f32,
+    pub entity_hit: bool,
+    pub kept: bool,
+}
+
+/// The fused candidates of one query, loaded with the gate inputs.
+struct Pool {
+    fused: Vec<(String, f32)>,
+    entity_hits: HashSet<String>,
+    by_id: HashMap<String, Candidate>,
 }
 
 /// Counts for `GET /diagnose`: what the person can see, and their own share of the job queue.
@@ -214,30 +233,64 @@ impl Store {
 
     /// Hybrid search. Every candidate channel, the neighbour expansion and the final load apply
     /// the search rule (`searchable`), so no hit can come from another person's private memory;
-    /// the vector channel applies it inside the index scan.
+    /// the vector channel applies it inside the index scan. Hits pass the relevance gate, are
+    /// scored `RRF * (1 + adjust)` and packed under the diversity cap, `budget` tokens and `limit`.
+    /// An agent read counts as a fetch; nothing else does.
     pub async fn search(
         &self,
         person_id: &str,
         query: &str,
         vector: Option<&[f32]>,
         limit: usize,
+        budget: usize,
         filter: &Filter,
     ) -> Result<Cards> {
-        let hits = self.rank(person_id, query, vector, filter).await?;
-        let cards = cards(hits, limit);
+        let pool = self
+            .candidate_pool(person_id, query, vector, filter)
+            .await?;
+        let hits = rank(&pool, filter, cairn_core::id::now_seconds());
+        let cards = pack(&hits, limit, budget);
         let ids: Vec<String> = cards.results.iter().map(|c| c.id.clone()).collect();
-        // An agent read counts as a fetch; the person's own pages use `get` and `list`.
         self.mark_fetched(&ids).await?;
         Ok(cards)
     }
 
-    async fn rank(
+    /// Every fused candidate with its gate inputs and whether the gate keeps it, for calibration.
+    pub async fn score_trace(
         &self,
         person_id: &str,
         query: &str,
         vector: Option<&[f32]>,
         filter: &Filter,
-    ) -> Result<Vec<Hit>> {
+    ) -> Result<Vec<Trace>> {
+        let pool = self
+            .candidate_pool(person_id, query, vector, filter)
+            .await?;
+        Ok(pool
+            .fused
+            .iter()
+            .filter_map(|(id, rrf)| {
+                let c = pool.by_id.get(id)?;
+                let input = gate_input(&pool, id, c);
+                Some(Trace {
+                    id: id.clone(),
+                    rrf: *rrf,
+                    cosine: c.cosine,
+                    coverage: c.coverage,
+                    entity_hit: input.entity_hit,
+                    kept: gate::keep(&input),
+                })
+            })
+            .collect())
+    }
+
+    async fn candidate_pool(
+        &self,
+        person_id: &str,
+        query: &str,
+        vector: Option<&[f32]>,
+        filter: &Filter,
+    ) -> Result<Pool> {
         if query.trim().is_empty() {
             return Err(crate::StoreError::Validation(
                 "query must not be empty".into(),
@@ -262,35 +315,23 @@ impl Store {
             }
             None => Vec::new(),
         };
+        let entity_hits: HashSet<String> = entity.iter().map(|(id, _)| id.clone()).collect();
         let seeds = fuse(vec![lexical.clone(), entity.clone(), semantic.clone()]);
         let neighbours = self.neighbours(person_id, &projects, &seeds).await?;
         let mut fused = fuse(vec![lexical, entity, semantic, neighbours]);
         fused.truncate(POOL);
         let ids: Vec<String> = fused.iter().map(|(id, _)| id.clone()).collect();
-        let by_id: HashMap<String, Candidate> = self
+        let by_id = self
             .load_candidates(person_id, &projects, &ids, query, vector)
             .await?
             .into_iter()
             .map(|c| (c.memory.id.clone(), c))
             .collect();
-        let mut hits: Vec<Hit> = fused
-            .into_iter()
-            .filter_map(|(id, score)| {
-                let memory = by_id.get(&id)?.memory.clone();
-                let eligible = matches(&memory, filter) && passes_relevance_floor(&memory, query);
-                eligible.then(|| Hit {
-                    score: score * kind_weight(memory.kind) * multiplier(&memory.usage),
-                    memory,
-                })
-            })
-            .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
-                .then_with(|| a.memory.id.cmp(&b.memory.id))
-        });
-        Ok(hits)
+        Ok(Pool {
+            fused,
+            entity_hits,
+            by_id,
+        })
     }
 
     /// The fused candidates as full memories, each with the relevance-gate inputs: the cosine to
@@ -397,25 +438,55 @@ impl Store {
             .collect())
     }
 
-    /// The fenced brief a hook injects at session start.
-    pub async fn brief(&self, person_id: &str, context: &WorkContext) -> Result<String> {
+    /// The fenced brief a hook injects at session start: this branch's last handoff, the project's
+    /// rules, decisions and gotchas ranked by `recent_files`, branch and feedback, and the
+    /// person's preferences. Nothing is counted as fetched.
+    pub async fn brief(
+        &self,
+        person_id: &str,
+        context: &WorkContext,
+        recent_files: &[String],
+    ) -> Result<String> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
               WHERE {} AND m.status = 'active'
-                AND ((m.kind IN ('rule','decision') AND m.scope = 'project' AND m.project_id = $2)
-                     OR (m.kind IN ('preference','handoff') AND m.owner_id = $1))
-              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 500",
+                AND ((m.kind = 'handoff' AND m.owner_id = $1 AND m.repo = $3
+                      AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
+                      AND m.project_id IS NOT DISTINCT FROM $2)
+                     OR (m.kind IN ('rule','decision','gotcha') AND m.scope = 'project' AND m.project_id = $2)
+                     OR (m.kind = 'preference' AND m.owner_id = $1))
+              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT 300",
             visible("m", "$1")
         ))
         .bind(person_id)
         .bind(&context.project_id)
+        .bind(&context.repository)
+        .bind(&context.branch)
+        .bind(&context.worktree)
         .fetch_all(&self.pool)
         .await?;
-        let memories = rows
+        let mut memories = rows
             .iter()
             .map(memory_from_row)
             .collect::<Result<Vec<_>>>()?;
-        Ok(session_brief(&memories, context))
+        self.attach(person_id, &mut memories).await?;
+        let default_branch: Option<String> = match &context.project_id {
+            Some(id) => {
+                sqlx::query_scalar("SELECT default_branch FROM projects WHERE project_id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?
+                    .flatten()
+            }
+            None => None,
+        };
+        Ok(session_brief(
+            &memories,
+            context,
+            recent_files,
+            default_branch.as_deref(),
+            cairn_core::id::now_seconds(),
+        ))
     }
 
     /// Up to two active, visible notes whose file entity is exactly `path`, the caller's project
@@ -496,6 +567,39 @@ impl Store {
             self.person_job_counts(person_id).await?;
         Ok(out)
     }
+}
+
+fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {
+    GateInput {
+        entity_hit: pool.entity_hits.contains(id),
+        coverage: c.coverage,
+        cosine: c.cosine,
+    }
+}
+
+/// The hits that pass the request filter and the gate, best first: score descending, then newest,
+/// then id.
+fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
+    let ctx = filter.context.clone().unwrap_or_default();
+    let mut hits: Vec<Hit> = pool
+        .fused
+        .iter()
+        .filter_map(|(id, rrf)| {
+            let c = pool.by_id.get(id)?;
+            let eligible = matches(&c.memory, filter) && gate::keep(&gate_input(pool, id, c));
+            eligible.then(|| Hit {
+                score: rrf * (1.0 + adjust(&c.memory, &ctx, now)),
+                memory: c.memory.clone(),
+            })
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+    hits
 }
 
 /// Entity names a query can match: the paths and code spans it contains, and the work context's

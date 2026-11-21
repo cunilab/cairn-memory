@@ -52,7 +52,8 @@ async fn main() {
             eprintln!("failed to open Cairn PostgreSQL storage: {error}");
             process::exit(1);
         });
-    let state = AppState::new(store, embeddings);
+    let mut state = AppState::new(store, embeddings);
+    state.debug_scores = env::var("CAIRN_DEBUG_SCORES").as_deref() == Ok("1");
     worker::spawn(&state);
     let listener = tokio::net::TcpListener::bind(address)
         .await

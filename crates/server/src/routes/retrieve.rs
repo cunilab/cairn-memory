@@ -8,7 +8,7 @@ use cairn_core::memory::{Kind, Relation, Scope};
 use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
-use cairn_core::retrieve::pack::Cards;
+use cairn_core::retrieve::pack::{BUDGET_DEFAULT, Cards};
 use cairn_store::export::Export;
 use cairn_store::retrieve::Diagnostics;
 use serde::Deserialize;
@@ -28,12 +28,14 @@ pub struct Search {
     kind: Option<Kind>,
     #[serde(default = "five")]
     limit: usize,
-    /// Tokens; accepted and ignored until step 5.
+    /// Tokens (about bytes / 4), clamped to 200..=4000; default 1,200.
     #[serde(default)]
-    #[allow(dead_code)]
     budget: Option<usize>,
     #[serde(default)]
     context: Option<WorkContext>,
+    /// Calibration only: honoured when the server runs with `CAIRN_DEBUG_SCORES=1`.
+    #[serde(default)]
+    debug: bool,
 }
 
 #[derive(Deserialize)]
@@ -75,25 +77,32 @@ pub async fn search(
     State(state): State<AppState>,
     Agent(account): Agent,
     Json(body): Json<Search>,
-) -> ApiResult<Cards> {
+) -> Result<Json<Value>, ApiError> {
     let vector = vector(&state, &body.query).await;
     let filter = Filter {
         kind: body.kind,
         context: body.context,
         ..Filter::default()
     };
-    Ok(Json(
-        state
+    if body.debug && state.debug_scores {
+        let trace = state
             .store
-            .search(
-                &account.person_id,
-                &body.query,
-                vector.as_deref(),
-                body.limit.clamp(1, MAX_LIMIT),
-                &filter,
-            )
-            .await?,
-    ))
+            .score_trace(&account.person_id, &body.query, vector.as_deref(), &filter)
+            .await?;
+        return Ok(Json(json!({"trace": trace})));
+    }
+    let cards: Cards = state
+        .store
+        .search(
+            &account.person_id,
+            &body.query,
+            vector.as_deref(),
+            body.limit.clamp(1, MAX_LIMIT),
+            body.budget.unwrap_or(BUDGET_DEFAULT),
+            &filter,
+        )
+        .await?;
+    Ok(Json(json!(cards)))
 }
 
 pub async fn brief(
@@ -111,7 +120,10 @@ pub async fn brief(
             &body.recent_files,
         )
         .await?;
-    let brief = state.store.brief(&account.person_id, &context).await?;
+    let brief = state
+        .store
+        .brief(&account.person_id, &context, &body.recent_files)
+        .await?;
     Ok(Json(
         json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES}),
     ))

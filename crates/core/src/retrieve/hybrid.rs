@@ -1,23 +1,10 @@
-use crate::memory::Kind;
 use std::collections::{HashMap, HashSet};
 
 /// Reciprocal-rank-fusion constant. Same algorithm as 0.1.5; only the channels change in step 5.
 pub const RRF_K: f32 = 60.0;
 pub const CANDIDATES_PER_CHANNEL: usize = 64;
-/// Fused hits kept before the request filter and the relevance floor trim them.
+/// Fused hits kept before the request filter and the relevance gate trim them.
 pub const POOL: usize = 128;
-const RULE_DECISION_WEIGHT: f32 = 3.0;
-const NOTE_WEIGHT: f32 = 2.0;
-const HANDOFF_WEIGHT: f32 = 1.0;
-
-pub fn kind_weight(kind: Kind) -> f32 {
-    match kind {
-        Kind::Rule | Kind::Decision => RULE_DECISION_WEIGHT,
-        Kind::Handoff => HANDOFF_WEIGHT,
-        _ => NOTE_WEIGHT,
-    }
-}
-
 /// Fuses ranked channels (lexical, entity, semantic, neighbours). Each channel is `(id, score)`;
 /// non-finite or non-positive scores are dropped and repeats keep the best. Ties keep the order
 /// the caller gave: a channel's own order for equal scores, the first channel that listed an id for
@@ -88,11 +75,5 @@ mod tests {
             ["z", "m", "a"],
             "equal scores keep channel order, not id order"
         );
-    }
-
-    #[test]
-    fn rules_outweigh_notes() {
-        assert!(kind_weight(Kind::Rule) > kind_weight(Kind::Fact));
-        assert!(kind_weight(Kind::Fact) > kind_weight(Kind::Handoff));
     }
 }

@@ -147,7 +147,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: python3 scripts/download_embedding_model.py "$RUNNER_TEMP/cairn-minilm"
       # bench.py builds the workspace and starts its own pgvector container.
-      - run: python3 scripts/bench.py --out "$RUNNER_TEMP/bench.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --min-hit5 0.68
+      - run: python3 scripts/bench.py --out "$RUNNER_TEMP/bench.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --min-hit5 0.85 --max-weak-hits 0
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

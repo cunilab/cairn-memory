@@ -17,6 +17,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub store: Store,
     pub embeddings: Option<LocalEmbeddings>,
+    /// Lets `/search` with `debug: true` return the gate inputs; only for score calibration.
+    pub debug_scores: bool,
     limiter: Arc<AuthRateLimiter>,
 }
 
@@ -25,6 +27,7 @@ impl AppState {
         Self {
             store,
             embeddings,
+            debug_scores: false,
             limiter: Arc::new(AuthRateLimiter::default()),
         }
     }

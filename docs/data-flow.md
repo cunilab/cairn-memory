@@ -75,17 +75,18 @@ flowchart LR
     Vis --> Lex[Lexical]
     Vis --> Ent[Entity]
     Vis --> Vec[Vector]
-    Lex --> Fuse[RRF fusion and relevance floor]
+    Lex --> Fuse[RRF fusion]
     Ent --> Fuse
     Vec --> Fuse
-    Fuse --> Rank[Kind weight and usage multiplier]
-    Rank --> Pack[Compact results and more: n]
+    Fuse --> Gate[Relevance gate: entity, coverage, cosine]
+    Gate --> Rank[Capped adjustments, plus or minus 30 percent]
+    Rank --> Pack[Two per file, token budget, limit, more: n]
 ```
 
 One ranking serves personal, project and global memories; the visibility rule runs in the same query before
 any id leaves the store (for the vector channel, inside the HNSW index scan). `kind=handoff` on `/search` finds the caller's own handoffs.
-The session brief is the latest handoff plus up to three project rules and decisions and two personal
-preferences, at most 4,096 bytes.
+The session brief is this branch's last handoff, the project's rules, decisions and gotchas ranked by the
+session's recent files, branch and feedback, and two personal preferences, at most 1,200 bytes.
 
 ## Projects and console
 

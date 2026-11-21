@@ -1,10 +1,9 @@
-//! Request-side narrowing and the relevance floor for agent search.
+//! Request-side narrowing for agent search.
 
 use crate::capture::WorkContext;
 use crate::memory::{Kind, Memory, Scope};
 use crate::process::distill::handoff_id;
 use serde::Deserialize;
-use std::collections::HashSet;
 
 /// What the caller is working on, and the kind it asks for. With no field set, nothing is
 /// narrowed.
@@ -58,85 +57,6 @@ pub fn matches(memory: &Memory, filter: &Filter) -> bool {
     }
 }
 
-pub fn tokenize(value: &str) -> Vec<String> {
-    value
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|t| t.len() >= 2)
-        .map(str::to_lowercase)
-        .collect()
-}
-
-/// Absolute evidence floor for agent search and context: a hit must share a technical term,
-/// a distinctive title word, or enough distinctive words with the query. Without it a vector
-/// channel always returns its nearest neighbours, however unrelated.
-pub fn passes_relevance_floor(memory: &Memory, query: &str) -> bool {
-    if entity_exact(memory, query) {
-        return true;
-    }
-    let terms = tokenize(query);
-    let technical: Vec<&String> = terms.iter().filter(|t| is_technical(t)).collect();
-    let distinctive: Vec<&String> = terms.iter().filter(|t| is_distinctive(t)).collect();
-    if technical.is_empty() && distinctive.is_empty() {
-        return false;
-    }
-    let title = tokenize(&memory.title);
-    let body = tokenize(&format!(
-        "{} {} {}",
-        memory.summary,
-        memory.reason,
-        memory.fields.text()
-    ));
-    let in_title = |token: &str| title.iter().any(|item| item == token);
-    let in_text = |token: &str| in_title(token) || body.iter().any(|item| item == token);
-    if technical.iter().any(|t| in_text(t)) {
-        return true;
-    }
-    if distinctive.iter().any(|t| in_title(t)) {
-        return true;
-    }
-    if matches!(memory.kind, Kind::Rule | Kind::Decision) && distinctive.iter().any(|t| in_text(t))
-    {
-        return true;
-    }
-    // Repeated query words count once. Generated notes and handoffs need two words; one
-    // ordinary word, however long, is not enough for them.
-    let matched: HashSet<&str> = distinctive
-        .iter()
-        .filter(|t| in_text(t))
-        .map(|t| t.as_str())
-        .collect();
-    let generated = matches!(memory.kind, Kind::Note | Kind::Handoff);
-    let long_word = !generated && distinctive.iter().any(|t| t.len() >= 5 && in_text(t));
-    matched.len() >= 2 || long_word
-}
-
-fn entity_exact(memory: &Memory, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return false;
-    }
-    let tokens = tokenize(&query);
-    memory.entities.iter().any(|e| {
-        let name = e.name.to_lowercase();
-        name == query || tokens.contains(&name)
-    })
-}
-
-fn is_technical(term: &str) -> bool {
-    term.contains('_') || term.chars().any(|c| c.is_ascii_digit())
-}
-
-fn is_distinctive(term: &str) -> bool {
-    const COMMON: &[&str] = &[
-        "about", "after", "also", "because", "been", "before", "capture", "could", "files", "from",
-        "handoff", "have", "here", "into", "just", "memory", "note", "notes", "only", "over",
-        "session", "should", "summary", "test", "tests", "that", "their", "them", "then", "there",
-        "they", "this", "tools", "under", "used", "using", "were", "what", "when", "where",
-        "which", "while", "will", "with", "work", "would", "your",
-    ];
-    term.len() >= 4 && !is_technical(term) && !COMMON.contains(&term)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,14 +105,5 @@ mod tests {
         };
         assert!(matches(&h, &for_session("s1")));
         assert!(!matches(&h, &for_session("s2")));
-    }
-
-    #[test]
-    fn floor_rejects_unrelated_and_accepts_title_words() {
-        let mut m = memory("m", Kind::Fact, Scope::Personal);
-        m.title = "Billing money is stored as integer cents".into();
-        assert!(passes_relevance_floor(&m, "how is billing money stored"));
-        assert!(!passes_relevance_floor(&m, "kubernetes ingress"));
-        assert!(!passes_relevance_floor(&m, "the and of"));
     }
 }

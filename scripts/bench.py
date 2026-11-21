@@ -154,6 +154,10 @@ def main():
     parser.add_argument("--lexical-only", action="store_true", help="do not load the embedding model")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--min-hit5", type=float, help="exit 1 when memory_search hit@5 is below this (a CI gate)")
+    parser.add_argument("--max-weak-hits", type=int, help="exit 1 when the main-set weak queries return more than this many cards in total (a CI gate)")
+    parser.add_argument("--dump-scores", help="write gold cosine and coverage per main question and the top candidate cosines per weak query "
+                        "(calibration input; starts the server with CAIRN_DEBUG_SCORES=1)")
+    parser.add_argument("--budget", type=int, help="pass this token budget to memory_search (default: the server default)")
     parser.add_argument("--dump-injected", help="also write the text each hook event injected to this file (contains random memory ids)")
     args = parser.parse_args()
 
@@ -220,7 +224,8 @@ def main():
         server_cmd = [server_exe, "--database-url", f"postgres://bench:bench@127.0.0.1:{db_port}/bench", "--bind", f"127.0.0.1:{port}"]
         if model_dir:
             server_cmd += ["--embedding-model-dir", str(model_dir)]
-        server = subprocess.Popen(server_cmd, env=env, stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+        server_env = dict(env, CAIRN_DEBUG_SCORES="1") if args.dump_scores else env
+        server = subprocess.Popen(server_cmd, env=server_env, stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
         http = Http(base + "/cairn-memory")
         for _ in range(600):
             try:
@@ -293,6 +298,8 @@ def main():
             "largest_tools": sorted(((blen(compact(t)), t["name"]) for t in tools_list["tools"]), reverse=True)[:3],
         }
 
+        extra = {"budget": args.budget} if args.budget else {}
+
         # (c) recall quality, (d) bytes per search call, (e) zero-hit behaviour.
         # Query order is fixed. Recall touches access counts, which feed ranking, so this order is part
         # of the benchmark definition.
@@ -306,11 +313,11 @@ def main():
             for q in questions:
                 gold = {ids[k] for k in q["gold"]}
                 # limit 5 is what an agent sees by default; the bytes are measured on it.
-                shaped, wire, text = mcp.tool(tool, query=q["query"], limit=5)
+                shaped, wire, text = mcp.tool(tool, query=q["query"], limit=5, **extra)
                 wire_all.append(wire)
                 text_all.append(text)
                 top5 = result_ids(shaped)
-                deep, _, _ = mcp.tool(tool, query=q["query"], limit=10)
+                deep, _, _ = mcp.tool(tool, query=q["query"], limit=10, **extra)
                 ranked = result_ids(deep)
                 rank = next((i + 1 for i, mid in enumerate(ranked) if mid in gold), None)
                 values = {
@@ -342,7 +349,7 @@ def main():
         for tool in ("memory_search",):
             rows = []
             for w in weak:
-                shaped, wire, _ = mcp.tool(tool, query=w["query"], limit=5)
+                shaped, wire, _ = mcp.tool(tool, query=w["query"], limit=5, **extra)
                 rows.append({"id": w["id"], "hits": len(result_ids(shaped)), "bytes": wire, "top": [key_of.get(m, "?") for m in result_ids(shaped)]})
             zero[tool] = {"queries": len(weak), "correct_zero_hit": sum(1 for r in rows if r["hits"] == 0), "rows": rows}
 
@@ -351,9 +358,9 @@ def main():
         hits, ranks = [], []
         for q in holdout["questions"]:
             gold = {ids[k] for k in q["gold"]}
-            shaped, _, _ = mcp.tool("memory_search", query=q["query"], limit=5)
+            shaped, _, _ = mcp.tool("memory_search", query=q["query"], limit=5, **extra)
             top5 = result_ids(shaped)
-            deep, _, _ = mcp.tool("memory_search", query=q["query"], limit=10)
+            deep, _, _ = mcp.tool("memory_search", query=q["query"], limit=10, **extra)
             ranked = result_ids(deep)
             rank = next((i + 1 for i, mid in enumerate(ranked) if mid in gold), None)
             hits.append(1.0 if gold & set(top5) else 0.0)
@@ -364,9 +371,12 @@ def main():
         recall_holdout["mrr_at_10"] = round(sum(ranks) / len(ranks), 4)
         rows = []
         for w in holdout["weak_queries"]:
-            shaped, wire, _ = mcp.tool("memory_search", query=w["query"], limit=5)
+            shaped, wire, _ = mcp.tool("memory_search", query=w["query"], limit=5, **extra)
             rows.append({"id": w["id"], "hits": len(result_ids(shaped)), "bytes": wire, "top": [key_of.get(m, "?") for m in result_ids(shaped)]})
         zero_holdout = {"queries": len(rows), "correct_zero_hit": sum(1 for r in rows if r["hits"] == 0), "rows": rows}
+
+        if args.dump_scores:
+            dump_scores(http, device, context, questions, weak, ids, key_of, args.dump_scores)
 
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
@@ -407,6 +417,7 @@ def main():
                     dump.write(f"--- {event} {extra.get('tool_input', {}).get('file_path', '')}\n{injected}\n")
             return {"event": event, "stdout_bytes": blen(out), "injected_bytes": blen(injected), "injected_tokens_est": est_tokens(blen(injected))}
 
+        fetched_before = int(sql("select coalesce(sum(fetched), 0) from cairn.usage") or 0)
         events = [hook("SessionStart", source="startup")]
         for path in EDIT_FILES:
             events.append(dict(hook("PostToolUse", tool_name="Edit",
@@ -415,6 +426,7 @@ def main():
         events.append(hook("PreCompact", trigger="auto"))
         events.append(hook("Stop", stop_hook_active=False))
         total = sum(e["injected_bytes"] for e in events)
+        usage_delta = int(sql("select coalesce(sum(fetched), 0) from cairn.usage") or 0) - fetched_before
         session_bytes = {
             "events": events,
             "total_injected_bytes": total,
@@ -441,6 +453,7 @@ def main():
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,
             "session_injection": session_bytes,
+            "usage_after_hooks_delta": usage_delta,
             "fixed_session_cost": fixed,
             "recall": recall,
             "zero_hit": zero,
@@ -455,6 +468,13 @@ def main():
         print_table(result)
         print(f"\nwrote {out}")
         hit5 = recall["memory_search"]["hit_at_5"]
+        weak_hits = sum(r["hits"] for r in zero["memory_search"]["rows"])
+        if usage_delta != 0:
+            print(f"FAIL: hooks counted {usage_delta} fetches (usage_after_hooks_delta must be 0)", file=sys.stderr)
+            sys.exit(1)
+        if args.max_weak_hits is not None and weak_hits > args.max_weak_hits:
+            print(f"FAIL: weak queries returned {weak_hits} cards, above --max-weak-hits {args.max_weak_hits}", file=sys.stderr)
+            sys.exit(1)
         if args.min_hit5 is not None and hit5 < args.min_hit5:
             print(f"FAIL: memory_search hit@5 {hit5:.3f} is below --min-hit5 {args.min_hit5}", file=sys.stderr)
             sys.exit(1)
@@ -473,6 +493,32 @@ def main():
         if container:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def dump_scores(http, device, context, questions, weak, ids, key_of, path):
+    """Gate inputs for calibration (spec 4.3), main set only: the gold memories' cosine and coverage
+    per question, and the three highest candidate cosines per weak query."""
+    def trace(query):
+        return http.call("/search", {"query": query, "context": context, "debug": True}, device)["trace"]
+
+    out = {"questions": [], "weak": []}
+    for q in questions:
+        rows = {row["id"]: row for row in trace(q["query"])}
+        gold = {}
+        for key in q["gold"]:
+            row = rows.get(ids[key])
+            gold[key] = None if row is None else {k: row[k] for k in ("cosine", "coverage", "entity_hit", "kept")}
+        out["questions"].append({"id": q["id"], "kind": q["kind"], "query": q["query"], "gold": gold})
+    for w in weak:
+        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["weak"].append({"id": w["id"], "query": w["query"],
+                            "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
+    best = sorted((max((g["cosine"] for g in q["gold"].values() if g and g["cosine"] is not None), default=0.0)
+                   for q in out["questions"] if q["kind"] == "paraphrase"), reverse=True)
+    weak_max = max((r["cosine"] for w in out["weak"] for r in w["top3"] if r["cosine"] is not None), default=0.0)
+    out["summary"] = {"paraphrase_best_gold_cosines_desc": best, "fourth_paraphrase_cosine": best[3] if len(best) > 3 else None,
+                      "max_weak_cosine": weak_max}
+    Path(path).write_text(json.dumps(out, indent=2) + "\n")
 
 
 def print_table(r):

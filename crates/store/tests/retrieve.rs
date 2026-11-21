@@ -717,7 +717,7 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
     };
     assert_eq!(fetched().await, 0);
     store.topic_notes(&me, "src/usage.rs", &work).await.unwrap();
-    store.brief(&me, &work).await.unwrap();
+    store.brief(&me, &work, &[]).await.unwrap();
     assert_eq!(fetched().await, 0, "topic and brief never count");
     let cards = store
         .search(
@@ -725,6 +725,7 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
             "ledger audit",
             None,
             5,
+            1200,
             &cairn_core::retrieve::filter::Filter::default(),
         )
         .await
@@ -1092,7 +1093,7 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work).await.unwrap();
+    let brief = store.brief(&me, &work, &[]).await.unwrap();
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1301,5 +1302,39 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .await
         .unwrap();
     assert_eq!(fetched, 0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn gate_drops_a_one_word_match_and_keeps_a_covered_one() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Drop columns slowly","summary":"Drop a column one release after code stops using it.","reason":"r"})),
+            &work,
+        )
+        .await
+        .unwrap()
+        .id;
+    let filter = cairn_core::retrieve::filter::Filter::default();
+    let search = |query: &'static str| {
+        let (store, me, filter) = (store, me.clone(), filter.clone());
+        async move {
+            store
+                .search(&me, query, None, 5, 1200, &filter)
+                .await
+                .unwrap()
+        }
+    };
+    // One of four query words ("drop") is shared: a candidate, but under the coverage bar.
+    assert!(search("guitar tuning for drop D").await.results.is_empty());
+    let found = search("drop column release").await;
+    assert_eq!(found.results.first().map(|c| &c.id), Some(&id));
     db.finish().await;
 }
