@@ -57,6 +57,17 @@ caller's own memory or a project memory of the same project; a declared contradi
 the caller cannot replace, is `contradicts=<id>`. Nothing infers either. `memory_forget` erases a memory the caller
 owns and is described in its own schema only, not in the instruction text.
 
+**Quality.** An agent save that is too thin to keep is refused with `400 {code: "quality", error: <one line>}`;
+the agent fixes its own save and retries. First failing rule wins: `title: use 8-80 characters that name the
+knowledge`; `summary: use 20-240 characters saying what is true`; `summary: repeats the title; say what is true in
+1-3 sentences`; `reason: say why this is true or was chosen (10+ characters)` (every kind but `note`);
+`fields.fix: say how the gotcha was fixed`; `fields.steps: list at least 2 ordered steps`. System saves
+(distillation, promotion) are built to pass and skip the check.
+
+**Default scope** (server-chosen when `scope` is omitted): `preference` and `note` are `personal`; every other
+kind is `project` when the request context names a project the person belongs to, else `personal`; `global`
+only when the agent asks.
+
 Removed in 0.1.6: every other tool (recall, context, reflect, smart-search, why-changed, resume,
 unresolved, session, link, project, list, graph, export, diagnose, delete, lesson). `kind=decision`
 replaces why-changed and `kind=handoff` replaces resume.

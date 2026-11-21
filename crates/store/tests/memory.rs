@@ -69,10 +69,10 @@ async fn save_get_and_dedupe_on_identity() {
 
     // Secrets never reach the row, and two saves that differ only in the secret collapse.
     let secret = save_input(
-        serde_json::json!({"kind":"fact","title":"Key","summary":"token=abc123 is used","reason":"r"}),
+        serde_json::json!({"kind":"fact","title":"Key title for tests","summary":"token=abc123 is used","reason":"r and the test says why"}),
     );
     let other = save_input(
-        serde_json::json!({"kind":"fact","title":"Key","summary":"token=zzz999 is used","reason":"r"}),
+        serde_json::json!({"kind":"fact","title":"Key title for tests","summary":"token=zzz999 is used","reason":"r and the test says why"}),
     );
     let first = db.store.save(&me, secret, &work).await.unwrap();
     assert!(
@@ -89,7 +89,7 @@ async fn save_get_and_dedupe_on_identity() {
         .store
         .save(
             &me,
-            save_input(serde_json::json!({"kind":"note","title":"n","summary":"s"})),
+            save_input(serde_json::json!({"kind":"note","title":"n title for tests","summary":"s is a summary of the test"})),
             &work,
         )
         .await
@@ -107,7 +107,7 @@ async fn save_get_and_dedupe_on_identity() {
         db.store
             .save(
                 &me,
-                save_input(serde_json::json!({"kind":"decision","title":"d","summary":"s"})),
+                save_input(serde_json::json!({"kind":"decision","title":"d title for tests","summary":"s is a summary of the test"})),
                 &work
             )
             .await
@@ -139,8 +139,9 @@ async fn project_scope_default_follows_membership() {
         (Scope::Project, Some(project.project_id.as_str()))
     );
 
-    let preference =
-        save_input(serde_json::json!({"kind":"preference","title":"p","summary":"s","reason":"r"}));
+    let preference = save_input(
+        serde_json::json!({"kind":"preference","title":"p title for tests","summary":"s is a summary of the test","reason":"r and the test says why"}),
+    );
     let id = db.store.save(&owner, preference, &work).await.unwrap().id;
     assert_eq!(
         db.store.get(&owner, &id).await.unwrap().scope,
@@ -148,7 +149,7 @@ async fn project_scope_default_follows_membership() {
         "preference is always personal"
     );
     let bad = save_input(
-        serde_json::json!({"kind":"preference","title":"p2","summary":"s","reason":"r","scope":"project"}),
+        serde_json::json!({"kind":"preference","title":"p2 title for tests","summary":"s is a summary of the test","reason":"r and the test says why","scope":"project"}),
     );
     assert!(matches!(
         db.store.save(&owner, bad, &work).await,
@@ -343,7 +344,7 @@ async fn visibility_matrix() {
     let expiring = store
         .save(
             &owner,
-            save_input(serde_json::json!({"kind":"note","title":"expiring note","summary":"s"})),
+            save_input(serde_json::json!({"kind":"note","title":"expiring note","summary":"s is a summary of the test"})),
             &work,
         )
         .await
@@ -437,7 +438,16 @@ async fn list_is_paged_newest_first() {
         }
     }
     assert_eq!(pages, 3);
-    assert_eq!(titles, ["rule 4", "rule 3", "rule 2", "rule 1", "rule 0"]);
+    assert_eq!(
+        titles,
+        [
+            "rule 4 (test rule)",
+            "rule 3 (test rule)",
+            "rule 2 (test rule)",
+            "rule 1 (test rule)",
+            "rule 0 (test rule)"
+        ]
+    );
     let only_notes = ListFilter {
         kind: Some(Kind::Note),
         ..ListFilter::default()
@@ -569,7 +579,7 @@ async fn saving_an_expired_note_again_makes_it_live() {
     };
     let me = db.person("me").await;
     let note = save_input(serde_json::json!({
-        "kind": "note", "title": "Session note", "summary": "Looked at the pool.", "reason": "context"
+        "kind": "note", "title": "Session note", "summary": "Looked at the pool. is a summary of the test", "reason": "context and the test says why"
     }));
     let work = WorkContext::default();
     let first = db.store.save(&me, note.clone(), &work).await.unwrap();

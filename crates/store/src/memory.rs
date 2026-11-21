@@ -44,6 +44,7 @@ macro_rules! memory_columns {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status,
+    m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
     (EXTRACT(EPOCH FROM m.created_at) * 1000000)::bigint AS created_us,
@@ -92,6 +93,8 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         entities: Vec::new(),
         links: Vec::new(),
         status: parse(row, "status")?,
+        stale_cause: row.try_get("stale_cause")?,
+        origin: parse(row, "origin")?,
         expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
         created_us: row.try_get("created_us")?,
@@ -398,7 +401,10 @@ impl Store {
             status
         };
         if new_status != status {
-            sqlx::query("UPDATE memories SET status = $2, updated_at = now() WHERE memory_id = $1")
+            sqlx::query(
+                "UPDATE memories SET status = $2, stale_cause = CASE WHEN $2 = 'stale' THEN 'feedback' END,
+                        status_changed_at = now(), updated_at = now() WHERE memory_id = $1",
+            )
                 .bind(memory_id)
                 .bind(new_status.as_str())
                 .execute(&mut *tx)
@@ -435,7 +441,7 @@ impl Store {
             "UPDATE memories SET status = 'forgotten', title = '', summary = '', reason = '', fields = '{}',
                     evidence = '{}', evidence_count = 0, repo = NULL, repo_branch = NULL,
                     repo_worktree = NULL, repo_commit = NULL, embedding = NULL, embedding_model = NULL,
-                    embedding_source = NULL, updated_at = now()
+                    embedding_source = NULL, stale_cause = NULL, status_changed_at = now(), updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
@@ -449,7 +455,7 @@ impl Store {
             .bind(memory_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM jobs WHERE kind IN ('embed','consolidate') AND job_key = $1 AND status = 'pending'")
+        sqlx::query("DELETE FROM jobs WHERE kind IN ('embed','consolidate','link') AND job_key = $1 AND status = 'pending'")
             .bind(memory_id)
             .execute(&mut *tx)
             .await?;
@@ -464,7 +470,7 @@ impl Store {
 /// Back to `active` when no remaining live memory supersedes it.
 async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
     sqlx::query(
-        "UPDATE memories SET status = 'active', updated_at = now()
+        "UPDATE memories SET status = 'active', status_changed_at = now(), updated_at = now()
           WHERE memory_id = $1 AND status = 'superseded'
             AND NOT EXISTS (SELECT 1 FROM links l JOIN memories s ON s.memory_id = l.source_id
                              WHERE l.target_id = $1 AND l.relation = 'supersedes' AND s.status <> 'forgotten')",
@@ -521,7 +527,7 @@ pub(crate) async fn link_tx(
     .execute(&mut *tx)
     .await?;
     if relation == Relation::Supersedes {
-        sqlx::query("UPDATE memories SET status = 'superseded', updated_at = now() WHERE memory_id = $1 AND status IN ('active','stale')")
+        sqlx::query("UPDATE memories SET status = 'superseded', stale_cause = NULL, status_changed_at = now(), updated_at = now() WHERE memory_id = $1 AND status IN ('active','stale')")
             .bind(target)
             .execute(tx)
             .await?;
@@ -548,8 +554,8 @@ pub(crate) async fn insert_memory(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18))
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -571,6 +577,7 @@ pub(crate) async fn insert_memory(
     .bind(&new.context.worktree)
     .bind(&new.context.commit)
     .bind(new.expires_at.map(|t| t as f64))
+    .bind(new.origin.as_str())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
@@ -601,6 +608,9 @@ pub(crate) async fn insert_memory(
             .execute(&mut *tx)
             .await?;
             enqueue_tx(tx, JobKind::Embed, &id).await?;
+            if new.kind != Kind::Handoff {
+                enqueue_tx(tx, JobKind::Link, &id).await?;
+            }
         }
         save_links(tx, person_id, &id, project_id, new).await?;
         return Ok(Saved {
@@ -626,6 +636,9 @@ pub(crate) async fn insert_memory(
         .await?;
     save_links(tx, person_id, &id, project_id, new).await?;
     enqueue_tx(tx, JobKind::Embed, &id).await?;
+    if new.kind != Kind::Handoff {
+        enqueue_tx(tx, JobKind::Link, &id).await?;
+    }
     Ok(Saved {
         id,
         status: Status::Active,

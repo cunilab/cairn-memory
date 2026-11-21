@@ -9,7 +9,9 @@ choosing consolidation candidates, and job retry rules.
 - `prepare_save` (redact, validate, kind policy, hashes, entities), `Origin`, `NewMemory`.
 - `entities::derive`, `distill::distill` and `handoff_id`.
 - `embed::embedding_text`, `source_hash`, `validate_vector`, `model_label`.
-- `consolidate::{band, cosine, same_cohort, newer}`; `jobs::{JobKind, JobEnd, backoff_after}`.
+- `consolidate::{band, guard}` (branch and origin guards); `jobs::{JobKind (embed, distill, consolidate, link), JobEnd, backoff_after}`.
+- `entities::derive` is the one extractor for save, the link job and the search entity channel: file, module, symbol, test, command, service, term (CM-SPEC-008 §3).
+- Agent saves also pass `memory::validate::validate_quality` (`Error::Quality`, HTTP 400 `quality`).
 
 ## Depends on
 `memory`, `capture`.

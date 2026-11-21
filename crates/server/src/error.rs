@@ -46,6 +46,7 @@ impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::Validation(m) => Self::invalid(m),
+            StoreError::Quality(m) => Self::new(StatusCode::BAD_REQUEST, "quality", m),
             StoreError::Conflict(m) => Self::new(StatusCode::CONFLICT, "conflict", m),
             StoreError::NotFound(m) => {
                 Self::new(StatusCode::NOT_FOUND, "not_found", format!("{m} not found"))

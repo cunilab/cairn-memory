@@ -171,7 +171,7 @@ async fn brief_shows_the_caller_their_own_rules_only() {
         } else {
             context.clone()
         };
-        save(&app, owner, json!({"title": title, "summary": title, "reason": "evidence", "scope": scope, "kind": kind, "context": context})).await;
+        save(&app, owner, json!({"title": title, "summary": format!("{title} summary for the test"), "reason": "evidence and the test says why", "scope": scope, "kind": kind, "context": context})).await;
     }
     let (status, _) = app
         .send(
@@ -225,8 +225,8 @@ async fn search_ranks_filters_and_never_leaks() {
     let context = json!({"project_id": pid, "repository": "r"});
 
     let queue = save(&app, &admin, json!({"kind": "decision", "title": "Use Postgres SKIP LOCKED for the job queue", "summary": "Jobs are claimed from a table.", "reason": "one datastore", "scope": "project", "context": context, "fields": {"alternatives": ["Redis"]}})).await;
-    let secret = save(&app, &admin, json!({"kind": "gotcha", "title": "Private payroll quirk", "summary": "Payroll export duplicates rows.", "reason": "seen twice", "scope": "personal", "fields": {"symptom": "duplicate rows"}})).await;
-    let global = save(&app, &admin, json!({"kind": "fact", "title": "Global idempotency keys", "summary": "Use idempotency keys on retries.", "reason": "payments", "scope": "global"})).await;
+    let secret = save(&app, &admin, json!({"kind": "gotcha", "title": "Private payroll quirk", "summary": "Payroll export duplicates rows.", "reason": "seen twice", "scope": "personal", "fields": {"symptom": "duplicate rows", "fix": "Dedupe the export by id"}})).await;
+    let global = save(&app, &admin, json!({"kind": "fact", "title": "Global idempotency keys", "summary": "Use idempotency keys on retries.", "reason": "payments and the test says why", "scope": "global"})).await;
 
     // The owner finds all three; bob finds the project memory (as a member), not the personal one.
     let mine = app
@@ -274,7 +274,7 @@ async fn search_ranks_filters_and_never_leaks() {
     assert!(got["memories"][0].get("usage").is_none());
     // A link from alice's private memory to the project decision is invisible to bob: it adds
     // no hit and shows up in no `links` list.
-    let linker = save(&app, &admin, json!({"kind": "gotcha", "title": "Private queue quirk", "summary": "Claims lag.", "reason": "seen", "scope": "personal", "contradicts": queue, "fields": {"symptom": "lag"}})).await;
+    let linker = save(&app, &admin, json!({"kind": "gotcha", "title": "Private queue quirk", "summary": "Claims lag. is a summary of the test", "reason": "seen and the test says why", "scope": "personal", "contradicts": queue, "fields": {"symptom": "lag", "fix": "Raise the lease"}})).await;
     let linked = app
         .post(
             "search",
@@ -320,7 +320,7 @@ async fn search_ranks_filters_and_never_leaks() {
     }
     // limit trims and `more` counts what was cut.
     for n in 0..3 {
-        save(&app, &admin, json!({"kind": "fact", "title": format!("Retry budget {n}"), "summary": "Retry budget is three attempts.", "reason": "ops", "scope": "personal"})).await;
+        save(&app, &admin, json!({"kind": "fact", "title": format!("Retry budget {n}"), "summary": "Retry budget is three attempts.", "reason": "ops and the test says why", "scope": "personal"})).await;
     }
     let cut = app
         .post(
@@ -350,7 +350,7 @@ async fn supersede_graph_export_and_diagnose() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "d").await;
-    let old = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Redis", "summary": "Sessions live in Redis.", "reason": "speed", "scope": "personal"})).await;
+    let old = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Redis", "summary": "Sessions live in Redis.", "reason": "speed and the test says why", "scope": "personal"})).await;
     let new = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Postgres", "summary": "Sessions moved to Postgres.", "reason": "one datastore", "scope": "personal", "supersedes": old})).await;
     // The replaced memory leaves normal search but stays readable and listed.
     let search = app
@@ -432,8 +432,8 @@ async fn get_returns_requested_records_and_names_the_rest() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let bob = app.member(&admin, "bob").await;
-    let mine = save(&app, &admin, json!({"kind": "fact", "title": "Mine", "summary": "s", "reason": "r", "scope": "personal", "fields": {"source": "docs"}})).await;
-    let shared = save(&app, &admin, json!({"kind": "fact", "title": "Shared", "summary": "s", "reason": "r", "scope": "global"})).await;
+    let mine = save(&app, &admin, json!({"kind": "fact", "title": "Mine title for tests", "summary": "s is a summary of the test", "reason": "r and the test says why", "scope": "personal", "fields": {"source": "docs"}})).await;
+    let shared = save(&app, &admin, json!({"kind": "fact", "title": "Shared title for tests", "summary": "s is a summary of the test", "reason": "r and the test says why", "scope": "global"})).await;
     let got = app
         .post("get", json!({"ids": [shared, "nope", mine]}), &admin)
         .await;
@@ -443,7 +443,7 @@ async fn get_returns_requested_records_and_names_the_rest() {
         .iter()
         .map(|m| m["title"].as_str().unwrap())
         .collect();
-    assert_eq!(order, ["Shared", "Mine"]);
+    assert_eq!(order, ["Shared title for tests", "Mine title for tests"]);
     assert_eq!(got["missing"], json!(["nope"]));
     // A repeated id is answered once, in first-seen order.
     let dup = app
@@ -454,7 +454,7 @@ async fn get_returns_requested_records_and_names_the_rest() {
         )
         .await;
     assert_eq!(dup["memories"].as_array().unwrap().len(), 2);
-    assert_eq!(dup["memories"][0]["title"], "Shared");
+    assert_eq!(dup["memories"][0]["title"], "Shared title for tests");
     assert_eq!(dup["missing"], json!(["nope"]));
     let keys: Vec<_> = got["memories"][1].as_object().unwrap().keys().collect();
     assert_eq!(
@@ -527,11 +527,11 @@ async fn job_queue_is_admin_only_and_idle_worker_is_a_no_op() {
     let admin = app.admin("admin").await;
     let user = app.member(&admin, "user").await;
     let device = app.device(&admin, "d").await;
-    save(&app, &device, json!({"kind": "fact", "title": "A fact", "summary": "s", "reason": "r", "scope": "personal"})).await;
+    save(&app, &device, json!({"kind": "fact", "title": "A fact title for tests", "summary": "s is a summary of the test", "reason": "r and the test says why", "scope": "personal"})).await;
     let queue = app.get("admin/jobs", &admin).await;
     assert_eq!(
         (queue["pending"].as_i64(), queue["quarantined"].as_i64()),
-        (Some(1), Some(0))
+        (Some(2), Some(0))
     );
     assert_eq!(
         app.send("GET", "admin/jobs", json!(null), Some(&user))
@@ -608,7 +608,7 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock", "summary": "Hold the lock first.", "reason": "r",
+        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock", "summary": "Hold the lock first.", "reason": "r and the test says why",
                "fields": {"symptom": "hang", "cause": "order", "fix": "lock first"},
                "context": {"files": ["src/queue.rs"]}}),
     )
@@ -697,9 +697,9 @@ async fn search_budget_caps_bytes_and_kind_filters() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     for n in 0..10 {
-        save(&app, &admin, json!({"kind": "fact", "title": format!("Ledger audit trail {n}"), "summary": "Ledger audit trail entries ".repeat(8).trim(), "reason": "ops", "scope": "personal"})).await;
+        save(&app, &admin, json!({"kind": "fact", "title": format!("Ledger audit trail {n}"), "summary": "Ledger audit trail entries ".repeat(8).trim(), "reason": "ops and the test says why", "scope": "personal"})).await;
     }
-    save(&app, &admin, json!({"kind": "rule", "title": "Ledger audit rule", "summary": "Audit the ledger weekly.", "reason": "ops", "scope": "personal"})).await;
+    save(&app, &admin, json!({"kind": "rule", "title": "Ledger audit rule", "summary": "Audit the ledger weekly.", "reason": "ops and the test says why", "scope": "personal"})).await;
     let all = app
         .post(
             "search",
@@ -743,7 +743,7 @@ async fn only_search_and_get_count_usage() {
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail.", "reason": "r",
+        json!({"kind": "gotcha", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
                "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": {"files": ["src/usage.rs"]}}),
     )
     .await;
@@ -794,7 +794,7 @@ async fn brief_uses_recent_files() {
         ("Queue lock order", "src/jobs/queue.rs"),
         ("Docs build flag", "docs/build.md"),
     ] {
-        save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it.", "reason": "r",
+        save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it. is a summary of the test", "reason": "r and the test says why",
             "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": context(file)})).await;
     }
     let brief = |recent: serde_json::Value| {

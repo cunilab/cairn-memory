@@ -152,7 +152,7 @@ jobs:
       # catch a regression and do not claim the numbers are good.
       - run: python3 scripts/bench.py --out "$RUNNER_TEMP/bench-v2.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --questions questions-v2.json --distractors 2000 --min-hit5 0.58 --max-weak-hits 28
       # v1 main set on the 70-memory corpus, kept for history: 0.96 and no weak card at 5b and 5c.
-      - run: python3 scripts/bench.py --skip-build --out "$RUNNER_TEMP/bench-v1.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --min-hit5 0.90 --max-weak-hits 0
+      - run: python3 scripts/bench.py --skip-build --out "$RUNNER_TEMP/bench-v1.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --min-hit5 0.90 --max-weak-hits 0 --min-link-ratio 0.60
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

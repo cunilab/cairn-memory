@@ -118,7 +118,10 @@ def engineering(rng):
                 "fields": {"symptom": f"The {c} {s}.", "cause": cause[0].upper() + cause[1:] + ".", "fix": fix[0].upper() + fix[1:] + "."}}
     if form == "rule":
         text = rng.choice(RULES).format(c=c)
-        return {"kind": "rule", "title": text.split(".")[0][:80].rstrip(), "summary": text,
+        title = text.split(".")[0][:80].rstrip()
+        # A one-sentence rule would repeat its title as the summary, which the save quality check rejects.
+        summary = text if text.rstrip(". ") != title else f"{text} The {team} team agreed to this."
+        return {"kind": "rule", "title": title, "summary": summary,
                 "reason": f"Agreed with the {team} team.", "fields": {}}
     if form == "decision":
         title, why, options = rng.choice(DECISIONS)

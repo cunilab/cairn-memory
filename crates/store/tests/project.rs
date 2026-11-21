@@ -129,7 +129,7 @@ async fn branches_and_conflicts_are_derived_from_memories() {
         .await
         .unwrap();
     let mut conflicting = save_input(
-        serde_json::json!({"kind":"rule","title":"Use spaces now","summary":"s","reason":"r"}),
+        serde_json::json!({"kind":"rule","title":"Use spaces now","summary":"s is a summary of the test","reason":"r and the test says why"}),
     );
     conflicting.contradicts = Some(a.id.clone());
     store

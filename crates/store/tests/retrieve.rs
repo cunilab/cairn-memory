@@ -96,7 +96,7 @@ async fn candidate_channels_respect_visibility_and_fuse() {
         ..WorkContext::default()
     };
     let pool = store
-        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Connection pool","summary":"The pool sets search_path on connect.","reason":"r"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Connection pool","summary":"The pool sets search_path on connect.","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
@@ -425,12 +425,12 @@ async fn lexical_reads_and_as_or_with_coverage_unless_negated() {
     let me = db.person("me").await;
     let work = WorkContext::default();
     let only_drop = store
-        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Drop table policy","summary":"Dropping a table needs two approvals.","reason":"r"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Drop table policy","summary":"Dropping a table needs two approvals.","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
     let guitar = store
-        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Guitar tuning for drop D","summary":"Tune the low string down a whole step.","reason":"r"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"fact","title":"Guitar tuning for drop D","summary":"Tune the low string down a whole step.","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
@@ -568,7 +568,7 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
     ] {
         ids.push(
             store
-                .save(&me, save_input(serde_json::json!({"kind":"fact","title":title,"summary":"marker text","reason":"r"})), &work)
+                .save(&me, save_input(serde_json::json!({"kind":"fact","title":title,"summary":"marker text is a summary of the test","reason":"r and the test says why"})), &work)
                 .await
                 .unwrap()
                 .id,
@@ -657,7 +657,7 @@ async fn visibility_matrix_for_all_four_channels() {
         store
             .save(
                 owner_ref,
-                save_input(serde_json::json!({"kind":"fact","scope":scope,"title":title,"summary":"matrix probe","reason":"r"})),
+                save_input(serde_json::json!({"kind":"fact","scope":scope,"title":title,"summary":"matrix probe is a summary of the test","reason":"r and the test says why"})),
                 work_ref,
             )
             .await
@@ -745,7 +745,7 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
         ..WorkContext::default()
     };
     let id = store
-        .save(&me, save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Usage probe words","summary":"ledger audit trail","reason":"r"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Usage probe words","summary":"ledger audit trail is a summary of the test","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
@@ -826,7 +826,7 @@ async fn consolidate_supersedes_in_cohort_and_relates_in_band() {
         .save(
             &me,
             save_input(
-                serde_json::json!({"kind":"fact","title":"same text","summary":"s","reason":"r"}),
+                serde_json::json!({"kind":"fact","title":"same text","summary":"s is a summary of the test","reason":"r and the test says why"}),
             ),
             &work,
         )
@@ -1165,8 +1165,8 @@ async fn diagnose_counts_only_my_jobs() {
         )
         .await
         .unwrap();
-    assert_eq!(store.diagnose(&me).await.unwrap().jobs_pending, 1);
-    assert_eq!(store.diagnose(&other).await.unwrap().jobs_pending, 3);
+    assert_eq!(store.diagnose(&me).await.unwrap().jobs_pending, 2);
+    assert_eq!(store.diagnose(&other).await.unwrap().jobs_pending, 5);
     db.finish().await;
 }
 
@@ -1248,7 +1248,7 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
     };
     let note = |title: &str, scope: &str, kind: &str| {
         save_input(
-            serde_json::json!({"kind": kind, "scope": scope, "title": title, "summary": format!("{title} summary"), "reason": "r"}),
+            serde_json::json!({"kind": kind, "scope": scope, "title": title, "summary": format!("{title} summary for the test"), "reason": "r and the test says why"}),
         )
     };
     let ours = store
@@ -1305,7 +1305,7 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         [ours.as_str(), newest.as_str()],
         "project first, newest next, at most 2"
     );
-    assert_eq!(notes[0].summary, "Project rule summary");
+    assert_eq!(notes[0].summary, "Project rule summary for the test");
     assert!(
         store
             .topic_notes(&me, "src/a", &context)
@@ -1356,7 +1356,7 @@ async fn gate_drops_a_one_word_match_and_keeps_a_covered_one() {
     let id = store
         .save(
             &me,
-            save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Drop columns slowly","summary":"Drop a column one release after code stops using it.","reason":"r"})),
+            save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Drop columns slowly","summary":"Drop a column one release after code stops using it.","reason":"r and the test says why"})),
             &work,
         )
         .await

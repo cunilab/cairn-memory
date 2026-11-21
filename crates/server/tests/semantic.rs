@@ -36,12 +36,12 @@ async fn meaning_finds_memories_and_never_crosses_people() {
     let alice = app.admin("alice").await;
     let bob = app.member(&alice, "bob").await;
     let mine = app
-        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal"}), &alice)
+        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal", "fields": {"fix": "Strip emoji from the customer name."}}), &alice)
         .await["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    app.post("remember", json!({"kind": "fact", "title": "Release cadence", "summary": "We ship every second Tuesday.", "reason": "agreed", "scope": "personal"}), &alice).await;
+    app.post("remember", json!({"kind": "fact", "title": "Release cadence", "summary": "We ship every second Tuesday.", "reason": "agreed and the test says why", "scope": "personal"}), &alice).await;
     app.settle().await;
 
     // The vector channel finds the memory when no word of the query appears in it...
@@ -105,7 +105,7 @@ async fn consolidate_supersedes_near_duplicates_and_links_related() {
     };
     let owner = app.admin("owner").await;
     let save = |title: &str, summary: &str| {
-        app.post("remember", json!({"kind": "rule", "title": title, "summary": summary, "reason": "money", "scope": "personal"}), &owner)
+        app.post("remember", json!({"kind": "rule", "title": title, "summary": summary, "reason": "money and the test says why", "scope": "personal"}), &owner)
     };
     let old = save(
         "Store money as integer cents",
@@ -167,7 +167,7 @@ async fn consolidate_supersedes_near_duplicates_and_links_related() {
     );
     // Another person's near-identical memory is left alone.
     let other = app.member(&owner, "other").await;
-    app.post("remember", json!({"kind": "rule", "title": "Store money as integer cents", "summary": "Never store money as floats; use integer cents everywhere.", "reason": "money", "scope": "personal"}), &other).await;
+    app.post("remember", json!({"kind": "rule", "title": "Store money as integer cents", "summary": "Never store money as floats; use integer cents everywhere.", "reason": "money and the test says why", "scope": "personal"}), &other).await;
     app.settle().await;
     assert_eq!(
         app.get(&format!("memories/{new}"), &owner).await["status"],
@@ -223,10 +223,10 @@ async fn off_topic_queries_stay_empty_among_400_distractors() {
             topics[i % topics.len()],
             details[(i / 2) % details.len()]
         );
-        app.post("remember", json!({"kind": "fact", "title": title, "summary": summary, "reason": "note", "scope": "personal"}), &me).await;
+        app.post("remember", json!({"kind": "fact", "title": title, "summary": summary, "reason": "note and the test says why", "scope": "personal"}), &me).await;
     }
     let target = app
-        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal"}), &me)
+        .post("remember", json!({"kind": "gotcha", "title": "Invoices render a blank page", "summary": "The typst template fails when a customer name has an emoji.", "reason": "font fallback", "scope": "personal", "fields": {"fix": "Strip emoji from the customer name."}}), &me)
         .await["id"]
         .as_str()
         .unwrap()

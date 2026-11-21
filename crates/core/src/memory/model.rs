@@ -1,4 +1,5 @@
 use super::fields::Fields;
+use crate::process::Origin;
 use serde::{Deserialize, Serialize};
 
 macro_rules! text_enum {
@@ -39,7 +40,7 @@ text_enum!(Relation {
     Supersedes => "supersedes", Contradicts => "contradicts",
 });
 text_enum!(EntityKind {
-    File => "file", Symbol => "symbol", Command => "command", Test => "test",
+    File => "file", Module => "module", Symbol => "symbol", Command => "command", Test => "test",
     Service => "service", Term => "term",
 });
 
@@ -103,6 +104,12 @@ pub struct Memory {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
     pub status: Status,
+    /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_cause: Option<String>,
+    /// Who wrote it. Internal: agents see only the memory.
+    #[serde(skip)]
+    pub origin: Origin,
     /// Unix seconds.
     pub expires_at: Option<i64>,
     pub created_at: i64,

@@ -167,7 +167,7 @@ async fn a_context_entity_does_not_pass_the_gate() {
     store
         .save(
             &me,
-            save_input(serde_json::json!({"kind":"fact","title":"Webhook retries","summary":"Providers resend callbacks.","reason":"r"})),
+            save_input(serde_json::json!({"kind":"fact","title":"Webhook retries","summary":"Providers resend callbacks.","reason":"r and the test says why"})),
             &work,
         )
         .await
@@ -237,8 +237,8 @@ async fn brief_keeps_handoff_preferences_and_file_rules_under_newer_rules() {
     .execute(store.pool())
     .await
     .unwrap();
-    let preference = save(serde_json::json!({"kind":"preference","scope":"personal","title":"Terse replies","summary":"Keep answers short.","reason":"r"})).await;
-    let file_rule = save(serde_json::json!({"kind":"rule","scope":"project","title":"Queue retries are capped","summary":"Never retry a job more than five times.","reason":"r"})).await;
+    let preference = save(serde_json::json!({"kind":"preference","scope":"personal","title":"Terse replies","summary":"Keep answers short. is a summary of the test","reason":"r and the test says why"})).await;
+    let file_rule = save(serde_json::json!({"kind":"rule","scope":"project","title":"Queue retries are capped","summary":"Never retry a job more than five times.","reason":"r and the test says why"})).await;
     // 350 newer rules with no file: the old single `LIMIT 300` query never saw the three above.
     bulk(
         &db,

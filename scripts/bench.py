@@ -169,6 +169,7 @@ def main():
     parser.add_argument("--questions", default="questions.json", help="main question set in bench/fixtures (default: v1)")
     parser.add_argument("--distractors", type=int, default=0, help="add this many generated unrelated memories")
     parser.add_argument("--min-hit5", type=float, help="exit 1 when memory_search hit@5 is below this (a CI gate)")
+    parser.add_argument("--min-link-ratio", type=float, help="exit 1 when the share of fixture durable memories with a link is below this (a CI gate)")
     parser.add_argument("--max-weak-hits", type=int, help="exit 1 when the main-set weak queries return more than this many cards in total (a CI gate)")
     parser.add_argument("--dump-scores", help="write gold cosine and coverage per main question and the top candidate cosines per weak query "
                         "(calibration input; starts the server with CAIRN_DEBUG_SCORES=1)")
@@ -304,7 +305,7 @@ def main():
             # consolidation supersedes and links near-duplicates, which changes what search returns, so a
             # search that races it makes two runs differ.
             missing = "(select count(*) from cairn.memories where embedding is null)" if model_dir else "0"
-            busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate') and status in ('pending','running'))"
+            busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate','link') and status in ('pending','running'))"
             for _ in range(240 + 4 * len(distractors)):
                 if int(sql(f"select {missing} + {busy}") or 0) == 0:
                     return
@@ -313,6 +314,20 @@ def main():
 
         settle()
         key_of = {v: k for k, v in ids.items()}
+
+        # Links per durable memory (step 6 §13): the fixture corpus alone, then everything incl. distractors.
+        durable = "kind in ('decision','rule','gotcha','procedure','fact') and status in ('active','stale')"
+        linked = "exists (select 1 from cairn.links l where l.source_id = m.memory_id or l.target_id = m.memory_id)"
+
+        def link_ratio(id_list):
+            quoted = ",".join(f"'{i}'" for i in id_list)
+            total = int(sql(f"select count(*) from cairn.memories m where {durable} and memory_id in ({quoted})") or 0)
+            hit = int(sql(f"select count(*) from cairn.memories m where {durable} and memory_id in ({quoted}) and {linked}") or 0)
+            return {"durable": total, "with_link": hit, "durable_with_link_ratio": round(hit / total, 3) if total else None}
+
+        link_stats = dict(link_ratio([ids[m["key"]] for m in corpus]),
+                          all_memories=link_ratio(list(ids.values())),
+                          note="fixture corpus durable memories (decision, rule, gotcha, procedure, fact) with >= 1 link of any relation; all_memories adds the distractors")
 
         def coverage(query, gold_keys):
             """Share of the query's stemmed lexemes each gold memory's `search_tsv` contains: the
@@ -528,6 +543,7 @@ def main():
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,
             "session_injection": session_bytes,
+            "links": link_stats,
             "usage_after_hooks_delta": usage_delta,
             "fixed_session_cost": fixed,
             "recall": recall,
@@ -549,6 +565,10 @@ def main():
             sys.exit(1)
         if args.max_weak_hits is not None and weak_hits > args.max_weak_hits:
             print(f"FAIL: weak queries returned {weak_hits} cards, above --max-weak-hits {args.max_weak_hits}", file=sys.stderr)
+            sys.exit(1)
+        ratio = link_stats["durable_with_link_ratio"]
+        if args.min_link_ratio is not None and (ratio is None or ratio < args.min_link_ratio):
+            print(f"FAIL: durable_with_link_ratio {ratio} is below --min-link-ratio {args.min_link_ratio}", file=sys.stderr)
             sys.exit(1)
         if args.min_hit5 is not None and hit5 < args.min_hit5:
             print(f"FAIL: memory_search hit@5 {hit5:.3f} is below --min-hit5 {args.min_hit5}", file=sys.stderr)
@@ -628,6 +648,8 @@ def print_table(r):
         rows.append((f"{tool} zero-hit correct", f"{z['correct_zero_hit']}/{z['queries']}"))
     h, hz = r["recall_holdout"], r["zero_hit_holdout"]
     rows.append(("holdout hit@5 / MRR@10", f"{h['hit_at_5']:.3f} / {h['mrr_at_10']:.3f}  (n={h['questions']}, precision {h['precision_at_5']})"))
+    ln = r["links"]
+    rows.append(("durable memories with >=1 link", f"{ln['durable_with_link_ratio']}  ({ln['with_link']} of {ln['durable']}; with distractors {ln['all_memories']['durable_with_link_ratio']})"))
     rows.append(("corpus", f"{r['corpus']['memories']} fixture + {r['corpus']['distractors']} distractor memories, set {r['corpus']['question_set']}"))
     rows.append(("holdout zero-hit correct", f"{hz['correct_zero_hit']}/{hz['queries']}"))
     c = r["call_bytes"]

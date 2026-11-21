@@ -125,7 +125,7 @@ export function Jobs() {
     <ConsoleShell crumbs={[{ label: "Jobs" }]}>
       <PageHeader
         title="Jobs"
-        description="Queue depth for embedding and session distillation. Quarantined jobs stay until an admin requeues or discards them."
+        description="Queue depth for embedding, linking, consolidation and session distillation. Quarantined jobs are retried automatically after an hour."
       />
       {error ? (
         <Alert variant="destructive">

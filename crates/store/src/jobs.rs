@@ -1,7 +1,8 @@
 use crate::{Result, Store, StoreError};
 use cairn_core::id::new_id;
 use cairn_core::process::jobs::{
-    JOB_ATTEMPT_CAP, JOB_LEASE_SECONDS, JobEnd, JobKind, backoff_after,
+    JOB_ATTEMPT_CAP, JOB_LEASE_SECONDS, JOB_QUARANTINE_RETRY_SECONDS, JobEnd, JobKind,
+    backoff_after,
 };
 use serde::Serialize;
 use sqlx::postgres::PgRow;
@@ -148,6 +149,30 @@ impl Store {
         }
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// No human requeue: a job quarantined for `JOB_QUARANTINE_RETRY_SECONDS` goes back to pending
+    /// with one attempt left, so a poison job costs one try an hour while a fixed one heals itself.
+    /// A quarantined job whose key already has a pending job is dropped. Returns the jobs retried.
+    pub async fn retry_quarantined(&self) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(&format!(
+            "DELETE FROM jobs q WHERE q.status = 'quarantined'
+                AND q.finished_at < now() - make_interval(secs => {JOB_QUARANTINE_RETRY_SECONDS})
+                AND EXISTS (SELECT 1 FROM jobs p WHERE p.kind = q.kind AND p.job_key = q.job_key AND p.status = 'pending')"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        let done = sqlx::query(&format!(
+            "UPDATE jobs SET status = 'pending', attempts = {}, not_before = now(), claim_id = NULL,
+                    lease_expires_at = NULL, finished_at = NULL, updated_at = now()
+              WHERE status = 'quarantined' AND finished_at < now() - make_interval(secs => {JOB_QUARANTINE_RETRY_SECONDS})",
+            JOB_ATTEMPT_CAP - 1
+        ))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(done.rows_affected())
     }
 
     /// Admin: a quarantined job goes back to pending with a fresh attempt count. Busy (409) when

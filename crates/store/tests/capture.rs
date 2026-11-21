@@ -209,7 +209,7 @@ async fn sweep_closes_idle_sessions_and_deletes_old_rows() {
         .save(
             &me,
             cairn_store::testing::save_input(
-                serde_json::json!({"kind":"note","title":"old","summary":"s"}),
+                serde_json::json!({"kind":"note","title":"old title for tests","summary":"s is a summary of the test"}),
             ),
             &WorkContext::default(),
         )

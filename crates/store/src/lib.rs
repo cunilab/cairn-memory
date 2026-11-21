@@ -8,6 +8,7 @@ pub mod device;
 pub mod embed;
 pub mod export;
 pub mod jobs;
+pub mod link;
 pub mod memory;
 pub mod project;
 pub mod retrieve;
@@ -32,6 +33,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_retrieval",
         include_str!("../../../migrations/0003_retrieval.sql"),
     ),
+    (
+        "0004_processing",
+        include_str!("../../../migrations/0004_processing.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on
@@ -44,6 +49,8 @@ pub enum StoreError {
     Conflict(String),
     NotFound(String),
     Forbidden(String),
+    /// An agent save that is too thin to keep (HTTP 400 `quality`, one line).
+    Quality(String),
     /// D2: `public.cairn_memories` exists. The operator recreates the database.
     LegacyDatabase,
     Database(sqlx::Error),
@@ -56,6 +63,7 @@ impl std::fmt::Display for StoreError {
             Self::Conflict(m) => write!(f, "conflict: {m}"),
             Self::NotFound(m) => write!(f, "not found: {m}"),
             Self::Forbidden(m) => write!(f, "forbidden: {m}"),
+            Self::Quality(m) => f.write_str(m),
             Self::LegacyDatabase => f.write_str("pre-0.1.6 database; recreate it"),
             Self::Database(e) => write!(f, "database error: {e}"),
         }
@@ -75,6 +83,7 @@ impl From<cairn_core::error::Error> for StoreError {
         match error {
             cairn_core::error::Error::Validation(m) => Self::Validation(m),
             cairn_core::error::Error::Conflict(m) => Self::Conflict(m),
+            cairn_core::error::Error::Quality(m) => Self::Quality(m),
         }
     }
 }

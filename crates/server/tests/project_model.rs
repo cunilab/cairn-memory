@@ -69,7 +69,7 @@ async fn shared_project_model() {
     let personal = app
         .post(
             "remember",
-            json!({"kind": "note", "title": "My scratch", "summary": "private", "scope": "personal"}),
+            json!({"kind": "note", "title": "My scratch", "summary": "private is a summary of the test", "scope": "personal"}),
             &author_device,
         )
         .await;
@@ -126,7 +126,7 @@ async fn shared_project_model() {
 
     // Conflicts come from `contradicts` links.
     let other = app
-        .post("remember", json!({"kind": "rule", "title": "Use floats", "summary": "Money is a float.", "reason": "simple", "context": context, "contradicts": rule_id}), &stranger_device)
+        .post("remember", json!({"kind": "rule", "title": "Use floats", "summary": "Money is a float. is a summary of the test", "reason": "simple and the test says why", "context": context, "contradicts": rule_id}), &stranger_device)
         .await;
     let conflicts = app
         .get(&format!("projects/{id}/conflicts"), &author_device)
@@ -217,24 +217,28 @@ async fn bad_save_input_is_a_400_with_a_message() {
     let device = app.device(&admin, "d").await;
     for (body, needle) in [
         (
-            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "colour": "red"}),
+            json!({"kind": "rule", "title": "A long enough title", "summary": "A summary that says what is true.", "reason": "a stated reason", "colour": "red"}),
             "colour",
         ),
         (
-            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "fields": {"symptom": "x"}}),
+            json!({"kind": "rule", "title": "A long enough title", "summary": "A summary that says what is true.", "reason": "a stated reason", "fields": {"symptom": "x"}}),
             "symptom",
         ),
         (
-            json!({"kind": "handoff", "title": "t", "summary": "s", "reason": "r"}),
+            json!({"kind": "handoff", "title": "A long enough title", "summary": "A summary that says what is true.", "reason": "a stated reason"}),
             "handoff",
         ),
         (
-            json!({"kind": "rule", "title": "t", "summary": "s"}),
+            json!({"kind": "rule", "title": "A long enough title", "summary": "A summary that says what is true."}),
             "reason",
         ),
         (
-            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r", "scope": "project"}),
+            json!({"kind": "rule", "title": "A long enough title", "summary": "A summary that says what is true.", "reason": "a stated reason", "scope": "project"}),
             "project",
+        ),
+        (
+            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r"}),
+            "title: use 8-80",
         ),
     ] {
         let (status, reply) = app.send("POST", "remember", body, Some(&device)).await;
@@ -330,5 +334,25 @@ async fn account_errors_use_the_texts_the_console_expects() {
         (status, body["error"].as_str()),
         (401, Some("account session is expired or revoked"))
     );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn quality_error_is_400_quality_one_line() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "d").await;
+    let thin = json!({"kind": "gotcha", "title": "Pool timeouts", "summary": "Requests hang when the pool is exhausted.", "reason": "Seen in production."});
+    let (status, reply) = app
+        .send("POST", "remember", thin.clone(), Some(&device))
+        .await;
+    assert_eq!(status, 400, "{reply}");
+    assert_eq!(reply["code"], "quality");
+    assert_eq!(reply["error"], "fields.fix: say how the gotcha was fixed");
+    assert!(!reply["error"].as_str().unwrap().contains('\n'));
+    let mut fixed = thin;
+    fixed["fields"] = json!({"fix": "Raise the pool size and add a timeout."});
+    let (status, reply) = app.send("POST", "remember", fixed, Some(&device)).await;
+    assert_eq!(status, 200, "{reply}");
     app.finish().await;
 }

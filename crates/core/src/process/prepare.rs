@@ -3,14 +3,35 @@ use crate::capture::{WorkContext, redact_sensitive_content};
 use crate::error::Error;
 use crate::memory::identity::{evidence_hash, identity_hash, normalize_evidence};
 use crate::memory::kind::{expires_at, resolve_scope};
-use crate::memory::validate::validate_save;
+use crate::memory::validate::{validate_quality, validate_save};
 use crate::memory::{Context, Entity, Fields, Kind, SaveInput, Scope};
 
-/// Who is saving. The system path (distill) may write a handoff; an agent may not.
+/// Who is saving. The system path (distill, promotion) may write a handoff and skips the quality
+/// rules (its outputs are built to pass them); an agent may not and does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     Agent,
     System,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::System => "system",
+        }
+    }
+}
+
+impl std::str::FromStr for Origin {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "agent" => Ok(Self::Agent),
+            "system" => Ok(Self::System),
+            other => Err(format!("unknown origin `{other}`")),
+        }
+    }
 }
 
 /// A validated, redacted and derived memory, ready for the store to insert.
@@ -18,6 +39,7 @@ pub enum Origin {
 pub struct NewMemory {
     pub kind: Kind,
     pub scope: Scope,
+    pub origin: Origin,
     pub title: String,
     pub summary: String,
     pub reason: String,
@@ -52,6 +74,9 @@ pub fn prepare_save(
         ..input
     };
     validate_save(&input, &fields, origin == Origin::System)?;
+    if origin == Origin::Agent {
+        validate_quality(&input, &fields)?;
+    }
     if input.supersedes.is_some() && input.supersedes == input.contradicts {
         return Err(Error::validation(
             "supersedes and contradicts must name different memories",
@@ -71,6 +96,7 @@ pub fn prepare_save(
     Ok(NewMemory {
         kind: input.kind,
         scope,
+        origin,
         identity_hash: identity_hash(
             input.kind,
             &input.title,
@@ -120,13 +146,13 @@ mod tests {
     #[test]
     fn rule_defaults_to_project_and_redacts_before_hashing() {
         let a = ok(
-            json!({"kind":"rule","title":"No secrets","summary":"token=abc123 never logged","reason":"audit"}),
+            json!({"kind":"rule","title":"No secrets in logs","summary":"token=abc123 never logged by any service","reason":"audit finding"}),
             true,
         );
         assert_eq!(a.scope, Scope::Project);
         assert!(!a.summary.contains("abc123"));
         let b = ok(
-            json!({"kind":"rule","title":"No secrets","summary":"token=zzz999 never logged","reason":"audit"}),
+            json!({"kind":"rule","title":"No secrets in logs","summary":"token=zzz999 never logged by any service","reason":"audit finding"}),
             true,
         );
         assert_eq!(
@@ -134,7 +160,7 @@ mod tests {
             "identity is taken after redaction"
         );
         let personal = ok(
-            json!({"kind":"rule","title":"No secrets","summary":"s","reason":"audit"}),
+            json!({"kind":"rule","title":"No secrets in logs","summary":"Secrets never reach the log output.","reason":"audit finding"}),
             false,
         );
         assert_eq!(personal.scope, Scope::Personal);
@@ -142,13 +168,18 @@ mod tests {
 
     #[test]
     fn note_expires_and_needs_no_reason_but_a_decision_does() {
-        let note = ok(json!({"kind":"note","title":"t","summary":"s"}), true);
+        let note = ok(
+            json!({"kind":"note","title":"A short-lived note","summary":"Something worth remembering for a while."}),
+            true,
+        );
         assert_eq!(
             (note.scope, note.expires_at),
             (Scope::Personal, Some(1_000 + 90 * 86_400))
         );
         let err = prepare_save(
-            input(json!({"kind":"decision","title":"t","summary":"s"})),
+            input(
+                json!({"kind":"decision","title":"Use one queue","summary":"Jobs run through one Postgres table."}),
+            ),
             &WorkContext::default(),
             false,
             Origin::Agent,
@@ -159,45 +190,47 @@ mod tests {
 
     #[test]
     fn wrong_or_unknown_fields_are_rejected() {
+        let t = "A long enough title";
+        let s = "A summary that says what is true.";
         for (value, needle) in [
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","fields":{"symptom":"x"}}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","fields":{"symptom":"x"}}),
                 "symptom",
             ),
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","fields":"x"}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","fields":"x"}),
                 "object",
             ),
             (
-                json!({"kind":"handoff","title":"t","summary":"s","reason":"r"}),
+                json!({"kind":"handoff","title":t,"summary":s,"reason":"because it is"}),
                 "system",
             ),
             (
-                json!({"kind":"preference","title":"t","summary":"s","reason":"r","scope":"project"}),
+                json!({"kind":"preference","title":t,"summary":s,"reason":"because it is","scope":"project"}),
                 "personal",
             ),
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","scope":"project"}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","scope":"project"}),
                 "initialized",
             ),
             (
-                json!({"kind":"fact","title":"x".repeat(81),"summary":"s","reason":"r"}),
+                json!({"kind":"fact","title":"x".repeat(81),"summary":s,"reason":"because it is"}),
                 "title",
             ),
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","evidence":vec!["e"; 21]}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","evidence":vec!["e"; 21]}),
                 "evidence",
             ),
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","supersedes":"a","contradicts":"a"}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","supersedes":"a","contradicts":"a"}),
                 "different",
             ),
             (
-                json!({"kind":"procedure","title":"t","summary":"s","reason":"r","fields":{"steps":vec!["a"; 21]}}),
+                json!({"kind":"procedure","title":t,"summary":s,"reason":"because it is","fields":{"steps":vec!["a"; 21]}}),
                 "steps",
             ),
             (
-                json!({"kind":"fact","title":"t","summary":"s","reason":"r","fields":{"source":"x".repeat(1001)}}),
+                json!({"kind":"fact","title":t,"summary":s,"reason":"because it is","fields":{"source":"x".repeat(1001)}}),
                 "source",
             ),
         ] {
@@ -217,6 +250,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn agent_saves_are_quality_checked_and_system_saves_are_not() {
+        let thin = json!({"kind":"gotcha","title":"t","summary":"s","reason":"r"});
+        let agent = prepare_save(
+            input(thin.clone()),
+            &WorkContext::default(),
+            false,
+            Origin::Agent,
+            0,
+        );
+        assert!(matches!(agent, Err(Error::Quality(m)) if m.starts_with("title:")));
+        let system = prepare_save(
+            input(thin),
+            &WorkContext::default(),
+            false,
+            Origin::System,
+            0,
+        )
+        .expect("system");
+        assert_eq!(system.origin, Origin::System);
     }
 
     #[test]

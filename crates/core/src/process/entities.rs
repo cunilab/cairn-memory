@@ -3,40 +3,62 @@ use crate::memory::{Entity, EntityKind};
 
 pub const ENTITY_CAP: usize = 32;
 
-/// Deterministic entities: the request's lists, plus repo-relative paths and backticked
-/// identifiers found in the memory text. Deduplicated, capped at 32.
+/// A command is only recognised in prose when it starts with one of these programs.
+const COMMAND_PROGRAMS: [&str; 20] = [
+    "cargo", "npm", "pnpm", "yarn", "npx", "node", "git", "docker", "kubectl", "make", "python",
+    "python3", "pytest", "go", "psql", "cairn", "bash", "sh", "just", "uv",
+];
+/// A module that is only one of these says nothing about the code.
+const GENERIC_MODULES: [&str; 5] = ["src", "lib", "app", "crates", "packages"];
+
+/// Deterministic entities (CM-SPEC-008 §3): the request's lists first, then backticked spans, then
+/// bare text; the parent directory of every file last. Deduplicated, capped at 32 (first wins).
+/// The one function behind save, link jobs and the search entity channel.
 pub fn derive(texts: &[&str], context: &WorkContext) -> Vec<Entity> {
     let mut out: Vec<Entity> = Vec::new();
-    let lists = [
-        (EntityKind::File, &context.files),
-        (EntityKind::Symbol, &context.symbols),
-        (EntityKind::Command, &context.commands),
-        (EntityKind::Test, &context.tests),
-        (EntityKind::Service, &context.services),
-    ];
-    for (kind, names) in lists {
-        for name in names {
-            let name = if kind == EntityKind::File {
-                normalize_path(name)
-            } else {
-                name.trim().to_owned()
-            };
-            push(&mut out, kind, name);
-        }
+    let worktree = context
+        .worktree
+        .as_deref()
+        .map(|w| w.trim().replace('\\', "/").trim_end_matches('/').to_owned())
+        .filter(|w| !w.is_empty());
+    for name in &context.files {
+        push_file(&mut out, &normalize_path(name, worktree.as_deref()));
+    }
+    for name in &context.symbols {
+        push_symbol(&mut out, name);
+    }
+    for name in &context.commands {
+        push(&mut out, EntityKind::Command, normalize_command(name));
+    }
+    for name in &context.tests {
+        push(&mut out, EntityKind::Test, clean_symbol(name));
+    }
+    for name in &context.services {
+        push(&mut out, EntityKind::Service, name.trim().to_lowercase());
     }
     for text in texts {
         for (index, part) in text.split('`').enumerate() {
             if index % 2 == 1 {
-                push_code(&mut out, part.trim());
-            } else {
+                push_code(&mut out, part.trim(), worktree.as_deref());
+            }
+        }
+    }
+    for text in texts {
+        for (index, part) in text.split('`').enumerate() {
+            if index % 2 == 0 {
                 for word in part.split_whitespace() {
-                    let word = word.trim_matches(|c: char| ",;:()[]\"'".contains(c) || c == '.');
-                    if looks_like_path(word) {
-                        push(&mut out, EntityKind::File, normalize_path(word));
-                    }
+                    push_word(&mut out, word, worktree.as_deref());
                 }
             }
         }
+    }
+    let modules: Vec<String> = out
+        .iter()
+        .filter(|e| e.kind == EntityKind::File)
+        .filter_map(|e| module_of(&e.name))
+        .collect();
+    for module in modules {
+        push(&mut out, EntityKind::Module, module);
     }
     out.truncate(ENTITY_CAP);
     out
@@ -46,43 +68,165 @@ fn push(out: &mut Vec<Entity>, kind: EntityKind, name: String) {
     if name.is_empty() || name.chars().count() > 200 {
         return;
     }
-    let name = if kind == EntityKind::Term {
-        name.to_lowercase()
-    } else {
-        name
-    };
     if !out.iter().any(|e| e.kind == kind && e.name == name) {
         out.push(Entity { kind, name });
     }
 }
 
-fn push_code(out: &mut Vec<Entity>, code: &str) {
+/// A file, plus a test entity when the path is a test file.
+fn push_file(out: &mut Vec<Entity>, path: &str) {
+    push(out, EntityKind::File, path.to_owned());
+    if is_test_path(path) {
+        push(out, EntityKind::Test, path.to_owned());
+    }
+}
+
+/// A symbol, or a test when the name says so.
+fn push_symbol(out: &mut Vec<Entity>, raw: &str) {
+    let name = clean_symbol(raw);
+    let kind = if name.starts_with("test_") || name.ends_with("_test") || name.ends_with("Test") {
+        EntityKind::Test
+    } else {
+        EntityKind::Symbol
+    };
+    push(out, kind, name);
+}
+
+/// A backticked span: path, command, symbol or term.
+fn push_code(out: &mut Vec<Entity>, code: &str, worktree: Option<&str>) {
     if code.is_empty() {
         return;
     }
     if looks_like_path(code) {
-        push(out, EntityKind::File, normalize_path(code));
+        push_file(out, &normalize_path(code, worktree));
     } else if code.contains(char::is_whitespace) {
-        push(out, EntityKind::Command, code.to_owned());
-    } else if code
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
+        let command = normalize_command(code);
+        if command
+            .split(' ')
+            .next()
+            .is_some_and(|program| COMMAND_PROGRAMS.contains(&program))
+        {
+            push(out, EntityKind::Command, command);
+        }
+    } else if is_symbol(&clean_symbol(code)) {
+        push_symbol(out, code);
+    } else if !code.is_empty()
+        && code
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && code.starts_with(|c: char| c.is_ascii_lowercase())
     {
-        let kind =
-            if code.contains("::") || code.contains('_') || code.chars().any(char::is_uppercase) {
-                EntityKind::Symbol
-            } else {
-                EntityKind::Term
-            };
-        push(out, kind, code.to_owned());
+        push(out, EntityKind::Term, code.to_owned());
     }
 }
 
-fn normalize_path(path: &str) -> String {
-    path.trim()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .to_owned()
+/// Bare prose: paths and symbols only, never inside a URL and never a word of 3 characters or fewer.
+fn push_word(out: &mut Vec<Entity>, word: &str, worktree: Option<&str>) {
+    let word = word.trim_matches(|c: char| ",:()[]\"'!;".contains(c) || c == '.');
+    if word.contains("://") || word.chars().count() <= 3 {
+        return;
+    }
+    if looks_like_path(word) {
+        push_file(out, &normalize_path(word, worktree));
+    } else if is_symbol(word) {
+        push_symbol(out, word);
+    }
+}
+
+fn normalize_path(path: &str, worktree: Option<&str>) -> String {
+    let path = path.trim().replace('\\', "/");
+    let path = match worktree.and_then(|w| path.strip_prefix(&format!("{w}/"))) {
+        Some(rest) => rest,
+        None => path.as_str(),
+    };
+    let mut path = path;
+    while let Some(rest) = path.strip_prefix("./") {
+        path = rest;
+    }
+    path.trim_end_matches('/').to_owned()
+}
+
+/// Collapses spaces, cuts at the first pipe, `&&`, `;` or `>`, keeps the first three words.
+fn normalize_command(command: &str) -> String {
+    let cut = ["|", "&&", ";", ">"]
+        .iter()
+        .filter_map(|stop| command.find(stop))
+        .min()
+        .unwrap_or(command.len());
+    command[..cut]
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Strips the trailing `()`, `!` or `;` of a symbol.
+fn clean_symbol(name: &str) -> String {
+    let mut name = name.trim();
+    loop {
+        let next = name
+            .strip_suffix("()")
+            .or_else(|| name.strip_suffix('!'))
+            .or_else(|| name.strip_suffix(';'));
+        match next {
+            Some(shorter) => name = shorter.trim_end(),
+            None => return name.to_owned(),
+        }
+    }
+}
+
+fn ident(part: &str) -> bool {
+    part.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `a::b`, camelCase, PascalCase with two humps, or snake_case with two parts.
+fn is_symbol(name: &str) -> bool {
+    let alnum = name.chars().all(|c| c.is_ascii_alphanumeric());
+    let mut chars = name.chars();
+    let (first, second) = (chars.next(), chars.next());
+    let path_qualified =
+        name.contains("::") && name.split("::").count() >= 2 && name.split("::").all(ident);
+    let camel = alnum
+        && first.is_some_and(|c| c.is_ascii_lowercase())
+        && name.chars().any(|c| c.is_ascii_uppercase());
+    let pascal = alnum
+        && first.is_some_and(|c| c.is_ascii_uppercase())
+        && second.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name.chars().skip(2).any(|c| c.is_ascii_uppercase());
+    let snake = {
+        let parts: Vec<&str> = name.split('_').collect();
+        parts.len() >= 2
+            && parts[0].starts_with(|c: char| c.is_ascii_lowercase())
+            && parts[0]
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && parts[1..].iter().all(|p| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            })
+            && !parts[1..]
+                .iter()
+                .all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    };
+    path_qualified || camel || pascal || snake
+}
+
+fn is_test_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.split('.').next().unwrap_or(file);
+    path.starts_with("tests/")
+        || path.contains("/tests/")
+        || stem.ends_with("_test")
+        || file.contains(".test.")
+        || (stem.starts_with("test_") && file.ends_with(".py"))
+}
+
+/// The parent directory, unless it is empty or only a generic top-level name.
+fn module_of(path: &str) -> Option<String> {
+    let (parent, _) = path.rsplit_once('/')?;
+    (!parent.is_empty() && !GENERIC_MODULES.contains(&parent)).then(|| parent.to_owned())
 }
 
 /// A slash path whose last segment has a short extension, such as `crates/core/src/lib.rs`.
@@ -129,9 +273,141 @@ mod tests {
         assert!(got.contains(&(EntityKind::File, "src/a.rs")));
         assert!(got.contains(&(EntityKind::Test, "it_works")));
         assert!(got.contains(&(EntityKind::File, "crates/core/src/lib.rs")));
-        assert!(got.contains(&(EntityKind::Command, "cargo test -p cairn-core")));
+        assert!(got.contains(&(EntityKind::Command, "cargo test -p")));
         assert!(got.contains(&(EntityKind::Symbol, "Memory::save")));
         assert!(!got.iter().any(|(_, n)| n.contains("x.io")));
+    }
+
+    fn has(entities: &[Entity], kind: EntityKind, name: &str) -> bool {
+        entities.iter().any(|e| e.kind == kind && e.name == name)
+    }
+
+    fn from_text(text: &str) -> Vec<Entity> {
+        derive(&[text], &WorkContext::default())
+    }
+
+    #[test]
+    fn entities_rows() {
+        // file: context + worktree strip + backticked + bare; a URL is not a file.
+        let context = WorkContext {
+            files: vec!["/w/repo/./src/a.rs".into(), "/w/repo/docs/".into()],
+            worktree: Some("/w/repo/".into()),
+            ..WorkContext::default()
+        };
+        let got = derive(
+            &["edit `crates/x/lib.rs` and src/b.rs, not https://x.io/c.html"],
+            &context,
+        );
+        assert!(has(&got, EntityKind::File, "src/a.rs"));
+        assert!(has(&got, EntityKind::File, "docs"));
+        assert!(has(&got, EntityKind::File, "crates/x/lib.rs"));
+        assert!(has(&got, EntityKind::File, "src/b.rs"));
+        assert!(!got.iter().any(|e| e.name.contains("x.io")));
+        // module: parent directory of a file.
+        assert!(has(&got, EntityKind::Module, "crates/x"));
+        // symbol: the four shapes, with trailing punctuation stripped; negatives stay out.
+        let got = from_text(
+            "`Memory::save()` `parseThing` `OrderItem` `retry_budget` `plain` `ALLCAPS` `a_1` `Order` `abc`",
+        );
+        for name in ["Memory::save", "parseThing", "OrderItem", "retry_budget"] {
+            assert!(has(&got, EntityKind::Symbol, name), "{name}");
+        }
+        for name in ["ALLCAPS", "a_1", "Order"] {
+            assert!(!got.iter().any(|e| e.name == name), "{name}");
+        }
+        assert!(has(&got, EntityKind::Term, "plain"));
+        assert!(has(&got, EntityKind::Term, "abc"));
+        // bare symbols need more than 3 characters and are skipped inside URLs.
+        let got = from_text("call load_user then fooBar; see https://x.io/some_thing_else and a_b");
+        assert!(has(&got, EntityKind::Symbol, "load_user"));
+        assert!(has(&got, EntityKind::Symbol, "fooBar"));
+        assert!(
+            !got.iter()
+                .any(|e| e.name.contains("some_thing") || e.name == "a_b")
+        );
+        // test: context, name rules, test file paths (file kept too).
+        let context = WorkContext {
+            tests: vec!["it_works".into()],
+            symbols: vec!["test_parse".into(), "ParserTest".into(), "helper_fn".into()],
+            files: vec![
+                "tests/common/db.rs".into(),
+                "src/a_test.rs".into(),
+                "web/b.test.ts".into(),
+                "src/lib.rs".into(),
+            ],
+            ..WorkContext::default()
+        };
+        let got = derive(&[], &context);
+        for name in [
+            "it_works",
+            "test_parse",
+            "ParserTest",
+            "tests/common/db.rs",
+            "src/a_test.rs",
+            "web/b.test.ts",
+        ] {
+            assert!(has(&got, EntityKind::Test, name), "{name}");
+        }
+        assert!(has(&got, EntityKind::File, "tests/common/db.rs"));
+        assert!(has(&got, EntityKind::Symbol, "helper_fn"));
+        assert!(!has(&got, EntityKind::Test, "src/lib.rs"));
+        // command: allowed program only, cut at pipes/&&/;/>, first three words.
+        let got = from_text(
+            "run `cargo   test -p cairn-core --lib | tail` then `rm -rf build` and `git status && git diff`",
+        );
+        assert!(has(&got, EntityKind::Command, "cargo test -p"));
+        assert!(has(&got, EntityKind::Command, "git status"));
+        assert!(
+            !got.iter()
+                .any(|e| e.kind == EntityKind::Command && e.name.starts_with("rm"))
+        );
+        let context = WorkContext {
+            commands: vec!["make  build > out.txt".into()],
+            ..WorkContext::default()
+        };
+        assert!(has(
+            &derive(&[], &context),
+            EntityKind::Command,
+            "make build"
+        ));
+        // service: lower-cased from the context only.
+        let context = WorkContext {
+            services: vec![" Postgres ".into()],
+            ..WorkContext::default()
+        };
+        let got = derive(&["Postgres"], &context);
+        assert!(has(&got, EntityKind::Service, "postgres"));
+        assert!(!has(&got, EntityKind::Service, "Postgres"));
+        // term: a backticked single lower-case word.
+        assert!(has(
+            &from_text("the `tokio` runtime"),
+            EntityKind::Term,
+            "tokio"
+        ));
+        assert!(
+            !from_text("the tokio runtime")
+                .iter()
+                .any(|e| e.kind == EntityKind::Term)
+        );
+    }
+
+    #[test]
+    fn module_skips_top_level_src() {
+        let context = WorkContext {
+            files: vec![
+                "src/lib.rs".into(),
+                "Cargo.toml".into(),
+                "app/page.tsx".into(),
+                "src/auth/session.rs".into(),
+            ],
+            ..WorkContext::default()
+        };
+        let modules: Vec<_> = derive(&[], &context)
+            .into_iter()
+            .filter(|e| e.kind == EntityKind::Module)
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(modules, ["src/auth"]);
     }
 
     #[test]

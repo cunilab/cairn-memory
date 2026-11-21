@@ -380,6 +380,8 @@ impl Store {
         .await?
         .rows_affected();
         tx.commit().await?;
+        self.retry_quarantined().await?;
+        self.reconcile_promoted().await?;
         Ok(report)
     }
 }

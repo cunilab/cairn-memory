@@ -85,7 +85,7 @@ try:
         return json.loads(result["content"][0]["text"])
 
 
-    record = {"scope":"global", "kind":"procedure", "title":"Scoped record", "summary":"Typed RPC record", "reason":"Round trip verification", "fields":{"steps":["one", "two"], "when":"testing"}}
+    record = {"scope":"global", "kind":"procedure", "title":"Scoped record", "summary":"Typed RPC record for the smoke test", "reason":"Round trip verification", "fields":{"steps":["one", "two"], "when":"testing"}}
     for index, field in enumerate(["kind", "title", "summary", "reason"]):
         missing = dict(record)
         del missing[field]

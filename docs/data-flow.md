@@ -57,15 +57,20 @@ flowchart TD
     Dup -->|forgotten| Reject[409 forgotten]
     Dup -->|exists| Same[Return the existing id, deduplicated]
     Dup -->|new| Write[Write memory, entities, links]
+    Write --> Link[link job]
+    Link -->|shared file, module, symbol, test; gotcha fix/cause| Auto[auto links, same project or owner, at most 8]
     Write --> Embed[embed job]
     Embed --> Consolidate[consolidate job]
+    Consolidate -->|project rule or gotcha with a twin in another project, cosine 0.92 or more| Promote[One global copy, redacted, linked to both sources]
+    Promote -->|fewer than 2 live sources| Withdraw[Copy expires]
     Consolidate -->|cosine 0.92 or more, same owner, scope, project, kind| Super[Older memory superseded]
     Consolidate -->|0.75 to 0.92| Relates[relates link]
 ```
 
 The default scope of a decision, rule, gotcha, procedure or fact is `project` in an initialized
 repository and `personal` otherwise; a preference is always `personal`. A correction is a new save with
-`supersedes`; the old memory stays as history.
+`supersedes`; the old memory stays as history. A quarantined job is retried by the sweep an hour later, with
+one attempt left, so nobody requeues jobs by hand.
 
 ## Recall
 

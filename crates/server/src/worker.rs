@@ -1,5 +1,5 @@
-//! Background work: distill sessions into notes and a handoff, embed memories, consolidate
-//! near-duplicates, and sweep idle sessions and expired rows. One tick drains what is due.
+//! Background work: distill sessions into notes and a handoff, embed memories, link them by shared
+//! entities, consolidate near-duplicates, and sweep idle sessions and expired rows. One tick drains what is due.
 
 use crate::AppState;
 use cairn_core::process::embed::EMBED_BATCH;
@@ -139,10 +139,11 @@ pub fn spawn(state: &AppState) {
     });
 }
 
-/// Runs every due job once: distill, then embed, then consolidate.
+/// Runs every due job once: distill, then embed, then link, then consolidate.
 pub async fn tick(state: &AppState) {
     distill(state).await;
     embed(state).await;
+    link(state).await;
     consolidate(state).await;
 }
 
@@ -233,6 +234,16 @@ async fn embed(state: &AppState) {
             .remove(job.key.as_str())
             .unwrap_or(JobEnd::Succeeded);
         settle(state, job, end).await;
+    }
+}
+
+async fn link(state: &AppState) {
+    for job in claim(state, JobKind::Link).await {
+        let end = match state.store.link_memory(&job.key).await {
+            Ok(_) => JobEnd::Succeeded,
+            Err(error) => JobEnd::Retry(error.to_string()),
+        };
+        settle(state, &job, end).await;
     }
 }
 
