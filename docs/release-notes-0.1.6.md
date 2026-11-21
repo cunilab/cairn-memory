@@ -44,4 +44,3 @@ Repeat steps 2–6 on each machine.
 ## TODO before release
 
 - Embedding model name and final benchmark numbers.
-- Confirm the ADR 0015 "telescopic layout" wording.
