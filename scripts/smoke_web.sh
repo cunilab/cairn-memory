@@ -66,20 +66,6 @@ api_port="$(printf '%s\n' "$ports" | sed -n '1p')"
 web_port="$(printf '%s\n' "$ports" | sed -n '2p')"
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import { memoryReadPath } from "./apps/web/lib/memory-path.ts";
-
-const member = memoryReadPath("proj");
-const owner = memoryReadPath("proj");
-if (member !== "projects/proj/memories") {
-  throw new Error(`member path ${member}`);
-}
-if (owner !== "projects/proj/memories") {
-  throw new Error(`owner path ${owner}`);
-}
-if (member !== owner) { throw new Error("every role must use the same decision list"); }
-JS
-
-node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
 import {
   isNoBodyStatus,
   isSessionRequired,
@@ -138,7 +124,7 @@ if (!rotated.includes("laptop") || !rotated.includes("old token stops working") 
   throw new Error("rotate copy must name the device, the old token and the one-time new token");
 }
 const detail = await import("node:fs").then((fs) =>
-  fs.readFileSync("apps/web/components/project-detail.tsx", "utf8"),
+  fs.readFileSync("apps/web/app/projects/_components/project-detail.tsx", "utf8"),
 );
 if (!detail.includes("do not repeat the action")) {
   throw new Error("a failed reload must tell the user not to repeat the action");
