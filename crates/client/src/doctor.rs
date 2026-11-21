@@ -1,6 +1,6 @@
 //! `cairn doctor`: read-only health checks, one `ok|warn|fail  <check>  <detail>` line each.
 
-use crate::{Client, Config, project, selected_config_path};
+use crate::{Client, Config, Error, project, selected_config_path};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,7 @@ fn config_check(path: &Path) -> Check {
 }
 
 fn server_checks(config: Config) -> Vec<Check> {
+    let path = config.path().map(|path| path.display().to_string());
     let client = Client::with_timeout(config, Duration::from_secs(3));
     let health = match client.get("/cairn-memory/health") {
         Ok(health) => health,
@@ -67,6 +68,14 @@ fn server_checks(config: Config) -> Vec<Check> {
     });
     checks.push(match client.get("/cairn-memory/auth/me") {
         Ok(_) => check("ok", "device", "token accepted"),
+        Err(Error::Status { status: 401, .. }) => check(
+            "fail",
+            "device",
+            format!(
+                "device token rejected (HTTP 401); check {}, run cairn setup",
+                path.as_deref().unwrap_or("the selected config")
+            ),
+        ),
         Err(error) => check("fail", "device", error.to_string()),
     });
     checks
@@ -84,7 +93,7 @@ fn project_check() -> Check {
         Ok(None) => check(
             "warn",
             "project",
-            "no .cairn/project.json; personal scope only",
+            "no .cairn/project.json: project memories are hidden and saves are personal; run cairn init",
         ),
         Err(error) => check("fail", "project", error.to_string()),
     }

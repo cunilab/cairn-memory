@@ -343,15 +343,28 @@ impl Store {
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
         let owner: String = row.try_get("owner_id")?;
         let status: Status = parse(&row, "status")?;
+        // Distinct voters: a repeated vote by the same person changes nothing.
+        sqlx::query(
+            "INSERT INTO usage_votes (memory_id, person_id, vote) VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(memory_id)
+        .bind(person_id)
+        .bind(if vote == Vote::Helpful {
+            "helpful"
+        } else {
+            "wrong"
+        })
+        .execute(&mut *tx)
+        .await?;
         let counts = sqlx::query(
-            "INSERT INTO usage (memory_id, helpful, wrong) VALUES ($1, $2, $3)
-             ON CONFLICT (memory_id) DO UPDATE
-                SET helpful = usage.helpful + $2, wrong = usage.wrong + $3
+            "INSERT INTO usage (memory_id, helpful, wrong)
+             SELECT $1, count(*) FILTER (WHERE vote = 'helpful'), count(*) FILTER (WHERE vote = 'wrong')
+               FROM usage_votes WHERE memory_id = $1
+             ON CONFLICT (memory_id) DO UPDATE SET helpful = EXCLUDED.helpful, wrong = EXCLUDED.wrong
              RETURNING wrong",
         )
         .bind(memory_id)
-        .bind(i32::from(vote == Vote::Helpful))
-        .bind(i32::from(vote == Vote::Wrong))
         .fetch_one(&mut *tx)
         .await?;
         let wrong = counts.try_get::<i32, _>("wrong")?.max(0) as u32;

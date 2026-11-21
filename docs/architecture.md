@@ -71,11 +71,11 @@ the memory is global, or it is project-scoped and the caller is a member of that
 3. **Process.** The worker embeds new memories, then runs `consolidate`: a neighbour with the same owner,
    scope, project and kind and cosine ≥ 0.92 is superseded by the newer memory; 0.75–0.92 adds a
    `relates` link. Nothing is queued for a human.
-4. **Recall.** `/search` (also `/smart-search`, `/context`, `/recall`) runs lexical, entity and vector
+4. **Recall.** `/search` (also `/context`, the same handler, for the hook until step 4) runs lexical, entity and vector
    channels over visible rows, fuses them (RRF), applies the relevance floor and usage multipliers, then
-   packs compact results with `more: n` for what was cut. `/resume`, `/unresolved`, `/why-changed` and
-   the session brief read handoffs, open contradictions and links.
-5. **Feedback and forget.** `helpful` and `wrong` votes change `usage` and may mark a memory stale.
+   packs compact results with `more: n` for what was cut. `kind=handoff` finds handoffs, `kind=decision` replaces
+   why-changed, and the session brief reads handoffs and links.
+5. **Feedback and forget.** `helpful` and `wrong` votes (one per person) change `usage` and may mark a memory stale; a stale memory still ranks, lower, and its card says so.
    Forget blanks the text and deletes its embedding, entities and links; the identity hash stays.
 
 ## Constraints

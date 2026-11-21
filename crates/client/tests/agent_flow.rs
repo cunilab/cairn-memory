@@ -609,10 +609,37 @@ fn doctor_reports_each_check_and_fails_when_the_server_is_unreachable() {
     }
     assert!(!text.contains(&team.owner.token), "{text}");
 
+    // Inside git without .cairn/project.json: project memories are hidden, so say how to fix it.
+    let bare = temp_dir("doctor-bare");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&bare)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let text = String::from_utf8_lossy(&run(&team.owner, &bare).stdout).into_owned();
+    let line = text.lines().find(|l| l.contains("project")).unwrap_or("");
+    assert!(line.starts_with("warn  project"), "{text}");
+    assert!(line.contains("run cairn init"), "{text}");
+
     // Same token, nothing listening: the server and device checks cannot pass.
     let dead = Agent::setup("doctor-dead", "http://127.0.0.1:1", "cdt_dead_server");
     let output = run(&dead, &dir);
     let text = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(1), "{text}");
     assert!(text.contains("fail  server"), "{text}");
+
+    // A live server that rejects the token: the device line says where to fix it.
+    let rejected = Agent::setup("doctor-401", &server.url, "cdt_not_a_real_device_token");
+    let output = run(&rejected, &dir);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    let device = text.lines().find(|l| l.contains("device")).unwrap_or("");
+    assert!(device.starts_with("fail  device"), "{text}");
+    assert!(device.contains("401"), "{text}");
+    assert!(device.contains("config.json"), "{text}");
+    assert!(device.contains("run cairn setup"), "{text}");
+    assert!(!text.contains("cdt_not_a_real_device_token"), "{text}");
 }

@@ -104,13 +104,10 @@ Cairn-owned hooks, MCP entry, and OpenCode `plugins/cairn/index.js`. URL-only
 setup still downloads the hook scripts of the matching published release.
 A script that differs from the recorded checksum is kept as `<name>.bak`.
 
-Default MCP search, smart search, recall, context, and reflect return short
-cards. `memory_save` and `memory_lesson_save` return `memory_id`, `kind`,
-`scope`, and `status`. `memory_get` and export stay full. Default agent search
-and the related recall routes omit raw captures until `includeCaptures` or
-`--include-captures`. A relevance floor can return no hits. Graph and
-similarity-review text is TOON; their structured content stays JSON. There is
-no server LLM.
+`memory_search` returns short cards (`id`, `kind`, `title`, `summary`, `score`,
+and `status` for a stale memory). `memory_save` returns `id`, `status` and
+`deduplicated`. `memory_get` returns full records. A relevance floor can return
+no hits. Results are one JSON text channel. There is no server LLM.
 
 OpenCode 2.1.4 omits the MCP registry on the first prompt of a cold session.
 The second prompt in that warmed session advertises the Cairn tools. The

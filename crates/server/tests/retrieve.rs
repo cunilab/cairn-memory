@@ -348,6 +348,10 @@ async fn supersede_graph_export_and_diagnose() {
         .post("search", json!({"query": "cache sessions"}), &device)
         .await;
     assert_eq!(ids(&search), vec![new.clone()]);
+    assert!(
+        search["results"][0].get("status").is_none(),
+        "active cards omit status"
+    );
     assert_eq!(
         app.get(&format!("memories/{old}"), &device).await["status"],
         "superseded"
@@ -396,6 +400,12 @@ async fn supersede_graph_export_and_diagnose() {
         (marked["status"].as_str(), marked["id"].as_str()),
         (Some("stale"), Some(new.as_str()))
     );
+    // A stale memory stays in search, and only its card carries `status`.
+    let search = app
+        .post("search", json!({"query": "cache sessions"}), &device)
+        .await;
+    assert_eq!(ids(&search), vec![new.clone()]);
+    assert_eq!(search["results"][0]["status"], "stale");
     let (status, _) = app
         .send(
             "POST",
@@ -426,6 +436,17 @@ async fn get_returns_requested_records_and_names_the_rest() {
         .collect();
     assert_eq!(order, ["Shared", "Mine"]);
     assert_eq!(got["missing"], json!(["nope"]));
+    // A repeated id is answered once, in first-seen order.
+    let dup = app
+        .post(
+            "get",
+            json!({"ids": [&shared, "nope", &shared, "nope", &mine, &mine]}),
+            &admin,
+        )
+        .await;
+    assert_eq!(dup["memories"].as_array().unwrap().len(), 2);
+    assert_eq!(dup["memories"][0]["title"], "Shared");
+    assert_eq!(dup["missing"], json!(["nope"]));
     let keys: Vec<_> = got["memories"][1].as_object().unwrap().keys().collect();
     assert_eq!(
         keys,

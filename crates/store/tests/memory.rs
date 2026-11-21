@@ -506,15 +506,31 @@ async fn feedback_moves_status_and_usage() {
         Status::Active
     );
     assert_eq!(db.store.get(&owner, &a).await.unwrap().usage.helpful, 1);
-    // One `wrong` from a member does not flip it; a second one does.
+    // Votes count distinct voters: a member repeating a vote changes nothing, a second member's
+    // `wrong` flips it.
+    for _ in 0..3 {
+        assert_eq!(
+            db.store.feedback(&member, &a, Vote::Helpful).await.unwrap(),
+            Status::Active
+        );
+        assert_eq!(
+            db.store.feedback(&member, &b, Vote::Wrong).await.unwrap(),
+            Status::Active
+        );
+    }
+    let usage = db.store.get(&owner, &b).await.unwrap().usage;
+    assert_eq!(usage.wrong, 1, "one voter, one wrong");
+    assert_eq!(db.store.get(&owner, &a).await.unwrap().usage.helpful, 1);
+    let second = db.person("second").await;
+    db.store
+        .join_project(&second, &project.project_id, None)
+        .await
+        .unwrap();
     assert_eq!(
-        db.store.feedback(&member, &b, Vote::Wrong).await.unwrap(),
-        Status::Active
-    );
-    assert_eq!(
-        db.store.feedback(&member, &b, Vote::Wrong).await.unwrap(),
+        db.store.feedback(&second, &b, Vote::Wrong).await.unwrap(),
         Status::Stale
     );
+    assert_eq!(db.store.get(&owner, &b).await.unwrap().usage.wrong, 2);
     // One `wrong` from the owner is enough.
     assert_eq!(
         db.store.feedback(&owner, &c, Vote::Wrong).await.unwrap(),

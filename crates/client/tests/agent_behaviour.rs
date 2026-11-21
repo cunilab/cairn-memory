@@ -162,8 +162,11 @@ fn feedback_and_forget() {
 
     let first = member.ok("memory_feedback", json!({"id": id, "vote": "wrong"}));
     assert_eq!(first["status"], "active");
-    let second = member.ok("memory_feedback", json!({"id": id, "vote": "wrong"}));
-    assert_eq!(second["status"], "stale");
+    // The same voter again changes nothing; the owner's own `wrong` makes it stale.
+    let again = member.ok("memory_feedback", json!({"id": id, "vote": "wrong"}));
+    assert_eq!(again["status"], "active");
+    let owner_vote = owner.ok("memory_feedback", json!({"id": id, "vote": "wrong"}));
+    assert_eq!(owner_vote["status"], "stale");
 
     let forgotten = owner.ok("memory_forget", json!({"id": id}));
     assert_eq!(forgotten["status"], "forgotten");

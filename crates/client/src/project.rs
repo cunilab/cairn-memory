@@ -77,9 +77,13 @@ pub struct ProjectFile {
 
 /// A malformed or unreadable existing file is an actionable warning, never a request to initialize.
 pub fn read(dir: &Path) -> Result<Option<ProjectFile>, Error> {
-    let Some(top) = toplevel(dir) else {
-        return Ok(None);
-    };
+    match toplevel(dir) {
+        Some(top) => read_at(&top),
+        None => Ok(None),
+    }
+}
+
+fn read_at(top: &Path) -> Result<Option<ProjectFile>, Error> {
     let path = top.join(FILE);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -106,13 +110,14 @@ pub fn read(dir: &Path) -> Result<Option<ProjectFile>, Error> {
     Ok(Some(file))
 }
 
-pub fn read_project_id(dir: &Path) -> Result<Option<String>, Error> {
-    Ok(read(dir)?.map(|file| file.project_id))
-}
-
 /// The project id in `<git toplevel of dir>/.cairn/project.json`, if there is a readable one.
 pub fn project_id(dir: &Path) -> Option<String> {
-    match read_project_id(dir) {
+    project_id_at(&toplevel(dir)?)
+}
+
+/// Same, for a git toplevel the caller already has (saves a `git` process).
+pub fn project_id_at(top: &Path) -> Option<String> {
+    match read_at(top).map(|file| file.map(|file| file.project_id)) {
         Ok(id) => id,
         Err(error) => {
             eprintln!("cairn: warning: {error}");

@@ -1,6 +1,6 @@
 //! The shapes search returns, and the limit that keeps a response small.
 
-use crate::memory::{Kind, Memory};
+use crate::memory::{Kind, Memory, Status};
 use serde::Serialize;
 
 /// A memory plus its search score.
@@ -17,6 +17,9 @@ pub struct Card {
     pub kind: Kind,
     pub title: String,
     pub summary: String,
+    /// Only when the memory is not `active` (a stale memory still ranks, lower).
+    #[serde(skip_serializing_if = "is_active")]
+    pub status: Status,
     /// Rounded to 3 decimals, relative to the top card (1.0).
     pub score: f32,
 }
@@ -33,6 +36,10 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+fn is_active(status: &Status) -> bool {
+    *status == Status::Active
+}
+
 /// `hits` arrive best first.
 pub fn cards(mut hits: Vec<Hit>, limit: usize) -> Cards {
     let more = hits.len().saturating_sub(limit);
@@ -45,6 +52,7 @@ pub fn cards(mut hits: Vec<Hit>, limit: usize) -> Cards {
             kind: h.memory.kind,
             title: h.memory.title,
             summary: h.memory.summary,
+            status: h.memory.status,
             score: if top > 0.0 {
                 (h.score / top * 1000.0).round() / 1000.0
             } else {
@@ -74,5 +82,9 @@ mod tests {
         assert!(json.get("more").is_none());
         let keys: Vec<_> = json["results"][0].as_object().unwrap().keys().collect();
         assert_eq!(keys, ["id", "kind", "score", "summary", "title"]);
+        let mut stale = hit("s", 0.3);
+        stale.memory.status = Status::Stale;
+        let json = serde_json::to_value(cards(vec![stale], 5)).expect("json");
+        assert_eq!(json["results"][0]["status"], "stale");
     }
 }

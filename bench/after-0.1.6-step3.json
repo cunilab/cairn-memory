@@ -39,34 +39,34 @@
     "weak_queries": 5
   },
   "fixed_session_cost": {
-    "deferred_hosts_bytes": 5246,
-    "deferred_hosts_tokens_est": 1312,
-    "eager_hosts_bytes": 7477,
-    "eager_hosts_tokens_est": 1869,
+    "deferred_hosts_bytes": 5291,
+    "deferred_hosts_tokens_est": 1323,
+    "eager_hosts_bytes": 7741,
+    "eager_hosts_tokens_est": 1935,
     "note": "tools/list (or just names) + initialize.instructions + scripted-session hook injection; excludes retrieval calls"
   },
   "label": "unlabelled",
   "mcp_surface": {
-    "initialize_instructions_bytes": 618,
-    "initialize_instructions_tokens_est": 154,
+    "initialize_instructions_bytes": 663,
+    "initialize_instructions_tokens_est": 166,
     "largest_tools": [
       [
-        1050,
+        1178,
         "memory_save"
       ],
       [
-        501,
+        585,
         "memory_search"
       ],
       [
-        272,
+        279,
         "memory_feedback"
       ]
     ],
     "tool_count": 5,
     "tool_names_bytes": 67,
-    "tools_list_bytes": 2298,
-    "tools_list_tokens_est": 574
+    "tools_list_bytes": 2517,
+    "tools_list_tokens_est": 629
   },
   "per_question_memory_search": [
     {

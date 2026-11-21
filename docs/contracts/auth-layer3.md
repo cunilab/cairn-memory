@@ -172,7 +172,7 @@ routes apply the same active-account check as the agent routes, so a device of a
 | Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `403` |
 | Identity | `auth/me` | yes | yes |
 | Capture | `session/start`, `session/end`, `session/checkpoint`, `session/brief`, `observe`, `sync/push` | start, end, checkpoint: yes; `observe` and `sync/push`: `401` (device only) | yes |
-| Recall | `search`, `smart-search`, `context`, `recall`, `resume`, `unresolved`, `why-changed`, `graph`, `diagnose` | yes | yes |
+| Recall | `search`, `get`, `context`, `session/brief`, `graph`, `diagnose` | yes | yes |
 | Memory | `remember`, `memories`, `feedback`, `forget`, `delete`, `contradict`, `supersede`, `links`, `export` | yes | yes |
 | Projects | `projects` (list), `projects/init`, `projects/{id}/rename`, `projects/{id}/members`, `projects/{id}/memories`, `projects/{id}/branches`, `projects/{id}/conflicts` | yes | yes |
 | Ownership transfer | `projects/{id}/ownership` | owner or admin, to an existing member | `403` |

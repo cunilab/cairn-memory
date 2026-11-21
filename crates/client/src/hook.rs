@@ -28,3 +28,31 @@ pub fn run(args: &[String]) -> Result<i32, Error> {
         })?;
     Ok(status.code().unwrap_or(1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn needs_an_event_name() {
+        assert!(run(&[]).is_err());
+    }
+
+    #[test]
+    fn runs_the_python_hook_next_to_the_config_and_returns_its_exit_code() {
+        let dir = std::env::temp_dir().join(format!("cairn-hook-stub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("hook")).unwrap();
+        std::fs::write(
+            dir.join("hook/cairn_hook.py"),
+            "import sys\nsys.exit(7 if '--cairn-managed' in sys.argv[1:] and 'Stop' not in sys.argv else 1)\n",
+        )
+        .unwrap();
+        let config = dir.join("config.json").to_string_lossy().into_owned();
+        let args = ["Stop", "--config", config.as_str(), "--cairn-managed"].map(str::to_owned);
+        assert_eq!(run(&args).unwrap(), 7);
+        // The event is not an argument of the script; options only.
+        let args = ["Start", "--config", config.as_str()].map(str::to_owned);
+        assert_eq!(run(&args).unwrap(), 1);
+    }
+}

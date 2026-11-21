@@ -149,6 +149,13 @@ CREATE TABLE usage (                               -- internal; never shown to a
     last_used_at timestamptz
 );
 
+CREATE TABLE usage_votes (                         -- one row per voter and vote; feeds usage.helpful/wrong
+    memory_id text NOT NULL REFERENCES memories ON DELETE CASCADE,
+    person_id text NOT NULL REFERENCES accounts,
+    vote      text NOT NULL CHECK (vote IN ('helpful','wrong')),
+    PRIMARY KEY (memory_id, person_id, vote)
+);
+
 -- capture ------------------------------------------------------------------
 CREATE TABLE sessions (
     person_id     text NOT NULL REFERENCES accounts,

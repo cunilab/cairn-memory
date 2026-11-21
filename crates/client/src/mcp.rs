@@ -191,7 +191,7 @@ impl McpServer {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return rpc_error(id, -32602, "tools/call requires a tool name");
         };
-        let Some(tool) = tools::find(name) else {
+        let Some(tool) = tools::find_by_name(name) else {
             return rpc_error(id, -32602, format!("unknown tool: {name}"));
         };
         let arguments = match params.get("arguments") {
@@ -291,6 +291,11 @@ mod tests {
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));
         assert_eq!(unknown["error"]["code"], -32602);
+        // CLI verbs are not MCP tool names.
+        for verb in ["search", "get", "save", "feedback", "forget"] {
+            let reply = call(&mut server, 3, "tools/call", json!({"name": verb}));
+            assert_eq!(reply["error"]["code"], -32602, "{verb}");
+        }
 
         let unreachable = call(
             &mut server,

@@ -7,8 +7,8 @@ The REST handlers, one file per area. Each file owns its request and response ty
 ## Entry points
 - `health`: `/health`, `/livez`. `account`: `/auth/*`. `device`: `/devices*`. `admin`: `/admin/jobs*`.
 - `project`: `/projects*`. `capture`: `/sync/push`, `/observe`, `/session/*`.
-- `memory`: `/remember`, `/memories*`, `/feedback`, `/forget`, `/delete`, `/links*`, `/supersede`, `/contradict`.
-- `retrieve`: `/search`, `/smart-search`, `/context`, `/recall`, `/resume`, `/unresolved`, `/why-changed`,
+- `memory`: `/remember`, `/get`, `/memories*`, `/feedback`, `/forget`, `/delete`.
+- `retrieve`: `/search` (and `/context`, the same handler, for the hook until step 4), `/session/brief`,
   `/graph`, `/export`, `/diagnose`.
 
 ## Depends on

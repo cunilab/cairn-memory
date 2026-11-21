@@ -10,7 +10,7 @@ use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
 use cairn_store::memory::{ListFilter, Vote};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Serialize)]
 pub struct Receipt {
@@ -144,7 +144,11 @@ pub async fn get_many(
         .map(|m| (m.id.clone(), m))
         .collect();
     let (mut memories, mut missing) = (Vec::new(), Vec::new());
+    let mut seen = HashSet::new();
     for id in body.ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
         match found.remove(&id) {
             Some(memory) => memories.push(Record::from(&memory)),
             None => missing.push(id),

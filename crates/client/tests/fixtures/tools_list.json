@@ -1,7 +1,7 @@
 {
  "tools": [
   {
-   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results. Fetch full records with memory_get.",
+   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory. kind=handoff returns the last session handoff. Fetch full records with memory_get.",
    "inputSchema": {
     "properties": {
      "kind": {
@@ -55,7 +55,7 @@
    "name": "memory_get"
   },
   {
-   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id>. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses.",
+   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses.",
    "inputSchema": {
     "properties": {
      "contradicts": {
@@ -116,7 +116,7 @@
    "name": "memory_save"
   },
   {
-   "description": "Mark a memory helpful or wrong. Wrong twice, or once by its owner, makes it stale.",
+   "description": "Mark a memory helpful or wrong. Wrong from two people, or from its owner, makes it stale.",
    "inputSchema": {
     "properties": {
      "id": {

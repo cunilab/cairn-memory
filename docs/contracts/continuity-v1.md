@@ -21,18 +21,18 @@ repository-name matching.
 
 ## Retrieval filters
 
-`/search`, `/smart-search`, `/context` and `/recall` are one handler and take the same body:
+`/search` and `/context` (kept for the hook until step 4) are one handler and take the same body:
 
 ```json
-{"query": "cache decision", "limit": 5, "sessionId": "session-42",
+{"query": "cache decision", "kind": "decision", "limit": 5,
  "context": {"repository": "cairn-demo", "branch": "feat/cache", "worktree": "wt-cache", "project_id": "project-…"}}
 ```
 
-With neither `sessionId` nor `context`, nothing is narrowed. Otherwise a global memory always matches; a project
-memory matches only the context's `project_id`; a personal memory matches, except that a handoff must also match
-the session and the repository, branch and worktree that are given. The reply is `{query, results, more}`; `more`
-is the number of hits left out by the limit. `resume` and `unresolved` take the same filters and read only the
-caller's own handoffs.
+`kind` keeps one kind (`kind=handoff` replaces the old resume route). With no `context`, nothing else is narrowed.
+Otherwise a global memory always matches; a project memory matches only the context's `project_id` (inside git
+without `.cairn/project.json` there is none, so project memories are hidden until `cairn init`); a personal
+memory matches, except that a handoff must also match the repository, branch and worktree that are given. The
+reply is `{results, more}`; `more` is the number of hits left out by the limit.
 
 ## Hybrid recall (v0.1.4)
 
@@ -47,8 +47,8 @@ Three channels run over the rows visible to the caller, each returning at most 5
 Channels are fused by reciprocal rank (k = 60), then one-hop link neighbours of the top hits are added
 (`supersedes` and `contradicts` are not hops). Scores are multiplied by a kind weight (rule and decision 3.0,
 handoff 1.0, every other kind 2.0) and by a feedback multiplier: each `helpful` vote adds 0.15 and each `wrong`
-vote subtracts 0.15, capped at ±0.45; fetching never raises a score. A memory goes `stale` after two `wrong`
-votes, or one from its owner; superseded and forgotten memories are not returned. The vector channel takes its top candidates before the visibility join; nothing from another person
+vote subtracts 0.15, capped at ±0.45; fetching never raises a score. Votes count distinct people. A memory goes `stale` after `wrong` votes from two people,
+or one from its owner; a stale memory is still returned, with `status:"stale"` on its card; superseded and forgotten memories are not returned. The vector channel takes its top candidates before the visibility join; nothing from another person
 leaves the store, because the rule is applied in the same query before ids are returned.
 
 ### Relevance floor
@@ -105,22 +105,21 @@ its evidence unioned onto the newer and a `supersedes` link of origin `auto`. Co
 
 ## Context pack response
 
-`{query, results, more}` where each hit has the memory's `id`, `kind`, `scope`, `title`, `summary`, `score` and,
-in full form, `project_id`, `status`, `reason`, `fields`, `evidence`, `entities`, `links` and `context`.
+`{results, more}` where each card has the memory's `id`, `kind`, `title`, `summary`, `score` and, only when the
+memory is stale, `status`. `POST /get` returns the full records (`reason`, `fields`, `evidence`, `links`).
 
 ## Declared contradictions and links (v0.1.4)
 
-A save may name `supersedes` and `contradicts` (one id each); `POST /supersede`, `/contradict`, `/links` and
-`/links/remove` write the same rows. Relations are `relates`, `causes`, `fixes`, `depends_on`, `supersedes` and
+A save may name `supersedes` and `contradicts` (one id each); there are no separate link routes. Relations are `relates`, `causes`, `fixes`, `depends_on`, `supersedes` and
 `contradicts`. Both ends must be visible to the caller. `GET /projects/{id}/conflicts` lists live project
-memories joined by `contradicts`; `unresolved` lists the caller's open ones. `GET /graph` returns visible memories
+memories joined by `contradicts`. `GET /graph` returns visible memories
 as nodes (`memory_id`) and links as edges (`source_id`, `target_id`) with an optional scope, project, relation and
 node cap; the console page `/graph` draws it.
 
 ## Why a change exists
 
-`POST /why-changed` runs the recall ranking in why-changed mode and returns the matching memories with their
-reason, evidence and links, so a reader can see what replaced or contradicts what.
+`POST /search` with `kind=decision`, then `POST /get`, returns the reason, evidence and links, so a reader can see
+what replaced or contradicts what.
 
 ## Session-start brief (v0.1.4)
 
