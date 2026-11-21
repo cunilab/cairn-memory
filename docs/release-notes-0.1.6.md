@@ -29,6 +29,9 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
 - **MCP tools 38 → 5.** Removed tools (recall, context, reflect, lessons, session and link tools,
   project tools, list, graph, export, diagnose, delete, ...) are gone; use `memory_search` with a `kind` filter instead.
 - Admin requeue/discard of jobs and memory feedback buttons are removed from the web.
+- Failed jobs that stopped retrying are tried again once after an upgrade and then every 24 hours; nobody requeues them.
+- Sign-in has no rate limit or lockout (a password guess costs one Argon2 check). Put a limit in your reverse proxy if the console is public.
+- Set `CAIRN_PUBLIC_URL` on the server so the console shows the right `cairn setup` address.
 
 ## Upgrade steps (one machine)
 

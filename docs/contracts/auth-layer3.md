@@ -24,7 +24,7 @@ which route accepts which.
 ```
 
 The response contains an account record, an opaque session token, and its
-expiry. Email identifiers are trimmed and ASCII-lowercased; an email is at most
+expiry (`expires_at`, a number of epoch seconds; the console's cookie lives until then). Email identifiers are trimmed and ASCII-lowercased; an email is at most
 320 bytes, has exactly one `@` with a non-empty part on each side, and has no
 whitespace. Passwords must be 12 to
 1024 bytes (bytes, not characters) and are never returned or stored in
@@ -49,26 +49,23 @@ body and returns the same session result. It needs the admin's web session
 
 | Caller | Status |
 | --- | --- |
-| No bearer | `401` |
-| Unknown, expired or revoked bearer | `401` |
-| Device token (any account, including the admin's) | `403`, `web console session required; device tokens cannot do this` |
+| No bearer | `401`, code `session_required` |
+| Unknown, expired or revoked bearer | `401`, code `session_required` |
+| Device token (any account, including the admin's) | `401`, code `session_required` |
 | Web session of a non-admin account | `403`, `admin web session required; only the admin account can do this` |
 | Admin web session | `200` |
 
 The returned session belongs to the new account, not the caller; the console does not
 store it. Before bootstrap it fails with `account bootstrap has not completed`, and for
 an email that is already registered with `account email is already registered`; both are
-`400`. The authorization check runs before the per-email rate limit and before the email and
-password are validated, so a caller without the admin session cannot use up an email's
-attempts. The CLI
+`400`. The authorization check runs before the email and password are validated. The CLI
 and MCP do not create accounts: account creation is a web action. The sharing flow that
 uses a second account is in [share-layer5](../archive/contracts/share-layer5.md).
 
 ## Account administration and passwords
 
-Three web-session routes manage accounts after bootstrap. A device bearer is `403`
-(`web console session required; device tokens cannot do this`) on all of them, and no
-bearer or an unknown, expired or revoked one is `401`.
+Three web-session routes manage accounts after bootstrap. A device bearer, no bearer and an
+unknown, expired or revoked one are all `401` with code `session_required`.
 
 `GET /cairn-memory/auth/accounts` needs the admin's web session (a non-admin session is
 `403`, `admin web session required; only the admin account can do this`). It returns
@@ -97,13 +94,10 @@ password ends its own sessions too. It writes the audit event `account_password_
 under the target account (metadata: `actor_person_id`).
 
 `POST /cairn-memory/auth/password` takes any web session and the body
-`{"current_password": "…", "new_password": "…"}`. A wrong current password is `401`
+`{"current_password": "…", "new_password": "…"}`. A wrong current password is `401`, code `invalid_credentials`
 (`invalid account credentials`) and a new password that breaks the rules is `400`. Success
 is `204`: the password changes and every **other** web session of the account is revoked;
-the calling session and the account's device tokens stay valid. The route shares the login
-rate limit (10 attempts per 60 seconds per normalized email, counted before the password is
-checked, so a caller without a valid session cannot use up an account's attempts; the 11th is
-`429`). It writes `account_password_change`. Passwords are never stored in plaintext or in
+the calling session and the account's device tokens stay valid. It writes `password_changed`. Passwords are never stored in plaintext or in
 audit metadata. There is no password recovery for a locked-out admin: the admin resets the
 other accounts, and nothing resets the admin's password without its own session.
 
@@ -118,7 +112,7 @@ no backfill (pre-release, no compatibility path).
 | Login | `POST /cairn-memory/auth/login` | None; email and password body. A device bearer is `403` |
 | Logout | `POST /cairn-memory/auth/logout` | Web session only |
 | Current account | `GET /cairn-memory/auth/me` | Web session or device token |
-| Audit history | `GET /cairn-memory/auth/audit` | Web session only; the caller's newest 100 events, file and PostgreSQL |
+| Audit history | `GET /cairn-memory/auth/audit?limit=&before=&before_id=&actor=&type=` | Web session only; the caller's events, newest first, `limit` 1 to 200 (default 50); the next page passes the last event's `created_at` as `before` and its `audit_id` as `before_id`; `actor` is `system` (what Cairn did) or `person`; `type` lists action names |
 
 Account tokens are sent as:
 
@@ -137,10 +131,15 @@ Standard authentication statuses: a validation failure (an invalid email or
 password, a second bootstrap, a duplicate email) returns `400`; invalid login
 credentials, a missing bearer, register before bootstrap (the admin check runs
 first and no session can exist yet), and an unknown,
-revoked, expired, or disabled account or device return `401`; a device token on a
-web-only action returns `403` with `web console session required; device tokens
-cannot do this`; a non-admin web session on `auth/register` returns `403` with `admin web
-session required; only the admin account can do this`; the rate limit returns `429`. The server maps these from the error text (`account_api_error` in
+revoked, expired, or disabled account or device return `401`. The body is `{"error", "code"}` and
+the console switches on `code`: `session_required` (no session, an unknown, expired or revoked
+one, or a device token on a console route: sign in again), `invalid_credentials` (a failed
+sign-in or a wrong current password) and `unauthorized` (a device token that is revoked or not
+valid). A non-admin web session on `auth/register` returns `403` with `admin web
+session required; only the admin account can do this`. There is no rate limit and no
+lockout: online guessing is bounded only by the cost of one Argon2 verify per try, and a login
+does that same verify for an unknown email, a disabled account and a wrong password, so neither
+the answer nor its time tells them apart. The server maps these from the error text (`account_api_error` in
 `crates/server/src/lib.rs`, `PostgresError::is_unauthorized` in
 `crates/storage/src/lib.rs`), so this list covers only these standard cases.
 
@@ -169,7 +168,7 @@ routes apply the same active-account check as the agent routes, so a device of a
 
 | Group | Routes | Web session | Device token |
 | --- | --- | --- | --- |
-| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `403` |
+| Account and device management | `auth/bootstrap`, `auth/register`, `auth/login`, `auth/logout`, `auth/audit`, `auth/password`, `auth/accounts` (list), `auth/accounts/{id}/password`, `devices/register`, `devices` (list), `devices/revoke`, `devices/rotate` | yes (`bootstrap` and `login` take no bearer and refuse a device bearer; `register`, `auth/accounts` and `auth/accounts/{id}/password` need the admin session) | `401` (`session_required`) |
 | Identity | `auth/me` | yes | yes |
 | Capture | `session/start`, `session/end`, `session/checkpoint`, `session/brief`, `session/topic`, `observe` | start, end, checkpoint: yes; `observe`: `401` (device only) | yes |
 | Recall | `search`, `get`, `session/brief`, `session/topic`, `graph`, `diagnose` | yes | yes |
@@ -204,12 +203,12 @@ capture by posting `observe` and keeps a device-bound outbox for outages; the
 An account forgets only a memory it owns; a foreign, forgotten or unknown id fails with `404` and nothing is
 written. Memory ids are unique across the schema, so a save never reuses another person's id.
 
-Bootstrap, register, login and password change are each limited to 10 attempts per 60-second window, per
-operation and per normalized (trimmed, ASCII-lowercased) email. The counter lives in server memory and resets
-on restart, counts every attempt including successful ones, and is not per IP; the 11th attempt in a window
-returns `429`. `me`, `logout`, `audit`, and the device endpoints are not limited. The server records
-metadata-only audit events (`audit_events`) for account bootstrap, register, login, logout, password reset and
-change, device registration, rotation and revocation, and project init, rename and ownership transfer.
+Nothing counts attempts. The server records metadata-only audit events (`audit_events`) for
+`account_registered`, `login` (successful only), `logout`, `password_changed`, `password_reset`,
+`device_registered`, `device_rotated`, `device_revoked`, `project_initialized`, `project_renamed`,
+`project_transferred` and `memory_forgotten`; Cairn's own work is recorded as `memory_merged`,
+`links_added`, `memory_promoted`, `memory_withdrawn`, `repo_state`, `memories_expired`,
+`session_distilled` and `job_quarantined`.
 Passwords, tokens, and memory content are never written to the audit table. Password recovery, MFA, and OIDC
 remain separate adapters because they require an email/identity provider decision beyond the self-hosted
 Layer 3 boundary.

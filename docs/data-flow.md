@@ -73,8 +73,8 @@ flowchart TD
 
 The default scope of a decision, rule, gotcha, procedure or fact is `project` in an initialized
 repository and `personal` otherwise; a preference is always `personal`. A correction is a new save with
-`supersedes`; the old memory stays as history. A quarantined job is retried by the sweep an hour later, with
-one attempt left, so nobody requeues jobs by hand.
+`supersedes`; the old memory stays as history. A quarantined job is retried once at the first start after a server
+upgrade, then by the sweep a day later, with one attempt left, so nobody requeues jobs by hand.
 
 ## Recall
 

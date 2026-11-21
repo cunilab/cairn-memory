@@ -160,8 +160,8 @@ entity and link retrieval available. Embedding and session distillation share a
 durable job table. The worker polls every 2 seconds, claims a job for 120
 seconds, and allows five attempts. A transient failure waits 30, 60, 120, then
 240 seconds; the fifth failure quarantines. A crashed worker's lease can be reclaimed. Jobs that will not
-succeed sit in quarantine until an admin requeues or discards them on the Jobs
-page. Succeeded jobs are removed after 24 hours. Searches do not wait for
+succeed sit in quarantine; Cairn retries them once at the first start after a server
+upgrade and again after 24 hours (nobody requeues by hand). Succeeded jobs are removed after 24 hours. Searches do not wait for
 indexing. Operators with an admin web session can read pending, running and
 quarantined counts at `GET /cairn-memory/admin/jobs`. See the
 [jobs contract](docs/contracts/continuity-v1.md#durable-jobs-v014) and the

@@ -108,10 +108,11 @@ pending marker again.
 One `jobs` table holds `embed`, `distill` and `consolidate` jobs, keyed so a job is enqueued once. A worker claims
 a job with a 120-second lease; five failed attempts quarantine it (status `quarantined`) after backoffs of 30, 60, 120 and
 240 seconds, and permanent errors (a vector that is not a finite normalized 384-vector, for example) quarantine it
-at once. An admin can requeue or discard a quarantined job from the console (`GET /admin/jobs`,
-`POST /admin/jobs/{id}/requeue`, `POST /admin/jobs/{id}/discard`). Finished jobs are deleted after a day. The
+at once. The console shows the queue read-only (`GET /admin/jobs`); there are no requeue or discard
+routes. Finished jobs are deleted after a day. The
 sweep also deletes expired memories 30 days after their expiry and expired observations. The sweep puts a job
-that has been quarantined for an hour back to pending with one attempt left.
+that has been quarantined for a day back to pending with one attempt left, and the first start of a new
+server version does the same for every quarantined job once.
 
 ### Consolidation
 

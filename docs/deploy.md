@@ -26,6 +26,7 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 | --- | --- |
 | `CAIRN_DATABASE_URL` | `postgres://<user>:<password>@<postgres-service>:5432/<database>` |
 | `CAIRN_EMBEDDING_MODEL_DIR` | `/opt/cairn/models/minilm` by default in the image; a provisioned directory for standalone servers |
+| `CAIRN_PUBLIC_URL` | The address agents are given, e.g. `https://cairn.example.test/agent`. The console shows it in the device setup command (`cairn setup <url>`); without it the server answers with the address a request reached it on |
 
 Without it the server falls back to the JSON file store and needs `--store`; the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
 
@@ -67,6 +68,6 @@ A trailing slash is dropped. Create the first account in the console on first vi
 
 ## Limits
 
-- `/agent` exposes the whole server API, not only the agent routes: health, bootstrap, login, and everything else are reachable from the internet. Bootstrap works until the first account exists, so create it right after the first deploy. Sign-in tries are limited per email; device and session tokens are the only other gate.
+- `/agent` exposes the whole server API, not only the agent routes: health, bootstrap, login, and everything else are reachable from the internet. Bootstrap works until the first account exists, so create it right after the first deploy. There is no sign-in rate limit or lockout: guessing a password costs one Argon2 verify per try (about 50 to 100 ms on one core), and passwords are at least 12 characters. Add a limit in the reverse proxy if the console is public; device and session tokens are the only other gate.
 - The console sets its session cookie `Secure` only when it sees an https request. Check the cookie in a browser after the first sign-in; if it is not `Secure`, Traefik is not passing the scheme through.
 - `cairn-server` image tags follow the release; there is no downgrade path for the database, so read the release's migration notes before updating.
