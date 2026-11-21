@@ -110,14 +110,14 @@ if (signInFailureMessage("authentication rate limit exceeded") !== "authenticati
 JS
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import { deleteDecisionImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
+import { forgetMemoryImpact, rotateDeviceImpact } from "./apps/web/lib/action-copy.ts";
 
-const deleted = deleteDecisionImpact("memory-1");
-if (!deleted.includes("memory-1") || !deleted.includes("forgets") || !deleted.includes("text is erased")) {
-  throw new Error("delete copy must describe that forgetting erases the text");
+const forgotten = forgetMemoryImpact("memory-1");
+if (!forgotten.includes("memory-1") || !forgotten.includes("no longer see it") || !forgotten.includes("cannot be undone")) {
+  throw new Error("forget copy must name the memory and say it cannot be undone");
 }
-if (/permanently|purged|undo button/i.test(deleted)) {
-  throw new Error("delete copy must not promise an undo control");
+if (/permanently|purged|undo button/i.test(forgotten)) {
+  throw new Error("forget copy must not promise an undo control");
 }
 const rotated = rotateDeviceImpact("laptop");
 if (!rotated.includes("laptop") || !rotated.includes("old token stops working") || !rotated.includes("shown once")) {
@@ -468,9 +468,9 @@ assert rows[0]["email"] == "owner@example.test" and rows[1]["email"] == "member@
 assert all({"person_id", "email", "role", "joined_at"} <= set(row) for row in rows)
 PY
 
-devices_page="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/devices")"
+devices_page="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/settings")"
 if [ "$devices_page" != "200" ]; then
-  printf '%s\n' "devices page status: ${devices_page}" >&2
+  printf '%s\n' "settings page status: ${devices_page}" >&2
   exit 1
 fi
 created_body="$workdir/device-created.body"
@@ -559,7 +559,7 @@ for removed in "POST projects/verify" "POST projects/${project_id}/branches" "PO
       ;;
   esac
 done
-for page in accounts jobs memories "projects/${project_id}"; do
+for page in dashboard memories activity graph projects settings "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
     printf '%s\n' "${page} page status: ${page_code}" >&2
