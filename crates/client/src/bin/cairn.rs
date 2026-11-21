@@ -52,7 +52,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     {
         return Ok(true);
     }
-    // `hook` forwards its options to the Python hook; the search verb parses its own.
+    // `hook` parses its own options (they come from the host config); so does `search`.
     if matches!(args.first().map(String::as_str), Some("hook" | "search")) {
         return Ok(false);
     }

@@ -3,7 +3,7 @@
 
 Starts a disposable pgvector Postgres in Docker and a real cairn-server on it, loads the
 synthetic corpus in bench/fixtures, then measures the agent-facing surface through the real
-`cairn mcp` binary and the real hook script. Prints a short table and writes JSON.
+`cairn mcp` and `cairn hook` binary. Prints a short table and writes JSON.
 
     python3 scripts/bench.py --out bench/result.json [--label NAME] [--lexical-only]
 
@@ -367,12 +367,12 @@ def main():
         mcp.close()
         mcp = None
 
-        # (b) one scripted Claude Code session through the real hook script.
+        # (b) one scripted Claude Code session through the real `cairn hook`.
         def hook(event, **extra):
             settle()
             payload = {"hook_event_name": event, "session_id": "bench-session-1", "cwd": str(repo)}
             payload.update(extra)
-            done = subprocess.run([sys.executable, str(ROOT / "scripts" / "cairn_hook.py"), "--agent", "claude", "--config", str(config_file)],
+            done = subprocess.run([cairn_exe, "hook", event, "--agent", "claude", "--config", str(config_file)],
                                   input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=30)
             if done.returncode != 0:
                 raise RuntimeError(f"hook {event} failed: {done.stderr}")
@@ -393,6 +393,7 @@ def main():
             events.append(dict(hook("PostToolUse", tool_name="Edit",
                                     tool_input={"file_path": path, "old_string": "a", "new_string": "b"},
                                     tool_response={"success": True}), file=path))
+        events.append(hook("PreCompact", trigger="auto"))
         events.append(hook("Stop", stop_hook_active=False))
         total = sum(e["injected_bytes"] for e in events)
         session_bytes = {
@@ -401,7 +402,7 @@ def main():
             "total_injected_tokens_est": est_tokens(total),
             "session_start_bytes": events[0]["injected_bytes"],
             "post_tool_use_bytes": sum(e["injected_bytes"] for e in events[1:-1]),
-            "note": "SessionStart + 10 Edit PostToolUse on distinct files + Stop, bytes of additionalContext",
+            "note": "SessionStart + 10 Edit PostToolUse on distinct files + PreCompact + Stop, bytes of additionalContext",
         }
 
         # Fixed per-session cost for an agent that loads the whole MCP surface eagerly vs deferred.

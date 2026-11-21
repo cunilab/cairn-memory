@@ -184,6 +184,7 @@ name = "cairn-client"
 version = "0.1.5"
 dependencies = [
  "axum",
+ "cairn-core",
  "cairn-server",
  "cairn-store",
  "serde",
