@@ -476,6 +476,95 @@ async fn list_is_paged_newest_first() {
 }
 
 #[tokio::test]
+async fn a_near_identical_save_is_deduplicated_and_changed_text_is_not() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let save = |title: &str, summary: &str, reason: &str| {
+        let input = save_input(
+            serde_json::json!({"kind":"fact","title":title,"summary":summary,"reason":reason}),
+        );
+        let (store, me) = (db.store.clone(), me.clone());
+        async move {
+            store
+                .save(&me, input, &WorkContext::default())
+                .await
+                .unwrap()
+        }
+    };
+    let first = save(
+        "Deploys run from the main branch",
+        "Every deploy is cut from main after the checks pass.",
+        "Agreed in the release review and written down here.",
+    )
+    .await;
+    assert!(!first.deduplicated);
+    // Same kind, title and summary: another reason, case or spacing is still the same memory.
+    let again = save(
+        "deploys  run from the Main branch",
+        "Every deploy is cut from main after the checks pass.",
+        "A different reason, written the second time this was saved.",
+    )
+    .await;
+    assert_eq!(
+        (again.deduplicated, again.id.as_str()),
+        (true, first.id.as_str())
+    );
+    // Changed text is a new memory.
+    let changed = save(
+        "Deploys run from the main branch",
+        "Every deploy is cut from main after the checks and a manual approval.",
+        "Agreed in the release review and written down here.",
+    )
+    .await;
+    assert!(!changed.deduplicated);
+    assert_ne!(changed.id, first.id);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_helpful_vote_takes_back_the_same_persons_wrong_vote() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("owner").await;
+    let id = db
+        .store
+        .save(&owner, rule("rule flipped"), &WorkContext::default())
+        .await
+        .unwrap()
+        .id;
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Wrong).await.unwrap(),
+        Status::Stale
+    );
+    // The owner changes their mind: one vote per person, so the wrong is gone and it is active.
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Helpful).await.unwrap(),
+        Status::Active
+    );
+    let memory = db.store.get(&owner, &id).await.unwrap();
+    assert_eq!(
+        (memory.status, memory.usage.helpful, memory.usage.wrong),
+        (Status::Active, 1, 0)
+    );
+    // A memory that is stale for a missing file is not revived by a vote.
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'missing' WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Helpful).await.unwrap(),
+        Status::Stale
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn feedback_moves_status_and_usage() {
     let Some(db) = TestDb::new().await else {
         return;
@@ -637,6 +726,27 @@ async fn a_duplicate_save_still_adds_its_links() {
             .iter()
             .any(|l| l.relation == Relation::Supersedes && l.target == old)
     );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn a_correction_that_only_changes_the_reason_keeps_the_reason() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let old = db.store.save(&me, rule("same rule"), &work).await.unwrap();
+    let mut again = rule("same rule");
+    again.reason = "the first reason was wrong".into();
+    again.supersedes = Some(old.id.clone());
+    let saved = db.store.save(&me, again, &work).await.unwrap();
+    assert!(saved.deduplicated);
+    assert_eq!(saved.id, old.id);
+    let memory = db.store.get(&me, &old.id).await.unwrap();
+    assert_eq!(memory.reason, "the first reason was wrong");
+    assert_eq!(memory.status, Status::Active);
+    assert!(memory.links.is_empty());
     db.finish().await;
 }
 

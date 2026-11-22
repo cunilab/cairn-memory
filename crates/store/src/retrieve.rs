@@ -41,6 +41,7 @@ pub struct Candidate {
 pub struct Trace {
     pub id: String,
     pub rrf: f32,
+    pub relevance: f32,
     pub cosine: Option<f32>,
     pub coverage: f32,
     pub entity_hit: bool,
@@ -323,7 +324,7 @@ impl Store {
     /// Hybrid search. Every candidate channel, the neighbour expansion and the final load apply
     /// the search rule (`searchable`), so no hit can come from another person's private memory;
     /// the vector channel applies it inside the index scan. Hits pass the relevance gate, are
-    /// scored `RRF * (1 + adjust)` and packed under the diversity cap, `budget` tokens and `limit`.
+    /// scored `relevance * (1 + adjust)` and packed under the diversity cap, `budget` tokens and `limit`.
     /// An agent read counts as a fetch; nothing else does.
     pub async fn search(
         &self,
@@ -364,6 +365,7 @@ impl Store {
                 Some(Trace {
                     id: id.clone(),
                     rrf: *rrf,
+                    relevance: gate::relevance(&input),
                     cosine: c.cosine,
                     coverage: c.coverage,
                     entity_hit: input.entity_hit,
@@ -768,17 +770,20 @@ fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {
 }
 
 /// The hits that pass the request filter and the gate, best first: score descending, then newest,
-/// then id.
+/// then id. The score is the absolute relevance (`gate::relevance`) times `1 + adjust`, so it says
+/// how good the match is, not where it ranks among the others. The fused rank only chose which
+/// candidates are loaded.
 fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
     let ctx = filter.context.clone().unwrap_or_default();
     let mut hits: Vec<Hit> = pool
         .fused
         .iter()
-        .filter_map(|(id, rrf)| {
+        .filter_map(|(id, _)| {
             let c = pool.by_id.get(id)?;
-            let eligible = matches(&c.memory, filter) && gate::keep(&gate_input(pool, id, c));
+            let input = gate_input(pool, id, c);
+            let eligible = matches(&c.memory, filter) && gate::keep(&input);
             eligible.then(|| Hit {
-                score: rrf * (1.0 + adjust(&c.memory, &ctx, now)),
+                score: gate::relevance(&input) * (1.0 + adjust(&c.memory, &ctx, now)),
                 memory: c.memory.clone(),
             })
         })

@@ -55,15 +55,43 @@ fn read_line(reader: &mut impl BufRead, cap: usize) -> io::Result<Line> {
 
 pub struct McpServer {
     client: Client,
+    /// What `client` was built from; a 401 reloads the file and retries when it changed.
+    config: Config,
     initialized: bool,
 }
 
 impl McpServer {
     pub fn new(config: Config) -> Self {
         Self {
-            client: Client::identified(config, crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
+            client: Client::identified(config.clone(), crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
+            config,
             initialized: false,
         }
+    }
+
+    /// `cairn setup` rotates the token in `config.json` under a running session: on a 401, read
+    /// the file again and, when it holds another credential, switch to it and ask once more.
+    fn call_with_fresh_config(
+        &mut self,
+        tool: &tools::Tool,
+        arguments: Map<String, Value>,
+    ) -> Result<Value, Error> {
+        let result = tools::call(&self.client, tool, arguments.clone());
+        if !matches!(result, Err(Error::Status { status: 401, .. })) {
+            return result;
+        }
+        let Some(fresh) = self
+            .config
+            .path()
+            .and_then(|path| Config::load_from(path).ok())
+            .filter(|fresh| *fresh != self.config)
+        else {
+            return result;
+        };
+        self.client =
+            Client::identified(fresh.clone(), crate::REQUEST_TIMEOUT, "", ClientKind::Mcp);
+        self.config = fresh;
+        tools::call(&self.client, tool, arguments)
     }
 
     /// Run the standalone newline-delimited JSON-RPC stdio transport.
@@ -200,7 +228,7 @@ impl McpServer {
             Some(Value::Object(arguments)) => arguments.clone(),
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
-        match tools::call(&self.client, tool, arguments) {
+        match self.call_with_fresh_config(tool, arguments) {
             Ok(value) => rpc_result(id, present::success(&value)),
             Err(error) => rpc_result(id, present::failure(&error.to_string())),
         }
@@ -337,6 +365,75 @@ mod tests {
             (reply["id"].clone(), reply["result"].clone()),
             (Value::Null, json!({}))
         );
+    }
+
+    /// Answers 200 to the token `good` and 401 to any other, until the process ends.
+    fn serve_token(good: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::Read;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                // The whole request is read, so closing the socket never resets the client.
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let body_start = loop {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                    assert!(read > 0, "request ended before its head did");
+                };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .map_or(0, |value| value.trim().parse().unwrap());
+                while request.len() < body_start + length {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let ok = head.contains(&format!("bearer {}", good.to_lowercase()));
+                let (status, body) = if ok {
+                    ("200 OK", r#"{"results":[]}"#)
+                } else {
+                    ("401 Unauthorized", r#"{"error":"bad token"}"#)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_rotated_token_is_picked_up_after_a_401() {
+        let url = serve_token("new-token");
+        let dir = std::env::temp_dir().join(format!("cairn-mcp-rotate-{}", std::process::id()));
+        let path = dir.join("config.json");
+        Config::new(&url, "old-token").unwrap().save(&path).unwrap();
+        let mut server = McpServer::new(Config::load_from(&path).unwrap());
+        call(&mut server, 1, "initialize", json!({}));
+        let search = |server: &mut McpServer, id| {
+            call(
+                server,
+                id,
+                "tools/call",
+                json!({"name": "memory_search", "arguments": {"query": "x"}}),
+            )
+        };
+        // The file still holds the rejected token: the 401 is reported, nothing to retry with.
+        assert_eq!(search(&mut server, 2)["result"]["isError"], true);
+        // `cairn setup` rotates it under the running session: the next call retries and works.
+        Config::new(&url, "new-token").unwrap().save(&path).unwrap();
+        let after = search(&mut server, 3);
+        assert_ne!(after["result"]["isError"], true, "{after}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

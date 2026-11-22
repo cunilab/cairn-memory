@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 import { DeviceStatusBadge } from "@/components/badges";
 import { CopyButton } from "@/components/copy-button";
+import { SetupCommand } from "@/components/setup-command";
 import { DataTable } from "@/components/data-table";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
@@ -61,20 +62,14 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
+import { useServerUrl } from "@/hooks/use-server-url";
 import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
 import { baselineOf, checkedInSince, type Baseline } from "@/lib/device-checkin";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import type { Agent } from "@/lib/setup-command";
 import type { DeviceView } from "@/lib/generated/DeviceView";
 import type { DeviceRegistration } from "@/lib/generated/DeviceRegistration";
-import type { Health } from "@/lib/generated/Health";
-
-const AGENTS = [
-  { value: "claude", label: "Claude" },
-  { value: "codex", label: "Codex" },
-  { value: "opencode", label: "OpenCode" },
-] as const;
-type Agent = (typeof AGENTS)[number]["value"];
 
 const HEALTH = {
   working: { text: "Working", icon: CircleCheckIcon },
@@ -109,7 +104,6 @@ function TokenStep({
 }) {
   const [shown, setShown] = useState(false);
   const token = issued.registration.token;
-  const command = `cairn setup ${serverUrl ?? "<server-url>"} --agent ${agent}`;
   return (
     <div className="flex flex-col gap-4">
       <DialogHeader>
@@ -143,28 +137,7 @@ function TokenStep({
         </li>
         <li className="flex flex-col gap-2">
           <span className="font-medium">2. Run on that machine</span>
-          <fieldset className="flex flex-wrap gap-x-4 gap-y-1">
-            <legend className="sr-only">Agent</legend>
-            {AGENTS.map((item) => (
-              <label key={item.value} className="flex min-h-8 items-center gap-2">
-                <input
-                  type="radio"
-                  name="agent"
-                  value={item.value}
-                  checked={agent === item.value}
-                  onChange={() => onAgent(item.value)}
-                />
-                {item.label}
-              </label>
-            ))}
-          </fieldset>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 rounded-md border bg-muted p-3 font-mono text-sm break-all">{command}</code>
-            <CopyButton text={command} label="Copy" />
-          </div>
-          {serverUrl === null ? (
-            <p className="text-muted-foreground">Replace <code>&lt;server-url&gt;</code> with this server&apos;s address.</p>
-          ) : null}
+          <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={onAgent} />
           <p className="text-muted-foreground">Paste the token when it asks. It never goes in your shell history.</p>
         </li>
         <li className="flex flex-col gap-1">
@@ -210,7 +183,7 @@ export function Devices() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const [serverUrl, setServerUrl] = useState<string | null>(null);
+  const serverUrl = useServerUrl();
   const acting = useRef(false);
 
   useResetOnHide(() => {
@@ -234,17 +207,6 @@ export function Devices() {
   }, [router]);
 
   const load = useCallback(() => cairn<DeviceView[]>("devices"), []);
-
-  // The setup command needs the address `cairn setup` is given.
-  useEffect(() => {
-    let cancelled = false;
-    cairn<Health>("health")
-      .then((health) => !cancelled && setServerUrl(health.public_url))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -549,6 +511,11 @@ export function Devices() {
         </p>
         {createButton}
       </div>
+      <section aria-labelledby="setup-heading" className="flex flex-col gap-2 rounded-md border p-4">
+        <h3 id="setup-heading" className="text-sm font-medium">Set up an agent</h3>
+        <p className="text-sm text-muted-foreground">Run this on the machine where the agent runs. It asks for a device token.</p>
+        <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
+      </section>
       {error ? <ErrorAlert message={error} onRetry={() => { setError(null); setDevices(null); setAttempt((n) => n + 1); }} /> : null}
       {devices === null ? <LoadingBlock label="Loading devices…" rows={4} /> : null}
       {devices !== null && (!error || devices.length > 0) ? (

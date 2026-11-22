@@ -89,7 +89,33 @@ fn project_check() -> Check {
         return check("ok", "project", "not in a git repository");
     }
     match project::read(&cwd) {
-        Ok(Some(file)) => check("ok", "project", file.project_id),
+        Ok(Some(file)) => {
+            // A committed id the server lacks (a wiped or new server) breaks every capture of this
+            // checkout, though the file is fine: ask the server. An unreachable one is reported by
+            // the server check, so it is not a second failure here.
+            let listed = Config::load().ok().and_then(|config| {
+                Client::with_timeout(config, Duration::from_secs(3))
+                    .get("/cairn-memory/projects")
+                    .ok()
+            });
+            match listed {
+                Some(list)
+                    if !list.as_array().is_some_and(|projects| {
+                        projects.iter().any(|p| p["project_id"] == file.project_id)
+                    }) =>
+                {
+                    check(
+                        "fail",
+                        "project",
+                        format!(
+                            "{} is not on the server (wiped or new?) or you are not a member; run cairn init to register or join it",
+                            file.project_id
+                        ),
+                    )
+                }
+                _ => check("ok", "project", file.project_id),
+            }
+        }
         Ok(None) => check(
             "warn",
             "project",
@@ -141,7 +167,7 @@ fn agent_checks(home: &Path) -> Vec<Check> {
             .iter()
             .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(marker)))
     };
-    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py");
+    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py") || has(files, "hook/run-hook");
     let mut checks = Vec::new();
     for (agent, folder, mcp, hooks) in &agents {
         if !folder.is_dir() {

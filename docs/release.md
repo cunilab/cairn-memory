@@ -19,7 +19,8 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Web console typecheck, lint, build`
   - `Documentation validation`
   - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
-  - `Bench` (`scripts/bench.py --min-hit5 0.68`; uploads the result JSON)
+  - `Docker images build` (builds `docker/server.Dockerfile` and `docker/web.Dockerfile` without pushing, so an image breaks in the pull request, not at tag time)
+  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.60 --max-weak-hits 0`, then on v1, `--min-hit5 0.88`; uploads the result JSON; the 0.1.7 run is hit@5 0.674, see ADR 0015)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
 - The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
 
@@ -27,7 +28,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
 
 Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[workspace.package]` of the root `Cargo.toml`.
 
-1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
+1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, set the same `version` in `apps/web/package.json` and in the two places of `apps/web/package-lock.json` (`scripts/check_web_version.py` fails the documentation check when they differ), and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
 2. Open the pull request, wait for the required checks, merge it.
 3. Tag the merge commit on `main` and push the tag:
 
@@ -160,6 +161,16 @@ the binary and aborts when one is missing, so they must stay in `release.yml` un
 `scripts/check_update_assets.py` (the Documentation validation job) fails when a name the 0.1.5 client asks for is
 no longer published. 0.1.5 records their checksums in `hook/installed.json`, so the first `cairn setup` of 0.1.6
 deletes them (`retire_python`).
+
+## 0.1.7 upgrade notes
+
+0.1.7 changes no schema and no tool; the details are in [the 0.1.7 release notes](release-notes-0.1.7.md). Upgrade the
+server and the CLI together, start the new server on the existing database (no wipe), and run `cairn update` on each
+machine. Re-running `cairn setup` is needed only when `cairn doctor` warns; when it runs, it also deletes a leftover
+0.1.5 `hook/run-hook` (only if it calls `cairn_hook.py`) and `hook/README.txt` with it. Search scores changed meaning
+(absolute, capped at 1.0), so a client that compared them with a fixed threshold must be re-checked.
+Memories saved by 0.1.6 keep the old identity hash (it included the reason), so saving the same text once more makes a
+duplicate that consolidation merges; there is no backfill.
 
 ## How clients update
 

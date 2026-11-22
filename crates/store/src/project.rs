@@ -154,6 +154,58 @@ impl Store {
         Ok((project, created))
     }
 
+    /// A committed project id the server does not know (a wiped or rebuilt server): creates the
+    /// project with that same id, owned by the caller, so the committed file keeps working for
+    /// everyone. An id another caller restored first is simply joined. True when this call created
+    /// it.
+    pub async fn restore_project(
+        &self,
+        person_id: &str,
+        project_id: &str,
+        repository: &str,
+        name: Option<&str>,
+    ) -> Result<(Project, bool)> {
+        let repository = repository.trim();
+        validate_project_text(repository, "repository")?;
+        let name = name.map(str::trim).filter(|n| !n.is_empty());
+        if let Some(name) = name {
+            validate_project_text(name, "project name")?;
+        }
+        let shaped = project_id.strip_prefix("proj_").is_some_and(|rest| {
+            !rest.is_empty()
+                && project_id.len() <= 64
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        });
+        if !shaped {
+            return Err(StoreError::Validation("invalid project id".into()));
+        }
+        let mut tx = self.pool.begin().await?;
+        let default_name = default_project_name(repository);
+        let created = sqlx::query(
+            "INSERT INTO projects (project_id, owner_id, repository, name) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (project_id) DO NOTHING",
+        )
+        .bind(project_id)
+        .bind(person_id)
+        .bind(repository)
+        .bind(name.unwrap_or(&default_name))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        join_member(&mut tx, person_id, project_id).await?;
+        let row = sqlx::query(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects WHERE project_id = $1"
+        ))
+        .bind(project_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((project_from_row(&row)?, created))
+    }
+
     /// Membership through the committed project file. Name, when given, must match the server's.
     pub async fn join_project(
         &self,

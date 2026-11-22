@@ -188,6 +188,16 @@ jobs:
           path: ${{ runner.temp }}/bench-*.json
           if-no-files-found: ignore
 
+  docker-images:
+    name: Docker images build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Build only, never pushed: the release workflow pushes. This catches a broken Dockerfile (a
+      # missing COPY, a failing build) in the pull request instead of at tag time.
+      - run: docker build -f docker/server.Dockerfile -t cairn-memory-server:ci .
+      - run: docker build -f docker/web.Dockerfile -t cairn-memory-web:ci .
+
   docs-validation:
     name: Documentation validation
     runs-on: ubuntu-24.04
@@ -198,3 +208,4 @@ jobs:
           python-version: "3.12"
       - run: python3 scripts/validate_phase0.py
       - run: python3 scripts/check_update_assets.py
+      - run: python3 scripts/check_web_version.py
