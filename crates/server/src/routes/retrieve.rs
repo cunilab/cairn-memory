@@ -132,6 +132,10 @@ pub async fn brief(
     Json(body): Json<Brief>,
 ) -> Result<Json<Value>, ApiError> {
     let context = body.context.unwrap_or_default();
+    let resolved = state
+        .store
+        .resolve_project(&account.person_id, &context)
+        .await?;
     state
         .store
         .record_session_files(
@@ -169,6 +173,9 @@ pub async fn brief(
     });
     if let Some(check) = check {
         reply["check"] = json!(check);
+    }
+    if let Some(project_id) = resolved.project_id {
+        reply["project_id"] = json!(project_id);
     }
     record(
         &state,

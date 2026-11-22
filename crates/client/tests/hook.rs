@@ -18,6 +18,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "cdt_testtoken1234567890";
+const NO_PROJECT_HINT: &str =
+    "Cairn: no project here (personal memory). Run cairn init to share with a project.";
+
+fn brief_and_hint() -> String {
+    format!("BRIEF\n{NO_PROJECT_HINT}")
+}
 
 #[derive(Clone)]
 struct Req {
@@ -329,7 +335,7 @@ fn start_injects_brief_only_and_end_after_work() {
         "SessionStart",
         &env.payload("s1", json!({"source": "startup"})),
     );
-    assert_eq!(injected(&start).as_deref(), Some("BRIEF"));
+    assert_eq!(injected(&start).as_deref(), Some(brief_and_hint().as_str()));
     let value: Value = serde_json::from_slice(&start.stdout).unwrap();
     assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
     let brief = &server.to("brief")[0];
@@ -647,7 +653,10 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
         "SessionStart",
         &env.payload("s1", json!({"source": "compact"})),
     );
-    assert_eq!(injected(&compact).as_deref(), Some("BRIEF"));
+    assert_eq!(
+        injected(&compact).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
     env.run("PreCompact", &env.payload("s1", json!({})));
     assert!(server.to("checkpoint").is_empty(), "no work yet");
     env.bash("s1", "make build", json!({"exit_code": 0}));
@@ -1566,7 +1575,7 @@ fn a_hanging_git_does_not_hold_the_hook() {
     );
     assert_eq!(
         injected(&output).as_deref(),
-        Some("BRIEF"),
+        Some(brief_and_hint().as_str()),
         "{}",
         stderr(&output)
     );
@@ -1674,8 +1683,8 @@ fn start_appends_one_instruction_line_only_in_an_initialised_repo() {
     let env = Env::new("hook-nudge-start", &server.url);
     assert_eq!(
         start(&env, "s0").as_deref(),
-        Some("BRIEF"),
-        "no project file: nothing added"
+        Some(brief_and_hint().as_str()),
+        "no project file: the hint replaces the session instruction"
     );
     with_project(&env);
     let text = start(&env, "s1").unwrap();
@@ -1926,4 +1935,106 @@ fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text(
     env.edit("d1", "src/a.rs", "x");
     let reason = blocked(&stop(&env, "d1", json!({}))).unwrap();
     assert!(reason.starts_with("You changed 1 file(s)"), "{reason}");
+}
+
+#[test]
+fn no_project_start_prints_hint_once() {
+    let server = fake();
+    let env = Env::new("hook-no-project-hint", &server.url);
+    let first = start(&env, "s1").unwrap();
+    assert_eq!(first, brief_and_hint());
+    assert!(NO_PROJECT_HINT.len() <= 90, "{}", NO_PROJECT_HINT.len());
+    assert_eq!(
+        start(&env, "s1").as_deref(),
+        Some("BRIEF"),
+        "the hint is once per session"
+    );
+    let off = [("CAIRN_NO_NUDGE", "1")];
+    let quiet = Env::new("hook-no-project-off", &server.url);
+    let started = quiet.run_with("SessionStart", &quiet.payload("e", json!({})), &[], &off);
+    assert_eq!(injected(&started).as_deref(), Some("BRIEF"));
+    let down = Env::new("hook-no-project-down", "http://127.0.0.1:9");
+    assert!(
+        start(&down, "d").is_none(),
+        "no hint when the server is unreachable"
+    );
+}
+
+#[test]
+fn init_without_git_writes_local_repository() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "init-nogit");
+    let dir = temp_dir("init-nogit").join("widget");
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = team.owner.run_in(&dir, &["init", "Widget"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".cairn/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["repository"], "local:widget");
+    assert!(file["project_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        said.contains(
+            "Keep .cairn/project.json with this folder; copies of the folder attach to the same project."
+        ),
+        "{said}"
+    );
+}
+
+#[test]
+fn init_suggests_commit_and_never_commits() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "init-git");
+    let dir = checkout("init-suggest");
+    let output = team.owner.run_in(&dir, &["init", "Demo"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(
+        said.contains(
+            "Commit .cairn/project.json so clones and worktrees attach: git add .cairn/project.json && git commit"
+        ),
+        "{said}"
+    );
+    let porcelain = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        porcelain.contains("?? .cairn/"),
+        "the file is untracked, not staged: {porcelain}"
+    );
+    assert!(
+        porcelain.lines().all(|line| line.starts_with("??")),
+        "nothing is staged: {porcelain}"
+    );
+    let commits = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(commits.trim(), "1", "init does not commit");
 }

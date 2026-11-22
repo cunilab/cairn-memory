@@ -370,3 +370,160 @@ async fn brief_session_keeps_recent_files_across_captures() {
     assert!(!db.store.end_session(&me, "unused").await.unwrap());
     db.finish().await;
 }
+
+async fn session_project(db: &TestDb, person: &str, session: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT project_id FROM sessions WHERE person_id = $1 AND session_id = $2")
+        .bind(person)
+        .bind(session)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap()
+}
+
+fn repo_observation(event: &str, session: &str, repository: &str) -> ObservationInput {
+    serde_json::from_value(serde_json::json!({
+        "event_id": event,
+        "session_id": session,
+        "content": format!("captured {event}"),
+        "kind": "assistant",
+        "context": {"repository": repository, "branch": "main"}
+    }))
+    .unwrap()
+}
+
+/// One member project for the repository attaches; two, or none, stays personal.
+#[tokio::test]
+async fn repository_fallback_needs_exactly_one_membership() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let repo = "github.com/acme/widgets";
+    let owner_a = db.person("owner-a").await;
+    let owner_b = db.person("owner-b").await;
+    let member = db.person("member").await;
+    let stranger = db.person("stranger").await;
+    let (first, _) = db
+        .store
+        .init_project(&owner_a, repo, Some("Widgets"))
+        .await
+        .unwrap();
+    let (second, _) = db
+        .store
+        .init_project(&owner_b, repo, Some("Fork"))
+        .await
+        .unwrap();
+    db.store
+        .join_project(&member, &first.project_id, None)
+        .await
+        .unwrap();
+
+    db.store
+        .capture(&member, repo_observation("one", "s-one", repo))
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-one").await.as_deref(),
+        Some(first.project_id.as_str()),
+        "exactly one membership attaches"
+    );
+    // The case the personal-session fixture must not hit: no project id, but this repository
+    // is the person's only project, so the session and its distilled note attach.
+    let mut decision = repo_observation("decide", "s-decide", repo);
+    decision.content =
+        "Decision: keep the queue in Postgres\nReason: one database is enough here".to_owned();
+    db.store.capture(&member, decision).await.unwrap();
+    assert!(
+        db.store
+            .distill_session(&member, "s-decide")
+            .await
+            .unwrap()
+            .notes
+            >= 1
+    );
+    let (note_project, rank): (Option<String>, String) = sqlx::query_as(
+        "SELECT project_id, rank FROM memories WHERE owner_id = $1 AND kind = 'decision'",
+    )
+    .bind(&member)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (note_project.as_deref(), rank.as_str()),
+        (Some(first.project_id.as_str()), "candidate")
+    );
+    let saved = db
+        .store
+        .save(
+            &member,
+            cairn_store::testing::rule("Repository fallback save"),
+            &WorkContext {
+                repository: Some(repo.into()),
+                ..WorkContext::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved_project: Option<String> =
+        sqlx::query_scalar("SELECT project_id FROM memories WHERE memory_id = $1")
+            .bind(&saved.id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(saved_project.as_deref(), Some(first.project_id.as_str()));
+
+    db.store
+        .join_project(&member, &second.project_id, None)
+        .await
+        .unwrap();
+    db.store
+        .capture(&member, repo_observation("two", "s-two", repo))
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-two").await,
+        None,
+        "two memberships stay personal"
+    );
+
+    db.store
+        .capture(&stranger, repo_observation("out", "s-out", repo))
+        .await
+        .unwrap();
+    assert_eq!(session_project(&db, &stranger, "s-out").await, None);
+    assert!(
+        !db.store
+            .is_member(&stranger, &first.project_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.store
+            .is_member(&stranger, &second.project_id)
+            .await
+            .unwrap(),
+        "a non-member learns nothing and joins nothing"
+    );
+
+    let (local, _) = db
+        .store
+        .init_project(&member, "local:widget", None)
+        .await
+        .unwrap();
+    db.store
+        .capture(
+            &member,
+            repo_observation("local", "s-local", "local:widget"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-local").await,
+        None,
+        "local: is not a repository fallback"
+    );
+    assert_ne!(
+        session_project(&db, &member, "s-local").await.as_deref(),
+        Some(local.project_id.as_str())
+    );
+    db.finish().await;
+}

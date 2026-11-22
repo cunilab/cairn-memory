@@ -30,6 +30,31 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
+/// Without git: the nearest ancestor of `cwd` (inclusive) that contains `.cairn/project.json`,
+/// stopping at `$HOME` or `/`.
+pub fn find_root(cwd: &Path) -> Option<PathBuf> {
+    let start = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok().or(Some(path)));
+    for dir in start.ancestors() {
+        if dir.join(FILE).is_file() {
+            return Some(dir.to_path_buf());
+        }
+        if dir == Path::new("/") || home.as_ref().is_some_and(|home| dir == home.as_path()) {
+            break;
+        }
+    }
+    None
+}
+
+/// True when `.cairn/project.json` is already tracked. A failure (untracked, or not a git checkout)
+/// is false; this never stages or commits.
+pub fn project_file_tracked(top: &Path) -> bool {
+    git(top, &["ls-files", "--error-unmatch", FILE]).is_some()
+}
+
 /// Stable remote identity, with a marked directory fallback for repositories without a remote.
 pub fn repository_name(top: &Path) -> String {
     git(top, &["config", "--get", "remote.origin.url"])
@@ -77,13 +102,14 @@ pub struct ProjectFile {
 
 /// A malformed or unreadable existing file is an actionable warning, never a request to initialize.
 pub fn read(dir: &Path) -> Result<Option<ProjectFile>, Error> {
-    match toplevel(dir) {
+    match toplevel(dir).or_else(|| find_root(dir)) {
         Some(top) => read_at(&top),
         None => Ok(None),
     }
 }
 
-fn read_at(top: &Path) -> Result<Option<ProjectFile>, Error> {
+/// `.cairn/project.json` in `top` itself.
+pub fn read_at(top: &Path) -> Result<Option<ProjectFile>, Error> {
     let path = top.join(FILE);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -112,7 +138,7 @@ fn read_at(top: &Path) -> Result<Option<ProjectFile>, Error> {
 
 /// The project id in `<git toplevel of dir>/.cairn/project.json`, if there is a readable one.
 pub fn project_id(dir: &Path) -> Option<String> {
-    project_id_at(&toplevel(dir)?)
+    project_id_at(&toplevel(dir).or_else(|| find_root(dir))?)
 }
 
 /// Same, for a git toplevel the caller already has (saves a `git` process).
@@ -129,7 +155,7 @@ pub fn project_id_at(top: &Path) -> Option<String> {
 /// Writes the server-confirmed identity and name. A different project or broken file is
 /// refused; an unchanged file is left untouched. Returns true when the file was written.
 pub fn write(top: &Path, project_id: &str, repository: &str, name: &str) -> Result<bool, Error> {
-    if let Some(existing) = read(top)? {
+    if let Some(existing) = read_at(top)? {
         if existing.project_id != project_id {
             return Err(Error::Input(format!(
                 "{FILE} already names project {}; not overwriting it with {project_id}",

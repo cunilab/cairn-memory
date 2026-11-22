@@ -1064,6 +1064,9 @@ fn capture(
     }
     if let Some(project) = project {
         context["project_id"] = serde_json::json!(project);
+    } else {
+        // No project id, and not the person's repository: the fallback must not attach it.
+        context["repository"] = serde_json::json!("local:scratch");
     }
     serde_json::from_value(serde_json::json!({
         "event_id": event,

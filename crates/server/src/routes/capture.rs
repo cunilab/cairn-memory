@@ -25,27 +25,36 @@ pub async fn observe(
     capture(state, device, input).await
 }
 
-/// `project_attachment.status` is `attached` when the capture's project id names a project the
-/// person belongs to, else `personal`. The hook and the CLI print a warning for a broken file.
+/// `project_attachment.status` is `attached` when the capture names a project the person belongs
+/// to, `attached_by_repository` when the repository matches exactly one membership, else
+/// `personal`. The hook and the CLI print a warning for a broken file.
 async fn capture(
     State(state): State<AppState>,
     DeviceCaller { account, device_id }: DeviceCaller,
     input: ObservationInput,
 ) -> Result<Json<Value>, ApiError> {
-    let project_id = input.context.project_id.clone();
+    let context = input.context.clone();
     let result = state
         .store
         .capture_from(&account.person_id, input, Some(&device_id))
         .await?;
-    let attached = match project_id {
-        Some(id) => state.store.is_member(&account.person_id, &id).await?,
-        None => false,
+    // After capture, a committed project id has joined. The status uses that membership.
+    let resolution = state
+        .store
+        .resolve_project(&account.person_id, &context)
+        .await?;
+    let status = if resolution.by_repository {
+        "attached_by_repository"
+    } else if resolution.project_id.is_some() {
+        "attached"
+    } else {
+        "personal"
     };
     Ok(Json(json!({
         "accepted": result.accepted,
         "duplicate": result.duplicate,
         "event_id": result.event_id,
-        "project_attachment": {"status": if attached { "attached" } else { "personal" }},
+        "project_attachment": {"status": status},
     })))
 }
 

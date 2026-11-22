@@ -125,6 +125,23 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
     })
 }
 
+/// Which project a request attaches to, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectResolution {
+    pub project_id: Option<String>,
+    /// Set only for the repository fallback (no project id, exactly one membership).
+    pub by_repository: bool,
+}
+
+impl ProjectResolution {
+    fn personal() -> Self {
+        Self {
+            project_id: None,
+            by_repository: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Saved {
     pub id: String,
@@ -211,23 +228,70 @@ impl Store {
     }
 
     /// The request's project when the person is (or by the committed file becomes) a member.
+    /// With no project id, exactly one membership for a non-`local:` repository is that project.
     pub(crate) async fn context_project(
         &self,
         person_id: &str,
         work: &WorkContext,
     ) -> Result<Option<String>> {
-        let Some(project_id) = work
+        if let Some(project_id) = work
             .project_id
             .as_deref()
             .map(str::trim)
-            .filter(|p| !p.is_empty())
+            .filter(|id| !id.is_empty())
+        {
+            let mut tx = self.pool.begin().await?;
+            let exists = join_member(&mut tx, person_id, project_id).await?;
+            tx.commit().await?;
+            return Ok(exists.then(|| project_id.to_owned()));
+        }
+        Ok(self.resolve_project(person_id, work).await?.project_id)
+    }
+
+    /// How a request attaches. An explicit project id counts only when the person is already a
+    /// member (capture joins first). `by_repository` is the single-membership fallback.
+    pub async fn resolve_project(
+        &self,
+        person_id: &str,
+        work: &WorkContext,
+    ) -> Result<ProjectResolution> {
+        if let Some(project_id) = work
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let member = self.is_member(person_id, project_id).await?;
+            return Ok(ProjectResolution {
+                project_id: member.then(|| project_id.to_owned()),
+                by_repository: false,
+            });
+        }
+        let Some(repository) = work
+            .repository
+            .as_deref()
+            .map(str::trim)
+            .filter(|repository| !repository.is_empty() && !repository.starts_with("local:"))
         else {
-            return Ok(None);
+            return Ok(ProjectResolution::personal());
         };
-        let mut tx = self.pool.begin().await?;
-        let exists = join_member(&mut tx, person_id, project_id).await?;
-        tx.commit().await?;
-        Ok(exists.then(|| project_id.to_owned()))
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT p.project_id FROM projects p
+              JOIN project_members m ON m.project_id = p.project_id
+             WHERE p.repository = $1 AND m.person_id = $2
+             LIMIT 2",
+        )
+        .bind(repository)
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(match ids.as_slice() {
+            [id] => ProjectResolution {
+                project_id: Some(id.clone()),
+                by_repository: true,
+            },
+            _ => ProjectResolution::personal(),
+        })
     }
 
     pub async fn get(&self, person_id: &str, memory_id: &str) -> Result<Memory> {

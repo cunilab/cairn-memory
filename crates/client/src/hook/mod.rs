@@ -28,6 +28,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
 const DOWN_SECONDS: i64 = 30;
+const NO_PROJECT_HINT: &str =
+    "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 
 /// `cairn save ...` (any path to the binary): a save through the CLI instead of the MCP tool.
 fn is_cairn_save(command: &str) -> bool {
@@ -281,7 +283,6 @@ impl Hook<'_> {
             "context": self.work_context(),
             "recent_files": git::recent_files(&self.cwd),
         });
-        let nudging = self.nudging();
         let reply = match self.post("/cairn-memory/session/brief", &body) {
             Ok(reply) => reply,
             Err(error) => {
@@ -289,8 +290,9 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
-                // No server text: the built-in line still goes in.
-                return nudging.then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
+                // Unreachable: no hint. A project file still gets the built-in line.
+                return (self.config.nudge() && self.file_project())
+                    .then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
             }
         };
         if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
@@ -310,26 +312,57 @@ impl Hook<'_> {
                 }
                 fits
             });
-        let nudge = nudging.then(|| {
+        let resolved = reply
+            .get("project_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        if let Some(id) = resolved.clone() {
+            self.with_state(|s| s.project_id = Some(id));
+        }
+        let line = if !self.config.nudge() {
+            None
+        } else if resolved.is_some() || self.file_project() {
             // The Stop text rides along with the start reply: no request at Stop.
             let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
             self.with_state(|s| s.stop_nudge = Some(stop));
-            inject::server_text(&reply, "session_instruction", DEFAULT_SESSION_INSTRUCTION)
-        });
-        match (brief, nudge) {
-            (Some(brief), Some(nudge)) => Some(format!("{brief}\n{nudge}")),
+            Some(inject::server_text(
+                &reply,
+                "session_instruction",
+                DEFAULT_SESSION_INSTRUCTION,
+            ))
+        } else {
+            let first = self
+                .with_state(|state| {
+                    let first = !state.hinted;
+                    state.hinted = true;
+                    first
+                })
+                .unwrap_or(false);
+            first.then(|| NO_PROJECT_HINT.to_owned())
+        };
+        match (brief, line) {
+            (Some(brief), Some(line)) => Some(format!("{brief}\n{line}")),
             (Some(brief), None) => Some(brief.to_owned()),
-            (None, nudge) => nudge,
+            (None, line) => line,
         }
     }
 
-    /// Reminders are on: not opted out, and the checkout has a readable `.cairn/project.json`.
+    /// A readable `.cairn/project.json` at the resolved root.
+    fn file_project(&self) -> bool {
+        self.top
+            .as_deref()
+            .is_some_and(|top| crate::project::project_id_at(top).is_some())
+    }
+
+    /// Reminders are on: not opted out, and a project was resolved from the file or the brief.
     fn nudging(&self) -> bool {
         self.config.nudge()
-            && self
-                .top
-                .as_deref()
-                .is_some_and(|top| crate::project::project_id_at(top).is_some())
+            && (self.file_project()
+                || self
+                    .with_state(|state| state.project_id.is_some())
+                    .unwrap_or(false))
     }
 
     /// The one-time Stop reminder: the session edited files, ran a test command or wrote a

@@ -70,6 +70,7 @@ pub fn top_level(cwd: &Path) -> Option<PathBuf> {
     git(cwd, &["rev-parse", "--show-toplevel"])
         .filter(|top| !top.is_empty())
         .and_then(|top| Path::new(&top).canonicalize().ok())
+        .or_else(|| crate::project::find_root(cwd))
 }
 
 /// `host/owner/repo` from `origin` (no credentials), else `local:<top directory name>`.

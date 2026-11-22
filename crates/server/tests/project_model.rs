@@ -438,3 +438,81 @@ async fn quality_error_is_400_quality_one_line() {
     assert_eq!(status, 200, "{reply}");
     app.finish().await;
 }
+
+#[tokio::test]
+async fn repository_fallback_status_is_attached_by_repository() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let owner = app.device(&admin, "owner").await;
+    let member_web = app.member(&admin, "member").await;
+    let member = app.device(&member_web, "member-laptop").await;
+    let stranger_web = app.member(&admin, "stranger").await;
+    let stranger = app.device(&stranger_web, "stranger-laptop").await;
+    let repo = "github.com/acme/widgets";
+    let id = app.project(&owner, repo).await;
+    app.post(
+        "projects/init",
+        json!({"project_id": id, "repository": repo, "name": "widgets"}),
+        &member,
+    )
+    .await;
+
+    let attached = app.post(
+        "observe",
+        json!({"event_id": "e1", "session_id": "s1", "kind": "prompt", "content": "work in the repo",
+               "context": {"repository": repo, "branch": "main"}}),
+        &member,
+    )
+    .await;
+    assert_eq!(
+        attached["project_attachment"]["status"],
+        "attached_by_repository"
+    );
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "b1", "context": {"repository": repo}}),
+            &member,
+        )
+        .await;
+    assert_eq!(brief["project_id"], id);
+
+    let other = app.member(&admin, "other").await;
+    let other_device = app.device(&other, "other-laptop").await;
+    let fork = app.project(&other_device, repo).await;
+    app.post(
+        "projects/init",
+        json!({"project_id": fork, "repository": repo, "name": "widgets"}),
+        &member,
+    )
+    .await;
+    let ambiguous = app
+        .post(
+            "observe",
+            json!({"event_id": "e2", "session_id": "s2", "kind": "prompt", "content": "which fork",
+               "context": {"repository": repo}}),
+            &member,
+        )
+        .await;
+    assert_eq!(ambiguous["project_attachment"]["status"], "personal");
+
+    let leaked = app
+        .post(
+            "observe",
+            json!({"event_id": "e3", "session_id": "s3", "kind": "prompt", "content": "not mine",
+               "context": {"repository": repo}}),
+            &stranger,
+        )
+        .await;
+    assert_eq!(leaked["project_attachment"]["status"], "personal");
+    assert!(leaked.get("project_id").is_none());
+    let quiet = app
+        .post(
+            "session/brief",
+            json!({"session_id": "b2", "context": {"repository": repo}}),
+            &stranger,
+        )
+        .await;
+    assert!(quiet.get("project_id").is_none());
+    app.finish().await;
+}

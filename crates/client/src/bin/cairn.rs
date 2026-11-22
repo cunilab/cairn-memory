@@ -162,8 +162,9 @@ fn setup(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Creates (or finds) the caller's project for this repository and writes
-/// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
+/// Creates (or finds) the caller's project for this folder and writes
+/// `.cairn/project.json`. Inside git the root is the checkout; otherwise it is the working
+/// folder and the repository is `local:<folder name>`. This never stages or commits.
 fn init(args: &[String]) -> Result<(), Error> {
     let yes = args.iter().any(|arg| arg == "--yes");
     let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
@@ -178,10 +179,10 @@ fn init(args: &[String]) -> Result<(), Error> {
     }
     let cwd = env::current_dir()
         .map_err(|error| Error::Input(format!("cannot read the current directory: {error}")))?;
-    let top = project::toplevel(&cwd)
-        .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
+    let git_top = project::toplevel(&cwd);
+    let top = git_top.clone().unwrap_or(cwd);
     let repository = project::repository_name(&top);
-    let existing = project::read(&cwd)?;
+    let existing = project::read_at(&top)?;
     if !rename
         && let (Some(requested), Some(recorded)) = (
             name,
@@ -241,7 +242,15 @@ fn init(args: &[String]) -> Result<(), Error> {
         if written { "written" } else { "already set" },
         path.display()
     );
-    println!("Commit .cairn/project.json so teammates who capture here join the project.");
+    if git_top.is_some() && !project::project_file_tracked(&top) {
+        println!(
+            "Commit .cairn/project.json so clones and worktrees attach: git add .cairn/project.json && git commit"
+        );
+    } else if git_top.is_none() {
+        println!(
+            "Keep .cairn/project.json with this folder; copies of the folder attach to the same project."
+        );
+    }
     Ok(())
 }
 

@@ -47,6 +47,12 @@ pub struct SessionState {
     /// Topic lookups sent so far; the cap is `inject::TOPIC_LOOKUPS_PER_SESSION`.
     #[serde(default)]
     pub topic_lookups: u8,
+    /// Project the brief resolved (the file, or exactly one repository membership).
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The no-project hint was injected; it is once per session.
+    #[serde(default)]
+    pub hinted: bool,
 }
 
 fn push_capped(list: &mut Vec<String>, value: &str, cap: usize) {
