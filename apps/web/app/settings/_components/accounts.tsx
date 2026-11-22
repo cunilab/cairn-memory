@@ -32,7 +32,7 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { AccountRow } from "@/lib/types";
+import type { Account } from "@/lib/generated/Account";
 
 function PasswordFields({ label = "Password", prefix }: { label?: string; prefix: string }) {
   return (
@@ -65,11 +65,11 @@ function PasswordFields({ label = "Password", prefix }: { label?: string; prefix
 export function Accounts() {
   const router = useRouter();
   const account = useAccount();
-  const [rows, setRows] = useState<AccountRow[] | null>(null);
+  const [rows, setRows] = useState<Account[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [transferring, setTransferring] = useState<AccountRow | null>(null);
-  const [resetting, setResetting] = useState<AccountRow | null>(null);
+  const [transferring, setTransferring] = useState<Account | null>(null);
+  const [resetting, setResetting] = useState<Account | null>(null);
   const admin = account?.is_admin === true;
 
   useResetOnHide(() => {
@@ -82,7 +82,7 @@ export function Accounts() {
 
   const load = useCallback(async () => {
     try {
-      setRows(await cairn<AccountRow[]>("auth/accounts"));
+      setRows(await cairn<Account[]>("auth/accounts"));
       setError(null);
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
@@ -100,7 +100,7 @@ export function Accounts() {
     }
   }, [admin, load]);
 
-  const columns = useMemo<ColumnDef<AccountRow>[]>(
+  const columns = useMemo<ColumnDef<Account>[]>(
     () => [
       {
         id: "email",

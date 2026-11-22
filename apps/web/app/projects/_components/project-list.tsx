@@ -21,21 +21,11 @@ import {
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { ListedProject } from "@/lib/types";
-
-// TODO(7a): `GET /projects` gains these counts (UX spec §5). Each column appears only when the
-// server sends it, so the list works today.
-interface ProjectExtras {
-  memories?: number;
-  stale?: number;
-  members?: number;
-  last_activity_at?: number | null;
-}
-type ProjectRow = ListedProject & ProjectExtras;
+import type { ProjectView } from "@/lib/generated/ProjectView";
 
 export function ProjectList() {
   const router = useRouter();
-  const [projects, setProjects] = useState<ProjectRow[] | null>(null);
+  const [projects, setProjects] = useState<ProjectView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -46,7 +36,7 @@ export function ProjectList() {
 
   useEffect(() => {
     let cancelled = false;
-    cairn<ProjectRow[]>("projects")
+    cairn<ProjectView[]>("projects")
       .then((listed) => {
         if (!cancelled) {
           setProjects(listed);
@@ -67,8 +57,8 @@ export function ProjectList() {
   }, [router, attempt]);
 
   const counts = projects?.some((p) => p.memories !== undefined) ?? false;
-  const columns = useMemo<ColumnDef<ProjectRow>[]>(() => {
-    const cols: ColumnDef<ProjectRow>[] = [
+  const columns = useMemo<ColumnDef<ProjectView>[]>(() => {
+    const cols: ColumnDef<ProjectView>[] = [
       {
         accessorKey: "name",
         header: "Name",

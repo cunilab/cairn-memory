@@ -27,11 +27,13 @@ pub struct PasswordChange {
     new_password: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Serialize)]
 pub struct Session {
     account: Account,
     token: String,
     /// Epoch seconds; the console's cookie lives until then.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     expires_at: i64,
 }
 

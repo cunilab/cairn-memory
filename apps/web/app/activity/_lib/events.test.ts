@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { auditLabel, dayKey, dayLabel, describeEvent, isSystemAction, type AuditEvent } from "./events.ts";
+import type { AuditEvent } from "../../../lib/generated/AuditEvent.ts";
+import { auditLabel, dayKey, dayLabel, describeEvent, isSystemAction } from "./events.ts";
 
 const event = (action: string, metadata: Record<string, unknown> | null = {}, extra: Partial<AuditEvent> = {}): AuditEvent => ({
   audit_id: "a",

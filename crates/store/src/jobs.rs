@@ -9,6 +9,7 @@ use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Job {
     pub job_id: String,
@@ -18,14 +19,20 @@ pub struct Job {
     pub attempts: i32,
     pub claim_id: Option<String>,
     pub last_error: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct JobSnapshot {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub pending: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub running: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub quarantined: i64,
     /// Quarantined jobs, newest first.
     pub quarantine: Vec<Job>,

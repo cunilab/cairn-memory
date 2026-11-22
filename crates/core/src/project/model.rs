@@ -1,6 +1,7 @@
 use crate::error::Error;
 use serde::Serialize;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Project {
     pub project_id: String,
@@ -8,7 +9,9 @@ pub struct Project {
     pub repository: String,
     pub name: String,
     pub default_branch: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
 }
 

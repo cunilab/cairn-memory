@@ -21,107 +21,153 @@ pub const BENCH: Bench = Bench {
     session_tokens: 1162,
 };
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Bench {
     pub hit_at_5: f64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub search_tokens: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub get_tokens: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub session_tokens: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Counts {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: i64,
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
     pub by_kind: BTreeMap<String, i64>,
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
     pub by_status: BTreeMap<String, i64>,
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
     pub by_scope: BTreeMap<String, i64>,
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
     pub by_origin: BTreeMap<String, i64>,
     /// Expired in the last 30 days and not yet swept away.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub expired_30d: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Day {
     pub day: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub saved: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct UsedMemory {
     pub id: String,
     pub kind: String,
     pub title: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub fetched: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub helpful: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub wrong: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageReport {
     /// Durable, active memories no agent has fetched.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub never_fetched: i64,
     /// Memories fetched in the last 30 days.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub fetched_30d: i64,
     /// Helpful votes in the last 30 days.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub helpful_30d: i64,
     pub top: Vec<UsedMemory>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageDay {
     pub day: String,
     /// Estimated: response bytes / 4.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub tokens: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub lookups: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub hits: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageDays {
     pub days: Vec<UsageDay>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total_tokens: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub lookups: i64,
     /// Lookups that found something, over all lookups; 0 with none.
     pub hit_ratio: f64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct StaleCauses {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub missing: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub feedback: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct StaleReport {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: i64,
     pub by_cause: StaleCauses,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub expiring_30d: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct LinkReport {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub auto: i64,
     /// Durable, active memories with at least one visible link, over all of them.
     pub durable_with_link_ratio: f64,
 }
 
 /// The dashboard's health card, from the same numbers as `stale` and `links`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct MemoryHealth {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub expiring: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub stale_missing: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub stale_feedback: i64,
     pub linked_ratio: f64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct JobCounts {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub pending: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub running: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub quarantined: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct DeviceAttention {
     pub device_id: String,
@@ -129,12 +175,16 @@ pub struct DeviceAttention {
     pub reason: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Capture {
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub observations_7d: i64,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Stats {
     pub memories: Counts,
@@ -146,7 +196,9 @@ pub struct Stats {
     pub links: LinkReport,
     pub memory_health: MemoryHealth,
     pub jobs: JobCounts,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub projects: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub devices_checked_in: i64,
     pub devices_attention: Vec<DeviceAttention>,
     /// No device has checked in yet, or nothing has been captured.

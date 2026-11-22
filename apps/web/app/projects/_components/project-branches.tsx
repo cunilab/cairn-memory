@@ -14,18 +14,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import type { ProjectBranch } from "@/lib/types";
-
-// TODO(7a): `GET /projects/{id}/branches` gains the latest visible handoff per branch.
-export interface BranchHandoff {
-  id: string;
-  title: string;
-  summary: string;
-  fields?: Record<string, string | string[]>;
-  updated_at: number;
-  device_name?: string | null;
-}
-export type BranchRow = ProjectBranch & { handoff?: BranchHandoff | null };
+import type { BranchHandoff } from "@/lib/generated/BranchHandoff";
+import type { BranchSummary } from "@/lib/generated/BranchSummary";
 
 function words(key: string): string {
   const text = key.replaceAll("_", " ");
@@ -68,7 +58,7 @@ function Handoff({ handoff }: { handoff: BranchHandoff }) {
 }
 
 /** Read-only: where work stopped per branch. */
-export function ProjectBranches({ branches }: { branches: BranchRow[] }) {
+export function ProjectBranches({ branches }: { branches: BranchSummary[] }) {
   if (branches.length === 0) {
     return (
       <Empty className="border">

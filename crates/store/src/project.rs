@@ -23,22 +23,27 @@ fn project_from_row(row: &PgRow) -> Result<Project> {
 }
 
 /// The latest handoff the reader may see for a branch: where work stopped.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BranchHandoff {
     pub id: String,
     pub title: String,
     pub summary: String,
     pub fields: serde_json::Value,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
     pub device_name: Option<String>,
 }
 
 /// Derived from `memories.repo_branch`; there is no branch table.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BranchSummary {
     pub branch: String,
     /// Project memories saved on the branch (a handoff is not counted).
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub memories: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub last_updated: i64,
     pub handoff: Option<BranchHandoff>,
 }
@@ -55,6 +60,7 @@ pub struct ProjectCounts {
 }
 
 /// A pair of live project memories joined by a `contradicts` link.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Conflict {
     pub memory_id: String,

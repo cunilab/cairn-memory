@@ -1,11 +1,11 @@
 "use client";
 
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { MemoryGraph } from "@/lib/types";
+import type { Graph } from "@/lib/generated/Graph";
 import { graphEdgeKey } from "../_lib/graph-edge-key";
 
 /** The accessible alternative to the canvas: every link as a row. */
-export function LinkTable({ graph, onOpen }: { graph: MemoryGraph; onOpen: (memoryId: string) => void }) {
+export function LinkTable({ graph, onOpen }: { graph: Graph; onOpen: (memoryId: string) => void }) {
   const titles = new Map(graph.nodes.map((node) => [node.memory_id, node.title]));
   const linked = new Set(graph.edges.flatMap((edge) => [edge.source_id, edge.target_id]));
   const alone = graph.nodes.filter((node) => !linked.has(node.memory_id));

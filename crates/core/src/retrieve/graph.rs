@@ -17,6 +17,7 @@ pub struct GraphFilter {
     pub relation: Option<Relation>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Node {
     pub memory_id: String,
@@ -26,6 +27,7 @@ pub struct Node {
     pub kind: Kind,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Edge {
     pub source_id: String,
@@ -33,6 +35,7 @@ pub struct Edge {
     pub relation: Relation,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Graph {
     pub nodes: Vec<Node>,

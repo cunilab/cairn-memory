@@ -12,24 +12,39 @@ use cairn_store::memory::ListFilter;
 use cairn_store::project::{BranchSummary, Conflict};
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "ProjectView"))]
 #[derive(Serialize)]
 pub struct Listed {
     #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
     project: Project,
+    #[cfg_attr(feature = "ts", ts(type = "\"owner\" | \"member\""))]
     role: &'static str,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     memories: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     stale: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     members: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     last_activity_at: Option<i64>,
 }
 
 /// A roster row; the console reads `role`.
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    ts(export, rename = "ProjectMember")
+)]
 #[derive(Serialize)]
 pub struct MemberRow {
     person_id: String,
     email: String,
+    #[cfg_attr(feature = "ts", ts(type = "\"owner\" | \"member\""))]
     role: &'static str,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     joined_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     last_active_at: Option<i64>,
 }
 

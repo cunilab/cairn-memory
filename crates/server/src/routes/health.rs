@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use serde::Serialize;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Serialize)]
 pub struct Health {
     ok: bool,

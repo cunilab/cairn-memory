@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Every per-kind struct omits empty values when serialized, so the stored object stays minimal.
+/// `default` beside `skip_serializing_if` is what makes ts-rs type the key as optional (`key?:`).
 macro_rules! fields_struct {
     ($name:ident { $($(#[$attr:meta])* $field:ident : $ty:ty),* $(,)? }) => {
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
         #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         pub struct $name {
-            $(#[serde(skip_serializing_if = "is_empty")] $(#[$attr])* pub $field: $ty,)*
+            $(#[serde(default, skip_serializing_if = "is_empty")] $(#[$attr])* pub $field: $ty,)*
         }
     };
 }
@@ -46,6 +48,7 @@ fields_struct!(Note {});
 fields_struct!(Handoff { next_steps: Vec<String>, open_questions: Vec<String>, files: Vec<String> });
 
 /// Serialize only; the kind travels in `Memory::kind`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Fields {

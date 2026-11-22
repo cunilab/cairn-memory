@@ -8,15 +8,18 @@ use serde::Serialize;
 use sqlx::Row;
 use std::collections::HashMap;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageView {
     pub fetched: u32,
     pub helpful: u32,
     pub wrong: u32,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_used_at: Option<i64>,
 }
 
 /// The memory at the other end of a link, as far as the reader may know it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct LinkOther {
     pub id: String,
@@ -25,6 +28,7 @@ pub struct LinkOther {
     pub status: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct LinkView {
     pub relation: Relation,
@@ -32,13 +36,16 @@ pub struct LinkView {
     pub target: String,
     pub auto: bool,
     /// `out`: this memory is the source. `in`: another memory links to it.
+    #[cfg_attr(feature = "ts", ts(type = "\"out\" | \"in\""))]
     pub direction: &'static str,
     pub other: Option<LinkOther>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct MemoryView {
     #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
     pub memory: Memory,
     pub origin: Origin,
     pub project_name: Option<String>,
@@ -46,7 +53,9 @@ pub struct MemoryView {
     /// The device that saved it; only its owner sees the name.
     pub device_name: Option<String>,
     /// The last git check of a memory that cites files or symbols.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub checked_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub status_changed_at: i64,
     pub fetched: u32,
     pub usage: UsageView,

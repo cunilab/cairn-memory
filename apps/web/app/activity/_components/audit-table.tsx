@@ -6,8 +6,9 @@ import { DataTable } from "@/components/data-table";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import { cairn } from "@/lib/cairn";
-import type { Device } from "@/lib/types";
-import { auditLabel, isSystemAction, type AuditEvent } from "../_lib/events";
+import type { Device } from "@/lib/generated/Device";
+import type { AuditEvent } from "@/lib/generated/AuditEvent";
+import { auditLabel, isSystemAction } from "../_lib/events";
 import { useAudit } from "../_lib/use-audit";
 
 export function AuditTable() {

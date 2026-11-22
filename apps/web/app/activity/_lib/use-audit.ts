@@ -3,7 +3,7 @@ import { useRouter } from "next/navigation";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { AuditEvent } from "./events";
+import type { AuditEvent } from "@/lib/generated/AuditEvent";
 
 type State = { events: AuditEvent[] | null; error: string | null };
 

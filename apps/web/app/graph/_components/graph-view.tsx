@@ -13,7 +13,8 @@ import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { ListedProject, MemoryGraph } from "@/lib/types";
+import type { Graph } from "@/lib/generated/Graph";
+import type { ProjectView } from "@/lib/generated/ProjectView";
 import { LinkTable } from "./link-table";
 import { MemoryGraphCanvas } from "./memory-graph";
 
@@ -27,7 +28,7 @@ const KINDS = ["decision", "rule", "gotcha", "procedure", "fact", "preference", 
   label: value.charAt(0).toUpperCase() + value.slice(1),
 }));
 
-type Loaded = { key: string; graph: MemoryGraph | null; projects: ListedProject[]; error: string | null };
+type Loaded = { key: string; graph: Graph | null; projects: ProjectView[]; error: string | null };
 
 export function GraphView() {
   const router = useRouter();
@@ -57,7 +58,7 @@ export function GraphView() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([cairn<MemoryGraph>(`graph?${query}`), cairn<ListedProject[]>("projects")])
+    Promise.all([cairn<Graph>(`graph?${query}`), cairn<ProjectView[]>("projects")])
       .then(([graph, projects]) => !cancelled && setLoaded({ key, graph, projects, error: null }))
       .catch((cause: unknown) => {
         if (cancelled) return;
@@ -78,7 +79,7 @@ export function GraphView() {
   }, [key, query, router]);
 
   // TODO(7a): `status` joins the shared filters once graph nodes carry it; `kind` is applied here until then.
-  const graph = useMemo<MemoryGraph | null>(() => {
+  const graph = useMemo<Graph | null>(() => {
     const full = loaded?.graph;
     if (!full || !kind) return full ?? null;
     const nodes = full.nodes.filter((node) => node.kind === kind);

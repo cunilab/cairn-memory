@@ -20,7 +20,9 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn, cairnPage } from "@/lib/cairn";
 import { onMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { ListedProject, ProjectBranch, ProjectMemory } from "@/lib/types";
+import type { BranchSummary } from "@/lib/generated/BranchSummary";
+import type { MemoryView } from "@/lib/generated/MemoryView";
+import type { ProjectView } from "@/lib/generated/ProjectView";
 
 const PAGE = 50;
 const KINDS = ["decision", "rule", "gotcha", "procedure", "fact", "preference", "note", "handoff"];
@@ -35,7 +37,7 @@ const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
   label: kind.charAt(0).toUpperCase() + kind.slice(1),
 }));
 
-type Page = { key: string; items: ProjectMemory[]; next: string | null; error: string | null };
+type Page = { key: string; items: MemoryView[]; next: string | null; error: string | null };
 
 export function MemoryTable() {
   const router = useRouter();
@@ -48,8 +50,8 @@ export function MemoryTable() {
   const branch = params.get("branch") ?? "";
   const q = params.get("q") ?? "";
   const [search, setSearch] = useState(q);
-  const [projects, setProjects] = useState<ListedProject[]>([]);
-  const [branches, setBranches] = useState<{ project: string; rows: ProjectBranch[] }>({ project: "", rows: [] });
+  const [projects, setProjects] = useState<ProjectView[]>([]);
+  const [branches, setBranches] = useState<{ project: string; rows: BranchSummary[] }>({ project: "", rows: [] });
   const [page, setPage] = useState<Page | null>(null);
   const [more, setMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -74,7 +76,7 @@ export function MemoryTable() {
 
   useEffect(() => {
     let cancelled = false;
-    cairn<ListedProject[]>("projects")
+    cairn<ProjectView[]>("projects")
       .then((rows) => !cancelled && setProjects(rows))
       .catch((cause: unknown) => {
         if (!cancelled && cause instanceof SessionRequiredError) requireSignIn();
@@ -87,7 +89,7 @@ export function MemoryTable() {
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
-    cairn<ProjectBranch[]>(`projects/${encodeURIComponent(project)}/branches`)
+    cairn<BranchSummary[]>(`projects/${encodeURIComponent(project)}/branches`)
       .then((rows) => !cancelled && setBranches({ project, rows }))
       .catch(() => !cancelled && setBranches({ project, rows: [] }));
     return () => {
@@ -97,7 +99,7 @@ export function MemoryTable() {
 
   useEffect(() => {
     let cancelled = false;
-    cairnPage<ProjectMemory>(`memories?${serverQuery}`)
+    cairnPage<MemoryView>(`memories?${serverQuery}`)
       .then(({ items, next }) => !cancelled && setPage({ key, items, next, error: null }))
       .catch((cause: unknown) => {
         if (cancelled) return;
@@ -130,7 +132,7 @@ export function MemoryTable() {
     if (!page?.next) return;
     setMore(true);
     try {
-      const next = await cairnPage<ProjectMemory>(`memories?${serverQuery}&cursor=${encodeURIComponent(page.next)}`);
+      const next = await cairnPage<MemoryView>(`memories?${serverQuery}&cursor=${encodeURIComponent(page.next)}`);
       setPage((current) =>
         current && current.key === key
           ? { ...current, items: [...current.items, ...next.items], next: next.next }
@@ -160,7 +162,7 @@ export function MemoryTable() {
   const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.name }));
   const branchOptions = (branches.project === project ? branches.rows : []).map((b) => ({ value: b.branch, label: b.branch }));
 
-  const columns = useMemo<ColumnDef<ProjectMemory>[]>(
+  const columns = useMemo<ColumnDef<MemoryView>[]>(
     () => [
       {
         accessorKey: "kind",
@@ -202,7 +204,7 @@ export function MemoryTable() {
         cell: ({ row }) => (
           <StatusBadge
             status={row.original.status}
-            cause={(row.original as ProjectMemory & { stale_cause?: string | null }).stale_cause}
+            cause={(row.original as MemoryView & { stale_cause?: string | null }).stale_cause}
           />
         ),
       },

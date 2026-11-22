@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
 import { cn } from "@/lib/utils";
+import type { AuditEvent } from "@/lib/generated/AuditEvent";
 import {
   dayKey,
   dayLabel,
@@ -14,7 +15,6 @@ import {
   isSystemAction,
   TIMELINE_FILTERS,
   touchedMemories,
-  type AuditEvent,
 } from "../_lib/events";
 import { useAudit } from "../_lib/use-audit";
 

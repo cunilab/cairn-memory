@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 macro_rules! text_enum {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
         $(#[$meta])*
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         pub enum $name { $($variant),+ }
@@ -45,6 +46,7 @@ text_enum!(EntityKind {
 });
 
 /// The client's git state. Never redacted.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub repo: Option<String>,
@@ -81,6 +83,7 @@ pub struct SaveInput {
 }
 
 /// A stored memory as the server returns it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Memory {
     pub id: String,
@@ -90,32 +93,35 @@ pub struct Memory {
     pub kind: Kind,
     pub title: String,
     pub summary: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
     /// Serialized as the bare per-kind object.
     pub fields: Fields,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
     pub evidence_count: u32,
     pub context: Context,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<Entity>,
     /// Outgoing and incoming. The console shows them through `MemoryView`, which adds the other end.
     #[serde(skip)]
     pub links: Vec<Link>,
     pub status: Status,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_cause: Option<String>,
     /// Who wrote it. Internal: agents see only the memory.
     #[serde(skip)]
     pub origin: Origin,
     /// Unix seconds.
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub expires_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
     /// Microsecond creation time for tie-breaks; `created_at` has one-second resolution.
     #[serde(skip)]
     pub created_us: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
     #[serde(skip)]
     pub evidence_hash: String,
@@ -127,6 +133,7 @@ pub struct Memory {
 }
 
 /// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Record {
     pub id: String,
@@ -135,16 +142,17 @@ pub struct Record {
     pub status: Status,
     pub title: String,
     pub summary: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
-    #[serde(skip_serializing_if = "Fields::is_empty")]
+    #[serde(default, skip_serializing_if = "Fields::is_empty")]
     pub fields: Fields,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
 }
 
@@ -167,12 +175,14 @@ impl From<&Memory> for Record {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Entity {
     pub kind: EntityKind,
     pub name: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Link {
     pub relation: Relation,

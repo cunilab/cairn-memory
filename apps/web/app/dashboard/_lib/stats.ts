@@ -1,5 +1,7 @@
 import { cairn } from "@/lib/cairn";
-import type { Device, Diagnostics, ListedProject } from "@/lib/types";
+import type { Device } from "@/lib/generated/Device";
+import type { ProjectView } from "@/lib/generated/ProjectView";
+import type { Diagnostics } from "@/lib/types";
 import type { UsageDays } from "./summary";
 
 /**
@@ -36,7 +38,7 @@ export interface DashboardStats {
 export async function loadStats(): Promise<DashboardStats> {
   const [diagnostics, projects, devices] = await Promise.all([
     cairn<Diagnostics>("diagnose"),
-    cairn<ListedProject[]>("projects"),
+    cairn<ProjectView[]>("projects"),
     cairn<Device[]>("devices"),
   ]);
   const checkedIn = devices.filter((d) => d.status !== "revoked" && d.last_seen_at !== d.created_at).length;

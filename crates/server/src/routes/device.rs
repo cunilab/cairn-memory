@@ -27,9 +27,11 @@ pub struct Target {
 }
 
 /// A device with what the console says about it. A revoked device has no health.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Serialize)]
 pub struct DeviceView {
     #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(flatten))]
     device: Device,
     health: Option<DeviceHealth>,
     health_reason: Option<String>,

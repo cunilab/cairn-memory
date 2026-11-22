@@ -22,20 +22,20 @@ import { useOpenMemory, useTabParam } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { ApiError, cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { ListedProject, ProjectMember, ProjectMemory } from "@/lib/types";
-import { ProjectBranches, type BranchRow } from "./project-branches";
+import type { BranchSummary } from "@/lib/generated/BranchSummary";
+import type { MemoryView } from "@/lib/generated/MemoryView";
+import type { ProjectMember } from "@/lib/generated/ProjectMember";
+import type { ProjectView } from "@/lib/generated/ProjectView";
+import { ProjectBranches } from "./project-branches";
 
 const TABS = ["branches", "stale", "members"] as const;
 
 type Loaded = {
-  project: ListedProject;
-  branches: BranchRow[];
-  stale: ProjectMemory[];
+  project: ProjectView;
+  branches: BranchSummary[];
+  stale: MemoryView[];
   members: ProjectMember[];
 };
-
-// TODO(7a): `Member` gains `last_active_at`; the column appears once the server sends it.
-type MemberRow = ProjectMember & { last_active_at?: number | null };
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -52,13 +52,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const path = `projects/${encodeURIComponent(projectId)}`;
 
   const fetchProject = useCallback(async (): Promise<Loaded> => {
-    const listed = await cairn<ListedProject[]>("projects");
+    const listed = await cairn<ProjectView[]>("projects");
     const project = listed.find((p) => p.project_id === projectId);
     if (!project) throw new ApiError("Project not found or you are not a member.", 404);
     const [branches, members, stale] = await Promise.all([
-      cairn<BranchRow[]>(`${path}/branches`),
-      cairn<MemberRow[]>(`${path}/members`),
-      cairn<ProjectMemory[]>(`memories?projectId=${encodeURIComponent(projectId)}&status=stale&limit=100`),
+      cairn<BranchSummary[]>(`${path}/branches`),
+      cairn<ProjectMember[]>(`${path}/members`),
+      cairn<MemoryView[]>(`memories?projectId=${encodeURIComponent(projectId)}&status=stale&limit=100`),
     ]);
     return { project, branches, members, stale };
   }, [projectId, path]);
@@ -122,8 +122,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const canTransfer = owner || account?.is_admin === true;
   const crumbs = [{ label: "Projects", href: "/projects" }, { label: data?.project.name ?? "Project" }];
 
-  const memberColumns = useMemo<ColumnDef<MemberRow>[]>(() => {
-    const cols: ColumnDef<MemberRow>[] = [
+  const memberColumns = useMemo<ColumnDef<ProjectMember>[]>(() => {
+    const cols: ColumnDef<ProjectMember>[] = [
       { id: "person", header: "Email", accessorKey: "email", cell: ({ row }) => <span className="break-all">{row.original.email}</span> },
       { id: "role", header: "Role", cell: ({ row }) => <RoleBadge role={row.original.role} /> },
       {
@@ -134,7 +134,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         meta: { className: "hidden sm:table-cell" },
       },
     ];
-    if (data?.members.some((m) => (m as MemberRow).last_active_at !== undefined)) {
+    if (data?.members.some((m) => m.last_active_at !== undefined)) {
       cols.push({
         id: "active",
         header: "Last active",
@@ -157,7 +157,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     return cols;
   }, [canTransfer, data?.members]);
 
-  const staleColumns = useMemo<ColumnDef<ProjectMemory>[]>(
+  const staleColumns = useMemo<ColumnDef<MemoryView>[]>(
     () => [
       {
         id: "title",
@@ -174,7 +174,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               {row.original.title}
             </button>
             <p className="line-clamp-2 text-sm text-muted-foreground">
-              {(row.original as ProjectMemory & { stale_cause?: string | null }).stale_cause ?? row.original.summary}
+              {(row.original as MemoryView & { stale_cause?: string | null }).stale_cause ?? row.original.summary}
             </p>
           </div>
         ),

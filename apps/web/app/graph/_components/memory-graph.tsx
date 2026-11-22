@@ -10,7 +10,7 @@ import {
   zoomToSizeRatio,
   type LabelCandidate,
 } from "../_lib/graph-layout";
-import type { MemoryGraph } from "@/lib/types";
+import type { Graph } from "@/lib/generated/Graph";
 
 const SCOPE_COLOR = {
   personal: ["--chart-2", "#5c6370"],
@@ -79,11 +79,11 @@ export function MemoryGraphCanvas({
   graph,
   onSelect,
 }: {
-  graph: MemoryGraph;
+  graph: Graph;
   onSelect: (memoryId: string) => void;
 }) {
   const container = useRef<HTMLDivElement>(null);
-  const [failure, setFailure] = useState<{ graph: MemoryGraph; dark: boolean; message: string } | null>(null);
+  const [failure, setFailure] = useState<{ graph: Graph; dark: boolean; message: string } | null>(null);
   const dark = useSyncExternalStore(subscribeDarkClass, () => document.documentElement.classList.contains("dark"), () => false);
   useEffect(() => {
     const element = container.current;

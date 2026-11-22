@@ -13,14 +13,15 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { JobQueue, QuarantinedJob } from "@/lib/types";
+import type { Job } from "@/lib/generated/Job";
+import type { JobSnapshot } from "@/lib/generated/JobSnapshot";
 
 /** Read-only: Cairn retries failed jobs by itself, so there is nothing for a person to press. */
 export function Jobs() {
   const router = useRouter();
   const account = useAccount();
   const admin = account?.is_admin === true;
-  const [queue, setQueue] = useState<JobQueue | null>(null);
+  const [queue, setQueue] = useState<JobSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   useResetOnHide(() => {
@@ -31,7 +32,7 @@ export function Jobs() {
   useEffect(() => {
     if (!admin) return;
     let cancelled = false;
-    cairn<JobQueue>("admin/jobs")
+    cairn<JobSnapshot>("admin/jobs")
       .then((next) => {
         if (cancelled) return;
         setQueue(next);
@@ -56,7 +57,7 @@ export function Jobs() {
     setAttempt((n) => n + 1);
   }, []);
 
-  const columns = useMemo<ColumnDef<QuarantinedJob>[]>(
+  const columns = useMemo<ColumnDef<Job>[]>(
     () => [
       {
         accessorKey: "kind",

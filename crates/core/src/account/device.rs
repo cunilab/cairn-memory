@@ -9,6 +9,7 @@ pub const LAST_SEEN_THROTTLE_SECONDS: i64 = 60;
 /// A device whose last hook check-in is older than this is "not seen recently".
 pub const DEVICE_STALE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStatus {
@@ -25,23 +26,28 @@ impl DeviceStatus {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Device {
     pub device_id: String,
     pub person_id: String,
     pub name: String,
     pub status: DeviceStatus,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub last_seen_at: i64,
     /// `claude`, `codex` or `opencode`, from the client's user agent.
     pub agent: Option<String>,
     pub client_version: Option<String>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_hook_at: Option<i64>,
     /// The retired Python hook (user agent `Python-urllib`).
     #[serde(skip)]
     pub legacy_hook: bool,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceHealth {

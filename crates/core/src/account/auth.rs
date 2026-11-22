@@ -17,6 +17,7 @@ pub const WEB_ONLY_ERROR: &str = "web console session required; device tokens ca
 /// Servers map this error text to 403: a non-admin web session reached an admin action.
 pub const ADMIN_ONLY_ERROR: &str = "admin web session required; only the admin account can do this";
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountStatus {
@@ -33,6 +34,7 @@ impl AccountStatus {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Account {
     pub person_id: String,
@@ -40,6 +42,7 @@ pub struct Account {
     pub status: AccountStatus,
     /// Only the bootstrap account is an admin; it alone may create accounts.
     pub is_admin: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: i64,
 }
 

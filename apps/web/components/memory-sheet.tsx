@@ -34,31 +34,8 @@ import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
 import { announceMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { MemoryLink, ProjectMemory } from "@/lib/types";
-
-// TODO(7a): the server will add these to `GET /memories/{id}` (UX spec §5). Every section that
-// reads one renders only when the field is present, so the sheet works today and fills in later.
-interface MemoryDetailExtras {
-  project_name?: string | null;
-  checked_at?: number | null;
-  status_changed_at?: number | null;
-  owner_is_me?: boolean;
-  device_name?: string | null;
-  origin?: "agent" | "system";
-  /** File or symbol entities reported missing, for "Why stale". */
-  missing_entities?: string[];
-  usage?: { fetched: number; helpful: number; wrong: number; last_used_at?: number | null };
-}
-
-// TODO(7a): `links[]` gains `direction` and `other` so lineage rows can show titles and
-// incoming links. Until then a row shows the other memory's id.
-type LinkView = MemoryLink & {
-  direction?: "out" | "in";
-  other?: { id: string; kind: string; title: string; status: string };
-};
-
-type MemoryDetail = ProjectMemory &
-  MemoryDetailExtras & { stale_cause?: string | null; links?: LinkView[] };
+import type { LinkView } from "@/lib/generated/LinkView";
+import type { MemoryView } from "@/lib/generated/MemoryView";
 
 const OUT_LABEL: Record<string, string> = {
   relates: "Related",
@@ -122,7 +99,7 @@ function Lineage({
   memory,
   open,
 }: {
-  memory: MemoryDetail;
+  memory: MemoryView;
   open: (id: string) => void;
 }) {
   const groups = new Map<string, LinkView[]>();
@@ -164,7 +141,7 @@ function Lineage({
   );
 }
 
-function Body({ memory, open }: { memory: MemoryDetail; open: (id: string) => void }) {
+function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void }) {
   const fields = Object.entries(memory.fields ?? {});
   const evidence = memory.evidence ?? [];
   return (
@@ -272,7 +249,7 @@ function Body({ memory, open }: { memory: MemoryDetail; open: (id: string) => vo
   );
 }
 
-type Load = { id: string; memory: MemoryDetail | null; error: string | null; missing: boolean };
+type Load = { id: string; memory: MemoryView | null; error: string | null; missing: boolean };
 
 /**
  * The one memory detail surface. It is driven by `?memory=<id>`, so any page can open it by
@@ -298,7 +275,7 @@ export function MemorySheet() {
       return;
     }
     let cancelled = false;
-    cairn<MemoryDetail>(`memories/${encodeURIComponent(id)}`)
+    cairn<MemoryView>(`memories/${encodeURIComponent(id)}`)
       .then((memory) => !cancelled && setLoaded({ id, memory, error: null, missing: false }))
       .catch((cause: unknown) => {
         if (cancelled) return;

@@ -18,3 +18,4 @@ sqlx = { version = "0.8", default-features = false, features = ["json", "postgre
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
+ts-rs = { version = "11", features = ["serde-json-impl"] }

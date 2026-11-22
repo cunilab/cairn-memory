@@ -80,6 +80,13 @@ jobs:
       - run: python3 scripts/test_download_embedding_model.py
       - run: python3 scripts/download_embedding_model.py "$CAIRN_TEST_EMBEDDING_MODEL_DIR"
       - run: cargo test --workspace --locked
+      - name: generated web types are current (ts-rs, spec W4)
+        # Regenerate from scratch so a removed type also shows up; `add -N` makes new files count.
+        run: |
+          rm -rf apps/web/lib/generated
+          cargo test --workspace --features ts --locked export_bindings
+          git add -N apps/web/lib/generated
+          git diff --exit-code apps/web/lib/generated
 
   build-other-platforms:
     name: Build on ${{ matrix.os }}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { cairn } from "@/lib/cairn";
-import type { Account } from "@/lib/types";
+import type { Account } from "@/lib/generated/Account";
 
 /** The signed-in account: undefined while loading, null when it could not be read. */
 export function useAccount(): Account | null | undefined {

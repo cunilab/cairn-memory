@@ -12,6 +12,7 @@ pub struct Hit {
 }
 
 /// What an agent sees of a hit; `memory_get` fetches the full record.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Card {
     pub id: String,
@@ -19,17 +20,18 @@ pub struct Card {
     pub title: String,
     pub summary: String,
     /// Only when the memory is not `active` (a stale memory still ranks, lower).
-    #[serde(skip_serializing_if = "is_active")]
+    #[serde(default, skip_serializing_if = "is_active")]
     pub status: Status,
     /// Rounded to 3 decimals, relative to the top card (1.0).
     pub score: f32,
 }
 
 /// `more` counts hits cut by the limit or the budget; a caller raises either to see them.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Cards {
     pub results: Vec<Card>,
-    #[serde(skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub more: usize,
 }
 

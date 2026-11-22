@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 description = "REST transport for Cairn Memory"
 
+[features]
+# Generates the web console's TypeScript types (docs/specs/0.1.6-step7-web-hardening.md W4).
+ts = ["dep:ts-rs", "cairn-core/ts", "cairn-store/ts"]
+
 [dependencies]
 axum.workspace = true
 cairn-core = { path = "../core" }
 cairn-store = { path = "../store" }
 serde.workspace = true
 serde_json.workspace = true
+ts-rs = { workspace = true, optional = true }
 tokio.workspace = true
 fastembed = { version = "=7.7.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 sha2.workspace = true

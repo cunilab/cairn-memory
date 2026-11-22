@@ -1,16 +1,6 @@
-// Pure copy for the Activity page: audit rows to sentences. No imports, so node:test runs it.
+// Pure copy for the Activity page: audit rows to sentences. Only a type import, so node:test runs it.
 
-/** `GET /auth/audit` row. `titles` arrives with step 7a (ids resolved server-side). */
-export interface AuditEvent {
-  audit_id: string;
-  action: string;
-  subject_id: string | null;
-  device_id: string | null;
-  metadata: Record<string, unknown> | null;
-  created_at: number;
-  // TODO(7a): server-resolved titles for the memory ids an event touched.
-  titles?: Record<string, string>;
-}
+import type { AuditEvent } from "@/lib/generated/AuditEvent";
 
 /** What Cairn did on its own. Everything else in the audit log is a person or device action. */
 export const SYSTEM_ACTIONS = [
@@ -114,7 +104,7 @@ export function describeEvent(event: AuditEvent): string {
 /** Memories an event touched, for the inline expand. Empty until the server sends titles. */
 export function touchedMemories(event: AuditEvent): { id: string; title: string }[] {
   const titles = event.titles ?? {};
-  return Object.entries(titles).map(([id, title]) => ({ id, title }));
+  return Object.entries(titles as Record<string, string>).map(([id, title]) => ({ id, title }));
 }
 
 /** Local calendar day of an epoch-seconds stamp, `YYYY-MM-DD`. */

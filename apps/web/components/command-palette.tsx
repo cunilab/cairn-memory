@@ -30,7 +30,7 @@ import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
 import { cairn } from "@/lib/cairn";
 import { THEMES } from "@/lib/theme";
-import type { ListedProject } from "@/lib/types";
+import type { ProjectView } from "@/lib/generated/ProjectView";
 
 const PAGES = [
   { href: "/dashboard", label: "Dashboard", keywords: "overview home", icon: LayoutDashboardIcon },
@@ -54,7 +54,7 @@ export function CommandPalette({
   const router = useRouter();
   const logout = useLogout();
   const [, setTheme] = useTheme();
-  const [projects, setProjects] = useState<ListedProject[]>([]);
+  const [projects, setProjects] = useState<ProjectView[]>([]);
   const loaded = useRef(false);
 
   useEffect(() => {
@@ -73,7 +73,7 @@ export function CommandPalette({
       return;
     }
     loaded.current = true;
-    cairn<ListedProject[]>("projects")
+    cairn<ProjectView[]>("projects")
       .then(setProjects)
       .catch(() => {
         loaded.current = false;

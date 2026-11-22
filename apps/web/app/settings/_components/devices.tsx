@@ -64,19 +64,9 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { Device, DeviceRegistration } from "@/lib/types";
-
-// TODO(7a): the server will add these to `GET /devices` (UX spec §5). Columns and the health
-// badge appear only when a device carries the field, so the table works today.
-interface DeviceExtras {
-  agent?: "claude" | "codex" | "opencode" | null;
-  client_version?: string | null;
-  last_hook_at?: number | null;
-  health?: "working" | "update_needed" | "stale" | "never_connected";
-  health_reason?: string | null;
-  fix_command?: string | null;
-}
-type DeviceRow = Device & DeviceExtras;
+import type { Device } from "@/lib/generated/Device";
+import type { DeviceView } from "@/lib/generated/DeviceView";
+import type { DeviceRegistration } from "@/lib/generated/DeviceRegistration";
 
 const AGENTS = [
   { value: "claude", label: "Claude" },
@@ -98,7 +88,7 @@ const POLL_LIMIT_MS = 10 * 60 * 1000;
 /** Registration and last use share a stamp until the device is first used. */
 const neverUsed = (device: Device) => device.last_seen_at === device.created_at;
 
-type DeviceAction = { device: DeviceRow; kind: "revoke" | "rotate" };
+type DeviceAction = { device: DeviceView; kind: "revoke" | "rotate" };
 type Issued = { registration: DeviceRegistration; baseline: number; rotated: boolean };
 
 /** Step 2 and 3: the token (shown once), the setup command, and the wait for the first check-in. */
@@ -211,7 +201,7 @@ function TokenStep({
 export function Devices() {
   const router = useRouter();
   const [params, set] = useQueryParams();
-  const [devices, setDevices] = useState<DeviceRow[] | null>(null);
+  const [devices, setDevices] = useState<DeviceView[] | null>(null);
   const [name, setName] = useState("");
   const [agent, setAgent] = useState<Agent>("claude");
   const [createOpen, setCreateOpen] = useState(false);
@@ -247,7 +237,7 @@ export function Devices() {
     router.replace(LOGIN_PATH);
   }, [router]);
 
-  const load = useCallback(() => cairn<DeviceRow[]>("devices"), []);
+  const load = useCallback(() => cairn<DeviceView[]>("devices"), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -401,8 +391,8 @@ export function Devices() {
   const hasAgent = devices?.some((d) => d.agent) ?? false;
   const hasVersion = devices?.some((d) => d.client_version) ?? false;
 
-  const columns = useMemo<ColumnDef<DeviceRow>[]>(() => {
-    const cols: ColumnDef<DeviceRow>[] = [
+  const columns = useMemo<ColumnDef<DeviceView>[]>(() => {
+    const cols: ColumnDef<DeviceView>[] = [
       {
         accessorKey: "name",
         header: "Device",

@@ -40,6 +40,7 @@ pub struct OwnedExport {
     pub memories: Vec<ExportedMemory>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Invalid {
     pub index: usize,
@@ -47,6 +48,7 @@ pub struct Invalid {
 }
 
 /// `new` would be (or was) written, `duplicate` already exists, `invalid` says why not.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ImportReport {
     pub new: usize,
