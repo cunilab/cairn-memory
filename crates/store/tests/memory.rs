@@ -730,6 +730,27 @@ async fn a_duplicate_save_still_adds_its_links() {
 }
 
 #[tokio::test]
+async fn a_correction_that_only_changes_the_reason_keeps_the_reason() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let old = db.store.save(&me, rule("same rule"), &work).await.unwrap();
+    let mut again = rule("same rule");
+    again.reason = "the first reason was wrong".into();
+    again.supersedes = Some(old.id.clone());
+    let saved = db.store.save(&me, again, &work).await.unwrap();
+    assert!(saved.deduplicated);
+    assert_eq!(saved.id, old.id);
+    let memory = db.store.get(&me, &old.id).await.unwrap();
+    assert_eq!(memory.reason, "the first reason was wrong");
+    assert_eq!(memory.status, Status::Active);
+    assert!(memory.links.is_empty());
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn other_peoples_worktree_paths_are_not_returned() {
     let Some(db) = TestDb::new().await else {
         return;

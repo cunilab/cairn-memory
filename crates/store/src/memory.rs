@@ -704,6 +704,15 @@ pub(crate) async fn insert_memory(
                 enqueue_tx(tx, JobKind::Link, &id).await?;
             }
         }
+        // Identity ignores the reason, so a correction that only changes it dedupes onto its own
+        // target: keep the new reason and skip the self-link.
+        if new.supersedes.as_deref() == Some(id.as_str()) {
+            sqlx::query("UPDATE memories SET reason = $2, updated_at = now() WHERE memory_id = $1")
+                .bind(&id)
+                .bind(&new.reason)
+                .execute(&mut *tx)
+                .await?;
+        }
         save_links(tx, person_id, &id, project_id, new).await?;
         return Ok(Saved {
             id,
@@ -750,7 +759,8 @@ async fn save_links(
         (&new.supersedes, Relation::Supersedes),
         (&new.contradicts, Relation::Contradicts),
     ] {
-        if let Some(target) = target {
+        // Only a deduplicated save can name itself; there is nothing to link then.
+        if let Some(target) = target.as_ref().filter(|t| t.as_str() != id) {
             link_tx(tx, person_id, id, new.scope, project_id, target, relation).await?;
         }
     }

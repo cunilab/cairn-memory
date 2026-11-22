@@ -495,8 +495,12 @@ pub fn retire_python(config_dir: &Path) {
             }
         }
     }
-    for name in ["run-hook", "README.txt"] {
-        let _ = fs::remove_file(hooks.join(name));
+    // The wrapper is Cairn's only when it runs the Python hook; a foreign file in a custom config
+    // dir stays, and so does the README that goes with it.
+    if fs::read_to_string(hooks.join("run-hook")).is_ok_and(|body| body.contains("cairn_hook.py")) {
+        for name in ["run-hook", "README.txt"] {
+            let _ = fs::remove_file(hooks.join(name));
+        }
     }
     let record: Map<String, Value> = fs::read_to_string(hooks.join("installed.json"))
         .ok()

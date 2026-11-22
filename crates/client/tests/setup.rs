@@ -618,3 +618,13 @@ fn remove_still_cleans_the_files_after_the_host_cli_is_gone() {
         fs::read_to_string(home.dir.join(".config/opencode/AGENTS.md")).unwrap_or_default();
     assert!(!agents.contains("cairn:begin"));
 }
+
+#[test]
+fn setup_keeps_a_run_hook_that_is_not_the_python_wrapper() {
+    let home = Home::new("foreign-wrapper", false);
+    home.write(".config/cairn/hook/run-hook", "#!/bin/sh\necho mine\n");
+    home.write(".config/cairn/hook/README.txt", "mine too");
+    home.ok("claude", false);
+    assert!(home.dir.join(".config/cairn/hook/run-hook").exists());
+    assert!(home.dir.join(".config/cairn/hook/README.txt").exists());
+}
