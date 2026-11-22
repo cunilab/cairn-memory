@@ -330,9 +330,18 @@ impl Hook<'_> {
     }
 
     fn tool(&self) -> Result<Option<String>, String> {
-        let Some(tool) = self.payload.tool().filter(|tool| !tool.is_read_only()) else {
+        let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        // A read is neither captured nor work, but it shares the edit's once-per-path topic note
+        // and per-session caps.
+        if let Some(given) = tool.read_path() {
+            let path = git::repo_relative(given, &self.cwd, self.top.as_deref());
+            return Ok(path.and_then(|path| self.topic(&path)));
+        }
+        if tool.is_read_only() {
+            return Ok(None);
+        }
         if tool.is_work() {
             self.with_state(|s| {
                 s.dirty = true;

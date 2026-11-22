@@ -177,6 +177,11 @@ impl Tool<'_> {
         FILE_TOOLS.contains(&self.name.as_str())
     }
 
+    /// The file a read tool opened: never captured, but its topic notes are worth showing.
+    pub fn read_path(&self) -> Option<&str> {
+        (self.name == "Read").then(|| self.file_path()).flatten()
+    }
+
     /// The structured path argument; the file itself is never read.
     fn file_path(&self) -> Option<&str> {
         ["file_path", "filePath", "path"]

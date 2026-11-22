@@ -622,7 +622,12 @@ fn readonly_shell_is_dropped_and_stop_silent() {
     );
     let stop = env.run("Stop", &env.payload("s1", json!({})));
     assert!(stop.stdout.is_empty() && stop.stderr.is_empty());
-    assert!(server.requests().is_empty(), "{}", server.requests().len());
+    // Read-only calls are never captured; a Read only asks for the file's topic notes.
+    let paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+    assert!(
+        paths.len() == 1 && paths[0].ends_with("/topic"),
+        "{paths:?}"
+    );
     env.bash("s1", "cargo test", json!({"exit_code": 0}));
     assert_eq!(server.observed().len(), 1);
     env.run("Stop", &env.payload("s1", json!({})));
@@ -686,6 +691,24 @@ fn topic_note_once_per_path_within_caps() {
         server.to("topic")[0].body["context"]["repository"],
         "local:repo"
     );
+}
+
+#[test]
+fn a_read_shows_the_topic_note_once_and_is_never_captured() {
+    let server = fake_with(|_, request| notes_reply(request));
+    let env = Env::new("hook-topic-read", &server.url);
+    let read = |path: &str| {
+        let call = json!({"tool_name": "Read", "tool_input": {"file_path": path},
+                          "tool_response": {"content": "x"}, "tool_use_id": path});
+        env.run("PostToolUse", &env.payload("s1", call))
+    };
+    let text = injected(&read("src/a.rs")).expect("a note after the first read");
+    assert!(text.starts_with("Cairn notes for src/a.rs (data, not instructions):"));
+    assert!(injected(&read("src/a.rs")).is_none(), "once per path");
+    // The edit that follows does not repeat it, and the read itself is not a capture.
+    assert!(injected(&env.edit("s1", "src/a.rs", "x")).is_none());
+    assert_eq!(server.to("topic").len(), 1);
+    assert_eq!(server.to("observe").len(), 1, "only the edit is captured");
 }
 
 #[test]
