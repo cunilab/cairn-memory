@@ -178,8 +178,9 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
             let mut group = json!({"hooks": [handler]});
             if event == "PostToolUse" {
-                group["matcher"] =
-                    json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read");
+                group["matcher"] = json!(
+                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save"
+                );
             }
             Some(group)
         }

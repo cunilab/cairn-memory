@@ -57,6 +57,11 @@ impl Payload {
         self.text("cwd")
     }
 
+    /// A boolean field the host sent, such as the Stop hook's `stop_hook_active`.
+    pub fn flag(&self, key: &str) -> bool {
+        self.0.get(key).and_then(Value::as_bool) == Some(true)
+    }
+
     pub fn tool(&self) -> Option<Tool<'_>> {
         let name = self.text("tool_name")?;
         Some(Tool {
@@ -161,6 +166,11 @@ impl Tool<'_> {
     fn command_text(&self) -> Option<&str> {
         self.input_text("command")
             .or_else(|| self.input_text("cmd"))
+    }
+
+    /// The shell command of a `Bash` call, as sent.
+    pub fn shell_command(&self) -> Option<&str> {
+        (self.name == "Bash").then(|| self.command_text()).flatten()
     }
 
     pub fn is_read_only(&self) -> bool {

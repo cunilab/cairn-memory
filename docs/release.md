@@ -20,7 +20,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Documentation validation`
   - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
   - `Docker images build` (builds `docker/server.Dockerfile` and `docker/web.Dockerfile` without pushing, so an image breaks in the pull request, not at tag time)
-  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.60 --max-weak-hits 0`, then on v1, `--min-hit5 0.88`; uploads the result JSON; the 0.1.7 run is hit@5 0.674, see ADR 0015)
+  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.65 --max-weak-hits 0`, then on v1, `--min-hit5 0.88`; uploads the result JSON; the 0.1.9 run is hit@5 0.674, see ADR 0015 and `bench/analysis-0.1.9.md`)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
 - The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
 
@@ -179,6 +179,13 @@ server and the CLI together, start the new server on the existing database (no w
 machine. Entity extraction keeps the leading dot of a bare dot-directory path (`.cairn/project.json`), and search cards,
 `memory_get` records and the `memory_feedback` reply carry `stale_cause`. Memories saved earlier keep their stored
 entities (no backfill): one the old extractor marked `missing` stays stale until it is saved again with `supersedes`.
+
+## 0.1.9 upgrade notes
+
+0.1.9 changes no schema, no tool and no retrieval; the details are in [the 0.1.9 release notes](release-notes-0.1.9.md).
+Upgrade the server and the CLI together, start the new server on the existing database (no wipe), and run `cairn update`
+on each machine. `cairn init` for a committed project id the server does not know (a wiped or new server) now refuses
+until you pass `--yes`, because the first caller becomes the owner. The CI `Bench` floor is hit@5 0.65.
 
 ## How clients update
 

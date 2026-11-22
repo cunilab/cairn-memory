@@ -538,8 +538,22 @@ fn init_registers_a_committed_project_again_after_a_server_wipe() {
         text.contains(&format!("fail  project  {id} is not on the server")),
         "{text}"
     );
-    // init registers the same id again, as owner, and says why.
-    let init = team.owner.run_in(&dir, &["init"]);
+    // A plain init refuses: whoever registers an unknown id first owns it. Nothing is written.
+    let refused = team.owner.run_in(&dir, &["init"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!refused.status.success(), "{said}");
+    assert!(said.contains("cairn init --yes"), "{said}");
+    let still = team.owner.run_in(&dir, &["doctor"]);
+    assert!(
+        String::from_utf8_lossy(&still.stdout).contains("is not on the server"),
+        "still unregistered"
+    );
+    // With --yes it registers the same id again, as owner, and warns why.
+    let init = team.owner.run_in(&dir, &["init", "--yes"]);
     let said = String::from_utf8_lossy(&init.stdout).into_owned();
     assert!(
         init.status.success(),
@@ -547,7 +561,7 @@ fn init_registers_a_committed_project_again_after_a_server_wipe() {
         String::from_utf8_lossy(&init.stderr)
     );
     assert!(
-        said.contains(&format!("did not know project {id}")),
+        said.contains(&format!("Warning: the server did not know project {id}")),
         "{said}"
     );
     assert!(

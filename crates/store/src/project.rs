@@ -157,13 +157,14 @@ impl Store {
     /// A committed project id the server does not know (a wiped or rebuilt server): creates the
     /// project with that same id, owned by the caller, so the committed file keeps working for
     /// everyone. An id another caller restored first is simply joined. True when this call created
-    /// it.
+    /// it. Without `confirmed` it is a conflict: the first caller owns the id.
     pub async fn restore_project(
         &self,
         person_id: &str,
         project_id: &str,
         repository: &str,
         name: Option<&str>,
+        confirmed: bool,
     ) -> Result<(Project, bool)> {
         let repository = repository.trim();
         validate_project_text(repository, "repository")?;
@@ -180,6 +181,12 @@ impl Store {
         });
         if !shaped {
             return Err(StoreError::Validation("invalid project id".into()));
+        }
+        // Whoever registers an unknown id first owns it, so the caller must say they know that.
+        if !confirmed {
+            return Err(StoreError::Conflict(format!(
+                "this server does not know project {project_id} (wiped or new server?). Registering it again makes you its owner; if that is intended, run `cairn init --yes`"
+            )));
         }
         let mut tx = self.pool.begin().await?;
         let default_name = default_project_name(repository);

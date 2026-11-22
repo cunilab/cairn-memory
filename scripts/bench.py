@@ -646,6 +646,11 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
     def trace(query):
         return http.call("/search", {"query": query, "context": context, "debug": True}, device)["trace"]
 
+    def top_cosines(rows, gold_ids=()):
+        """The five highest candidate cosines, best first, and whether each is a gold memory."""
+        ranked = sorted((r for r in rows if r["cosine"] is not None), key=lambda r: -r["cosine"])[:5]
+        return [{"cosine": round(r["cosine"], 4), "gold": r["id"] in gold_ids} for r in ranked]
+
     out = {"questions": [], "weak": []}
     for q in questions:
         rows = {row["id"]: row for row in trace(q["query"])}
@@ -653,10 +658,13 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
         for key in q["gold"]:
             row = rows.get(ids[key])
             gold[key] = None if row is None else {k: row[k] for k in ("cosine", "coverage", "entity_hit", "kept")}
-        out["questions"].append({"id": q["id"], "kind": q["kind"], "query": q["query"], "gold": gold})
+        out["questions"].append({"id": q["id"], "kind": q["kind"], "query": q["query"], "gold": gold,
+                                 "top_cosines": top_cosines(rows.values(), {ids[k] for k in q["gold"]}),
+                                 "pool": len(rows)})
     for w in weak:
-        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
-        out["weak"].append({"id": w["id"], "query": w["query"],
+        all_rows = trace(w["query"])
+        rows = sorted(all_rows, key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["weak"].append({"id": w["id"], "query": w["query"], "top_cosines": top_cosines(all_rows),
                             "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     best = sorted((max((g["cosine"] for g in q["gold"].values() if g and g["cosine"] is not None), default=0.0)
                    for q in out["questions"] if q["kind"].startswith("paraphrase")), reverse=True)
@@ -664,12 +672,14 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
     out["holdout"] = {"questions": [], "weak": []}
     for q in holdout["questions"]:
         rows = {row["id"]: row for row in trace(q["query"])}
-        out["holdout"]["questions"].append({"id": q["id"], "query": q["query"], "gold": {
+        out["holdout"]["questions"].append({"id": q["id"], "query": q["query"],
+                                            "top_cosines": top_cosines(rows.values(), {ids[k] for k in q["gold"]}), "gold": {
             key: (None if ids[key] not in rows else {k: rows[ids[key]][k] for k in ("cosine", "coverage", "entity_hit", "kept")})
             for key in q["gold"]}})
     for w in holdout["weak_queries"]:
-        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
-        out["holdout"]["weak"].append({"id": w["id"], "query": w["query"],
+        all_rows = trace(w["query"])
+        rows = sorted(all_rows, key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["holdout"]["weak"].append({"id": w["id"], "query": w["query"], "top_cosines": top_cosines(all_rows),
                                        "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     out["summary"] = {"paraphrase_best_gold_cosines_desc": best, "fourth_paraphrase_cosine": best[3] if len(best) > 3 else None,
                       "max_weak_cosine": weak_max}

@@ -14,6 +14,7 @@ use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{WorkContext, redact_work_context};
 use cairn_core::id::now_seconds;
+use cairn_core::process::distill::{has_typed_line, is_test_command};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -26,6 +27,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
 const DOWN_SECONDS: i64 = 30;
+
+/// `cairn save ...` (any path to the binary): a save through the CLI instead of the MCP tool.
+fn is_cairn_save(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let program = words
+        .next()
+        .map(|w| w.rsplit(['/', '\\']).next().unwrap_or(w));
+    matches!(program, Some("cairn" | "cairn.exe")) && words.next() == Some("save")
+}
 
 struct Options {
     event: String,
@@ -158,7 +168,13 @@ impl Hook<'_> {
     fn handle(&self) -> Result<Option<String>, String> {
         match self.event {
             "SessionStart" => Ok(self.start()),
-            "UserPromptSubmit" => self.capture(self.payload.prompt()).map(|()| None),
+            "UserPromptSubmit" => {
+                let prompt = self.payload.prompt();
+                if prompt.as_ref().is_some_and(|p| has_typed_line(&p.content)) {
+                    self.with_state(|s| s.worked_signal = true);
+                }
+                self.capture(prompt).map(|()| None)
+            }
             "PostToolUse" => self.tool(),
             "Stop" => {
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
@@ -170,7 +186,7 @@ impl Hook<'_> {
                 {
                     self.checkpoint(generation);
                 }
-                Ok(None)
+                Ok(self.stop_nudge())
             }
             "PreCompact" => {
                 if let Some(generation) = self
@@ -278,17 +294,55 @@ impl Hook<'_> {
             let _ = self.check.set(check.clone());
         }
         let brief = reply
-            .get("brief")?
-            .as_str()
-            .filter(|brief| !brief.is_empty())?;
-        if brief.len() > inject::BRIEF_MAX_BYTES {
-            eprintln!(
-                "cairn hook: the brief exceeds {} bytes; not injected",
-                inject::BRIEF_MAX_BYTES
-            );
+            .get("brief")
+            .and_then(Value::as_str)
+            .filter(|brief| !brief.is_empty())
+            .filter(|brief| {
+                let fits = brief.len() <= inject::BRIEF_MAX_BYTES;
+                if !fits {
+                    eprintln!(
+                        "cairn hook: the brief exceeds {} bytes; not injected",
+                        inject::BRIEF_MAX_BYTES
+                    );
+                }
+                fits
+            });
+        let nudge = self.nudging().then_some(inject::START_NUDGE);
+        match (brief, nudge) {
+            (Some(brief), Some(nudge)) => Some(format!("{brief}\n{nudge}")),
+            (brief, nudge) => brief.or(nudge).map(str::to_owned),
+        }
+    }
+
+    /// Reminders are on: not opted out, and the checkout has a readable `.cairn/project.json`.
+    fn nudging(&self) -> bool {
+        self.config.nudge()
+            && self
+                .top
+                .as_deref()
+                .is_some_and(|top| crate::project::project_id_at(top).is_some())
+    }
+
+    /// The one-time Stop reminder: the session edited files, ran a test command or wrote a
+    /// `Decision:` line, and never saved. Not when the host is already continuing because of a
+    /// Stop hook (`stop_hook_active`), and not for OpenCode, whose plugin cannot continue a turn.
+    fn stop_nudge(&self) -> Option<String> {
+        if self.payload.flag("stop_hook_active") || self.agent == "opencode" || !self.nudging() {
             return None;
         }
-        Some(brief.to_owned())
+        let decided = self
+            .payload
+            .assistant()
+            .is_some_and(|message| has_typed_line(&message.content));
+        self.with_state(|s| {
+            s.worked_signal |= decided;
+            if s.nudged || s.saved || !(s.worked_signal || !s.edited.is_empty()) {
+                return None;
+            }
+            s.nudged = true;
+            Some(inject::stop_reminder(s.edited.len()))
+        })
+        .flatten()
     }
 
     /// After the brief is printed: answers its `check` with what git says (files and symbols still
@@ -333,6 +387,12 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        // The agent saved: the MCP tool of any host (`mcp__cairn__memory_save`,
+        // `cairn_memory_save`). Nothing else to do for it.
+        if tool.name.contains("cairn") && tool.name.ends_with("memory_save") {
+            self.with_state(|s| s.saved = true);
+            return Ok(None);
+        }
         // A read is neither captured nor work, but it shares the edit's once-per-path topic note
         // and per-session caps.
         if let Some(given) = tool.read_path() {
@@ -343,10 +403,15 @@ impl Hook<'_> {
             return Ok(None);
         }
         if tool.is_work() {
+            let command = tool.shell_command();
+            let tested = command.is_some_and(is_test_command);
+            let saved = command.is_some_and(is_cairn_save);
             self.with_state(|s| {
                 s.dirty = true;
                 s.worked = true;
                 s.generation += 1;
+                s.worked_signal |= tested;
+                s.saved |= saved;
             });
         }
         if tool.is_file_tool() {
@@ -355,6 +420,7 @@ impl Hook<'_> {
                 let Some(path) = git::repo_relative(&given, &self.cwd, self.top.as_deref()) else {
                     continue;
                 };
+                self.with_state(|s| s.remember_edit(&path));
                 self.capture(Some(tool.edit(&path, &new_text)))?;
                 notes.extend(self.topic(&path));
             }
@@ -365,9 +431,13 @@ impl Hook<'_> {
 
     /// The note text for the first edit of `path`, within the per-session caps.
     fn topic(&self, path: &str) -> Option<String> {
+        // The lookup is reserved before the request, so a failing server is not asked without end.
         let wanted = self.with_state(|s| {
-            !s.topics.iter().any(|seen| seen == path)
+            let wanted = !s.topics.iter().any(|seen| seen == path)
                 && s.topics_injected < inject::TOPICS_PER_SESSION
+                && s.topic_lookups < inject::TOPIC_LOOKUPS_PER_SESSION;
+            s.topic_lookups += u8::from(wanted);
+            wanted
         })?;
         if !wanted {
             return None;
@@ -375,7 +445,7 @@ impl Hook<'_> {
         let body = json!({"path": path, "context": self.work_context()});
         let reply = match self.post("/cairn-memory/session/topic", &body) {
             Ok(reply) => reply,
-            // Not marked seen: the next edit of this path asks again.
+            // Not marked seen: the next edit of this path asks again, while lookups remain.
             Err(error) => {
                 self.warn("Cairn topic notes unavailable", &error);
                 return None;

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 const TOPICS_MAX: usize = 64;
+const EDITED_MAX: usize = 64;
 const HASHES_MAX: usize = 512;
 const STALE: Duration = Duration::from_secs(7 * 86_400);
 const LOCK_STALE: Duration = Duration::from_secs(86_400);
@@ -28,6 +29,21 @@ pub struct SessionState {
     pub capture_hashes: Vec<String>,
     /// Topic notes injected so far; the cap is `inject::TOPICS_PER_SESSION`.
     pub topics_injected: u8,
+    /// Repo files edited in this session (distinct, at most `EDITED_MAX`), for the Stop reminder.
+    #[serde(default)]
+    pub edited: Vec<String>,
+    /// A recognised test command ran, or a `Decision:`-style line was written.
+    #[serde(default)]
+    pub worked_signal: bool,
+    /// The agent saved to Cairn (the `memory_save` tool or `cairn save`).
+    #[serde(default)]
+    pub saved: bool,
+    /// The Stop reminder was sent; it is sent once per session.
+    #[serde(default)]
+    pub nudged: bool,
+    /// Topic lookups sent so far; the cap is `inject::TOPIC_LOOKUPS_PER_SESSION`.
+    #[serde(default)]
+    pub topic_lookups: u8,
 }
 
 fn push_capped(list: &mut Vec<String>, value: &str, cap: usize) {
@@ -41,6 +57,12 @@ impl SessionState {
     pub fn remember_topic(&mut self, path: &str) {
         if !self.topics.iter().any(|seen| seen == path) {
             push_capped(&mut self.topics, path, TOPICS_MAX);
+        }
+    }
+
+    pub fn remember_edit(&mut self, path: &str) {
+        if !self.edited.iter().any(|seen| seen == path) && self.edited.len() < EDITED_MAX {
+            self.edited.push(path.to_owned());
         }
     }
 

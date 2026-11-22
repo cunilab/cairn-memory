@@ -398,7 +398,12 @@ fn session_start_reports_repo_state() {
         "SessionStart",
         &env.payload("s1", json!({"source": "startup"})),
     );
-    assert_eq!(injected(&start).as_deref(), Some("BRIEF"));
+    // A project file is there, so the brief carries the instruction line.
+    assert!(
+        injected(&start)
+            .unwrap()
+            .starts_with("BRIEF\nCairn is active")
+    );
     let posts = server.to("repo-state");
     assert_eq!(
         posts.len(),
@@ -691,6 +696,24 @@ fn topic_note_once_per_path_within_caps() {
         server.to("topic")[0].body["context"]["repository"],
         "local:repo"
     );
+}
+
+#[test]
+fn topic_lookups_per_session_are_capped_even_when_no_path_has_notes() {
+    let server = fake();
+    let env = Env::new("hook-topic-lookups", &server.url);
+    for i in 0..24 {
+        env.edit("s1", &format!("src/quiet{i}.rs"), "x");
+    }
+    assert_eq!(
+        server.to("topic").len(),
+        16,
+        "no request past the lookup cap"
+    );
+    // Known paths never ask again, and another session has its own budget.
+    env.edit("s1", "src/quiet0.rs", "y");
+    env.edit("s2", "src/quiet0.rs", "y");
+    assert_eq!(server.to("topic").len(), 17);
 }
 
 #[test]
@@ -1610,4 +1633,231 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     );
     run("Stop", base(json!({})));
     run("SessionEnd", base(json!({})));
+}
+
+// ---- Agent nudges: the start line and the one-time Stop reminder ----
+
+fn with_project(env: &Env) {
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    std::fs::write(
+        env.repo.join(".cairn/project.json"),
+        r#"{"project_id":"prj_demo"}"#,
+    )
+    .unwrap();
+}
+
+/// The reason of a Stop reply that makes the agent continue; `None` for no output.
+fn blocked(output: &Output) -> Option<String> {
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&text).expect("stdout is one JSON object");
+    assert_eq!(value["decision"], "block", "{text}");
+    Some(value["reason"].as_str().unwrap().to_owned())
+}
+
+fn start(env: &Env, session: &str) -> Option<String> {
+    injected(&env.run(
+        "SessionStart",
+        &env.payload(session, json!({"source": "startup"})),
+    ))
+}
+
+fn stop(env: &Env, session: &str, extra: Value) -> Output {
+    env.run("Stop", &env.payload(session, extra))
+}
+
+#[test]
+fn start_appends_one_instruction_line_only_in_an_initialised_repo() {
+    let server = fake();
+    let env = Env::new("hook-nudge-start", &server.url);
+    assert_eq!(
+        start(&env, "s0").as_deref(),
+        Some("BRIEF"),
+        "no project file: nothing added"
+    );
+    with_project(&env);
+    let text = start(&env, "s1").unwrap();
+    let (brief, line) = text.split_once('\n').unwrap();
+    assert_eq!(brief, "BRIEF");
+    assert!(
+        line.starts_with("Cairn is active for this project."),
+        "{line}"
+    );
+    assert!(
+        line.contains("memory_search") && line.contains("memory_save"),
+        "{line}"
+    );
+    assert!(line.len() <= 200, "{}", line.len());
+}
+
+#[test]
+fn start_gives_the_line_even_when_the_project_has_no_brief_yet() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"brief": ""}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-empty", &server.url);
+    with_project(&env);
+    let text = start(&env, "s1").unwrap();
+    assert!(
+        text.starts_with("Cairn is active for this project."),
+        "{text}"
+    );
+}
+
+#[test]
+fn work_without_a_save_blocks_the_first_stop_once() {
+    let server = fake();
+    let env = Env::new("hook-nudge-block", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    env.edit("s1", "src/b.rs", "y");
+    env.edit("s1", "src/a.rs", "z");
+    let reason = blocked(&stop(&env, "s1", json!({}))).expect("a reminder");
+    assert!(
+        reason.starts_with("You changed 2 files but saved nothing to Cairn."),
+        "{reason}"
+    );
+    assert!(reason.contains("memory_save"), "{reason}");
+    assert!(
+        blocked(&stop(&env, "s1", json!({}))).is_none(),
+        "once per session"
+    );
+    assert!(blocked(&stop(&env, "s1", json!({"stop_hook_active": true}))).is_none());
+}
+
+#[test]
+fn no_reminder_while_the_host_is_already_continuing() {
+    let server = fake();
+    let env = Env::new("hook-nudge-active", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "s1", json!({"stop_hook_active": true}))).is_none());
+}
+
+#[test]
+fn a_save_by_tool_or_cli_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("hook-nudge-saved", &server.url);
+    with_project(&env);
+    env.edit("mcp", "src/a.rs", "x");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "mcp",
+            json!({"tool_name": "mcp__cairn__memory_save", "tool_input": {"kind": "gotcha"},
+                   "tool_response": {"status": "active"}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "mcp", json!({}))).is_none());
+    env.edit("cli", "src/a.rs", "x");
+    env.bash(
+        "cli",
+        "/usr/local/bin/cairn save -",
+        json!({"exit_code": 0}),
+    );
+    assert!(blocked(&stop(&env, "cli", json!({}))).is_none());
+    // Another server's `memory_save` is not a Cairn save.
+    env.edit("other", "src/a.rs", "x");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "other",
+            json!({"tool_name": "mcp__agentmemory__memory_save", "tool_input": {}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "other", json!({}))).is_some());
+}
+
+#[test]
+fn only_real_work_is_reminded() {
+    let server = fake();
+    let env = Env::new("hook-nudge-work", &server.url);
+    with_project(&env);
+    // Questions and reading: nothing.
+    env.prompt("qa", "how does the queue work?");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "qa",
+            json!({"tool_name": "Read", "tool_input": {"file_path": "src/a.rs"}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "qa", json!({}))).is_none());
+    // A recognised test command counts, a plain install does not.
+    env.bash("inst", "bun install", json!({"exit_code": 0}));
+    assert!(blocked(&stop(&env, "inst", json!({}))).is_none());
+    env.bash("test", "bun test", json!({"exit_code": 0}));
+    let reason = blocked(&stop(&env, "test", json!({}))).unwrap();
+    assert!(
+        reason.starts_with("You ran tests or wrote a decision but saved nothing"),
+        "{reason}"
+    );
+    // A Decision-style line in the last assistant message counts.
+    let said =
+        json!({"last_assistant_message": "Done.\nDecision: use pgvector\nReason: one database"});
+    assert!(blocked(&stop(&env, "decide", said)).is_some());
+    assert!(
+        blocked(&stop(
+            &env,
+            "plain",
+            json!({"last_assistant_message": "All done."})
+        ))
+        .is_none()
+    );
+}
+
+#[test]
+fn no_project_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("hook-nudge-noproject", &server.url);
+    env.edit("s1", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "s1", json!({}))).is_none());
+}
+
+#[test]
+fn opencode_is_never_blocked() {
+    let server = fake();
+    let env = Env::new("hook-nudge-opencode", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    let out = env.run_with(
+        "Stop",
+        &env.payload("s1", json!({})),
+        &["--agent", "opencode"],
+        &[],
+    );
+    assert!(blocked(&out).is_none());
+    // The flag was not spent: a host that can continue still gets its reminder.
+    assert!(blocked(&stop(&env, "s1", json!({}))).is_some());
+}
+
+#[test]
+fn the_reminders_can_be_turned_off_by_config_or_environment() {
+    let server = fake();
+    let env = Env::new("hook-nudge-off", &server.url);
+    with_project(&env);
+    // Environment.
+    env.edit("e", "src/a.rs", "x");
+    let off = [("CAIRN_NO_NUDGE", "1")];
+    let started = env.run_with("SessionStart", &env.payload("e", json!({})), &[], &off);
+    assert_eq!(injected(&started).as_deref(), Some("BRIEF"));
+    let stopped = env.run_with("Stop", &env.payload("e", json!({})), &[], &off);
+    assert!(blocked(&stopped).is_none());
+    // Config file.
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(env.config()).unwrap()).unwrap();
+    config["nudge"] = json!(false);
+    std::fs::write(env.config(), config.to_string()).unwrap();
+    assert_eq!(start(&env, "c").as_deref(), Some("BRIEF"));
+    env.edit("c", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "c", json!({}))).is_none());
+    // And on again once the key is gone.
+    config.as_object_mut().unwrap().remove("nudge");
+    std::fs::write(env.config(), config.to_string()).unwrap();
+    assert!(start(&env, "d").unwrap().contains("Cairn is active"));
 }

@@ -14,7 +14,7 @@ use std::process;
 
 const USAGE: &str = "Usage:
   cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
-  cairn init [name]             (create or join; write .cairn/project.json)
+  cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
   cairn init --rename <name>    (owner only; update server and project file)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
@@ -60,6 +60,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
         let allowed = (index == 0 && value == "--version")
             || (index == 1 && args[0] == "update" && value == "--check")
             || (index == 1 && args[0] == "init" && value == "--rename")
+            || (args[0] == "init" && value == "--yes")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
         if value.starts_with('-') && value != "-" && !allowed {
@@ -147,8 +148,8 @@ fn setup(args: &[String]) -> Result<(), Error> {
         return Ok(());
     }
     warn_ignored_legacy_config();
-    let config = Config::new(url, &read_token()?)?;
     let path = selected_config_path()?;
+    let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
     setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
@@ -164,7 +165,9 @@ fn setup(args: &[String]) -> Result<(), Error> {
 /// Creates (or finds) the caller's project for this repository and writes
 /// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
 fn init(args: &[String]) -> Result<(), Error> {
-    let (rename, name) = match args {
+    let yes = args.iter().any(|arg| arg == "--yes");
+    let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
+    let (rename, name) = match args.as_slice() {
         [] => (false, None),
         [name] if name != "--rename" => (false, Some(name.trim())),
         [flag, name] if flag == "--rename" => (true, Some(name.trim())),
@@ -208,7 +211,7 @@ fn init(args: &[String]) -> Result<(), Error> {
         let path = format!("/cairn-memory/projects/{}/rename", file.project_id);
         client.post(&path, &json!({"name": name}))?
     } else {
-        let mut body = json!({ "repository": repository });
+        let mut body = json!({ "repository": repository, "confirm_register": yes });
         if let Some(file) = &existing {
             body["project_id"] = json!(file.project_id);
         }
@@ -227,7 +230,7 @@ fn init(args: &[String]) -> Result<(), Error> {
     let written = project::write(&top, project_id, &repository, name)?;
     if created["created"] == true && existing.is_some() && !rename {
         println!(
-            "The server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are its owner."
+            "Warning: the server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are now its owner. Tell your team if you did not expect this."
         );
     } else if !written {
         println!("already initialized, you are a member");

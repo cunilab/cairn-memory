@@ -87,6 +87,8 @@ OpenCode V2 gets a marked global `AGENTS.md` block, the MCP registration (throug
 CLI, which keeps JSONC comments) and a plugin that runs `cairn hook`.
 [Hook events, setup and limits](docs/contracts/hook-v1.md#setup).
 
+In a repository with `.cairn/project.json` the hook also reminds the agent to use Cairn: one instruction line at session start, and once per session a Stop reminder to save when it worked and saved nothing ([details](docs/contracts/hook-v1.md#reminders-agent-nudges)). Turn it off with `"nudge": false` in the config file or `CAIRN_NO_NUDGE=1`.
+
 `setup` reads the token from stdin (a hidden prompt on a unix terminal, so it stays out of the process list and shell history; on Windows, or where `stty` is missing, a terminal prompt is visible and `setup` warns, so pipe the token instead) and stores the URL and token in the selected config file with mode `0600`. `CAIRN_CONFIG` selects that file; otherwise it is `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`). `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored, with one stderr warning that does not print their values. `export` writes its bundle with mode `0600`. The URL must be `https`, or `http` for a loopback host; it may include a path prefix (`https://host/agent`) when a reverse proxy mounts the API there. A hosted layout is in [deploy](docs/deploy.md). Account and device management stay in the web console; a device token gets `403` there. The tool and command reference is [CM-CONTRACT-002](docs/contracts/mcp-layer1.md).
 
 To work together, run `cairn init "Project name"` in a fresh checkout and commit
@@ -99,6 +101,8 @@ refused. The owner can explicitly repair or change both names with
 `cairn init --rename "Project name"` in that checkout, then commit the updated file.
 That also fixes a project accidentally named `--help` by an older CLI after the
 server and CLI are upgraded to 0.1.4. Captures also join by the stable ID.
+If the server has never heard of the committed id (a wiped or new server), `cairn init` refuses and warns:
+whoever registers an unknown id first becomes its owner. Run `cairn init --yes` only when that is intended.
 `cairn init --help`, `cairn init -h`, `cairn --help` and `cairn help init` print
 usage without connecting; unknown options and flag-like positional values are
 rejected before any request. See the [project contract](docs/contracts/project-layer4.md#init-and-membership).
@@ -230,7 +234,7 @@ has been run (otherwise pass `--lexical-only`).
 python3 scripts/bench.py --out bench/result.json --label my-change
 ```
 
-`--min-hit5 0.68` exits 1 when `memory_search` hit@5 is below the floor; CI runs it as the `Bench` job. The pre-rewrite baseline is `bench/baseline-0.1.6-pre.json` and the 0.1.6 step 2 reference is `bench/after-0.1.6-step2.json` (hit@5 0.72, zero-hit 4/5); see `docs/evidence.md` (2026-11-21).
+`--min-hit5 0.65` exits 1 when `memory_search` hit@5 is below the floor; CI runs it as the `Bench` job. The pre-rewrite baseline is `bench/baseline-0.1.6-pre.json` and the 0.1.6 step 2 reference is `bench/after-0.1.6-step2.json` (hit@5 0.72, zero-hit 4/5); see `docs/evidence.md` (2026-11-21).
 
 ## Reference
 

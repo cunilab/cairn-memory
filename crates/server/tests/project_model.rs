@@ -229,11 +229,28 @@ async fn init_registers_a_committed_project_the_server_lost() {
     let admin = app.admin("admin").await;
     let owner = app.device(&admin, "owner-laptop").await;
     let id = "proj_zzzzzzzzzzzzzzzzzzzzzzzzzz";
-    // An unknown id (a wiped server) is created again with the same id, owned by the caller.
+    // An unknown id (a wiped server) is not registered on a plain request: whoever asks first
+    // would own it, so the caller has to confirm.
+    let (status, refused) = app
+        .send(
+            "POST",
+            "projects/init",
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused.to_string().contains("cairn init --yes"),
+        "{refused}"
+    );
+    assert_eq!(app.get("projects", &owner).await, json!([]));
+    // Confirmed, it is created again with the same id, owned by the caller.
     let restored = app
         .post(
             "projects/init",
-            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets",
+                   "confirm_register": true}),
             &owner,
         )
         .await;

@@ -12,13 +12,15 @@ const MAX_TYPED_NOTES: usize = 64;
 const MAX_GOTCHAS: usize = 3;
 const HANDOFF_FILES_MAX: usize = 20;
 /// Normalised commands starting with one of these are "the test command" (D3).
-const TEST_COMMANDS: [&str; 11] = [
+const TEST_COMMANDS: [&str; 13] = [
     "cargo test",
     "cargo nextest",
     "npm test",
     "npm run test",
     "pnpm test",
     "yarn test",
+    "bun test",
+    "bunx vitest",
     "pytest",
     "python -m pytest",
     "go test",
@@ -215,15 +217,28 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
     notes
 }
 
+/// Whether a shell command is a recognised test command (D3).
+pub fn is_test_command(command: &str) -> bool {
+    let command = normalize_command(command);
+    TEST_COMMANDS
+        .iter()
+        .any(|t| command == *t || command.strip_prefix(t).is_some_and(|r| r.starts_with(' ')))
+}
+
+/// Whether a text has a `Decision:`-style line (any typed label with a value), the lines the
+/// distiller turns into notes.
+pub fn has_typed_line(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim().split_once(':').is_some_and(|(label, value)| {
+            typed_kind(&label.trim().to_ascii_lowercase()).is_some() && !value.trim().is_empty()
+        })
+    })
+}
+
 /// D3: the first passing test command of the session.
 fn test_fact(observations: &[Observation]) -> Option<Note> {
     let passed = observations.iter().find(|o| {
-        o.kind == CaptureKind::Command && o.ok == Some(true) && {
-            let command = normalize_command(command_text(o));
-            TEST_COMMANDS.iter().any(|t| {
-                command == *t || command.strip_prefix(t).is_some_and(|r| r.starts_with(' '))
-            })
-        }
+        o.kind == CaptureKind::Command && o.ok == Some(true) && is_test_command(command_text(o))
     })?;
     let command = normalize_command(command_text(passed));
     Some(Note {
@@ -629,6 +644,33 @@ mod tests {
         assert_eq!(decision.evidence, vec!["e1".to_owned()]);
         assert_eq!(decision.scope, Some(Scope::Personal));
         assert!(d.notes[1].input.reason.starts_with("Distilled"));
+    }
+
+    #[test]
+    fn test_commands_and_typed_lines_are_recognised() {
+        for yes in [
+            "cargo test --workspace",
+            "bun test",
+            "bunx vitest run",
+            "pnpm test",
+            "npm test",
+            "yarn test",
+        ] {
+            assert!(is_test_command(yes), "{yes}");
+        }
+        for no in [
+            "bun install",
+            "bunx prettier .",
+            "npm install",
+            "cargo build",
+            "testing",
+        ] {
+            assert!(!is_test_command(no), "{no}");
+        }
+        assert!(has_typed_line("some prose\n  Decision: use pgvector"));
+        assert!(has_typed_line("gotcha: lock timeouts"));
+        assert!(!has_typed_line("Decision:\nprose, no value"));
+        assert!(!has_typed_line("Note: not a typed label"));
     }
 
     #[test]

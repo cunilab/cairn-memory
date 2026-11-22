@@ -178,7 +178,7 @@ jobs:
       # v2 main set on a store with 2,000 unrelated memories is the headline (spec 0.1.6-step5 sections 13 and 14):
       # hit@5 0.651 and no card on all 14 weak queries (gate: one cosine bar tau_s = 0.43, no weak path).
       # The gates are those minus a small margin; they catch a regression and do not claim the numbers are good.
-      - run: python3 scripts/bench.py --out "$RUNNER_TEMP/bench-v2.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --questions questions-v2.json --distractors 2000 --min-hit5 0.60 --max-weak-hits 0
+      - run: python3 scripts/bench.py --out "$RUNNER_TEMP/bench-v2.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --questions questions-v2.json --distractors 2000 --min-hit5 0.65 --max-weak-hits 0
       # v1 main set on the 70-memory corpus, kept for history: 0.92 (23 of 25) and no weak card. 0.88 allows one miss.
       - run: python3 scripts/bench.py --skip-build --out "$RUNNER_TEMP/bench-v1.json" --model-dir "$RUNNER_TEMP/cairn-minilm" --min-hit5 0.88 --max-weak-hits 0 --min-link-ratio 0.60
       - if: always()

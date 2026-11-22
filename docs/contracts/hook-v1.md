@@ -41,14 +41,34 @@ derived from `cwd`, never read from the payload.
 
 | Event | Capture | Server call | Injects |
 | --- | --- | --- | --- |
-| `SessionStart` (startup, resume, clear, compact) | none | `POST /session/brief`; when the reply has `check`, then `POST /session/repo-state` | the brief, at most 1,200 B |
+| `SessionStart` (startup, resume, clear, compact) | none | `POST /session/brief`; when the reply has `check`, then `POST /session/repo-state` | the brief, at most 1,200 B; in a repository with `.cairn/project.json` one more instruction line (below), at most 200 B |
 | `UserPromptSubmit` | `prompt`, at most 8 KiB | `POST /observe` | nothing |
 | `PostToolUse`, file tool (`Edit`, `Write`, `MultiEdit`, `apply_patch`) | `edit`: `<Tool> <path>` plus a 1 KiB excerpt | `/observe`; the first edit of a path this session also `POST /session/topic` | a topic note or card, at most 300 B |
 | `PostToolUse`, shell, not read-only | `command` with `ok`; a failed one keeps the command, the exit and the first error line (200 B) | `/observe` | nothing |
+| `PostToolUse`, the `memory_save` tool of Cairn (`mcp__cairn__memory_save`, `cairn_memory_save`) or `cairn save` in a shell | none (only marks the session as having saved) | none | nothing |
 | `PostToolUse`, read-only or other tool | dropped | none | nothing |
-| `Stop` | `assistant` only when `CAIRN_CAPTURE_ASSISTANT=1` | `POST /session/checkpoint` if work is unsaved | nothing |
+| `Stop` | `assistant` only when `CAIRN_CAPTURE_ASSISTANT=1` | `POST /session/checkpoint` if work is unsaved | once per session, a reminder to save (below); otherwise nothing |
 | `PreCompact` (Claude) | none | `POST /session/checkpoint` if the session worked | nothing |
 | `SessionEnd` | none | `POST /session/end` if the session worked | nothing |
+
+### Reminders (agent nudges)
+
+Only in a checkout with a readable `.cairn/project.json`, and never when switched off:
+
+- **Start line.** `SessionStart` appends one instruction line to the brief (the brief itself stays labelled as data):
+  `Cairn is active for this project. Before deciding or debugging, memory_search; after a decision, fixed gotcha or
+  finished task, memory_save with a reason.` (154 B, about 39 tokens). It is given even when the project has no brief yet.
+- **Stop reminder.** The first `Stop` of a session that did real work and made no Cairn save answers
+  `{"decision":"block","reason":"You changed N files but saved nothing to Cairn. If anything here is a reusable decision,
+  gotcha or procedure, save it now with memory_save; otherwise just finish."}`, which makes Claude Code and Codex continue
+  for one turn (about 50 tokens). Real work is an edited file, a recognised test command (`cargo test`, `npm test`,
+  `pnpm test`, `yarn test`, `bun test`, `bunx vitest`, `pytest`, `go test`, ...) or a `Decision:`-style line in the prompt or
+  the last assistant message. A save is the Cairn `memory_save` tool or `cairn save`. It is sent once per session (state
+  flag), never when the payload says `stop_hook_active`, never for a session of questions only, and not for OpenCode,
+  whose plugin cannot continue a turn. Codex follows Claude's Stop contract; the reply is untested against a live Codex.
+- **Opt out.** `"nudge": false` in the config file (kept by a later `cairn setup`) or `CAIRN_NO_NUDGE=1`.
+- The Claude Code and Codex `PostToolUse` matcher also lists `mcp__cairn__memory_save`, so re-run `cairn setup --agent
+  <agent>` (or `cairn update`) once after upgrading; until then a save through the MCP tool is not seen and the reminder may fire.
 
 Captures are redacted with the same patterns as the server (`cairn-core::capture::redact`) before
 the outbox write and the request, then clipped. Read-only shell commands are recognised by an
@@ -85,8 +105,8 @@ else `!is_error && !interrupted`, else unknown. Stdout is
 
 ## Injection budget
 
-Per session: brief at most 1,200 B (a new SessionStart resets the budget), at most 4 topic notes of
-300 B, a hard total of 2,500 B, tracked in the hook state. The scripted bench session injects
+Per session: brief at most 1,200 B (a new SessionStart resets the budget), the start line (below) at most
+200 B, at most 4 topic notes of 300 B, so at most 2,600 B in all; the topic count and lookups are tracked in the hook state. The scripted bench session injects
 about 1 KB ([bench](../../bench/after-0.1.6-step4.json)).
 
 ## Outbox

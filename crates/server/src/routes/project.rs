@@ -55,6 +55,10 @@ pub struct Init {
     repository: String,
     #[serde(default)]
     name: Option<String>,
+    /// The caller knows the server has never seen `project_id` (a wipe or a new server) and
+    /// accepts becoming its owner. Without it an unknown id is refused.
+    #[serde(default)]
+    confirm_register: bool,
 }
 
 #[derive(Serialize)]
@@ -123,6 +127,7 @@ pub async fn init(
         {
             Ok(project) => (project, false),
             // A wiped or rebuilt server: register the committed id again, owned by the caller.
+            // Whoever asks first owns it, so the caller must say they know that.
             Err(StoreError::NotFound(_)) => {
                 state
                     .store
@@ -131,6 +136,7 @@ pub async fn init(
                         id,
                         &body.repository,
                         body.name.as_deref(),
+                        body.confirm_register,
                     )
                     .await?
             }
