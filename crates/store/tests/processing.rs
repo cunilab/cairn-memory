@@ -1382,6 +1382,73 @@ async fn duplicate_saves_count_proofs() {
     db.finish().await;
 }
 
+/// Cosine is high enough to supersede, but `node 20` and `node 22` are different rare tokens.
+#[tokio::test]
+async fn rare_tokens_relate_instead_of_superseding() {
+    use cairn_core::memory::Status;
+    use cairn_core::memory::model::Rank;
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let work = WorkContext::default();
+    let older = store
+        .save(&person, rule("Use node 20 for the desktop app"), &work)
+        .await
+        .unwrap()
+        .id;
+    let newer = store
+        .save(&person, rule("Use node 22 for the desktop app"), &work)
+        .await
+        .unwrap()
+        .id;
+    store
+        .upsert_embedding(&older, "h1", &tilted(1.0, 1))
+        .await
+        .unwrap();
+    store
+        .upsert_embedding(&newer, "h2", &tilted(0.97, 2))
+        .await
+        .unwrap();
+    let out = store.consolidate_memory(&newer).await.unwrap();
+    assert!(out.superseded.is_empty(), "{out:?}");
+    assert_eq!(out.related, vec![older.clone()]);
+    let linked = links(&db).await;
+    assert!(
+        linked.iter().any(|link| {
+            link.2 == "relates"
+                && link.3 == "auto"
+                && ((link.0 == newer && link.1 == older) || (link.0 == older && link.1 == newer))
+        }),
+        "{linked:?}"
+    );
+    for id in [&older, &newer] {
+        let memory = store.get(&person, id).await.unwrap();
+        assert_eq!(memory.status, Status::Active);
+        assert_eq!(memory.rank, Rank::Normal);
+    }
+    let cards = store
+        .search(
+            &person,
+            "desktop app",
+            Some(&tilted(1.0, 1)),
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<&str> = cards.results.iter().map(|card| card.id.as_str()).collect();
+    assert!(
+        ids.contains(&older.as_str()) && ids.contains(&newer.as_str()),
+        "{ids:?}"
+    );
+    db.finish().await;
+}
+
 async fn handoff_stamp(store: &cairn_store::Store, id: &str) -> (String, String) {
     let row =
         sqlx::query("SELECT updated_at::text AS at, summary FROM memories WHERE memory_id = $1")

@@ -324,4 +324,15 @@ mod tests {
         assert_eq!(value["results"][0]["seen"], 3);
         assert!(value["results"][0].get("proof_count").is_none());
     }
+
+    #[test]
+    fn memory_json_omits_single_proof() {
+        let one = hit("a", 0.3);
+        let json = serde_json::to_value(&one.memory).expect("json");
+        assert!(json.get("proof_count").is_none(), "{json}");
+        let mut repeated = hit("b", 0.3);
+        repeated.memory.proof_count = 3;
+        let json = serde_json::to_value(&repeated.memory).expect("json");
+        assert_eq!(json["proof_count"], 3);
+    }
 }

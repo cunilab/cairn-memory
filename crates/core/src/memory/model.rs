@@ -113,6 +113,8 @@ pub struct Memory {
     pub status: Status,
     pub rank: Rank,
     /// Times this knowledge was saved, including the first. At least 1.
+    /// Omitted the first time, same as a search card's `seen`.
+    #[serde(default, skip_serializing_if = "proof_once")]
     pub proof_count: u32,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +139,10 @@ pub struct Memory {
     /// Internal only; never shown to agents.
     #[serde(skip)]
     pub usage: Usage,
+}
+
+fn proof_once(n: &u32) -> bool {
+    *n < 2
 }
 
 /// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.

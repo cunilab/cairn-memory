@@ -62,6 +62,11 @@ fn rare_tokens(text: &str) -> BTreeSet<&str> {
 }
 
 fn rare_word(word: &str) -> Option<&str> {
+    // Backticks stay: a wrapped word is rare even with no digit, slash, or file suffix.
+    let word = word.trim_matches(|c: char| c.is_ascii_punctuation() && c != '`');
+    if word.is_empty() {
+        return None;
+    }
     let inner = word
         .strip_prefix('`')
         .and_then(|rest| rest.strip_suffix('`'))
@@ -187,6 +192,17 @@ mod tests {
                 side,
                 "See `config.toml` for the listen port",
                 "The listen port is in `config.toml`",
+            ),
+            Band::Supersede
+        );
+        // A trailing period is not a different token from the same number.
+        assert_eq!(
+            guard(
+                Band::Supersede,
+                side,
+                side,
+                "Use node 20.",
+                "use node 20 now",
             ),
             Band::Supersede
         );
