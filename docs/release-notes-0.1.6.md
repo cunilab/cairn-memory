@@ -18,9 +18,15 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
 - **Better recall** with a small local embedding model (all-MiniLM-L6-v2, 384 dimensions, runs inside the server).
   Benchmark (43 questions among 2,000 unrelated memories): hit@5 0.65, 14 of 14 off-topic queries return nothing,
   search reply ~133 tokens, session overhead ~1,160 tokens. Recall of pure paraphrases (no shared word) stays low (4 of 17).
+  Final run on the release code (`bench/after-0.1.6-final-v2.json`): hit@5 0.651, MRR@10 0.608, precision@5 0.429,
+  14 of 14 off-topic queries empty, search reply ~133 tokens, session overhead ~1,162 tokens. On the 70-memory
+  fixture set (`bench/after-0.1.6-final-v1.json`): hit@5 0.92, MRR@10 0.86, 5 of 5 off-topic queries empty.
+  The untouched holdout set (10 questions, reported once, never used to tune) scores hit@5 0.20 with the
+  2,000 distractors and 0.30 without; 4 of 5 and 5 of 5 of its off-topic queries return nothing.
 - **New web console:** Dashboard, Memories, Activity, Projects, Graph, Settings. Device health,
   setup command, export and import of your own memories.
 - Tested for Claude Code, Codex and OpenCode.
+- The server URL for `cairn setup` can be pasted with or without a trailing `/cairn-memory`.
 
 ## Breaking changes
 

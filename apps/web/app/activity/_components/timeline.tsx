@@ -1,10 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { ChevronRightIcon, WorkflowIcon } from "lucide-react";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
 import { cn } from "@/lib/utils";
 import type { AuditEvent } from "@/lib/generated/AuditEvent";
@@ -60,6 +61,33 @@ function Row({ event }: { event: AuditEvent }) {
   );
 }
 
+/** Empty state. The audit log holds the person's own actions; point there when it has some. */
+function EmptyTimeline() {
+  const { events } = useAudit("person");
+  const hasAudit = (events?.length ?? 0) > 0;
+  return (
+    <Empty className="border">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <WorkflowIcon />
+        </EmptyMedia>
+        <EmptyTitle>Nothing automatic yet</EmptyTitle>
+        <EmptyDescription>
+          Cairn starts merging, linking and checking memories once your agents save some.
+          {hasAudit ? " Sign-ins, device changes and forgotten memories are in the Audit log." : ""}
+        </EmptyDescription>
+      </EmptyHeader>
+      {hasAudit ? (
+        <EmptyContent>
+          <Button nativeButton={false} variant="outline" render={<Link href="/activity?tab=audit" />}>
+            Open the Audit log
+          </Button>
+        </EmptyContent>
+      ) : null}
+    </Empty>
+  );
+}
+
 export function Timeline() {
   const [params, set] = useQueryParams();
   const [now] = useState(() => Math.floor(Date.now() / 1000));
@@ -96,17 +124,7 @@ export function Timeline() {
         ))}
       </div>
       {days.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <WorkflowIcon />
-            </EmptyMedia>
-            <EmptyTitle>Nothing automatic yet</EmptyTitle>
-            <EmptyDescription>
-              Cairn starts merging, linking and checking memories once your agents save some.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <EmptyTimeline />
       ) : (
         days.map(([key, items]) => (
           <section key={key} aria-labelledby={`day-${key}`}>

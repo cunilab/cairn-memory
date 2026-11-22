@@ -239,10 +239,11 @@ fn normalize_url(url: &str) -> Result<String, Error> {
         _ => return Err(bad("scheme must be https (or http on loopback)")),
     }
     let scheme = uri.scheme_str().unwrap_or("https");
-    Ok(format!(
-        "{scheme}://{authority}{}",
-        uri.path().trim_end_matches('/')
-    ))
+    // Every route already starts with `/cairn-memory`, so a URL pasted with that suffix
+    // would request `/cairn-memory/cairn-memory/...`. Drop it once, here.
+    let path = uri.path().trim_end_matches('/');
+    let path = path.strip_suffix("/cairn-memory").unwrap_or(path);
+    Ok(format!("{scheme}://{authority}{path}"))
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -647,6 +648,45 @@ mod tests {
                 .recv()
                 .unwrap()
                 .starts_with("GET /agent/cairn-memory/auth/me ")
+        );
+    }
+
+    #[test]
+    fn a_url_ending_in_the_api_prefix_is_not_prefixed_twice() {
+        for (given, kept) in [
+            (
+                "http://127.0.0.1:58080/cairn-memory",
+                "http://127.0.0.1:58080",
+            ),
+            (
+                "http://127.0.0.1:58080/cairn-memory/",
+                "http://127.0.0.1:58080",
+            ),
+            (
+                "https://cairn.example.test/agent/cairn-memory",
+                "https://cairn.example.test/agent",
+            ),
+            ("http://127.0.0.1:58080", "http://127.0.0.1:58080"),
+            (
+                "https://cairn.example.test/agent",
+                "https://cairn.example.test/agent",
+            ),
+            (
+                "https://cairn.example.test/not-cairn-memory",
+                "https://cairn.example.test/not-cairn-memory",
+            ),
+        ] {
+            assert_eq!(Config::new(given, TOKEN).unwrap().url(), kept, "{given}");
+        }
+        let (url, request) =
+            serve_once("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_owned());
+        let client = Client::new(Config::new(&format!("{url}/cairn-memory"), TOKEN).unwrap());
+        client.get("/cairn-memory/health").unwrap();
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .starts_with("GET /cairn-memory/health ")
         );
     }
 

@@ -400,7 +400,29 @@ export function Devices() {
       {
         accessorKey: "name",
         header: "Device",
-        cell: ({ row }) => <span className="font-medium break-words">{row.original.name}</span>,
+        cell: ({ row }) => {
+          const d = row.original;
+          return (
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium break-words">{d.name}</span>
+              {/* The Agent, Client and Last check-in columns are hidden below md; phones read them here. */}
+              <dl className="flex flex-col gap-0.5 text-xs text-muted-foreground md:hidden">
+                <div className="flex gap-1">
+                  <dt>Agent:</dt>
+                  <dd>{d.agent ?? "—"}</dd>
+                </div>
+                <div className="flex gap-1">
+                  <dt>Client:</dt>
+                  <dd>{d.client_version ?? "—"}</dd>
+                </div>
+                <div className="flex gap-1">
+                  <dt>Last check-in:</dt>
+                  <dd>{d.last_hook_at === null ? "Never" : <Time value={d.last_hook_at} className="whitespace-nowrap" />}</dd>
+                </div>
+              </dl>
+            </div>
+          );
+        },
       },
     ];
     cols.push(
@@ -428,7 +450,7 @@ export function Devices() {
           ) : (
             <Time value={row.original.last_hook_at} className="text-xs whitespace-nowrap text-muted-foreground" />
           ),
-        meta: { className: "hidden sm:table-cell" },
+        meta: { className: "hidden md:table-cell" },
       },
       {
         accessorKey: "status",

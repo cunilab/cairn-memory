@@ -153,6 +153,8 @@ CLI together: the MCP tool set and the shape of `memory_save` changed.
 
 The agent hook is now the `cairn hook` command and the Python scripts are gone. `POST /sync/push` and `/context` are removed, so a machine that still runs the Python hook cannot capture until it is updated. On every machine: install the new `cairn`, then re-run `cairn setup <server-url> --agent claude|codex|opencode` (the token comes on stdin). That replaces the old `python3 cairn_hook.py` entries, deletes the old `hook/` scripts and `hook-state.sqlite3`, and leaves an old version 2 outbox untouched. `cairn update` also rewrites the commands of agents that already have them.
 
+The server URL given to `cairn setup` may end in `/cairn-memory`; the client drops that suffix once, so `https://host`, `https://host/cairn-memory` and a reverse-proxy prefix such as `https://host/agent` all work.
+
 ## How clients update
 
 - `cairn --version` prints the installed version.

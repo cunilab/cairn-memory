@@ -234,7 +234,12 @@ export function MemoryTable() {
             aria-label="Search title or summary"
             placeholder="Search title or summary…"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setSearch(value);
+              // Clearing applies at once; typing is debounced below.
+              if (!value) set({ q: null });
+            }}
           />
         </InputGroup>
         {mobile ? (
