@@ -151,10 +151,48 @@ pub(crate) fn mcp_text(path: &Path, entry: &Value, remove: bool) -> R<String> {
     })
 }
 
+/// The 0.1.5 hook entries ran `<config dir>/hook/run-hook`, a wrapper with no
+/// `--cairn-managed` flag that execs the deleted Python script.
+fn legacy_run_hook(handler: &Value) -> bool {
+    let command = handler
+        .get("command")
+        .map_or(String::new(), Value::to_string);
+    command.contains("cairn/hook/run-hook") || command.contains("cairn\\\\hook\\\\run-hook")
+}
+
 /// Replaces the Cairn hook handlers of every event; other handlers and groups stay. The
-/// `--cairn-managed` marker also finds the retired Python hook's entries, so a re-setup
-/// replaces them. Only the touched groups change in the file.
+/// `--cairn-managed` marker also finds the retired Python hook's entries, and the legacy
+/// `run-hook` path its 0.1.5 wrapper's, so a re-setup replaces them. Only the touched groups
+/// change in the file.
 pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<String> {
+    let ours = |handler: &Value| {
+        legacy_run_hook(handler)
+            || handler
+                .get("command")
+                .map_or(String::new(), Value::to_string)
+                .contains(MANAGED_FLAG)
+    };
+    let wanted = |event: &str| match (ctx.remove, events.iter().find(|e| e.0 == event)) {
+        (false, Some((_, timeout))) => {
+            let handler =
+                json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
+            let mut group = json!({"hooks": [handler]});
+            if event == "PostToolUse" {
+                group["matcher"] = json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read");
+            }
+            Some(group)
+        }
+        _ => None,
+    };
+    edit_hooks(path, &ours, &wanted)
+}
+
+/// Drops the handlers `ours` matches from every event and appends the `wanted` group, if any.
+fn edit_hooks(
+    path: &Path,
+    ours: &dyn Fn(&Value) -> bool,
+    wanted: &dyn Fn(&str) -> Option<Value>,
+) -> R<String> {
     const ALL: [&str; 6] = [
         "SessionStart",
         "UserPromptSubmit",
@@ -163,12 +201,6 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
         "PreCompact",
         "SessionEnd",
     ];
-    let managed = |handler: &Value| {
-        handler
-            .get("command")
-            .map_or(String::new(), Value::to_string)
-            .contains(MANAGED_FLAG)
-    };
     edit_json(path, |text, root| {
         let none = Map::new();
         let hooks = match root.get("hooks") {
@@ -192,7 +224,7 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 if handlers.iter().any(|h| !h.is_object()) {
                     return Err(format!("invalid {event} hook handler"));
                 }
-                let others: Vec<Value> = handlers.iter().filter(|h| !managed(h)).cloned().collect();
+                let others: Vec<Value> = handlers.iter().filter(|h| !ours(h)).cloned().collect();
                 if others.len() == handlers.len() {
                     continue;
                 }
@@ -202,18 +234,7 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                     rewritten.push((index, others));
                 }
             }
-            let wanted = match (ctx.remove, events.iter().find(|e| e.0 == event)) {
-                (false, Some((_, timeout))) => {
-                    let handler = json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
-                    let mut group = json!({"hooks": [handler]});
-                    if event == "PostToolUse" {
-                        group["matcher"] =
-                            json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch");
-                    }
-                    Some(group)
-                }
-                _ => None,
-            };
+            let wanted = wanted(event);
             // Already exactly ours: leave the file's bytes alone.
             if rewritten.is_empty()
                 && dropped.len() == usize::from(wanted.is_some())
@@ -452,6 +473,30 @@ pub fn refresh(exe: &Path) -> Vec<String> {
 /// is left with a note. An old version 2 outbox is left alone too (pre-release: not replayed).
 pub fn retire_python(config_dir: &Path) {
     let hooks = config_dir.join("hook");
+    // Every host, configured now or not: a 0.1.5 run-hook entry fails on each event it fires.
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        for (agent, file) in hook_files(Path::new(&home)) {
+            let Ok(before) = read(&file) else { continue };
+            if agent == "opencode" || !before.contains("run-hook") {
+                continue;
+            }
+            let written = edit_hooks(&file, &legacy_run_hook, &|_| None).and_then(|body| {
+                if body == before {
+                    return Ok(());
+                }
+                write_private(&file, body.as_bytes()).map_err(|e| e.to_string())
+            });
+            if let Err(error) = written {
+                eprintln!(
+                    "cairn: warning: old run-hook entries in {} were not removed ({error})",
+                    file.display()
+                );
+            }
+        }
+    }
+    for name in ["run-hook", "README.txt"] {
+        let _ = fs::remove_file(hooks.join(name));
+    }
     let record: Map<String, Value> = fs::read_to_string(hooks.join("installed.json"))
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())

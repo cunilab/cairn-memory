@@ -141,7 +141,7 @@ fn agent_checks(home: &Path) -> Vec<Check> {
             .iter()
             .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(marker)))
     };
-    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py");
+    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py") || has(files, "hook/run-hook");
     let mut checks = Vec::new();
     for (agent, folder, mcp, hooks) in &agents {
         if !folder.is_dir() {

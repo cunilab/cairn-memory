@@ -168,7 +168,7 @@ fn claude_install_remove_keeps_others() {
     );
     assert_eq!(
         post[1]["matcher"],
-        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch"
+        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read"
     );
     let mcp = &home.json(".claude/.claude.json")["mcpServers"];
     assert_eq!(mcp["cairn"]["command"], EXE);
@@ -290,6 +290,49 @@ fn setup_replaces_the_old_python_entries_and_retires_their_files() {
         .arg("doctor");
     let text = String::from_utf8_lossy(&doctor.output().unwrap().stdout).into_owned();
     assert!(text.contains("ok    hooks  claude hook present"), "{text}");
+}
+
+#[test]
+fn setup_removes_the_0_1_5_run_hook_entries_of_every_host() {
+    let home = Home::new("legacy-wrapper", false);
+    let run_hook = home.dir.join(".config/cairn/hook/run-hook");
+    let legacy = |event: &str| {
+        json!([{"hooks": [
+            {"type": "command", "command": format!("{} {event}", run_hook.display())},
+            {"type": "command", "command": "keep-me"},
+        ]}])
+    };
+    home.write(
+        ".claude/settings.json",
+        &json!({"hooks": {"Stop": legacy("Stop"), "SessionEnd": legacy("SessionEnd")}}).to_string(),
+    );
+    // Codex is not configured in this run; its stale entries go too.
+    let codex = json!({"hooks": {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "~/.config/cairn/hook/run-hook"}]}],
+        "Stop": legacy("Stop"),
+    }});
+    home.write(".codex/hooks.json", &codex.to_string());
+    home.write(
+        ".config/cairn/hook/run-hook",
+        "#!/bin/sh\nexec python3 cairn_hook.py\n",
+    );
+    home.write(".config/cairn/hook/README.txt", "old hook");
+
+    home.ok("claude", false);
+
+    let settings = home.json(".claude/settings.json");
+    assert!(!settings.to_string().contains("run-hook"), "{settings}");
+    let stop = settings["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(
+        stop[0]["hooks"],
+        json!([{"type": "command", "command": "keep-me"}])
+    );
+    assert_eq!(command_of(&stop[1]), expected("Stop", "claude", &home));
+    assert_eq!(
+        home.json(".codex/hooks.json"),
+        json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep-me"}]}]}})
+    );
+    assert!(!run_hook.exists() && !home.dir.join(".config/cairn/hook").exists());
 }
 
 #[test]
