@@ -1,8 +1,14 @@
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
 import { CheckIcon, CircleDashedIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SetupCommand } from "@/components/setup-command";
 import { Spinner } from "@/components/ui/spinner";
+import { useServerUrl } from "@/hooks/use-server-url";
+import type { Agent } from "@/lib/setup-command";
 
 type Props = {
   /** A device has checked in. */
@@ -26,6 +32,8 @@ function Status({ done, children }: { done: boolean; children: React.ReactNode }
 /** First run: a checklist of real controls. It disappears once the first capture arrives. */
 export function FirstRun({ checkedIn, captured, total, gaveUp }: Props) {
   const done = 1 + (checkedIn ? 1 : 0) + (captured ? 1 : 0);
+  const serverUrl = useServerUrl();
+  const [agent, setAgent] = useState<Agent>("claude");
   return (
     <Card>
       <CardHeader>
@@ -45,7 +53,10 @@ export function FirstRun({ checkedIn, captured, total, gaveUp }: Props) {
               <Button nativeButton={false} render={<Link href="/settings?tab=devices&create=1" />}>
                 Create device token
               </Button>
-              <span className="text-sm text-muted-foreground">The dialog shows the token and the setup command.</span>
+              <span className="text-sm text-muted-foreground">Then run this on the machine where your agent runs.</span>
+            </div>
+            <div className="pl-6">
+              <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
             </div>
           </li>
           <li className="flex flex-col gap-2">
