@@ -36,12 +36,14 @@ pub struct Note {
 }
 
 /// Rule-based output of one session: typed notes from `Decision:`-style lines, a fail-then-fix
-/// gotcha, a test-command fact, and a handoff. All are plain `SaveInput`s built to pass the same
-/// validation and quality rules as an agent's save.
+/// gotcha, a test-command fact, a handoff, and one session digest when files changed. All are
+/// plain `SaveInput`s built to pass the same validation and quality rules as an agent's save.
 #[derive(Clone, Debug, Default)]
 pub struct Distilled {
     pub notes: Vec<Note>,
     pub handoff: Option<SaveInput>,
+    /// One note for the session when it changed files. `None` when it did not.
+    pub digest: Option<SaveInput>,
 }
 
 /// One handoff per (owner, project-or-repository, branch, worktree): the id is derived, so a
@@ -78,6 +80,7 @@ pub fn distill(observations: &[Observation]) -> Distilled {
     Distilled {
         notes,
         handoff: handoff(observations, &failures),
+        digest: digest(observations),
     }
 }
 
@@ -260,6 +263,99 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
             scope: None,
         },
         files: Vec::new(),
+    })
+}
+
+/// One searchable note for a session that changed files: the paths, and the last result of each
+/// recognised test command. Prompt text stays out.
+fn digest(observations: &[Observation]) -> Option<SaveInput> {
+    let mut files = Vec::new();
+    for observation in observations {
+        if observation.kind != CaptureKind::Edit {
+            continue;
+        }
+        for file in &observation.context.files {
+            let file = file.trim();
+            if !file.is_empty() && !files.iter().any(|seen| seen == file) {
+                files.push(file.to_owned());
+            }
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for observation in observations {
+        if observation.kind != CaptureKind::Command {
+            continue;
+        }
+        let Some(ok) = observation.ok else {
+            continue;
+        };
+        if !is_test_command(command_text(observation)) {
+            continue;
+        }
+        let key = key_of(observation);
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(slot) = results.iter_mut().find(|(name, _)| name == &key) {
+            slot.1 = ok;
+        } else {
+            results.push((key, ok));
+        }
+    }
+    let listed = if files.len() > 6 {
+        format!(
+            "{}, +{} more",
+            files
+                .iter()
+                .take(6)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            files.len() - 6
+        )
+    } else {
+        files.join(", ")
+    };
+    let tests = results
+        .iter()
+        .take(3)
+        .map(|(command, ok)| format!("{command} {}", if *ok { "pass" } else { "fail" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last = observations.last()?;
+    let place = last
+        .context
+        .branch
+        .clone()
+        .or_else(|| {
+            last.context.repository.as_deref().map(|repository| {
+                basename(repository.strip_prefix("local:").unwrap_or(repository)).to_owned()
+            })
+        })
+        .unwrap_or_else(|| "workspace".to_owned());
+    let mut evidence = Vec::new();
+    for file in &files {
+        push_unique(&mut evidence, file);
+    }
+    for (command, _) in results.iter().take(3) {
+        push_unique(&mut evidence, command);
+    }
+    Some(SaveInput {
+        kind: Kind::Note,
+        title: clip(
+            &format!("Session {} on {place}", date(last.captured_at)),
+            TITLE_MAX,
+        ),
+        summary: clip(&format!("Changed {listed}. Tests: {tests}."), SUMMARY_MAX),
+        reason: "Derived from the captures of one session.".to_owned(),
+        fields: None,
+        evidence,
+        supersedes: None,
+        contradicts: None,
+        scope: None,
     })
 }
 
@@ -965,5 +1061,66 @@ mod tests {
         for input in inputs {
             quality(input);
         }
+    }
+
+    #[test]
+    fn digest_lists_files_and_test_results() {
+        let prompt_text = "zephyr-quilt: do not copy this prompt into the digest";
+        let d = distill(&[
+            prompt("p1", prompt_text),
+            fail(
+                "c1",
+                "cargo test --workspace",
+                "error[E0308]: mismatched types in billing",
+            ),
+            edit("e1", "src/ui/LedControls.tsx"),
+            edit("e2", "src/panel/removed.tsx"),
+            pass("c2", "cargo test"),
+            pass("c3", "cargo build"),
+        ]);
+        let digest = d.digest.expect("digest");
+        assert_eq!(digest.kind, Kind::Note);
+        assert_eq!(digest.title, "Session 2026-09-21 on feat/x");
+        assert_eq!(
+            digest.summary,
+            "Changed src/ui/LedControls.tsx, src/panel/removed.tsx. Tests: cargo test pass."
+        );
+        assert!(!digest.summary.contains("zephyr-quilt"), "{digest:?}");
+        assert!(!digest.summary.contains("mismatched"), "{digest:?}");
+        assert!(!digest.summary.contains("cargo build"), "{digest:?}");
+        assert!(!digest.summary.contains("fail"), "{digest:?}");
+        assert_eq!(digest.reason, "Derived from the captures of one session.");
+        assert_eq!(
+            digest.evidence,
+            [
+                "src/ui/LedControls.tsx",
+                "src/panel/removed.tsx",
+                "cargo test",
+            ]
+        );
+        let mut many = vec![pass("t1", "cargo test")];
+        for index in 0..8 {
+            many.push(edit(&format!("m{index}"), &format!("f{index}.rs")));
+        }
+        let summary = distill(&many).digest.expect("long digest").summary;
+        assert_eq!(
+            summary,
+            "Changed f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, +2 more. Tests: cargo test pass."
+        );
+        assert!(!summary.contains("zephyr-quilt"));
+    }
+
+    #[test]
+    fn no_digest_without_changed_files() {
+        assert!(
+            distill(&[prompt("p1", "TODO: later"), pass("c1", "cargo test")])
+                .digest
+                .is_none()
+        );
+        assert!(
+            distill(&[fail("c1", "cargo test", "boom boom boom boom")])
+                .digest
+                .is_none()
+        );
     }
 }

@@ -1468,3 +1468,130 @@ async fn brief_skips_candidates() {
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
 }
+
+#[tokio::test]
+async fn digest_searchable_not_in_brief() {
+    use cairn_core::memory::Kind;
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id.clone();
+    let take = |event: &str, kind: &str, content: &str, ok: Option<bool>, file: Option<&str>| {
+        let mut context = serde_json::json!({
+            "repository": "github.com/acme/one",
+            "branch": "feat",
+            "worktree": "wt-1",
+            "project_id": pid,
+        });
+        if kind == "command" {
+            context["commands"] = serde_json::json!([content.lines().next().unwrap_or("")]);
+        }
+        if let Some(file) = file {
+            context["files"] = serde_json::json!([file]);
+        }
+        serde_json::from_value(serde_json::json!({
+            "event_id": event,
+            "session_id": "digest",
+            "kind": kind,
+            "ok": ok,
+            "content": content,
+            "context": context,
+        }))
+        .unwrap()
+    };
+    store
+        .capture(
+            &person,
+            take(
+                "p1",
+                "prompt",
+                "zephyr-quilt: do not copy this prompt into the digest",
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            take(
+                "c1",
+                "command",
+                "cargo test\nexit 101: error[E0308]: mismatched types",
+                Some(false),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    // Plain names: the english parser keeps `src/LedControls.tsx` as one lexeme, so
+    // `LedControls removed` would not match a path. These files are the words themselves.
+    for (event, file) in [("e1", "LedControls"), ("e2", "removed")] {
+        store
+            .capture(
+                &person,
+                take(event, "edit", &format!("Edit {file}\nx"), None, Some(file)),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .capture(
+            &person,
+            take("c2", "command", "cargo test", Some(true), None),
+        )
+        .await
+        .unwrap();
+    store.distill_session(&person, "digest").await.unwrap();
+    let work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("github.com/acme/one".into()),
+        branch: Some("feat".into()),
+        worktree: Some("wt-1".into()),
+        ..WorkContext::default()
+    };
+    let brief = store
+        .brief(&person, &work, &["LedControls".into()])
+        .await
+        .unwrap();
+    assert!(!brief.contains("LedControls"), "{brief}");
+    assert!(!brief.contains("cargo test pass"), "{brief}");
+    let cards = store
+        .search(
+            &person,
+            "LedControls removed",
+            None,
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let digest = cards
+        .results
+        .iter()
+        .find(|card| card.kind == Kind::Note)
+        .expect("search finds the digest");
+    assert!(digest.summary.contains("LedControls"), "{}", digest.summary);
+    assert!(digest.summary.contains("removed"), "{}", digest.summary);
+    assert!(
+        digest.summary.contains("cargo test pass"),
+        "{}",
+        digest.summary
+    );
+    assert!(
+        !digest.summary.contains("zephyr-quilt"),
+        "{}",
+        digest.summary
+    );
+    db.finish().await;
+}

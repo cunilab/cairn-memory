@@ -1646,3 +1646,135 @@ async fn chat_session_keeps_richer_handoff() {
     );
     db.finish().await;
 }
+
+#[tokio::test]
+async fn digest_is_project_candidate_with_note_ttl() {
+    use cairn_core::memory::Kind;
+    use cairn_core::process::Origin;
+    use cairn_store::memory::ListFilter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    let session = "digest";
+    let fail = "cargo test\nexit 101: error[E0308]: mismatched types in src/ui/LedControls.tsx";
+    store
+        .capture(
+            &person,
+            capture(
+                "d-p1",
+                session,
+                "prompt",
+                "zephyr-quilt: do not copy this prompt into the digest",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            capture(
+                "d-c1",
+                session,
+                "command",
+                fail,
+                Some(false),
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    for (event, file) in [
+        ("d-e1", "src/ui/LedControls.tsx"),
+        ("d-e2", "src/panel/removed.tsx"),
+    ] {
+        store
+            .capture(
+                &person,
+                capture(
+                    event,
+                    session,
+                    "edit",
+                    &format!("Edit {file}\nx"),
+                    None,
+                    Some(&pid),
+                    Some(file),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .capture(
+            &person,
+            capture(
+                "d-c2",
+                session,
+                "command",
+                "cargo test",
+                Some(true),
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.distill_session(&person, session).await.unwrap();
+    let notes: Vec<_> = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories
+        .into_iter()
+        .filter(|memory| memory.kind == Kind::Note)
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let note = &notes[0];
+    assert_eq!(note.scope, Scope::Project);
+    assert_eq!(note.origin, Origin::System);
+    assert_eq!(column_rank(store, &note.id).await, "candidate");
+    // `expires_at` is the note TTL from the Rust clock at prepare; `created_at` is Postgres
+    // `now()` at insert. Those clocks can land in adjacent seconds.
+    let ttl = note.expires_at.expect("note ttl") - note.created_at;
+    assert!(
+        (ttl - 90 * 86_400).abs() <= 1,
+        "expires_at is created + 90 days, got {ttl}"
+    );
+    assert!(
+        note.title.starts_with("Session ") && note.title.ends_with(" on feat"),
+        "{}",
+        note.title
+    );
+    assert_eq!(
+        note.summary,
+        "Changed src/ui/LedControls.tsx, src/panel/removed.tsx. Tests: cargo test pass."
+    );
+    assert!(!note.summary.contains("zephyr-quilt"));
+    // A retry confirms the candidate, so rank is read before the second distill.
+    store.distill_session(&person, session).await.unwrap();
+    let again = store
+        .list(
+            &person,
+            &ListFilter {
+                kind: Some(Kind::Note),
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].id, note.id);
+    db.finish().await;
+}

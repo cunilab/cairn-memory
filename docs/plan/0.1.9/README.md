@@ -44,7 +44,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 02 | [x] [Project recognition everywhere](02-project-recognition.md) | 00 | — |
 | 12 | [x] [Subagents and automated sessions](12-automation-sessions.md) | 00 | — |
 | 05 | [x] [Handoffs that are not overwritten](05-handoffs.md) | 02, 12 | — |
-| 04 | [Session digest note](04-session-digest.md) | 01, 05 | — |
+| 04 | [x] [Session digest note](04-session-digest.md) | 01, 05 | — |
 | 03 | [Ask once to save 0–3 notes](03-save-ask.md) | 12 | — |
 | 06 | [User corrections become rules](06-corrections.md) | 03 | — |
 | 11 | [Proof count and rare-token veto](11-proof-and-veto.md) | 01 | `0008_proof_count` |

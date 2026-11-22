@@ -4,7 +4,7 @@ use crate::usage::RETRIEVAL_RETENTION_DAYS;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
 use cairn_core::capture::{
-    CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
+    CaptureKind, CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
 };
 use cairn_core::capture::{redact_sensitive_content, redact_work_context};
 use cairn_core::id::now_seconds;
@@ -343,6 +343,32 @@ impl Store {
                     written.push(saved.id);
                 }
                 // A note the person forgot stays forgotten.
+                Err(StoreError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(mut digest) = output.digest {
+            digest.scope = Some(note_scope);
+            let mut files = Vec::new();
+            for observation in &observations {
+                if observation.kind != CaptureKind::Edit {
+                    continue;
+                }
+                for file in &observation.context.files {
+                    if !file.is_empty() && !files.contains(file) {
+                        files.push(file.clone());
+                    }
+                }
+            }
+            let digest_work = WorkContext {
+                files,
+                ..work.clone()
+            };
+            match self
+                .save_as(person_id, digest, &digest_work, Origin::System, device)
+                .await
+            {
+                Ok(saved) => written.push(saved.id),
                 Err(StoreError::Conflict(_)) => {}
                 Err(error) => return Err(error),
             }
