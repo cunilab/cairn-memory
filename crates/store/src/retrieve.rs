@@ -281,8 +281,9 @@ pub fn lexical_sql(narrow: &Narrow) -> String {
     )
 }
 
-/// Aliases are searched when the 0.1.9 bench clears the ship rule. See `bench/aliases-0.1.9.md`.
-pub const ALIASES_IN_SEARCH: bool = true;
+/// Aliases are searched only when the 0.1.9 bench clears the ship rule. It did not (v2 weak 9/14,
+/// not 14/14), so alias rows are stored and embedded but ignored by search. See `bench/aliases-0.1.9.md`.
+pub const ALIASES_IN_SEARCH: bool = false;
 
 /// The vector channel's statement; the plan test explains the same text.
 pub fn vector_sql(narrow: &Narrow) -> String {
@@ -487,12 +488,21 @@ impl Store {
         query: &str,
         vector: Option<&[f32]>,
     ) -> Result<Vec<Candidate>> {
+        // The gate sees the best of the memory's own vector and its aliases' (`least` skips NULLs).
+        let nearest = if ALIASES_IN_SEARCH {
+            "least(m.embedding <=> $4::vector,
+                   (SELECT min(a.embedding <=> $4::vector) FROM memory_aliases a
+                     WHERE a.memory_id = m.memory_id AND a.embedding IS NOT NULL))"
+        } else {
+            "(m.embedding <=> $4::vector)"
+        };
+        let cosine =
+            format!("CASE WHEN $4::vector IS NULL THEN NULL ELSE (1 - {nearest})::float4 END");
         let rows = sqlx::query(&format!(
             "WITH q AS (SELECT coalesce(array_agg(DISTINCT lexeme), '{{}}') AS lx
                           FROM unnest(to_tsvector('english', $3)))
              {MEMORY_COLUMNS},
-                    CASE WHEN $4::vector IS NULL OR m.embedding IS NULL THEN NULL
-                         ELSE (1 - (m.embedding <=> $4::vector))::float4 END AS cosine,
+                    {cosine} AS cosine,
                     CASE WHEN cardinality(q.lx) = 0 THEN 0::float4 ELSE
                       ((SELECT count(*) FROM unnest(m.search_tsv) t WHERE t.lexeme = ANY(q.lx))::float4
                         / cardinality(q.lx))::float4 END AS coverage

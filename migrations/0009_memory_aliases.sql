@@ -15,6 +15,7 @@ INSERT INTO memory_aliases (memory_id, ord, source, text)
 SELECT memory_id, 100, 'derived', title
   FROM memories
  WHERE status <> 'forgotten'
+   AND char_length(title) >= 1
 ON CONFLICT DO NOTHING;
 
 INSERT INTO memory_aliases (memory_id, ord, source, text)

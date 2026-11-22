@@ -218,7 +218,8 @@ def main():
             if q["kind"] == "paraphrase_stem":
                 continue
             for key in q["gold"]:
-                shared = words(q["query"]) & words(searchable(by_key[key]))
+                # Aliases were written blind; words they share with a question are the paraphrase, not leakage.
+                shared = words(q["query"]) & words(searchable({k: v for k, v in by_key[key].items() if k != "aliases"}))
                 assert not shared, f"{q['id']} shares words with {key}: {sorted(shared)}"
 
     model_dir = None
@@ -359,6 +360,12 @@ def main():
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
+        # Aliases are searched by their own vectors: before any query, every alias row must have one (checked
+        # again here, outside settle, so an A/B that silently ran without alias vectors fails loudly).
+        alias_rows = int(sql("select count(*) from cairn.memory_aliases") or 0)
+        alias_unembedded = int(sql("select count(*) from cairn.memory_aliases where embedding is null") or 0)
+        if model_dir:
+            assert alias_unembedded == 0, f"{alias_unembedded} alias rows have no embedding before queries"
         key_of = {v: k for k, v in ids.items()}
 
         # Links per durable memory (step 6 §13): the fixture corpus alone, then everything incl. distractors.
@@ -426,7 +433,7 @@ def main():
         # of the benchmark definition.
         recall = {}
         per_question = []
-        search_wire, search_text = [], []
+        search_wire, search_text, search_ms = [], [], []
         for tool in ("memory_search",):
             wire_all, text_all = [], []
             scores = {"recall5": [], "hit5": [], "rr": [], "cards": [], "goldcards": []}
@@ -434,8 +441,10 @@ def main():
             for q in questions:
                 gold = {ids[k] for k in q["gold"]}
                 # limit 5 is what an agent sees by default; the bytes are measured on it.
+                started = time.perf_counter()
                 shaped, wire, text = mcp.tool(tool, query=q["query"], limit=5, **extra)
                 wire_all.append(wire)
+                search_ms.append((time.perf_counter() - started) * 1000)
                 text_all.append(text)
                 top5 = result_ids(shaped)
                 deep, _, _ = mcp.tool(tool, query=q["query"], limit=10, **extra)
@@ -516,6 +525,7 @@ def main():
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
         calls["memory_search"]["note"] = "limit 5, mean over the gold questions"
+        calls["memory_search"]["mean_ms"] = round(sum(search_ms) / len(search_ms), 1)
         decisions = []
         for query in ("migration lock deploy", "money cents", "payment webhook duplicate"):
             shaped, wire, text = mcp.tool("memory_search", query=query, kind="decision", limit=3)
@@ -616,7 +626,8 @@ def main():
             "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
             "corpus": {"memories": len(corpus), "distractors": len(distractors), "question_set": args.questions,
                        "questions": len(questions), "weak_queries": len(weak),
-                       "aliases": not args.no_aliases},
+                       "aliases": not args.no_aliases, "alias_rows": alias_rows,
+                       "alias_rows_without_embedding": alias_unembedded},
             "semantic_channel": {"server_health": semantic, "embedding_model": "pinned all-MiniLM-L6-v2" if model_dir else None,
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,

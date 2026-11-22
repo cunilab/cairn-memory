@@ -449,8 +449,9 @@ async fn test_0012_is_additive_on_populated_db() {
 }
 
 /// A 0.1.8 database (0001–0006) already has rows. Alias backfill adds one derived title per
-/// non-forgotten memory and one clipped symptom for a gotcha, leaves forgotten rows alone, and
-/// a second run inserts nothing. Memory rows are not rewritten.
+/// non-forgotten memory with a non-empty title and one clipped symptom for a gotcha, leaves
+/// forgotten rows and empty titles alone, and a second run inserts nothing. Memory rows are
+/// not rewritten.
 #[tokio::test]
 async fn alias_backfill_idempotent() {
     let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
@@ -511,7 +512,8 @@ async fn alias_backfill_idempotent() {
            ('mem_gotcha', 'per_old', 'personal', 'gotcha', 'Gotcha title kept', 'A gotcha that already existed.', $1, 'e2', 'i2', 'agent', 'active'),
            ('mem_empty', 'per_old', 'personal', 'gotcha', 'Empty symptom kept', 'A gotcha with no symptom text.', '{\"symptom\":\"\"}', 'e3', 'i3', 'agent', 'active'),
            ('mem_forgot', 'per_old', 'personal', 'gotcha', 'Forgotten gotcha', 'A forgotten gotcha with a symptom.', '{\"symptom\":\"still there\"}', 'e4', 'i4', 'agent', 'forgotten'),
-           ('mem_note', 'per_old', 'personal', 'note', 'Note title kept', 'A note that already existed.', '{}', 'e5', 'i5', 'agent', 'active')",
+           ('mem_note', 'per_old', 'personal', 'note', 'Note title kept', 'A note that already existed.', '{}', 'e5', 'i5', 'agent', 'active'),
+           ('mem_blank', 'per_old', 'personal', 'fact', '', 'A memory whose title is empty.', '{}', 'e6', 'i6', 'agent', 'active')",
     )
     .bind(serde_json::json!({ "symptom": symptom }))
     .execute(store.pool())
@@ -566,6 +568,10 @@ async fn alias_backfill_idempotent() {
                 "Note title kept".into()
             ),
         ]
+    );
+    assert!(
+        !rows.iter().any(|(id, _, _, _)| id == "mem_blank"),
+        "an empty title is not copied into an alias"
     );
     let sql = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

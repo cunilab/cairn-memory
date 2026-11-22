@@ -2,7 +2,7 @@ use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Scope, Status};
 use cairn_core::process::jobs::JobKind;
 use cairn_core::retrieve::hybrid::fuse;
-use cairn_store::retrieve::Narrow;
+use cairn_store::retrieve::{ALIASES_IN_SEARCH, Narrow};
 use cairn_store::testing::{TestDb, rule, save_input};
 
 /// A unit vector with `weight` on axis 0 and the rest on axis `axis`, so cosine to axis 0 is `weight`.
@@ -1966,8 +1966,12 @@ async fn aliases_embedded_and_searched() {
         .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
         .await
         .unwrap();
-    assert_eq!(found[0].0, id);
-    assert!(found[0].1 > 0.99, "{found:?}");
+    if ALIASES_IN_SEARCH {
+        assert_eq!(found[0].0, id);
+        assert!(found[0].1 > 0.99, "{found:?}");
+    } else {
+        assert!(found.iter().all(|(_, score)| *score < 0.5), "{found:?}");
+    }
     db.finish().await;
 }
 
@@ -2010,7 +2014,10 @@ async fn forgotten_aliases_not_returned() {
         .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
         .await
         .unwrap();
-    assert_eq!(found[0].0, id);
+    assert!(found.iter().any(|(hit, _)| hit == &id));
+    if ALIASES_IN_SEARCH {
+        assert_eq!(found[0].0, id);
+    }
     assert!(store.forget(&me, &id).await.unwrap());
     let found = store
         .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
@@ -2023,6 +2030,108 @@ async fn forgotten_aliases_not_returned() {
         .await
         .unwrap();
     assert_eq!(left, 1, "forget hides the row; it does not delete it");
+    db.finish().await;
+}
+
+/// One memory whose own vector is far from the query axis and whose alias vector is on it;
+/// returns its id. The query text shares no word with the memory.
+async fn alias_only_memory(db: &TestDb, me: &str) -> String {
+    let store = &db.store;
+    let id = store
+        .save(
+            me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Alias gate title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["where is the telescope mirror stored"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    for item in store.pending_embeddings(10).await.unwrap() {
+        let vector = if item.alias_ord.is_some() {
+            tilted(1.0, 1)
+        } else {
+            tilted(0.2, 2)
+        };
+        store
+            .upsert_embedding(&id, &item.source_hash, &vector)
+            .await
+            .unwrap();
+    }
+    id
+}
+
+/// The gate sees the best of the memory and alias cosines: a query that only an alias is close to
+/// passes it through `Store::search`, and forgetting the memory hides it again.
+#[tokio::test]
+async fn alias_only_query_passes_gate_in_search() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = alias_only_memory(&db, &me).await;
+    let query = tilted(1.0, 1);
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cards.results.iter().any(|c| c.id == id),
+        ALIASES_IN_SEARCH,
+        "{cards:?}"
+    );
+    assert!(store.forget(&me, &id).await.unwrap());
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!cards.results.iter().any(|c| c.id == id), "{cards:?}");
+    db.finish().await;
+}
+
+/// An alias that is only weakly close (cosine 0.3, under the gate) does not make an off-topic
+/// query return the memory.
+#[tokio::test]
+async fn weak_query_returns_nothing_with_aliases_present() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    alias_only_memory(&db, &me).await;
+    let query = tilted(0.3, 3);
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(cards.results.is_empty(), "{cards:?}");
     db.finish().await;
 }
 

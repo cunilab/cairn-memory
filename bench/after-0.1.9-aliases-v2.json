@@ -10,9 +10,10 @@
     },
     "memory_search": {
       "calls": 43,
-      "max_bytes": 1556,
-      "mean_bytes": 532,
-      "mean_tokens_est": 133,
+      "max_bytes": 1620,
+      "mean_bytes": 730,
+      "mean_ms": 118.9,
+      "mean_tokens_est": 182,
       "min_bytes": 55,
       "note": "limit 5, mean over the gold questions"
     },
@@ -20,8 +21,8 @@
       "calls": 3,
       "limit": 3,
       "max_bytes": 322,
-      "mean_bytes": 144,
-      "mean_tokens_est": 36,
+      "mean_bytes": 229,
+      "mean_tokens_est": 57,
       "min_bytes": 55,
       "note": "3 queries"
     },
@@ -34,6 +35,8 @@
     }
   },
   "corpus": {
+    "alias_rows": 3341,
+    "alias_rows_without_embedding": 0,
     "aliases": true,
     "distractors": 2000,
     "memories": 70,
@@ -121,7 +124,7 @@
         "dis-1609",
         "dis-1195",
         "dis-0387",
-        "dis-1293"
+        "dis-1447"
       ]
     },
     {
@@ -141,7 +144,7 @@
       ]
     },
     {
-      "cards": 1,
+      "cards": 3,
       "first_gold_rank_in_10": 1,
       "gold": [
         "proc-release"
@@ -153,7 +156,9 @@
       "id": "q04",
       "kind": "direct",
       "top5": [
-        "proc-release"
+        "proc-release",
+        "dup-migration-expand-contract",
+        "rule-migrations-additive"
       ]
     },
     {
@@ -170,10 +175,10 @@
       "kind": "direct",
       "top5": [
         "fact-max-upload",
-        "dis-1877",
+        "dis-1445",
         "dis-1247",
-        "dis-0641",
-        "dis-1445"
+        "dis-1877",
+        "dis-0641"
       ]
     },
     {
@@ -190,9 +195,9 @@
       "kind": "direct",
       "top5": [
         "rule-pr-small",
-        "dis-1493",
-        "dis-1517",
-        "dis-1647",
+        "proc-add-migration",
+        "dis-0167",
+        "dis-1817",
         "dis-0605"
       ]
     },
@@ -230,7 +235,7 @@
       ]
     },
     {
-      "cards": 1,
+      "cards": 2,
       "first_gold_rank_in_10": 1,
       "gold": [
         "got-tokio-blocking"
@@ -242,11 +247,12 @@
       "id": "q09",
       "kind": "direct",
       "top5": [
-        "got-tokio-blocking"
+        "got-tokio-blocking",
+        "dis-1579"
       ]
     },
     {
-      "cards": 1,
+      "cards": 2,
       "first_gold_rank_in_10": 1,
       "gold": [
         "proc-restore-backup"
@@ -258,11 +264,12 @@
       "id": "q10",
       "kind": "direct",
       "top5": [
-        "proc-restore-backup"
+        "proc-restore-backup",
+        "dis-0023"
       ]
     },
     {
-      "cards": 2,
+      "cards": 3,
       "first_gold_rank_in_10": 1,
       "gold": [
         "hand-refund-api"
@@ -275,7 +282,8 @@
       "kind": "direct",
       "top5": [
         "hand-refund-api",
-        "rule-idempotency-keys"
+        "rule-idempotency-keys",
+        "dup-idempotency-header"
       ]
     },
     {
@@ -296,7 +304,7 @@
       ]
     },
     {
-      "cards": 2,
+      "cards": 3,
       "first_gold_rank_in_10": 1,
       "gold": [
         "rule-feature-flag-cleanup"
@@ -309,11 +317,12 @@
       "kind": "direct",
       "top5": [
         "rule-feature-flag-cleanup",
-        "dec-feature-flags-db"
+        "dec-feature-flags-db",
+        "proc-incident-rollback"
       ]
     },
     {
-      "cards": 2,
+      "cards": 4,
       "first_gold_rank_in_10": 2,
       "gold": [
         "got-webhook-duplicates"
@@ -328,12 +337,14 @@
       "kind": "paraphrase",
       "top5": [
         "dup-webhook-replay",
-        "got-webhook-duplicates"
+        "got-webhook-duplicates",
+        "fact-payment-provider",
+        "rule-idempotency-keys"
       ]
     },
     {
-      "cards": 1,
-      "first_gold_rank_in_10": 1,
+      "cards": 2,
+      "first_gold_rank_in_10": 2,
       "gold": [
         "dec-money-integer-cents"
       ],
@@ -346,25 +357,28 @@
       "id": "q15",
       "kind": "paraphrase",
       "top5": [
+        "dup-money-minor-units",
         "dec-money-integer-cents"
       ]
     },
     {
-      "cards": 1,
-      "first_gold_rank_in_10": 1,
+      "cards": 5,
+      "first_gold_rank_in_10": 6,
       "gold": [
         "fact-prod-region"
       ],
       "gold_coverage": {
         "fact-prod-region": 0.0
       },
-      "gold_in_top5": [
-        "fact-prod-region"
-      ],
+      "gold_in_top5": [],
       "id": "q16",
       "kind": "paraphrase",
       "top5": [
-        "fact-prod-region"
+        "dis-0141",
+        "dis-0089",
+        "dis-0107",
+        "dis-0165",
+        "dis-0069"
       ]
     },
     {
@@ -400,7 +414,7 @@
       "top5": []
     },
     {
-      "cards": 1,
+      "cards": 2,
       "first_gold_rank_in_10": 1,
       "gold": [
         "got-json-bigint"
@@ -414,25 +428,30 @@
       "id": "q19",
       "kind": "paraphrase",
       "top5": [
-        "got-json-bigint"
+        "got-json-bigint",
+        "dis-0975"
       ]
     },
     {
-      "cards": 0,
-      "first_gold_rank_in_10": null,
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
       "gold": [
         "fact-vat-sync"
       ],
       "gold_coverage": {
         "fact-vat-sync": 0.167
       },
-      "gold_in_top5": [],
+      "gold_in_top5": [
+        "fact-vat-sync"
+      ],
       "id": "q20",
       "kind": "paraphrase_stem",
-      "top5": []
+      "top5": [
+        "fact-vat-sync"
+      ]
     },
     {
-      "cards": 2,
+      "cards": 5,
       "first_gold_rank_in_10": 1,
       "gold": [
         "rule-idempotency-keys",
@@ -447,7 +466,10 @@
       "kind": "near_duplicate",
       "top5": [
         "rule-idempotency-keys",
-        "dup-idempotency-header"
+        "dup-idempotency-header",
+        "dis-0015",
+        "dis-0061",
+        "dis-0083"
       ]
     },
     {
@@ -511,7 +533,7 @@
       ]
     },
     {
-      "cards": 3,
+      "cards": 4,
       "first_gold_rank_in_10": 1,
       "gold": [
         "got-webhook-duplicates",
@@ -527,11 +549,12 @@
       "top5": [
         "got-webhook-duplicates",
         "dup-webhook-replay",
+        "rule-idempotency-keys",
         "proc-onboard-merchant"
       ]
     },
     {
-      "cards": 1,
+      "cards": 2,
       "first_gold_rank_in_10": 1,
       "gold": [
         "fact-service-ports"
@@ -543,11 +566,12 @@
       "id": "q26",
       "kind": "direct",
       "top5": [
-        "fact-service-ports"
+        "fact-service-ports",
+        "proc-local-setup"
       ]
     },
     {
-      "cards": 1,
+      "cards": 2,
       "first_gold_rank_in_10": 1,
       "gold": [
         "rule-commit-conventional"
@@ -559,7 +583,8 @@
       "id": "q27",
       "kind": "direct",
       "top5": [
-        "rule-commit-conventional"
+        "rule-commit-conventional",
+        "proc-add-migration"
       ]
     },
     {
@@ -613,7 +638,7 @@
       ]
     },
     {
-      "cards": 3,
+      "cards": 4,
       "first_gold_rank_in_10": 1,
       "gold": [
         "fact-slo"
@@ -627,6 +652,7 @@
       "top5": [
         "fact-slo",
         "dec-api-versioning-header",
+        "dis-1737",
         "dis-0387"
       ]
     },
@@ -651,7 +677,7 @@
       ]
     },
     {
-      "cards": 0,
+      "cards": 1,
       "first_gold_rank_in_10": null,
       "gold": [
         "dec-timestamps-utc"
@@ -662,7 +688,9 @@
       "gold_in_top5": [],
       "id": "q33",
       "kind": "paraphrase",
-      "top5": []
+      "top5": [
+        "got-test-flaky-time"
+      ]
     },
     {
       "cards": 0,
@@ -680,7 +708,7 @@
     },
     {
       "cards": 5,
-      "first_gold_rank_in_10": null,
+      "first_gold_rank_in_10": 10,
       "gold": [
         "got-cargo-cache-ci"
       ],
@@ -692,14 +720,14 @@
       "kind": "paraphrase",
       "top5": [
         "dis-0495",
-        "dis-1097",
-        "dis-1583",
+        "dis-1909",
+        "dis-1887",
         "dis-1725",
-        "dis-0403"
+        "dis-1583"
       ]
     },
     {
-      "cards": 1,
+      "cards": 4,
       "first_gold_rank_in_10": null,
       "gold": [
         "got-pagination-ties"
@@ -711,6 +739,9 @@
       "id": "q36",
       "kind": "paraphrase",
       "top5": [
+        "dis-1019",
+        "dis-0065",
+        "dis-1027",
         "dis-1693"
       ]
     },
@@ -771,13 +802,13 @@
       "top5": [
         "dis-1583",
         "dis-1097",
-        "dis-1181",
-        "dis-0559",
-        "dis-1337"
+        "dis-0079",
+        "dis-1251",
+        "dis-1181"
       ]
     },
     {
-      "cards": 0,
+      "cards": 1,
       "first_gold_rank_in_10": null,
       "gold": [
         "fact-ci-runtime"
@@ -788,7 +819,9 @@
       "gold_in_top5": [],
       "id": "q41",
       "kind": "paraphrase",
-      "top5": []
+      "top5": [
+        "fact-retention"
+      ]
     },
     {
       "cards": 0,
@@ -805,18 +838,24 @@
       "top5": []
     },
     {
-      "cards": 0,
-      "first_gold_rank_in_10": null,
+      "cards": 3,
+      "first_gold_rank_in_10": 2,
       "gold": [
         "dec-email-postmark"
       ],
       "gold_coverage": {
         "dec-email-postmark": 0.0
       },
-      "gold_in_top5": [],
+      "gold_in_top5": [
+        "dec-email-postmark"
+      ],
       "id": "q43",
       "kind": "paraphrase",
-      "top5": []
+      "top5": [
+        "dis-1639",
+        "dec-email-postmark",
+        "dis-0024"
+      ]
     }
   ],
   "recall": {
@@ -825,63 +864,63 @@
         "direct": {
           "hit5": 1.0,
           "n": 19,
-          "precision_at_5": 0.4872,
+          "precision_at_5": 0.3958,
           "recall5": 1.0,
           "rr": 1.0
         },
         "near_duplicate": {
           "hit5": 1.0,
           "n": 5,
-          "precision_at_5": 0.7143,
+          "precision_at_5": 0.5556,
           "recall5": 1.0,
           "rr": 1.0
         },
         "paraphrase": {
           "hit5": 0.2353,
           "n": 17,
-          "precision_at_5": 0.1905,
+          "precision_at_5": 0.1081,
           "recall5": 0.2353,
-          "rr": 0.2059
+          "rr": 0.1627
         },
         "paraphrase_stem": {
-          "hit5": 0.5,
+          "hit5": 1.0,
           "n": 2,
           "precision_at_5": 1.0,
-          "recall5": 0.5,
-          "rr": 0.5
+          "recall5": 1.0,
+          "rr": 1.0
         }
       },
       "bytes_per_call": {
         "calls": 43,
-        "max_bytes": 1556,
-        "mean_bytes": 532,
-        "mean_tokens_est": 133,
+        "max_bytes": 1620,
+        "mean_bytes": 730,
+        "mean_tokens_est": 182,
         "min_bytes": 55
       },
-      "cards_returned": 75,
-      "gold_cards_returned": 34,
-      "hit_at_5": 0.6744,
-      "mrr_at_10": 0.6628,
-      "precision_at_5": 0.4533,
+      "cards_returned": 105,
+      "gold_cards_returned": 35,
+      "hit_at_5": 0.6977,
+      "mrr_at_10": 0.669,
+      "precision_at_5": 0.3333,
       "questions": 43,
-      "recall_at_5": 0.6744,
+      "recall_at_5": 0.6977,
       "text_channel_bytes_per_call": {
         "calls": 43,
-        "max_bytes": 1421,
-        "mean_bytes": 459,
-        "mean_tokens_est": 115,
+        "max_bytes": 1487,
+        "mean_bytes": 644,
+        "mean_tokens_est": 161,
         "min_bytes": 14
       }
     }
   },
   "recall_holdout": {
-    "cards_returned": 12,
-    "hit_at_5": 0.2,
-    "mrr_at_10": 0.12,
+    "cards_returned": 19,
+    "hit_at_5": 0.3,
+    "mrr_at_10": 0.181,
     "per_question": [
       {
-        "cards": 0,
-        "first_gold_rank_in_10": null,
+        "cards": 1,
+        "first_gold_rank_in_10": 1,
         "gold": [
           "dec-auth-sessions-cookies"
         ],
@@ -889,7 +928,9 @@
           "dec-auth-sessions-cookies": 0.0
         },
         "id": "h01",
-        "top5": []
+        "top5": [
+          "dec-auth-sessions-cookies"
+        ]
       },
       {
         "cards": 0,
@@ -904,7 +945,7 @@
         "top5": []
       },
       {
-        "cards": 0,
+        "cards": 1,
         "first_gold_rank_in_10": null,
         "gold": [
           "dec-pdf-typst"
@@ -913,7 +954,9 @@
           "dec-pdf-typst": 0.0
         },
         "id": "h03",
-        "top5": []
+        "top5": [
+          "sess-typst"
+        ]
       },
       {
         "cards": 1,
@@ -942,8 +985,8 @@
         "top5": []
       },
       {
-        "cards": 1,
-        "first_gold_rank_in_10": 1,
+        "cards": 3,
+        "first_gold_rank_in_10": 3,
         "gold": [
           "rule-secrets-env"
         ],
@@ -952,6 +995,8 @@
         },
         "id": "h06",
         "top5": [
+          "dec-monorepo-workspace",
+          "dis-0015",
           "rule-secrets-env"
         ]
       },
@@ -968,8 +1013,8 @@
         "top5": []
       },
       {
-        "cards": 0,
-        "first_gold_rank_in_10": null,
+        "cards": 3,
+        "first_gold_rank_in_10": 3,
         "gold": [
           "proc-rotate-db-password"
         ],
@@ -977,11 +1022,15 @@
           "proc-rotate-db-password": 0.0
         },
         "id": "h08",
-        "top5": []
+        "top5": [
+          "dis-0587",
+          "dis-0793",
+          "proc-rotate-db-password"
+        ]
       },
       {
         "cards": 5,
-        "first_gold_rank_in_10": 5,
+        "first_gold_rank_in_10": 7,
         "gold": [
           "fact-retention"
         ],
@@ -990,11 +1039,11 @@
         },
         "id": "h09",
         "top5": [
+          "dis-0053",
           "dis-1129",
           "dis-0397",
-          "dis-1681",
           "dis-1235",
-          "fact-retention"
+          "dis-0539"
         ]
       },
       {
@@ -1016,7 +1065,7 @@
         ]
       }
     ],
-    "precision_at_5": 0.1667,
+    "precision_at_5": 0.1579,
     "questions": 10
   },
   "semantic_channel": {
@@ -1147,7 +1196,7 @@
   "usage_after_hooks_delta": 0,
   "zero_hit": {
     "memory_search": {
-      "correct_zero_hit": 14,
+      "correct_zero_hit": 9,
       "queries": 14,
       "rows": [
         {
@@ -1169,10 +1218,13 @@
           "top": []
         },
         {
-          "bytes": 55,
-          "hits": 0,
+          "bytes": 474,
+          "hits": 2,
           "id": "w4",
-          "top": []
+          "top": [
+            "dis-0132",
+            "dis-0090"
+          ]
         },
         {
           "bytes": 55,
@@ -1181,10 +1233,12 @@
           "top": []
         },
         {
-          "bytes": 55,
-          "hits": 0,
+          "bytes": 287,
+          "hits": 1,
           "id": "w6",
-          "top": []
+          "top": [
+            "dis-1983"
+          ]
         },
         {
           "bytes": 55,
@@ -1199,10 +1253,12 @@
           "top": []
         },
         {
-          "bytes": 55,
-          "hits": 0,
+          "bytes": 326,
+          "hits": 1,
           "id": "w9",
-          "top": []
+          "top": [
+            "dec-queue-postgres"
+          ]
         },
         {
           "bytes": 55,
@@ -1211,10 +1267,13 @@
           "top": []
         },
         {
-          "bytes": 55,
-          "hits": 0,
+          "bytes": 570,
+          "hits": 2,
           "id": "w11",
-          "top": []
+          "top": [
+            "dec-pdf-typst",
+            "sess-typst"
+          ]
         },
         {
           "bytes": 55,
@@ -1223,10 +1282,12 @@
           "top": []
         },
         {
-          "bytes": 55,
-          "hits": 0,
+          "bytes": 260,
+          "hits": 1,
           "id": "w13",
-          "top": []
+          "top": [
+            "dis-0114"
+          ]
         },
         {
           "bytes": 55,
