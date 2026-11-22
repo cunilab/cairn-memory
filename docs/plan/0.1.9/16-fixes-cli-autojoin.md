@@ -4,7 +4,7 @@ title: "16 Fixes: device fixes, cairn fixes, audited auto-join"
 status: frozen
 ---
 
-# 16 Fixes: device fixes, `cairn fixes`, audited auto-join
+# 16 Fixes: device fixes, cairn fixes, audited auto-join
 
 ## Goal
 
