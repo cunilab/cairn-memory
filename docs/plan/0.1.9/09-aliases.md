@@ -24,11 +24,13 @@ D-LLM (agent writes aliases; derived ones are copies of existing text), D-DATA, 
 ## Design
 
 - Migration `0009_memory_aliases.sql`:
-  `CREATE TABLE memory_aliases (memory_id text NOT NULL REFERENCES memories ON DELETE CASCADE, ord smallint NOT NULL, source text NOT NULL CHECK (source IN ('agent','derived')), text text NOT NULL CHECK (char_length(text) BETWEEN 1 AND 120), embedding vector(384), embedding_source text, PRIMARY KEY (memory_id, ord));`
+  `CREATE TABLE memory_aliases (memory_id text NOT NULL REFERENCES memories ON DELETE CASCADE, ord smallint NOT NULL, source text NOT NULL CHECK (source IN ('agent','derived','learned')), text text NOT NULL CHECK (char_length(text) BETWEEN 1 AND 120), embedding vector(384), embedding_source text, PRIMARY KEY (memory_id, ord));`
   `CREATE INDEX memory_aliases_hnsw ON memory_aliases USING hnsw (embedding vector_cosine_ops);`
   Backfill (idempotent, `ON CONFLICT DO NOTHING`): for every non-forgotten memory, `ord 100` = `title`;
   for gotchas with a non-empty `fields->>'symptom'`, `ord 101` = that symptom clipped to 120 chars. `source='derived'`,
   `embedding` NULL.
+- `source='learned'` is allowed by the CHECK for aliases an admin applies from Fixes F11 (item 15). This item writes
+  no `learned` rows; they count toward the 5-alias limit and are searched like the others.
 - Embedding: the existing embed path (`crates/store/src/embed.rs`: `pending_embeddings`, `enqueue_missing_embeddings`,
   `upsert_embedding`) also selects alias rows with `embedding IS NULL` and fills them with the same MiniLM model. No new
   job kind (avoids a `jobs_kind_check` change).

@@ -6,7 +6,7 @@ status: frozen
 
 # 0.1.9 write-side plan
 
-Twelve items plus one guard, all shipping in 0.1.9 (branch `0.1.9`, PR #17). Sources: the advisory v2
+Sixteen items plus one guard, all shipping in 0.1.9 (branch `0.1.9`, PR #17). Sources: the advisory v2
 (ideas A1–A7, A9, D5, D6, D9, G1, G3, J1, J2, B1, B2/B3, I4), the Kivori investigation,
 [`bench/analysis-0.1.9.md`](../../../bench/analysis-0.1.9.md) and [the 0.1.9 release notes](../../release-notes-0.1.9.md).
 
@@ -43,7 +43,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 01 | [x] [Distilled notes take project scope, low rank](01-project-scope.md) | 00 | `0007_memory_rank` |
 | 02 | [x] [Project recognition everywhere](02-project-recognition.md) | 00 | — |
 | 12 | [x] [Subagents and automated sessions](12-automation-sessions.md) | 00 | — |
-| 05 | [Handoffs that are not overwritten](05-handoffs.md) | 02, 12 | — |
+| 05 | [x] [Handoffs that are not overwritten](05-handoffs.md) | 02, 12 | — |
 | 04 | [Session digest note](04-session-digest.md) | 01, 05 | — |
 | 03 | [Ask once to save 0–3 notes](03-save-ask.md) | 12 | — |
 | 06 | [User corrections become rules](06-corrections.md) | 03 | — |
@@ -52,11 +52,16 @@ Migration numbers are fixed here so parallel work does not collide.
 | 08 | [Per-project web report](08-project-report.md) | 01, 04, 12 | `0010_session_outcome` |
 | 07 | [Write-side bench in CI](07-write-bench.md) | 01–06, 12 | — |
 | 10 | [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
+| 13 | [Fixes: recording](13-fixes-recording.md) | 03, 08, 09, 12 | `0011_fixes` |
+| 14 | [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
+| 15 | [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |
+| 16 | [Fixes: device fixes, `cairn fixes`, audited auto-join](16-fixes-cli-autojoin.md) | 15 | — |
 
 Shared files, in this order only: `crates/client/src/hook/mod.rs` and `hook/state.rs` (02 → 12 → 05 → 03 → 06);
 `crates/core/src/process/distill.rs` (01 → 05 → 04 → 08); `crates/store/src/capture.rs` (01 → 05 → 04 → 12 → 08);
 `crates/client/src/tools.rs` and `crates/server/src/routes/memory.rs` (03 → 09); `crates/core/src/retrieve/rank.rs` (01 → 11);
-`crates/store/src/lib.rs` migration list (01 → 11 → 09 → 08).
+`crates/store/src/lib.rs` migration list (01 → 11 → 09 → 08 → 13);
+`crates/store/src/fixes.rs` (13 → 14 → 15 → 16); `crates/store/src/memory.rs` (09 → 15 → 16); hook files after 06 (→ 13).
 
 ## Global acceptance (before the PR merges)
 
