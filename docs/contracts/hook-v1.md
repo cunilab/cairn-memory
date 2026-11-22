@@ -55,20 +55,30 @@ derived from `cwd`, never read from the payload.
 
 Only in a checkout with a readable `.cairn/project.json`, and never when switched off:
 
-- **Start line.** `SessionStart` appends one instruction line to the brief (the brief itself stays labelled as data):
-  `Cairn is active for this project. Before deciding or debugging, memory_search; after a decision, fixed gotcha or
-  finished task, memory_save with a reason.` (154 B, about 39 tokens). It is given even when the project has no brief yet.
+- **Start line.** `SessionStart` appends one instruction line to the brief (the brief itself stays labelled as data).
+  Built-in text: `Cairn is active for this project. Before deciding or debugging, memory_search; after a decision,
+  fixed gotcha or finished task, memory_save with a reason.` (154 B, about 39 tokens). It is given even when the
+  project has no brief yet, and when the server cannot be reached.
 - **Stop reminder.** The first `Stop` of a session that did real work and made no Cairn save answers
-  `{"decision":"block","reason":"You changed N files but saved nothing to Cairn. If anything here is a reusable decision,
-  gotcha or procedure, save it now with memory_save; otherwise just finish."}`, which makes Claude Code and Codex continue
-  for one turn (about 50 tokens). Real work is an edited file, a recognised test command (`cargo test`, `npm test`,
-  `pnpm test`, `yarn test`, `bun test`, `bunx vitest`, `pytest`, `go test`, ...) or a `Decision:`-style line in the prompt or
-  the last assistant message. A save is the Cairn `memory_save` tool or `cairn save`. It is sent once per session (state
+  `{"decision":"block","reason":"<text>"}`, which makes Claude Code and Codex continue for one turn. Built-in text:
+  `You changed {files} file(s) but saved nothing to Cairn. If anything here is a reusable decision, gotcha or
+  procedure, save it now with memory_save; otherwise just finish.` (about 41 tokens; `{files}` is the number of files
+  the session edited). Real work is an edited file, a recognised test command (`cargo test`, `npm test`, `pnpm test`,
+  `yarn test`, `bun test`, `bunx vitest`, `pytest`, `go test`, ...) or a `Decision:`-style line in the prompt or the
+  last assistant message. A save is the Cairn `memory_save` tool or `cairn save`. It is sent once per session (state
   flag), never when the payload says `stop_hook_active`, never for a session of questions only, and not for OpenCode,
   whose plugin cannot continue a turn. Codex follows Claude's Stop contract; the reply is untested against a live Codex.
+- **Editable texts.** Both texts are server settings (at most 600 B each). For each field the hook uses the project's
+  override if set, else the global text, else the built-in one. They arrive in the `instructions` object of the
+  `/session/brief` reply (`session_instruction`, `stop_nudge`); the hook keeps the Stop text in its session state, so
+  Stop makes no request. A server that cannot be reached, or an empty text, means the built-in text. Global texts: a
+  server admin changes them (`POST /agent-instructions`, read with `GET`); a project's overrides: its owner or a server
+  admin (`POST /projects/{id}/agent-instructions`), readable by members. An empty text clears. Every change writes an
+  `agent_instructions_changed` audit event with the old and new text. The web edits them under Settings, Agent
+  instructions, and on the project page. The MCP `initialize` instructions stay static.
 - **Opt out.** `"nudge": false` in the config file (kept by a later `cairn setup`) or `CAIRN_NO_NUDGE=1`.
 - The Claude Code and Codex `PostToolUse` matcher also lists `mcp__cairn__memory_save`, so re-run `cairn setup --agent
-  <agent>` (or `cairn update`) once after upgrading; until then a save through the MCP tool is not seen and the reminder may fire.
+  <agent>` once after upgrading (the `cairn update` that installs 0.1.9 still writes the old matcher); until then a save through the MCP tool is not seen and the reminder may fire.
 
 Captures are redacted with the same patterns as the server (`cairn-core::capture::redact`) before
 the outbox write and the request, then clipped. Read-only shell commands are recognised by an

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { RoleBadge } from "@/components/badges";
+import { AgentInstructionsEditor } from "@/components/agent-instructions-editor";
 import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
 import { FormDialog } from "@/components/form-dialog";
@@ -28,7 +29,7 @@ import type { ProjectMember } from "@/lib/generated/ProjectMember";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 import { ProjectBranches } from "./project-branches";
 
-const TABS = ["branches", "stale", "members"] as const;
+const TABS = ["branches", "stale", "members", "instructions"] as const;
 
 type Loaded = {
   project: ProjectView;
@@ -237,6 +238,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             <TabsTrigger value="branches">Branches</TabsTrigger>
             <TabsTrigger value="stale">Stale ({data.stale.length})</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
+            <TabsTrigger value="instructions">Agent instructions</TabsTrigger>
           </TabsList>
           <TabsContent value="branches">
             <ProjectBranches branches={data.branches} />
@@ -259,6 +261,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               getRowId={(m) => m.person_id}
               filterPlaceholder="Filter members"
               empty={<p className="p-6 text-sm text-muted-foreground">No members found.</p>}
+            />
+          </TabsContent>
+          <TabsContent value="instructions">
+            <AgentInstructionsEditor
+              path={`${path}/agent-instructions`}
+              scope="project"
+              canEdit={canTransfer}
             />
           </TabsContent>
         </Tabs>

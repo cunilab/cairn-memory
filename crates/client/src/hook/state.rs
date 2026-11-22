@@ -38,6 +38,9 @@ pub struct SessionState {
     /// The agent saved to Cairn (the `memory_save` tool or `cairn save`).
     #[serde(default)]
     pub saved: bool,
+    /// The Stop reminder text the server gave at session start; the built-in one when none.
+    #[serde(default)]
+    pub stop_nudge: Option<String>,
     /// The Stop reminder was sent; it is sent once per session.
     #[serde(default)]
     pub nudged: bool,

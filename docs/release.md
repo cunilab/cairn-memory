@@ -182,9 +182,9 @@ entities (no backfill): one the old extractor marked `missing` stays stale until
 
 ## 0.1.9 upgrade notes
 
-0.1.9 changes no schema, no tool and no retrieval; the details are in [the 0.1.9 release notes](release-notes-0.1.9.md).
+0.1.9 changes no tool and no retrieval and adds one additive migration (`0006_agent_instructions`: two nullable columns on `projects`, applied at start); the details are in [the 0.1.9 release notes](release-notes-0.1.9.md).
 Upgrade the server and the CLI together, start the new server on the existing database (no wipe), and run `cairn update`
-on each machine. `cairn init` for a committed project id the server does not know (a wiped or new server) now refuses
+on each machine, then `cairn setup --agent <agent>` once so the hook sees Cairn saves. `cairn init` for a committed project id the server does not know (a wiped or new server) now refuses
 until you pass `--yes`, because the first caller becomes the owner. The CI `Bench` floor is hit@5 0.65.
 
 ## How clients update

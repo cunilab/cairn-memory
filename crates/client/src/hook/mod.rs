@@ -14,6 +14,7 @@ use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{WorkContext, redact_work_context};
 use cairn_core::id::now_seconds;
+use cairn_core::instructions::{DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_stop_nudge};
 use cairn_core::process::distill::{has_typed_line, is_test_command};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
@@ -280,6 +281,7 @@ impl Hook<'_> {
             "context": self.work_context(),
             "recent_files": git::recent_files(&self.cwd),
         });
+        let nudging = self.nudging();
         let reply = match self.post("/cairn-memory/session/brief", &body) {
             Ok(reply) => reply,
             Err(error) => {
@@ -287,7 +289,8 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
-                return None;
+                // No server text: the built-in line still goes in.
+                return nudging.then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
             }
         };
         if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
@@ -307,10 +310,16 @@ impl Hook<'_> {
                 }
                 fits
             });
-        let nudge = self.nudging().then_some(inject::START_NUDGE);
+        let nudge = nudging.then(|| {
+            // The Stop text rides along with the start reply: no request at Stop.
+            let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
+            self.with_state(|s| s.stop_nudge = Some(stop));
+            inject::server_text(&reply, "session_instruction", DEFAULT_SESSION_INSTRUCTION)
+        });
         match (brief, nudge) {
             (Some(brief), Some(nudge)) => Some(format!("{brief}\n{nudge}")),
-            (brief, nudge) => brief.or(nudge).map(str::to_owned),
+            (Some(brief), None) => Some(brief.to_owned()),
+            (None, nudge) => nudge,
         }
     }
 
@@ -340,7 +349,8 @@ impl Hook<'_> {
                 return None;
             }
             s.nudged = true;
-            Some(inject::stop_reminder(s.edited.len()))
+            let template = s.stop_nudge.as_deref().unwrap_or(DEFAULT_STOP_NUDGE);
+            Some(fill_stop_nudge(template, s.edited.len()))
         })
         .flatten()
     }

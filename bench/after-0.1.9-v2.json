@@ -55,9 +55,9 @@
   "label": "after-0.1.9",
   "links": {
     "all_memories": {
-      "durable": 1122,
-      "durable_with_link_ratio": 0.717,
-      "with_link": 804
+      "durable": 1121,
+      "durable_with_link_ratio": 0.716,
+      "with_link": 803
     },
     "durable": 62,
     "durable_with_link_ratio": 0.839,
@@ -1130,7 +1130,7 @@
         "event": "Stop",
         "injected_bytes": 0,
         "injected_tokens_est": 0,
-        "stdout_bytes": 195
+        "stdout_bytes": 197
       }
     ],
     "note": "SessionStart + 10 Edit PostToolUse on distinct files + a failing and a passing cargo test around one more edit + PreCompact + Stop, bytes of additionalContext",

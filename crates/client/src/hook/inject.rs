@@ -1,6 +1,7 @@
 //! What a hook may put into the model's context, and the budget that bounds it (C5).
 
 use super::event::truncate;
+use cairn_core::instructions::MAX_INSTRUCTION_BYTES;
 use serde_json::{Value, json};
 
 /// The server caps the brief at the same number; a longer one is dropped, never cut.
@@ -12,20 +13,17 @@ pub const TOPICS_PER_SESSION: u8 = 4;
 /// session that opens hundreds of files with no notes would otherwise make one request each.
 pub const TOPIC_LOOKUPS_PER_SESSION: u8 = 16;
 
-/// Appended to the session brief in a repository with `.cairn/project.json`: the one place the
-/// hook gives an instruction (the brief itself stays labelled as data). At most 200 bytes.
-pub const START_NUDGE: &str = "Cairn is active for this project. Before deciding or debugging, memory_search; after a decision, fixed gotcha or finished task, memory_save with a reason.";
-
-/// The one-time Stop reminder for a session that worked and saved nothing.
-pub fn stop_reminder(files: usize) -> String {
-    let did = match files {
-        0 => "You ran tests or wrote a decision".to_owned(),
-        1 => "You changed 1 file".to_owned(),
-        n => format!("You changed {n} files"),
-    };
-    format!(
-        "{did} but saved nothing to Cairn. If anything here is a reusable decision, gotcha or procedure, save it now with memory_save; otherwise just finish."
-    )
+/// The server's text for a field (`reply["instructions"][key]`) when it is usable: not empty, and
+/// cut to the stored limit on a character boundary; else the built-in default.
+pub fn server_text(reply: &Value, key: &str, default: &str) -> String {
+    reply["instructions"][key]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map_or_else(
+            || default.to_owned(),
+            |text| truncate(text, MAX_INSTRUCTION_BYTES).to_owned(),
+        )
 }
 
 fn one_line(text: &str) -> String {
@@ -93,11 +91,18 @@ mod tests {
     }
 
     #[test]
-    fn nudge_texts_are_short_and_stop_blocks() {
-        assert!(START_NUDGE.len() <= 200, "{}", START_NUDGE.len());
-        assert!(stop_reminder(3).starts_with("You changed 3 files but saved nothing to Cairn."));
-        assert!(stop_reminder(1).starts_with("You changed 1 file but"));
-        assert!(stop_reminder(0).starts_with("You ran tests or wrote a decision but"));
+    fn server_text_is_used_when_present_else_the_default() {
+        let reply =
+            json!({"instructions": {"a": "  Use Cairn.  ", "b": "   ", "c": "é".repeat(400)}});
+        assert_eq!(server_text(&reply, "a", "dflt"), "Use Cairn.");
+        assert_eq!(server_text(&reply, "b", "dflt"), "dflt");
+        assert_eq!(server_text(&reply, "missing", "dflt"), "dflt");
+        assert_eq!(server_text(&json!({}), "a", "dflt"), "dflt");
+        assert_eq!(server_text(&reply, "c", "dflt").len(), 600);
+    }
+
+    #[test]
+    fn stop_replies_block_with_the_reason() {
         let reply = output("Stop", "why");
         assert_eq!(reply, json!({"decision": "block", "reason": "why"}));
         assert_eq!(

@@ -1719,7 +1719,7 @@ fn work_without_a_save_blocks_the_first_stop_once() {
     env.edit("s1", "src/a.rs", "z");
     let reason = blocked(&stop(&env, "s1", json!({}))).expect("a reminder");
     assert!(
-        reason.starts_with("You changed 2 files but saved nothing to Cairn."),
+        reason.starts_with("You changed 2 file(s) but saved nothing to Cairn."),
         "{reason}"
     );
     assert!(reason.contains("memory_save"), "{reason}");
@@ -1794,7 +1794,7 @@ fn only_real_work_is_reminded() {
     env.bash("test", "bun test", json!({"exit_code": 0}));
     let reason = blocked(&stop(&env, "test", json!({}))).unwrap();
     assert!(
-        reason.starts_with("You ran tests or wrote a decision but saved nothing"),
+        reason.starts_with("You changed 0 file(s) but saved nothing"),
         "{reason}"
     );
     // A Decision-style line in the last assistant message counts.
@@ -1860,4 +1860,70 @@ fn the_reminders_can_be_turned_off_by_config_or_environment() {
     config.as_object_mut().unwrap().remove("nudge");
     std::fs::write(env.config(), config.to_string()).unwrap();
     assert!(start(&env, "d").unwrap().contains("Cairn is active"));
+}
+
+#[test]
+fn server_instruction_texts_are_used_and_the_stop_text_needs_no_request() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            let reply = json!({"brief": "BRIEF", "instructions": {
+                "session_instruction": "  Project rule: search Cairn first.  ",
+                "stop_nudge": "Save to Cairn! Files: {files}. {files} again."}});
+            return (200, reply.to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-server", &server.url);
+    with_project(&env);
+    assert_eq!(
+        start(&env, "s1").as_deref(),
+        Some("BRIEF\nProject rule: search Cairn first.")
+    );
+    env.edit("s1", "src/a.rs", "x");
+    env.edit("s1", "src/b.rs", "y");
+    let before = server.requests().len();
+    let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
+    assert_eq!(reason, "Save to Cairn! Files: 2. 2 again.");
+    let asked: Vec<String> = server.requests()[before..]
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    assert!(
+        asked.iter().all(|p| !p.ends_with("/brief")),
+        "no request for the text at Stop: {asked:?}"
+    );
+}
+
+#[test]
+fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"brief": "BRIEF", "instructions": {"session_instruction": "", "stop_nudge": "  "}}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-empty-text", &server.url);
+    with_project(&env);
+    assert!(
+        start(&env, "s1")
+            .unwrap()
+            .contains("Cairn is active for this project.")
+    );
+    env.edit("s1", "src/a.rs", "x");
+    let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
+    assert!(
+        reason.starts_with("You changed 1 file(s) but saved nothing to Cairn."),
+        "{reason}"
+    );
+    // The server is not there at session start: the built-in line goes in alone.
+    let env = Env::new("hook-nudge-down", "http://127.0.0.1:9");
+    with_project(&env);
+    let text = start(&env, "d1").unwrap();
+    assert!(
+        text.starts_with("Cairn is active for this project."),
+        "{text}"
+    );
+    env.edit("d1", "src/a.rs", "x");
+    let reason = blocked(&stop(&env, "d1", json!({}))).unwrap();
+    assert!(reason.starts_with("You changed 1 file(s)"), "{reason}");
 }

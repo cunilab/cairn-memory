@@ -6,6 +6,7 @@ pub mod capture;
 pub mod consolidate;
 pub mod device;
 pub mod embed;
+pub mod instructions;
 pub mod jobs;
 pub mod link;
 pub mod memory;
@@ -44,6 +45,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0005_console",
         include_str!("../../../migrations/0005_console.sql"),
+    ),
+    (
+        "0006_agent_instructions",
+        include_str!("../../../migrations/0006_agent_instructions.sql"),
     ),
 ];
 

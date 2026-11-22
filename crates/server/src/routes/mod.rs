@@ -5,6 +5,7 @@ mod admin;
 mod capture;
 mod device;
 mod health;
+mod instructions;
 mod memory;
 mod project;
 mod retrieve;
@@ -43,6 +44,15 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/devices/register", post(device::register))
         .route("/cairn-memory/devices/revoke", post(device::revoke))
         .route("/cairn-memory/devices/rotate", post(device::rotate))
+        // agent instructions
+        .route(
+            "/cairn-memory/agent-instructions",
+            get(instructions::global).post(instructions::set_global),
+        )
+        .route(
+            "/cairn-memory/projects/{project_id}/agent-instructions",
+            get(instructions::project).post(instructions::set_project),
+        )
         // admin
         .route("/cairn-memory/admin/jobs", get(admin::jobs))
         .route("/cairn-memory/stats", get(stats::stats))

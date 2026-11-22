@@ -817,7 +817,7 @@
         "event": "Stop",
         "injected_bytes": 0,
         "injected_tokens_est": 0,
-        "stdout_bytes": 195
+        "stdout_bytes": 197
       }
     ],
     "note": "SessionStart + 10 Edit PostToolUse on distinct files + a failing and a passing cargo test around one more edit + PreCompact + Stop, bytes of additionalContext",

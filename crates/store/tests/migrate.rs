@@ -19,7 +19,8 @@ async fn migrate_twice_is_a_no_op() {
             "0002_capture",
             "0003_retrieval",
             "0004_processing",
-            "0005_console"
+            "0005_console",
+            "0006_agent_instructions"
         ]
     );
     let tables: i64 = sqlx::query_scalar(
