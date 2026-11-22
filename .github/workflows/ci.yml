@@ -58,6 +58,10 @@ jobs:
             echo "cairn-core must not depend on sqlx, tokio, axum or reqwest" >&2
             exit 1
           fi
+      - name: migrations do not destroy data (docs/plan/0.1.9/00-guard.md)
+        run: |
+          python3 scripts/check_migrations.py
+          python3 scripts/test_check_migrations.py
 
   rust-tests:
     name: Rust tests

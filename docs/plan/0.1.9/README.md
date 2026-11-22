@@ -39,7 +39,7 @@ Migration numbers are fixed here so parallel work does not collide.
 
 | # | Item | Depends on | Migration |
 |---|---|---|---|
-| 00 | [Migration guard](00-guard.md) | — | — |
+| 00 | [x] [Migration guard](00-guard.md) | — | — |
 | 01 | [Distilled notes take project scope, low rank](01-project-scope.md) | 00 | `0007_memory_rank` |
 | 02 | [Project recognition everywhere](02-project-recognition.md) | 00 | — |
 | 12 | [Subagents and automated sessions](12-automation-sessions.md) | 00 | — |
