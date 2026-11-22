@@ -6,7 +6,7 @@ status: frozen
 
 # 0.1.9 write-side plan
 
-Sixteen items plus one guard, all shipping in 0.1.9 (branch `0.1.9`, PR #17). Sources: the advisory v2
+Seventeen items plus one guard, all shipping in 0.1.9 (branch `0.1.9`, PR #17). Sources: the advisory v2
 (ideas A1–A7, A9, D5, D6, D9, G1, G3, J1, J2, B1, B2/B3, I4), the Kivori investigation,
 [`bench/analysis-0.1.9.md`](../../../bench/analysis-0.1.9.md) and [the 0.1.9 release notes](../../release-notes-0.1.9.md).
 
@@ -46,6 +46,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 05 | [x] [Handoffs that are not overwritten](05-handoffs.md) | 02, 12 | — |
 | 04 | [x] [Session digest note](04-session-digest.md) | 01, 05 | — |
 | 03 | [Ask once to save 0–3 notes](03-save-ask.md) | 12 | — |
+| 17 | [Expiry marks, never deletes or hides](17-expiry-keeps-data.md) (high priority: live data loss) | 00 | — (no schema) |
 | 06 | [User corrections become rules](06-corrections.md) | 03 | — |
 | 11 | [Proof count and rare-token veto](11-proof-and-veto.md) | 01 | `0008_proof_count` |
 | 09 | [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
@@ -58,10 +59,10 @@ Migration numbers are fixed here so parallel work does not collide.
 | 16 | [Fixes: device fixes, `cairn fixes`, audited auto-join](16-fixes-cli-autojoin.md) | 15 | — |
 
 Shared files, in this order only: `crates/client/src/hook/mod.rs` and `hook/state.rs` (02 → 12 → 05 → 03 → 06);
-`crates/core/src/process/distill.rs` (01 → 05 → 04 → 08); `crates/store/src/capture.rs` (01 → 05 → 04 → 12 → 08);
+`crates/core/src/process/distill.rs` (01 → 05 → 04 → 08); `crates/store/src/capture.rs` (01 → 05 → 04 → 12 → 17 → 08);
 `crates/client/src/tools.rs` and `crates/server/src/routes/memory.rs` (03 → 09); `crates/core/src/retrieve/rank.rs` (01 → 11);
 `crates/store/src/lib.rs` migration list (01 → 11 → 09 → 08 → 13);
-`crates/store/src/fixes.rs` (13 → 14 → 15 → 16); `crates/store/src/memory.rs` (09 → 15 → 16); hook files after 06 (→ 13).
+`crates/store/src/fixes.rs` (13 → 14 → 15 → 16); `crates/store/src/memory.rs` (17 → 09 → 15 → 16); hook files after 06 (→ 13).
 
 ## Global acceptance (before the PR merges)
 
