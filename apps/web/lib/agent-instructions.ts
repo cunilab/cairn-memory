@@ -25,12 +25,12 @@ export function overLimit(text: string, max: number = MAX_INSTRUCTION_BYTES): bo
 }
 
 /** What the hook appends to the session brief, exactly: the brief, a newline, the text. */
-export function previewStart(text: string): string {
+export function sampleStart(text: string): string {
   return `Cairn session brief …\n${text.trim()}`;
 }
 
 /** What the agent is told at Stop: `{files}` becomes the number of edited files. */
-export function previewStop(text: string, files: number = 3): string {
+export function sampleStop(text: string, files: number = 3): string {
   return text.trim().replaceAll("{files}", String(files));
 }
 

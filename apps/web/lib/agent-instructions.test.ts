@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ALLOWED, upstreamPath } from "./proxy.ts";
-import { MAX_INSTRUCTION_BYTES, byteCounter, byteLength, changedFields, overLimit, previewStart, previewStop } from "./agent-instructions.ts";
+import { MAX_INSTRUCTION_BYTES, byteCounter, byteLength, changedFields, overLimit, sampleStart, sampleStop } from "./agent-instructions.ts";
 
 test("bytes are counted as UTF-8 after trimming, as the server does", () => {
   assert.equal(byteLength("  abc \n"), 3);
@@ -14,9 +14,9 @@ test("bytes are counted as UTF-8 after trimming, as the server does", () => {
 });
 
 test("the preview shows what the agent receives", () => {
-  assert.equal(previewStart("  Use Cairn.  "), "Cairn session brief …\nUse Cairn.");
-  assert.equal(previewStop("Edited {files} files; {files} total."), "Edited 3 files; 3 total.");
-  assert.equal(previewStop("Edited {files}", 12), "Edited 12");
+  assert.equal(sampleStart("  Use Cairn.  "), "Cairn session brief …\nUse Cairn.");
+  assert.equal(sampleStop("Edited {files} files; {files} total."), "Edited 3 files; 3 total.");
+  assert.equal(sampleStop("Edited {files}", 12), "Edited 12");
 });
 
 test("only changed fields are sent, and clearing sends an empty text", () => {

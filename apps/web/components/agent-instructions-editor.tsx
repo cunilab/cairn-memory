@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Textarea } from "@/components/ui/textarea";
-import { SOURCE_LABEL, byteCounter, changedFields, overLimit, previewStart, previewStop } from "@/lib/agent-instructions";
+import { SOURCE_LABEL, byteCounter, changedFields, overLimit, sampleStart, sampleStop } from "@/lib/agent-instructions";
 import { cairn } from "@/lib/cairn";
 import type { AgentInstructions } from "@/lib/generated/AgentInstructions";
 import type { InstructionField } from "@/lib/generated/InstructionField";
@@ -20,13 +20,13 @@ const COPY: Record<Key, { title: string; help: string; preview: (text: string) =
   session_instruction: {
     title: "Session start line",
     help: "One instruction added to the session brief when an agent starts in a repository with .cairn/project.json.",
-    preview: previewStart,
+    preview: sampleStart,
     where: "Added after the brief",
   },
   stop_nudge: {
     title: "Stop reminder",
     help: "Sent once, when a session changed files or ran tests and saved nothing to Cairn. {files} becomes the number of edited files.",
-    preview: (text) => previewStop(text),
+    preview: (text) => sampleStop(text),
     where: "Shown to the agent at Stop (with 3 edited files here)",
   },
 };
