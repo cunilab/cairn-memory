@@ -512,6 +512,50 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
 }
 
 #[test]
+fn init_registers_a_committed_project_again_after_a_server_wipe() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "wipe");
+    let dir = checkout("wipe");
+    std::fs::create_dir_all(dir.join(".cairn")).unwrap();
+    let id = "proj_zzzzzzzzzzzzzzzzzzzzzzzzzz";
+    std::fs::write(
+        dir.join(".cairn/project.json"),
+        format!(r#"{{"project_id":"{id}","repository":"local:wipe","name":"Wiped"}}"#),
+    )
+    .unwrap();
+    // The file is fine but the server has never heard of the id: doctor says so.
+    let before = team.owner.run_in(&dir, &["doctor"]);
+    let text = String::from_utf8_lossy(&before.stdout).into_owned();
+    assert_eq!(before.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains(&format!("fail  project  {id} is not on the server")),
+        "{text}"
+    );
+    // init registers the same id again, as owner, and says why.
+    let init = team.owner.run_in(&dir, &["init"]);
+    let said = String::from_utf8_lossy(&init.stdout).into_owned();
+    assert!(
+        init.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    assert!(
+        said.contains(&format!("did not know project {id}")),
+        "{said}"
+    );
+    assert!(
+        std::fs::read_to_string(dir.join(".cairn/project.json"))
+            .unwrap()
+            .contains(id)
+    );
+    let after = team.owner.run_in(&dir, &["doctor"]);
+    let text = String::from_utf8_lossy(&after.stdout).into_owned();
+    assert!(text.contains(&format!("ok    project  {id}")), "{text}");
+}
+
+#[test]
 fn doctor_reports_each_check_and_fails_when_the_server_is_unreachable() {
     let Some(server) = Server::start() else {
         return;

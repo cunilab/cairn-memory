@@ -225,7 +225,11 @@ fn init(args: &[String]) -> Result<(), Error> {
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project name".to_owned()))?;
     let written = project::write(&top, project_id, &repository, name)?;
-    if !written {
+    if created["created"] == true && existing.is_some() && !rename {
+        println!(
+            "The server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are its owner."
+        );
+    } else if !written {
         println!("already initialized, you are a member");
     }
     let path = top.join(".cairn/project.json");

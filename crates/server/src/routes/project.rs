@@ -116,13 +116,26 @@ pub async fn init(
 ) -> ApiResult<Initialized> {
     let account = caller.account;
     let (project, created) = match body.project_id.as_deref() {
-        Some(id) => (
-            state
-                .store
-                .join_project(&account.person_id, id, body.name.as_deref())
-                .await?,
-            false,
-        ),
+        Some(id) => match state
+            .store
+            .join_project(&account.person_id, id, body.name.as_deref())
+            .await
+        {
+            Ok(project) => (project, false),
+            // A wiped or rebuilt server: register the committed id again, owned by the caller.
+            Err(StoreError::NotFound(_)) => {
+                state
+                    .store
+                    .restore_project(
+                        &account.person_id,
+                        id,
+                        &body.repository,
+                        body.name.as_deref(),
+                    )
+                    .await?
+            }
+            Err(error) => return Err(error.into()),
+        },
         None => {
             state
                 .store

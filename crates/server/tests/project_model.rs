@@ -224,6 +224,50 @@ async fn shared_project_model() {
 }
 
 #[tokio::test]
+async fn init_registers_a_committed_project_the_server_lost() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let owner = app.device(&admin, "owner-laptop").await;
+    let id = "proj_zzzzzzzzzzzzzzzzzzzzzzzzzz";
+    // An unknown id (a wiped server) is created again with the same id, owned by the caller.
+    let restored = app
+        .post(
+            "projects/init",
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            &owner,
+        )
+        .await;
+    assert_eq!(restored["created"], true);
+    assert_eq!(restored["project_id"], id);
+    assert_eq!(restored["repository"], "github.com/acme/widgets");
+    let listed = app.get("projects", &owner).await;
+    assert_eq!(listed[0]["project_id"], id, "{listed}");
+    // Asking again joins the project that now exists.
+    let again = app
+        .post(
+            "projects/init",
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            &owner,
+        )
+        .await;
+    assert_eq!(
+        (again["created"].clone(), again["project_id"].clone()),
+        (json!(false), json!(id))
+    );
+    // An id that is not shaped like ours is refused, not created.
+    let (status, _) = app
+        .send(
+            "POST",
+            "projects/init",
+            json!({"project_id": "x", "repository": "github.com/acme/widgets"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn bad_save_input_is_a_400_with_a_message() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
