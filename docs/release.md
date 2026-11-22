@@ -162,6 +162,16 @@ the binary and aborts when one is missing, so they must stay in `release.yml` un
 no longer published. 0.1.5 records their checksums in `hook/installed.json`, so the first `cairn setup` of 0.1.6
 deletes them (`retire_python`).
 
+## 0.1.7 upgrade notes
+
+0.1.7 changes no schema and no tool; the details are in [the 0.1.7 release notes](release-notes-0.1.7.md). Upgrade the
+server and the CLI together, start the new server on the existing database (no wipe), and run `cairn update` on each
+machine. Re-running `cairn setup` is needed only when `cairn doctor` warns; when it runs, it also deletes a leftover
+0.1.5 `hook/run-hook` (only if it calls `cairn_hook.py`) and `hook/README.txt` with it. Search scores changed meaning
+(absolute, capped at 1.0), so a client that compared them with a fixed threshold must be re-checked.
+Memories saved by 0.1.6 keep the old identity hash (it included the reason), so saving the same text once more makes a
+duplicate that consolidation merges; there is no backfill.
+
 ## How clients update
 
 - `cairn --version` prints the installed version.
