@@ -464,7 +464,12 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
         ],
     );
     assert_eq!(found["results"][0]["id"], id.as_str());
-    assert_eq!(found["results"][0]["score"], 1.0);
+    // An absolute score, not a share of the top card's.
+    assert!(
+        found["results"][0]["score"]
+            .as_f64()
+            .is_some_and(|s| s > 0.5 && s <= 1.0)
+    );
     let theirs = member.json_in(&dir_b, &["search", "skip locked"]);
     assert_eq!(theirs["results"][0]["id"], id.as_str());
     let none = owner.json_in(&dir_a, &["search", "skip locked", "--kind", "rule"]);

@@ -11,6 +11,7 @@ export type Card = { id: string, kind: Kind, title: string, summary: string,
  */
 status?: Status, 
 /**
- * Rounded to 3 decimals, relative to the top card (1.0).
+ * Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
+ * whatever else matched. The order of cards can still tell apart two that both show 1.0.
  */
 score: number, };

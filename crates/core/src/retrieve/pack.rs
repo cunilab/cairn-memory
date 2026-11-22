@@ -22,7 +22,8 @@ pub struct Card {
     /// Only when the memory is not `active` (a stale memory still ranks, lower).
     #[serde(default, skip_serializing_if = "is_active")]
     pub status: Status,
-    /// Rounded to 3 decimals, relative to the top card (1.0).
+    /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
+    /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
 }
 
@@ -75,7 +76,6 @@ struct Packer {
     used: usize,
     budget: usize,
     limit: usize,
-    top: f32,
 }
 
 impl Packer {
@@ -87,11 +87,7 @@ impl Packer {
             title: hit.memory.title.clone(),
             summary: hit.memory.summary.clone(),
             status: hit.memory.status,
-            score: if self.top > 0.0 {
-                (hit.score / self.top * 1000.0).round() / 1000.0
-            } else {
-                1.0
-            },
+            score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
         };
         let cost = serde_json::to_string(&card).map_or(0, |json| json.len()) + 1;
         if self.out.len() == self.limit || (self.used + cost > self.budget && !self.out.is_empty())
@@ -113,7 +109,6 @@ pub fn pack(hits: &[Hit], limit: usize, budget_tokens: usize) -> Cards {
         used: 0,
         budget: budget_tokens.clamp(BUDGET_MIN, BUDGET_MAX) * 4,
         limit,
-        top: hits.first().map_or(0.0, |h| h.score),
     };
     let mut per_entity: HashMap<&str, u8> = HashMap::new();
     let mut deferred = Vec::new();
@@ -178,10 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn cards_cut_normalise_and_count_the_rest() {
+    fn cards_cut_keep_the_absolute_score_and_count_the_rest() {
         let c = pack(&[hit("a", 0.8), hit("b", 0.2), hit("c", 0.1)], 2, 1200);
         assert_eq!((c.results.len(), c.more), (2, 1));
-        assert_eq!((c.results[0].score, c.results[1].score), (1.0, 0.25));
+        assert_eq!((c.results[0].score, c.results[1].score), (0.8, 0.2));
+        // A favoured kind can score over 1.0 internally; the card shows at most 1.0.
+        assert_eq!(pack(&[hit("a", 1.25)], 5, 1200).results[0].score, 1.0);
         let json = serde_json::to_value(pack(&[hit("a", 0.3)], 5, 1200)).expect("json");
         assert!(json.get("more").is_none());
         let keys: Vec<_> = json["results"][0].as_object().unwrap().keys().collect();

@@ -259,3 +259,53 @@ async fn off_topic_queries_stay_empty_among_400_distractors() {
     assert_eq!(ids(&found).first(), Some(&target), "{found}");
     app.finish().await;
 }
+
+#[tokio::test]
+async fn ranking_follows_the_match_not_the_kind_or_the_age_of_the_embedding() {
+    let Some(model) = model() else { return };
+    let Some(app) = App::with_model(Some(model)).await else {
+        return;
+    };
+    let me = app.admin("alice").await;
+    let save = |body: serde_json::Value| app.post("remember", body, &me);
+    save(json!({"kind":"decision","title":"Cairn keeps MiniLM embeddings","summary":"Cairn 0.1.6 keeps the MiniLM embedding model; larger models did not improve end-to-end recall.","reason":"measured on bench v2","scope":"personal"})).await;
+    save(json!({"kind":"gotcha","title":"cairn init 404 after wipe","summary":"After a server wipe cairn init returns 404 because the committed project.json names a project the server no longer has.","reason":"seen in a live test","scope":"personal","fields":{"fix":"Re-register the project with cairn init."}})).await;
+    let old = save(json!({"kind":"procedure","title":"Release a Cairn version","summary":"Bump the version, merge to main, tag vX.Y.Z and let the release workflow publish assets.","reason":"release steps","scope":"personal","fields":{"steps":["Bump the workspace version","Merge to main","Push the tag"]}})).await;
+    app.settle().await;
+    let search = |query: &str| {
+        let found = app.post("search", json!({"query": query}), &me);
+        async move { found.await["results"].as_array().unwrap().clone() }
+    };
+    let title = |card: &serde_json::Value| card["title"].as_str().unwrap().to_owned();
+
+    // The procedure matches both words and the intent; it is first, with a score that is a match
+    // quality (not 1.0 because it is on top), and nothing that only shares "cairn" outranks it.
+    for query in ["how do I release cairn", "release cairn"] {
+        let cards = search(query).await;
+        assert_eq!(
+            title(&cards[0]),
+            "Release a Cairn version",
+            "{query}: {cards:?}"
+        );
+        let top = cards[0]["score"].as_f64().unwrap();
+        assert!(top > 0.0 && top < 1.0, "{query}: absolute score, got {top}");
+        for weaker in &cards[1..] {
+            assert!(
+                weaker["score"].as_f64().unwrap() < top,
+                "{query}: {cards:?}"
+            );
+        }
+    }
+
+    // A superseding save is searchable at once, before its embedding exists, and still first.
+    let new = save(json!({"kind":"procedure","title":"Release a Cairn version","summary":"Run scripts/release.sh with the new version, then tag vX.Y.Z and wait for the release workflow to publish assets.","reason":"the release steps changed","scope":"personal","supersedes": old["id"],"fields":{"steps":["Run scripts/release.sh","Push the tag"]}})).await;
+    for settled in [false, true] {
+        if settled {
+            app.settle().await;
+        }
+        let cards = search("release cairn").await;
+        assert_eq!(cards[0]["id"], new["id"], "settled {settled}: {cards:?}");
+        assert!(cards.iter().all(|c| c["id"] != old["id"]));
+    }
+    app.finish().await;
+}
