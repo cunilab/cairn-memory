@@ -19,6 +19,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Web console typecheck, lint, build`
   - `Documentation validation`
   - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
+  - `Docker images build` (builds `docker/server.Dockerfile` and `docker/web.Dockerfile` without pushing, so an image breaks in the pull request, not at tag time)
   - `Bench` (`scripts/bench.py --min-hit5 0.68`; uploads the result JSON)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
 - The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
@@ -27,7 +28,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
 
 Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[workspace.package]` of the root `Cargo.toml`.
 
-1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
+1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, set the same `version` in `apps/web/package.json` and in the two places of `apps/web/package-lock.json` (`scripts/check_web_version.py` fails the documentation check when they differ), and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
 2. Open the pull request, wait for the required checks, merge it.
 3. Tag the merge commit on `main` and push the tag:
 
