@@ -1,0 +1,157 @@
+{
+ "tools": [
+  {
+   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory. kind=handoff returns the last session handoff. Fetch full records with memory_get.",
+   "inputSchema": {
+    "properties": {
+     "kind": {
+      "enum": [
+       "decision",
+       "rule",
+       "gotcha",
+       "procedure",
+       "fact",
+       "preference",
+       "note",
+       "handoff"
+      ],
+      "type": "string"
+     },
+     "limit": {
+      "description": "default 5",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "query": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "type": "object"
+   },
+   "name": "memory_search"
+  },
+  {
+   "description": "Full records (fields, evidence, links) for ids from memory_search.",
+   "inputSchema": {
+    "properties": {
+     "ids": {
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 10,
+      "minItems": 1,
+      "type": "array"
+     }
+    },
+    "required": [
+     "ids"
+    ],
+    "type": "object"
+   },
+   "name": "memory_get"
+  },
+  {
+   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses.",
+   "inputSchema": {
+    "properties": {
+     "contradicts": {
+      "type": "string"
+     },
+     "evidence": {
+      "description": "paths, commands, commits",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "fields": {
+      "type": "object"
+     },
+     "kind": {
+      "enum": [
+       "decision",
+       "rule",
+       "gotcha",
+       "procedure",
+       "fact",
+       "preference",
+       "note"
+      ],
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "scope": {
+      "enum": [
+       "project",
+       "personal",
+       "global"
+      ],
+      "type": "string"
+     },
+     "summary": {
+      "maxLength": 240,
+      "type": "string"
+     },
+     "supersedes": {
+      "type": "string"
+     },
+     "title": {
+      "maxLength": 80,
+      "type": "string"
+     }
+    },
+    "required": [
+     "kind",
+     "title",
+     "summary"
+    ],
+    "type": "object"
+   },
+   "name": "memory_save"
+  },
+  {
+   "description": "Mark a memory helpful or wrong. Wrong from two people, or from its owner, makes it stale.",
+   "inputSchema": {
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "vote": {
+      "enum": [
+       "helpful",
+       "wrong"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "vote"
+    ],
+    "type": "object"
+   },
+   "name": "memory_feedback"
+  },
+  {
+   "description": "Erase a memory you own. To replace outdated knowledge, save with supersedes instead.",
+   "inputSchema": {
+    "properties": {
+     "id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "id"
+    ],
+    "type": "object"
+   },
+   "name": "memory_forget"
+  }
+ ]
+}

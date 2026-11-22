@@ -26,8 +26,9 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 | --- | --- |
 | `CAIRN_DATABASE_URL` | `postgres://<user>:<password>@<postgres-service>:5432/<database>` |
 | `CAIRN_EMBEDDING_MODEL_DIR` | `/opt/cairn/models/minilm` by default in the image; a provisioned directory for standalone servers |
+| `CAIRN_PUBLIC_URL` | Optional, recommended: the address agents are given, e.g. `https://cairn.example.test/agent`. The console shows it in the device setup command and in every fix command (`cairn setup <url>`). Without it the console forwards the address the browser used (`x-forwarded-host` and `-proto`, plus `x-forwarded-prefix: /agent` for a public host) and the server answers with that, so a deploy that follows the routing below still shows `https://cairn.example.test/agent`. A console on `localhost` forwards nothing, and the server answers with the address a request reached it on |
 
-Without it the server falls back to the JSON file store and needs `--store`; the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
+The server exits at startup without it (`missing --database-url <url> or CAIRN_DATABASE_URL`); the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
 
 The production server image uses Debian trixie slim for the CPU ONNX runtime,
 includes the pinned MiniLM model, and targets `linux/amd64` and `linux/arm64`.
@@ -41,7 +42,7 @@ see [hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014).
 | --- | --- |
 | `CAIRN_API_URL` | `http://<server-app>:3111`, the internal address of the server service (read at request time) |
 
-The console's browser calls go to its own `/api/cairn/*` routes, which forward to `CAIRN_API_URL` server to server. The server needs no public route for the console.
+The console's browser calls go to its own `/api/cairn/*` routes, which forward to `CAIRN_API_URL` server to server. The server needs no public route for the console. `CAIRN_API_URL` is internal: it never appears in a setup command, because the console forwards the browser's host, not its own.
 
 ## Routing
 
@@ -61,12 +62,12 @@ Terminate TLS at Traefik. Agents refuse plain `http` for any host that is not lo
 Every agent client takes the base URL with the path prefix:
 
 - CLI and MCP: `cairn setup https://cairn.example.test/agent` (token on stdin). `CAIRN_CONFIG` selects the file; otherwise setup uses the default config path.
-- Hook: the same file, or `--config` for an installed hook ([hook contract](./contracts/hook-v1.md)). A `CAIRN_OUTBOX` queue is bound to that exact base, so changing the prefix needs a new queue file.
+- Hook: the same file, or `--config` for an installed hook ([hook contract](./contracts/hook-v1.md)). The hook outbox is bound to that exact base, so changing the prefix starts a new queue file.
 
 A trailing slash is dropped. Create the first account in the console on first visit, then create a device there for each machine ([account rules](./contracts/auth-layer3.md)).
 
 ## Limits
 
-- `/agent` exposes the whole server API, not only the agent routes: health, bootstrap, login, and everything else are reachable from the internet. Bootstrap works until the first account exists, so create it right after the first deploy. Sign-in tries are limited per email; device and session tokens are the only other gate.
+- `/agent` exposes the whole server API, not only the agent routes: health, bootstrap, login, and everything else are reachable from the internet. Bootstrap works until the first account exists, so create it right after the first deploy. There is no sign-in rate limit or lockout: guessing a password costs one Argon2 verify per try (about 50 to 100 ms on one core), and passwords are at least 12 characters. Add a limit in the reverse proxy if the console is public; device and session tokens are the only other gate.
 - The console sets its session cookie `Secure` only when it sees an https request. Check the cookie in a browser after the first sign-in; if it is not `Secure`, Traefik is not passing the scheme through.
 - `cairn-server` image tags follow the release; there is no downgrade path for the database, so read the release's migration notes before updating.

@@ -6,263 +6,118 @@ status: draft
 
 # Layer 1 MCP Compatibility Contract
 
-This contract defines the Cairn MCP transport and the `cairn` CLI, which share one
-tool table (`crates/client/src/tools.rs`). Both are network clients: each tool call is
-one REST call to a Cairn server, authenticated with a device token. Neither opens a store
-file. It is intentionally a small compatibility surface rather than a claim of parity with
-the upstream full tool registry. The credential model is in
-[CM-CONTRACT-008](auth-layer3.md); the decision is in
-[ADR 0008](../adr/0008-self-hosted-account-authentication.md).
+The `cairn mcp` stdio server and the `cairn` CLI share one tool table
+(`crates/client/src/tools.rs`): five tools, one REST call each, authenticated with a device
+token. Neither opens a store file. The credential model is in
+[CM-CONTRACT-008](auth-layer3.md). Design and rationale: `docs/specs/0.1.6-step3-agent-surface.md`.
 
 ## Transport
 
-- Command: `cairn mcp` (the `cairn-server mcp --store` command no longer exists)
-- Configuration: `cairn setup <server-url>` reads the device token from stdin (typed without
-  echo on a terminal, one line when piped) so it never appears in the process list or shell
-  history, and writes the selected config file with mode `0600`, through a fresh temporary
-  file and a rename; a config directory it creates gets mode `0700`. The selected file is
-  `CAIRN_CONFIG` when that variable is non-empty after trimming, otherwise
-  `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`).
-  That file's `url` and `token` are the only server URL and device credential for the CLI
-  and stdio MCP. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are not configuration. If either
-  name is present, including an empty or whitespace-only value, it is ignored and one
-  stderr line names the variable without its value. Missing
-  configuration is an error that names the selected file and `cairn setup`.
-- Server URL: `https`, or `http` only for a loopback host (`localhost`, `127.0.0.0/8`,
-  `::1`). Plain `http` to any other host is refused at setup and at load. A URL may not
-  carry credentials, a query, or a fragment. It may carry a path prefix (a trailing slash is
-  dropped), for a server behind a reverse proxy mount such as `https://cairn.example.test/agent`;
-  every request goes to `<url>/cairn-memory/...`.
-- The client never follows a redirect, so the token cannot leave the configured origin, and
-  never prints the token. Errors show the server's own message, for example
-  `HTTP 403: web console session required; device tokens cannot do this`. A genuine HTTP 401
-  names the selected config file and says to run `cairn setup <server-url>` with
-  `CAIRN_CONFIG` set to that file. The credential is removed from the response text
-  before the 300-character clip. The 401 stays inside
-  the CLI's stderr line or the MCP tool result; it does not add a second stdout record.
-- TLS is rustls through the `ureq` crate (no OpenSSL, no async runtime in the client). It
-  verifies certificates with the operating system's trust store, so a server behind a
-  private CA works once that CA is trusted by the system.
-- Plain `http` (loopback) never uses `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, so the
-  token is not handed to a proxy. `https` URLs honour those variables.
-- A tool argument that fills a path segment may not be `.` or `..`; the call fails before any
-  request.
-- Transport: newline-delimited JSON-RPC 2.0 over stdin/stdout. A line that is not UTF-8 or
-  not JSON gets `-32700`; valid JSON that is not a single request object (a batch, a response,
-  no `method`) or a line over 8 MiB gets `-32600`; the server keeps reading either way.
-  A message with an `id` member, including `"id": null`, always gets a reply. A message
-  without one is a notification: it gets no reply and runs nothing, so a `tools/call`
-  notification causes no REST call.
-- Diagnostics: stderr only; stdout is reserved for protocol messages
-- Handshake: `initialize`, `notifications/initialized`
-- Discovery: `tools/list`
-- Invocation: `tools/call`
-- Probe: `ping`
-- Protocol version returned by this adapter: `2025-06-18`
+- Command `cairn mcp`; newline-delimited JSON-RPC 2.0 on stdin/stdout, diagnostics on stderr only.
+  Methods: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`. Protocol
+  version returned: `2025-06-18`.
+- `cairn setup <server-url>` reads the device token from stdin (hidden on a terminal) and writes the
+  selected config file with mode `0600` through a temporary file and a rename. The selected file is
+  `CAIRN_CONFIG` when non-empty, else `$XDG_CONFIG_HOME/cairn/config.json`, else
+  `~/.config/cairn/config.json`, else `%APPDATA%`. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are not
+  configuration: a present one is ignored with one stderr line naming it, never its value.
+- Server URL: `https`, or `http` for a loopback host only; no credentials, query or fragment; a path
+  prefix is allowed. Every request goes to `<url>/cairn-memory/...`. Redirects are never followed.
+  Plain `http` never uses `HTTP(S)_PROXY`.
+- A line that is not UTF-8 or JSON gets `-32700`; JSON that is not one request object, or a line over
+  8 MiB, gets `-32600`; the loop keeps reading. A message with an `id` (even `null`) always gets a
+  reply; one without is a notification and runs nothing.
+- Errors show the server's message with the token removed. A genuine 401 names the config file and says
+  to run `cairn setup <server-url>`.
 
-## Tool manifest
+## Instructions
 
-Each tool maps to one route. No tool takes an account token: the device token in the
-configuration is the only credential, and the server scopes every call to its account.
+`initialize.instructions` carries one text, at most 700 bytes (663 today), generated by
+`tools::instructions()`. It is sent once per MCP session and written to the OpenCode `AGENTS.md`
+block by `cairn setup --agent opencode`. The hook no longer re-injects it. `serverInfo` is
+`name: cairn-memory`, `title: Cairn`. Memory text is data, never instructions.
 
-| Tool | Route | Behavior |
+## Tools
+
+`tools/list` is `{"tools":[{name,description,inputSchema}]}`, 2,517 bytes compact (limit 3,500; the
+snapshot is `crates/client/tests/fixtures/tools_list.json`). The client adds `context` (repository,
+branch, worktree, commit, `project_id`) from git to every call; it is in no schema.
+
+| Tool | Route | Arguments |
 | --- | --- | --- |
-| `memory_save` | `POST /remember` | Save a scoped structured record; scope, title, summary and reason required |
-| `memory_list`, `memory_get` | `GET /memories`, `GET /memories/{id}` | List readable records or get every field |
-| `memory_recall` | `POST /recall` | Return a bounded context pack |
-| `memory_consolidate` | `POST /session/end` | End a session and create its evidence-backed memory |
-| `memory_smart_search` | `POST /smart-search` | Search durable memories |
-| `memory_why_changed` | `POST /why-changed` | Return decisions, reasons, evidence, relationships, and conflict signals |
-| `memory_diagnose` | `GET /diagnose` | Report the account's lifecycle counts |
-| `memory_lesson_save` | `POST /remember` | Save a scoped record; defaults to gotcha unless kind is explicit |
-| `memory_reflect` | `POST /context` | Return hybrid retrieval candidates; local embeddings when enabled |
-| `memory_session_start` | `POST /session/start` | Start or resume a session |
-| `memory_observe` | `POST /observe` | Capture one bounded, idempotent observation |
-| `memory_session_end` | `POST /session/end` | Alias for session consolidation |
-| `memory_search` | `POST /search` | Hybrid search |
-| `memory_context` | `POST /context` | Bounded context assembly |
-| `memory_resume` | `POST /resume` | Recover recent session summaries for current work context |
-| `memory_unresolved` | `POST /unresolved` | Recover session summaries with unresolved work |
-| `memory_forget` | `POST /forget` | Persist forget suppression for an event or memory |
-| `memory_export` | `POST /export` | Return a versioned portable memory bundle |
-| `memory_import` | `POST /import` | Merge a versioned bundle idempotently |
-| `memory_correct` | `POST /correct` | Supersede a memory or observation with a corrected durable memory |
-| `memory_contradict` | `POST /contradict` | Declare that one visible memory contradicts another |
-| `memory_supersede` | `POST /supersede` | Set `supersedes` on an existing memory |
-| `memory_similarity_reviews` | `GET /similarity-reviews` | List open reviews the caller can read on both sides |
-| `memory_review_dismiss` | `POST /similarity-reviews/dismiss` | Dismiss one open review |
-| `memory_review_contradict` | `POST /similarity-reviews/contradict` | Declare a contradiction from a review |
-| `memory_review_supersede` | `POST /similarity-reviews/supersede` | Supersede one side of a review |
-| `memory_link` | `POST /links` | Add one typed link; edit rights on the source |
-| `memory_unlink` | `POST /links/remove` | Remove one typed link |
-| `memory_graph` | `GET /graph` | Readable memory link graph, with optional scope, project, relation, and cap |
+| `memory_search` | `POST /search` | `query`; `kind` (the 7 kinds or `handoff`); `limit` 1–20, default 5 |
+| `memory_get` | `POST /get` | `ids` 1–10 (duplicates answered once) |
+| `memory_save` | `POST /remember` | `kind`, `title` ≤80, `summary` ≤240; `reason`, `fields`, `evidence[]`, `supersedes`, `contradicts`, `scope` |
+| `memory_feedback` | `POST /feedback` | `id`, `vote` = `helpful` \| `wrong` |
+| `memory_forget` | `POST /forget` | `id` |
 
-Project tools run the same routes as the web console, with the same
-account scope. Their behavior is owned by the contract named here:
+`reason` is required for every kind except `note`; the server answers the one-line error
+`reason: required for <kind>`. A correction is a save with `supersedes=<old id>`, allowed on the
+caller's own memory or a project memory of the same project; a declared contradiction, for a memory
+the caller cannot replace, is `contradicts=<id>`. Nothing infers either. `memory_forget` erases a memory the caller
+owns and is described in its own schema only, not in the instruction text.
 
-| Tool | Owner |
-| --- | --- |
-| `memory_project_list`, `memory_project_register`, `memory_project_memories`, `memory_project_freshness` | [CM-CONTRACT-009](project-layer4.md) |
-| `memory_project_members`, `memory_project_verify`, `memory_delete` | [CM-CONTRACT-009](project-layer4.md) |
+**Quality.** An agent save that is too thin to keep is refused with `400 {code: "quality", error: <one line>}`;
+the agent fixes its own save and retries. First failing rule wins: `title: use 8-80 characters that name the
+knowledge`; `summary: use 20-240 characters saying what is true`; `summary: repeats the title; say what is true in
+1-3 sentences`; `reason: say why this is true or was chosen (10+ characters)` (every kind but `note`);
+`fields.fix: say how the gotcha was fixed`; `fields.steps: list at least 2 ordered steps`. System saves
+(distillation, promotion) are built to pass and skip the check.
 
-Removed with the local-store mode: `memory_sessions` (it listed the file store's unscoped
-sessions), `memory_account_bootstrap` and `memory_account_register` (account creation is a
-web action), and `memory_project_team_remove` (member removal is web-only; a device token is
-`403`, so the tool would only invite retries). Since 2026-11-16 there is no invite, team
-member add or member removal at all, so `memory_project_invite` and
-`memory_project_team_add` are gone too; a teammate joins a project by capturing in a checkout
-whose `.cairn/project.json` names it ([project-layer4](project-layer4.md)). `cairn init`, which
-writes that file, is a CLI command only. `memory_diagnose` returns the lifecycle
-summary of `GET /diagnose`, not the earlier local storage counts. `memory_project_list` is
-new: an agent needs a project id before saving project memory. Argument names are the
-camelCase names of the REST bodies; path ids (`projectId`, `memoryId`) are percent-encoded
-into the route.
+**Default scope** (server-chosen when `scope` is omitted): `preference` and `note` are `personal`; every other
+kind is `project` when the request context names a project the person belongs to, else `personal`; `global`
+only when the agent asks.
 
-Tool results include a text content block and `structuredContent`. A failed call, including a
-server `4xx`, is returned as a tool result with `isError: true` and the server's message;
-malformed JSON-RPC requests and unknown tools or protocol methods use JSON-RPC errors. A tool
-checks its required arguments before the request.
+Removed in 0.1.6: every other tool (recall, context, reflect, smart-search, why-changed, resume,
+unresolved, session, link, project, list, graph, export, diagnose, delete, lesson). `kind=decision`
+replaces why-changed and `kind=handoff` replaces resume.
 
-## Agent-facing results (v0.1.5)
+## Results
 
-`structuredContent` is always a JSON object. A tool whose REST body is an array
-is wrapped, including when the array is empty:
+One channel: `content[0].text` is the server's compact JSON. There is no second structured channel and
+no wrapper keys. A failed call, including a server 4xx, is `{"isError":true,"content":[{"type":"text","text":<message>}]}`.
+A tool checks its required keys before the request; malformed JSON-RPC and unknown tools use JSON-RPC errors.
 
-| Tool | Object key |
-| --- | --- |
-| `memory_list`, `memory_project_memories` | `memories` |
-| `memory_project_list` | `projects` |
-| `memory_project_members` | `members` |
-| `memory_project_freshness` | `freshness` |
-| `memory_similarity_reviews` | `reviews` |
-| `memory_search`, `memory_smart_search` | `results` |
-
-`initialize.serverInfo` is `name: cairn-memory`, `title: Cairn`. The shared
-instruction text says these are Cairn tools. Protocol names stay as in the
-table above, including `memory_save` and `memory_get`. OpenCode names a tool
-`<server>_<tool>` ([Names](https://opencode.ai/docs/mcp-servers/#names)); Cairn's
-server key is `cairn`, so the host calls `cairn_memory_save`. Renaming the
-protocol tools is not required. The MCP schema requires `structuredContent` to
-be an object ([SEP-2106](https://modelcontextprotocol.io/seps/2106-json-schema-2020-12)).
-
-`memory_save` and `memory_lesson_save` return this receipt on both channels.
-The text is compact JSON of the same object. Errors stay errors.
+`memory_search` → `{"results":[Card],"more":n}`, `more` omitted at 0. `Card` is
+`{id, kind, title, summary, score}` plus `status:"stale"` only for a stale memory (it stays in
+results, ranked lower); `score` has 3 decimals, the top card is `1.0`.
 
 ```json
-{"memory_id":"mem-1","kind":"gotcha","scope":"personal","status":"active"}
+{"results":[{"id":"mem_…","kind":"decision","title":"Use Postgres SKIP LOCKED for the job queue","summary":"Background jobs run …","score":1.0}],"more":3}
 ```
 
-`memory_get` returns the stored record, including content, provenance, and
-lifecycle, with empty fields left in place. `memory_export` is the same lossless
-bundle the REST route returns. Both use compact JSON text. The CLI still prints
-pretty server JSON for every command, including save, search, and export.
+`memory_get` → `{"memories":[Record],"missing":[id]}` in request order; hidden and unknown ids go to
+`missing`. `Record` is `{id, kind, scope, status, title, summary, reason?, fields?, evidence?, links?, branch?, updated_at}`
+with empty values omitted. Only this call and search count a memory as fetched.
 
-`memory_search`, `memory_smart_search`, `memory_recall`, `memory_context`, and
-`memory_reflect` default to short cards on both channels. A search array becomes
-`{"results":[...]}`. A context pack keeps `query`, `results`, `omitted_count`,
-`omitted_memory_ids`, and `recovery_hint` (null when there is no hint). Reflect
-still adds `mode` and `note` and still drops the two omission fields it already
-dropped. On a default card, `title` is at most 120 UTF-8 bytes and `summary` at
-most 240. A longer value is cut on a character boundary and ends with `…`, and
-that mark counts toward the cap. `expanded`, `memory_get`, REST, and the CLI
-keep the stored text.
+`memory_save` → `{"id","status","deduplicated"}`. An identical save from the same owner returns the
+existing id with `deduplicated:true` and merges new evidence; a save that matches a forgotten memory is an
+error. `memory_feedback` → `{"id","status"}`: `wrong` votes from two different people, or one from the owner, make it `stale`; a repeat vote by the same person changes nothing.
+`memory_forget` → `{"id","status":"forgotten"}`.
 
-```json
-{"results":[{"memory_id":"mem-1","kind":"gotcha","scope":"project","title":"Hook auth","summary":"401 names the config file.","score":0.5}]}
+Search applies the relevance floor and scope rules of [CM-CONTRACT-006](continuity-v1.md); no external
+model API is used. Record shape and visibility: [project-layer4](project-layer4.md#memory-scopes-and-record).
+
+## CLI
+
+```
+cairn setup <url> [--agent claude|codex|opencode] [--remove]   cairn init [name | --rename name]
+cairn doctor     cairn mcp     cairn update [--check]     cairn hook <Event> …     cairn --version
+cairn search <query> [--kind k] [--limit n]     cairn get <id>...     cairn save [<json>|-]
+cairn feedback <id> helpful|wrong               cairn forget <id>
 ```
 
-`expanded: true` is the only wider option. It is removed before the REST call.
-Each hit then keeps useful recall fields: the card, `project_id`, `status`,
-`pinned`, `importance`, `reason`, `details`, typed fields, `evidence`,
-relationships, and the stale and contradiction signals. It omits `lifecycle`,
-`source_event_ids`, the scope-copied `source`, and `content`. An empty array or
-empty object on that hit is omitted (`applies_to`, `tags`, `entities`,
-`alternatives`, `steps`, and the other optional lists). False, zero, and a
-non-empty collection stay. Required empty collections stay elsewhere: `results`,
-`omitted_memory_ids`, and graph `nodes` and `edges`. `memory_why_changed`,
-`memory_resume`, and `memory_unresolved` keep full hits, including an empty
-relationship list. Authorization is unchanged. Search and context also apply
-the capture filter and relevance floor in
-[CM-CONTRACT-006](continuity-v1.md#capture-eligibility-v015).
-
-Other MCP objects use compact JSON and omit nulls and empty strings on both
-channels. They keep false, zero, empty arrays and objects, `status`, and flags
-such as `truncated`, `accepted`, and `duplicate`.
-
-`memory_graph` and `memory_similarity_reviews` keep JSON `structuredContent`,
-with those empty values omitted. Their text is tab-delimited TOON
-([spec 4.4](https://github.com/toon-format/spec/blob/main/SPEC.md)). Null
-`project_id` and other null columns stay in that text so the table stays
-rectangular. An empty review list is `reviews: []`. This encoder is only those
-two shapes. `scripts/cairn_instructions.txt` and the session brief are unchanged
-apart from the Cairn name sentence.
-
-Capture and explicit-save tools accept the nested Layer 1 `lifecycle` object
-defined in [CM-CONTRACT-004](lifecycle-v1.md).
-
-## Scoped records and CLI
-
-The flat common and per-type fields, visibility and authority rules are defined in [the scope contract](project-layer4.md#memory-scopes-and-record). MCP `memory_save` and `memory_lesson_save` expose every field and require `scope`, `title`, `summary`, `reason`. The lesson alias defaults `kind` to `gotcha`; an explicit kind is preserved. Project saves in an initialized checkout fill `context.project_id` from its committed file when absent. Scope is always explicit.
-
-CLI `cairn save '<JSON-record>'` and `cairn lesson '<JSON-record>'` accept the same fields, or read one JSON object from stdin when no argument is supplied. `cairn memories` lists readable notes; `cairn memory <id>` prints a complete record. The CLI prints the server's fields. MCP shapes are in [Agent-facing results](#agent-facing-results-v015).
-
-```sh
-cairn save '{"scope":"personal","kind":"preference","title":"Concise replies","summary":"Answer in one paragraph.","reason":"Reduce reading time.","preference":"concise","example":"one paragraph"}'
-cairn memories
-cairn memory memory-id
-```
-
-Other commands retain `start`, `capture`, `end`, `search`, `context`, `why-changed`, `resume`, `unresolved`, `forget`, `correct`, `contradict`, `supersede`, `reviews`, `review-dismiss`, `review-contradict`, `review-supersede`, `export`, `import`, `project-list`, `project-members`, `project-memories`, `project-verify`, `project-freshness`, `delete-memory` and `init`. Account/device management remains in the web console. `memory_project_memories` includes raw captures and summaries. `memory_project_verify`, correct and delete retain project author/owner checks; global correct/delete allow author or admin. `memory_promote`, `promote`, `promote-preview` and private per-repository lists are removed.
-
-All search/context routes use [hybrid recall](continuity-v1.md#hybrid-recall-v014); no external model API is used.
-
-## Layer 2 context filters
-
-The query tools `memory_recall`, `memory_context`, `memory_reflect`,
-`memory_smart_search`, and `memory_search` accept optional `sessionId`,
-`context`, and `includeCaptures` arguments. `includeCaptures` defaults to false.
-`memory_why_changed` accepts it too. Resume and unresolved do not. Scope
-behavior, capture eligibility, and the relevance floor are defined in
-[CM-CONTRACT-006](continuity-v1.md). CLI `cairn search` and `cairn context`
-take `--include-captures` for the same opt-in.
-
-## Deliberate limitations
-
-- The client needs a running server and a device token created in the web console; there is
-  no offline or local-file mode, and the CLI and MCP no longer create accounts.
-- `memory_observe` on the PostgreSQL server is a device-token sync push (it records a sync
-  event); on the file store it accepts either credential. Both return the same
-  `{accepted, duplicate, observation}` shape.
-- `memory_reflect` is retrieval-only until a provider-backed reflection
-  lifecycle exists.
-- The adapter supports the compatibility handshake used by the current Layer 1
-  baseline; modern protocol-era discovery is a later transport task.
-- The tool schemas are Cairn-owned compatibility schemas. Exact upstream
-  argument and result parity remains a verification task.
+The five verbs call the same tools and print the same compact JSON plus a newline; `save` reads one
+`SaveInput` object from its argument or stdin. `doctor` is read-only and prints `ok|warn|fail  <check>  <detail>`
+per check (config, server, semantic, device, project, agents, hooks), exiting 1 on any `fail`. `hook` runs the
+capture and injection hook ([hook contract](./hook-v1.md)). Account and device management stay in the web console.
 
 ## Evidence
 
-- `crates/client/src/tools.rs` holds the tool table and route mapping;
-  `crates/client/src/mcp.rs` holds the protocol and its unit tests;
-  `crates/client/src/lib.rs` holds the configuration and HTTP client with their unit tests
-  (file mode, environment override, loopback-only `http`, redirect refusal, token never in
-  output or errors).
-- `crates/client/tests/agent_flow.rs` runs the real `cairn` binary and `cairn mcp` against
-  the file-store router (capture, recall, session, scoped save, a `403` on web-only
-  routes, revocation) and, as an ignored test with `CAIRN_TEST_DATABASE_URL`, against the
-  PostgreSQL router.
-- `scripts/smoke_mcp.sh` drives `cairn mcp` against a spawned `cairn-server`.
-  `scripts/smoke_full_flow.sh` drives the CLI, including capture, scoped save,
-  project visibility, and same-account export/import, against the same kind of server.
-
-## Agent guidance (v0.1.4)
-
-MCP `initialize.instructions` returns the same compact text used by hook and
-instruction-file integration (`scripts/cairn_instructions.txt`, at most 2048
-UTF-8 bytes). It tells the agent when to recall/save, choose project/personal/global
-scope explicitly, supply title/summary/reason and fill known per-type fields and
-evidence. Save/lesson tool descriptions repeat their required fields and scope
-visibility; missing causal fields must never be invented. Tool schemas and REST
-validation still enforce required fields. This is agent guidance, not a
-server-side memory-writing LLM. Setup, removal, per-agent capabilities and limits
-are owned by [the hook contract](hook-v1.md#agent-instructions-and-setup-v014).
+- `crates/client/src/tools.rs` (table, size, lint and snapshot tests), `mcp.rs` (protocol), `present.rs`
+  (result envelope), `doctor.rs`, `hook.rs`, `lib.rs` (configuration and HTTP client).
+- `crates/client/tests/agent_flow.rs` runs the real binary and `cairn mcp` against the server router on a
+  `TestDb` schema; `agent_behaviour.rs` holds the four scripted agent scenarios. Both need
+  `CAIRN_TEST_DATABASE_URL`.
+- `scripts/smoke_mcp.sh` drives `cairn mcp` against a spawned `cairn-server`; `scripts/bench.py` measures
+  sizes and recall.

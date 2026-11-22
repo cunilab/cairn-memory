@@ -1,0 +1,23 @@
+[package]
+name = "cairn-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PostgreSQL persistence for the Cairn Memory 0.1.6 model (schema `cairn`)"
+
+[features]
+# Generates the web console's TypeScript types (docs/specs/0.1.6-step7-web-hardening.md W4).
+ts = ["dep:ts-rs", "cairn-core/ts"]
+# `TestDb`: one schema per test inside CAIRN_TEST_DATABASE_URL.
+testing = []
+
+[dependencies]
+cairn-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+ts-rs = { workspace = true, optional = true }
+sqlx.workspace = true
+
+[dev-dependencies]
+cairn-store = { path = ".", features = ["testing"] }
+tokio.workspace = true

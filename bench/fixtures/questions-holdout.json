@@ -1,0 +1,22 @@
+{
+  "_comment": "Holdout recall questions for scripts/bench.py, written against corpus.json before any step 5 ranking change. Reported next to the main set, never used to tune it. Same format as questions.json: every question is a 'paraphrase' that shares no content word with its gold memory (the harness verifies this); 'weak' queries have no gold and are expected to return zero hits. Kinds covered: decision, gotcha, rule, procedure, fact.",
+  "questions": [
+    {"id": "h01", "kind": "paraphrase", "query": "how are people signing in on the website and kicked out immediately", "gold": ["dec-auth-sessions-cookies"]},
+    {"id": "h02", "kind": "paraphrase", "query": "how do we keep users uninterrupted while machines are swapped sequentially", "gold": ["dec-deploy-rolling-drain"]},
+    {"id": "h03", "kind": "paraphrase", "query": "what tool prints our billing documents", "gold": ["dec-pdf-typst"]},
+    {"id": "h04", "kind": "paraphrase", "query": "newly minted links get denied because one machine's watch was ahead", "gold": ["got-upload-clock-skew"]},
+    {"id": "h05", "kind": "paraphrase", "query": "program refuses to launch on my newer notebook computer", "gold": ["got-docker-arm-build"]},
+    {"id": "h06", "kind": "paraphrase", "query": "where may passwords and keys live in our repo", "gold": ["rule-secrets-env"]},
+    {"id": "h07", "kind": "paraphrase", "query": "anonymous URLs must state how much traffic they tolerate", "gold": ["rule-rate-limits-public"]},
+    {"id": "h08", "kind": "paraphrase", "query": "swapping the access phrase for our datastore with no outage", "gold": ["proc-rotate-db-password"]},
+    {"id": "h09", "kind": "paraphrase", "query": "how long are purchase histories stored", "gold": ["fact-retention"]},
+    {"id": "h10", "kind": "paraphrase", "query": "which release of our data store software is deployed", "gold": ["fact-pg-version"]}
+  ],
+  "weak_queries": [
+    {"id": "hw1", "query": "volcanic eruption evacuation plan"},
+    {"id": "hw2", "query": "knitting pattern for a wool scarf"},
+    {"id": "hw3", "query": "ancient Roman aqueduct engineering"},
+    {"id": "hw4", "query": "marathon training schedule for beginners"},
+    {"id": "hw5", "query": "fix a leaking kitchen faucet"}
+  ]
+}

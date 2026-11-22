@@ -44,7 +44,12 @@ def validate_markdown(root: Path) -> list[str]:
                     ids[document_id] = str(relative)
                 title = TITLE_PATTERN.search(header)
                 heading = H1_PATTERN.search(parts[2])
-                if title is None or heading is None or title.group(1) != heading.group(1).strip():
+                # Step specs extend the H1 after " — ", so only the part before it must match.
+                if (
+                    title is None
+                    or heading is None
+                    or title.group(1).split(" — ")[0] != heading.group(1).strip().split(" — ")[0]
+                ):
                     errors.append(f"{relative}: title does not match the H1")
 
         for target in LINK_PATTERN.findall(text):
@@ -60,7 +65,7 @@ def validate_markdown(root: Path) -> list[str]:
 
 def validate_fixtures(root: Path) -> list[str]:
     errors: list[str] = []
-    fixture_dir = root / "fixtures" / "phase-0"
+    fixture_dir = root / "docs" / "fixtures" / "phase-0"
     count = 0
 
     for path in sorted(fixture_dir.rglob("*.jsonl")):

@@ -37,7 +37,7 @@ Status describes the document, not the software. A `draft` document may describe
 | Product purpose, users, collaboration model, goals, and boundaries | [`product.md`](./product.md) |
 | Product and rewrite phases and milestone outcomes | [`roadmap.md`](./roadmap.md) |
 | System structure, data ownership, and flows | [`architecture.md`](./architecture.md) |
-| Rationale for expensive or hard-to-reverse choices | [`adr/`](./adr/) |
+| Rationale for expensive or hard-to-reverse choices | [`adr/`](./adr) |
 | Feature behavior and acceptance criteria | `specs/` documents |
 | Upstream public contracts and compatibility classification | `contracts/` documents |
 | Pass/fail checks and recorded results | `evidence.md` |

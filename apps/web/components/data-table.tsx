@@ -45,6 +45,8 @@ type DataTableProps<T> = {
   pageSize?: number;
   toolbar?: ReactNode;
   getRowId?: (row: T) => string;
+  /** False when the caller filters (for example from the URL) and the box would duplicate it. */
+  searchable?: boolean;
 };
 
 /** Sortable, filterable, paged table (shadcn data-table pattern on TanStack Table). */
@@ -58,6 +60,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
           label={props.label}
           filterPlaceholder={props.filterPlaceholder}
           empty={props.empty}
+          searchable={props.searchable}
         />
       }
     >
@@ -70,20 +73,23 @@ function DataTablePending({
   label,
   filterPlaceholder,
   empty,
-}: Pick<DataTableProps<unknown>, "label" | "filterPlaceholder" | "empty">) {
+  searchable = true,
+}: Pick<DataTableProps<unknown>, "label" | "filterPlaceholder" | "empty" | "searchable">) {
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <InputGroup className="w-full sm:max-w-xs">
-        <InputGroupAddon>
-          <SearchIcon />
-        </InputGroupAddon>
-        <InputGroupInput
-          type="search"
-          aria-label={`Filter ${label}`}
-          placeholder={filterPlaceholder}
-          disabled
-        />
-      </InputGroup>
+      {searchable ? (
+        <InputGroup className="w-full sm:max-w-xs">
+          <InputGroupAddon>
+            <SearchIcon />
+          </InputGroupAddon>
+          <InputGroupInput
+            type="search"
+            aria-label={`Filter ${label}`}
+            placeholder={filterPlaceholder}
+            disabled
+          />
+        </InputGroup>
+      ) : null}
       <div className="min-w-0 overflow-hidden rounded-lg border bg-card">{empty}</div>
     </div>
   );
@@ -99,6 +105,7 @@ function DataTableReady<T>({
   pageSize = 10,
   toolbar,
   getRowId,
+  searchable = true,
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>(initialSort);
   const [filter, setFilter] = useState("");
@@ -124,21 +131,25 @@ function DataTableReady<T>({
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <InputGroup className="w-full sm:max-w-xs">
-          <InputGroupAddon>
-            <SearchIcon />
-          </InputGroupAddon>
-          <InputGroupInput
-            type="search"
-            aria-label={`Filter ${label}`}
-            placeholder={filterPlaceholder}
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-          />
-        </InputGroup>
-        {toolbar}
-      </div>
+      {searchable || toolbar ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {searchable ? (
+            <InputGroup className="w-full sm:max-w-xs">
+              <InputGroupAddon>
+                <SearchIcon />
+              </InputGroupAddon>
+              <InputGroupInput
+                type="search"
+                aria-label={`Filter ${label}`}
+                placeholder={filterPlaceholder}
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+              />
+            </InputGroup>
+          ) : null}
+          {toolbar}
+        </div>
+      ) : null}
       <div className="min-w-0 overflow-hidden rounded-lg border bg-card">
         <Table aria-label={label}>
           <TableHeader>
@@ -149,6 +160,7 @@ function DataTableReady<T>({
                   return (
                     <TableHead
                       key={header.id}
+                      scope="col"
                       aria-sort={
                         sorted === "asc" ? "ascending" : sorted === "desc" ? "descending" : undefined
                       }

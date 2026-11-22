@@ -3,15 +3,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  ActivityIcon,
+  BrainIcon,
+  DownloadIcon,
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
-  ListTodoIcon,
+  LockKeyholeIcon,
   LogOutIcon,
   MonitorIcon,
   MoonIcon,
+  SettingsIcon,
   SunIcon,
-  UsersIcon,
+  WaypointsIcon,
 } from "lucide-react";
 import {
   Command,
@@ -23,12 +27,22 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
-import { useAccount } from "@/hooks/use-account";
 import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
+import { toast } from "sonner";
 import { cairn } from "@/lib/cairn";
+import { downloadExport } from "@/lib/export";
 import { THEMES } from "@/lib/theme";
-import type { ListedProject } from "@/lib/types";
+import type { ProjectView } from "@/lib/generated/ProjectView";
+
+const PAGES = [
+  { href: "/dashboard", label: "Dashboard", keywords: "overview home", icon: LayoutDashboardIcon },
+  { href: "/memories", label: "Memories", keywords: "search list", icon: BrainIcon },
+  { href: "/activity", label: "Activity", keywords: "timeline audit jobs", icon: ActivityIcon },
+  { href: "/projects", label: "Projects", keywords: "repositories branches", icon: FolderIcon },
+  { href: "/graph", label: "Graph", keywords: "links", icon: WaypointsIcon },
+  { href: "/settings", label: "Settings", keywords: "devices tokens accounts password", icon: SettingsIcon },
+];
 
 const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
@@ -41,10 +55,9 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const router = useRouter();
-  const account = useAccount();
   const logout = useLogout();
   const [, setTheme] = useTheme();
-  const [projects, setProjects] = useState<ListedProject[]>([]);
+  const [projects, setProjects] = useState<ProjectView[]>([]);
   const loaded = useRef(false);
 
   useEffect(() => {
@@ -63,7 +76,7 @@ export function CommandPalette({
       return;
     }
     loaded.current = true;
-    cairn<ListedProject[]>("projects")
+    cairn<ProjectView[]>("projects")
       .then(setProjects)
       .catch(() => {
         loaded.current = false;
@@ -87,30 +100,35 @@ export function CommandPalette({
       <CommandList>
         <CommandEmpty>Nothing matches.</CommandEmpty>
         <CommandGroup heading="Pages">
-          <CommandItem value="overview dashboard" onSelect={() => go("/dashboard")}>
-            <LayoutDashboardIcon />
-            Overview
+          {PAGES.map(({ href, label, keywords, icon: Icon }) => (
+            <CommandItem key={href} value={`${label} ${keywords}`} onSelect={() => go(href)}>
+              <Icon />
+              {label}
+            </CommandItem>
+          ))}
+        </CommandGroup>
+        <CommandGroup heading="Actions">
+          <CommandItem
+            value="export memories download"
+            onSelect={() => {
+              onOpenChange(false);
+              downloadExport().then(
+                () => toast.success("Export ready"),
+                (cause: unknown) => toast.error(cause instanceof Error ? cause.message : "Could not export."),
+              );
+            }}
+          >
+            <DownloadIcon />
+            Export memories
           </CommandItem>
-          <CommandItem value="projects" onSelect={() => go("/projects")}>
-            <FolderIcon />
-            Projects
-          </CommandItem>
-          <CommandItem value="devices tokens" onSelect={() => go("/devices")}>
+          <CommandItem value="create device token setup agent" onSelect={() => go("/settings?tab=devices&create=1")}>
             <KeyRoundIcon />
-            Devices
+            Create device token
           </CommandItem>
-          {account?.is_admin ? (
-            <>
-              <CommandItem value="accounts users" onSelect={() => go("/accounts")}>
-                <UsersIcon />
-                Accounts
-              </CommandItem>
-              <CommandItem value="jobs queue" onSelect={() => go("/jobs")}>
-                <ListTodoIcon />
-                Jobs
-              </CommandItem>
-            </>
-          ) : null}
+          <CommandItem value="change password" onSelect={() => go("/settings?tab=account")}>
+            <LockKeyholeIcon />
+            Change password
+          </CommandItem>
         </CommandGroup>
         {projects.length > 0 ? (
           <CommandGroup heading="Projects">

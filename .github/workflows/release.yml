@@ -1,7 +1,7 @@
 # Publishes a GitHub Release when a vX.Y.Z tag is pushed. The tag must equal the workspace
 # version and point at a commit on main. Assets are raw binaries (no archives) so
 # `cairn update` needs no unpacking: cairn-<target>[.exe], cairn-server-<target>[.exe],
-# cairn_hook.py, cairn_outbox.py, and SHA256SUMS over all of them. The image jobs then build
+# and SHA256SUMS over all of them, plus three legacy stubs (release/legacy-update-stubs) that a 0.1.5 `cairn update` requires. The image jobs then build
 # each platform natively and the manifest jobs publish ghcr.io/cunilab/cairn-memory-server and
 # cairn-memory-web (vX.Y.Z and latest, linux/amd64 and linux/arm64).
 name: Release
@@ -92,10 +92,14 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Add hook scripts and checksums
+      # An installed 0.1.5 `cairn update` downloads these three assets before it swaps the binary
+      # and aborts if one is missing. They are stubs; 0.1.6 deletes them on the next setup.
+      # scripts/check_update_assets.py (CI, Documentation validation) keeps this list honest.
+      - name: Add legacy update stubs
+        run: cp release/legacy-update-stubs/* dist/
+      - name: Add checksums
         working-directory: dist
         run: |
-          cp ../scripts/cairn_hook.py ../scripts/cairn_outbox.py ../scripts/cairn_instructions.txt .
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS .
           cat SHA256SUMS
@@ -104,6 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          **0.1.6 is a breaking release.** It needs a fresh PostgreSQL database (there is no migration from 0.1.5; the server refuses to start on an old one, so existing data is not carried over), the server and every client must be upgraded together, and each machine must re-run `cairn setup <server-url> --agent claude|codex|opencode` after updating. The assets `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt` are stubs that only let a 0.1.5 `cairn update` finish. See docs/release-notes-0.1.6.md.
+
           Linux CLI assets remain static musl binaries. Linux server assets use `*-unknown-linux-gnu` and require a glibc system compatible with Ubuntu 24.04 (glibc 2.39 or newer); Alpine/musl is unsupported. The multi-arch server image uses Debian trixie slim and includes the pinned local MiniLM model. PostgreSQL requires pgvector. Standalone servers must provision the model directory to enable semantic search; without it, lexical/entity/link recall remains available. See the current upgrade notes in the repository release document before upgrading, including the historical pre-0.1.4 store warning when it still applies.
           NOTES
           gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes

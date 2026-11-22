@@ -126,12 +126,12 @@ defines the bounded grammar.
   and sibling notes on both stores. Explicit source-event forgetting suppresses
   every derivation. This implements the owner's rule that hiding one item
   must not silently remove other shared knowledge; see the
-  [lifecycle contract](../contracts/lifecycle-v1.md#forgetting-shared-knowledge).
+  [lifecycle contract](../archive/contracts/lifecycle-v1.md#forgetting-shared-knowledge).
 
 ### Stage 3 contract decisions (2026-11-17)
 
 The owner approved `fastembed` 7.7.1 with minimal CPU ONNX features and the
-SHA-verified FP32 MiniLM artifact pinned in `models/minilm.json` (Apache-2.0).
+SHA-verified FP32 MiniLM artifact pinned in `crates/server/assets/minilm/minilm.json` (Apache-2.0).
 The production image bakes it in; standalone servers load a provisioned directory.
 Runtime model downloads/external embedding APIs are disabled. Model load failure
 preserves lexical/entity/link recall and reports semantic search disabled.
@@ -222,7 +222,7 @@ and replacing its votes so concurrent voters cannot overwrite each other.
 Summary regeneration locks and carries the same memory's reinforcement and
 feedback state into the replacement. Imports clear votes and recompute their
 counts in both stores: a backup cannot authenticate a voter. The
-[export contract](../contracts/export-v1.md#import-behavior) owns that rule.
+[export contract](../archive/contracts/export-v1.md#import-behavior) owns that rule.
 
 ### Stage 6 contract decisions (2026-11-17)
 
@@ -474,6 +474,37 @@ when the file starts with the Cairn marker, and it removes a config entry only
 when the package path is the retired `plugin/cairn.js` asset with the same
 marker. OpenCode 2.1.4 loaded the directory. Its plugin list stayed empty, and
 session creation did not emit a session event.
+
+### v0.1.6 explicit-save identity and review cleanup (2026-11-19)
+
+The console Memories page loads records by default and no longer reads the
+similarity review queue. A small on-demand control fetches open reviews and
+shows only `near_duplicate` rows; historical `possible_conflict` rows remain
+stored and readable through the API but are not presented there. Review
+actions stay explicit and unchanged.
+
+The background similarity scan no longer creates a review from cosine alone
+below 0.75. It still publishes `near_duplicate` suggestions at 0.75 and above.
+`possible_conflict` remains in the stored/API shape for historical rows and
+compatibility, and neither band merges, hides, or replaces a memory. Cosine is
+a suggestion, never a decision.
+
+An explicit `memory_save` or `memory_lesson_save` reuses its existing record
+only when the authenticated owner, scope, project, kind, lifecycle, context,
+`supersedes`, and every meaning-bearing field match after redaction. A
+temporary-retention expiry is normalized because it is generated per save; a
+durable explicit expiry is compared. Evidence is excluded from that identity
+and merged instead. Generated source event ids
+and stored provenance are preserved. An identical retry with no new evidence
+is a no-op, including `changed_at`. Different text, typed fields, owners,
+kinds, scopes, context, lifecycle, or links create a separate record. Forgotten,
+expired, superseded, and live-successor-hidden records are never reused. The
+file store scans the caller's own live records; PostgreSQL serializes equal
+saves with a transaction advisory lock keyed by owner and a SHA-256 identity
+fingerprint, then compares the same identity in Rust. The evidence update
+touches only `record`, `changed_by`, and `changed_at`; no migration or
+re-embedding is needed. The MCP save receipt keeps its four fields. No
+server-side LLM is added.
 
 ## Trust and limits
 

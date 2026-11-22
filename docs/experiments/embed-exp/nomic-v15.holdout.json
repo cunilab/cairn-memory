@@ -1,0 +1,13 @@
+{
+ "tau_s": 0.672,
+ "tau_w": 1.5,
+ "hit5": 0.0,
+ "mrr10": 0.0,
+ "precision5": 0.0,
+ "cards": 9,
+ "paraphrase_hits": 0,
+ "paraphrase_n": 10,
+ "weak_zero": 4,
+ "weak_n": 5,
+ "weak_cards": 5
+}

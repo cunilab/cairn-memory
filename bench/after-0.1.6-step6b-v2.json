@@ -1,0 +1,1432 @@
+{
+  "call_bytes": {
+    "memory_get": {
+      "calls": 4,
+      "max_bytes": 1402,
+      "mean_bytes": 1066,
+      "mean_tokens_est": 266,
+      "min_bytes": 854,
+      "note": "decision, gotcha, procedure, note; one id per call"
+    },
+    "memory_search": {
+      "calls": 43,
+      "max_bytes": 1608,
+      "mean_bytes": 1158,
+      "mean_tokens_est": 290,
+      "min_bytes": 55,
+      "note": "limit 5, mean over the gold questions"
+    },
+    "memory_search_kind_decision": {
+      "calls": 3,
+      "limit": 3,
+      "max_bytes": 324,
+      "mean_bytes": 229,
+      "mean_tokens_est": 57,
+      "min_bytes": 55,
+      "note": "3 queries"
+    },
+    "memory_search_kind_handoff": {
+      "bytes": 55,
+      "limit": 2,
+      "results": 0,
+      "text_channel_bytes": 14,
+      "tokens_est": 14
+    }
+  },
+  "corpus": {
+    "distractors": 2000,
+    "memories": 70,
+    "question_set": "questions-v2.json",
+    "questions": 43,
+    "weak_queries": 14
+  },
+  "fixed_session_cost": {
+    "deferred_hosts_bytes": 2412,
+    "deferred_hosts_tokens_est": 603,
+    "eager_hosts_bytes": 4862,
+    "eager_hosts_tokens_est": 1216,
+    "note": "tools/list (or just names) + initialize.instructions + scripted-session hook injection; excludes retrieval calls"
+  },
+  "label": "unlabelled",
+  "links": {
+    "all_memories": {
+      "durable": 1121,
+      "durable_with_link_ratio": 0.716,
+      "with_link": 803
+    },
+    "durable": 62,
+    "durable_with_link_ratio": 0.839,
+    "note": "fixture corpus durable memories (decision, rule, gotcha, procedure, fact) with >= 1 link of any relation; all_memories adds the distractors",
+    "with_link": 52
+  },
+  "mcp_surface": {
+    "initialize_instructions_bytes": 663,
+    "initialize_instructions_tokens_est": 166,
+    "largest_tools": [
+      [
+        1178,
+        "memory_save"
+      ],
+      [
+        585,
+        "memory_search"
+      ],
+      [
+        279,
+        "memory_feedback"
+      ]
+    ],
+    "tool_count": 5,
+    "tool_names_bytes": 67,
+    "tools_list_bytes": 2517,
+    "tools_list_tokens_est": 629
+  },
+  "per_question_memory_search": [
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-queue-postgres"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dec-queue-postgres"
+      ],
+      "id": "q01",
+      "kind": "direct",
+      "top5": [
+        "dec-queue-postgres",
+        "dis-1003",
+        "dis-1113",
+        "dis-0163",
+        "dis-0659"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 10,
+      "gold": [
+        "dec-api-versioning-header"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [],
+      "id": "q02",
+      "kind": "direct",
+      "top5": [
+        "dis-0293",
+        "dis-1457",
+        "dis-0585",
+        "dis-0215",
+        "dis-1479"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-cors-preflight"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-cors-preflight"
+      ],
+      "id": "q03",
+      "kind": "direct",
+      "top5": [
+        "got-cors-preflight",
+        "dec-frontend-spa"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 7,
+      "gold": [
+        "proc-release"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [],
+      "id": "q04",
+      "kind": "direct",
+      "top5": [
+        "dis-1031",
+        "dis-0293",
+        "dis-1479",
+        "dis-0085",
+        "dis-1651"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-max-upload"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-max-upload"
+      ],
+      "id": "q05",
+      "kind": "direct",
+      "top5": [
+        "fact-max-upload",
+        "dis-0527",
+        "dis-1287",
+        "dis-0983",
+        "dis-0221"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "rule-pr-small"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "rule-pr-small"
+      ],
+      "id": "q06",
+      "kind": "direct",
+      "top5": [
+        "rule-commit-conventional",
+        "rule-pr-small",
+        "dis-1817",
+        "dis-1647",
+        "dis-1517"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-timezone-report"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-timezone-report"
+      ],
+      "id": "q07",
+      "kind": "direct",
+      "top5": [
+        "got-timezone-report",
+        "dis-1857",
+        "dis-1433",
+        "dis-1263",
+        "dis-1925"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-payment-provider"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-payment-provider"
+      ],
+      "id": "q08",
+      "kind": "direct",
+      "top5": [
+        "fact-payment-provider",
+        "rule-idempotency-keys",
+        "dup-idempotency-header",
+        "dup-webhook-replay",
+        "rule-log-no-pii"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-tokio-blocking"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-tokio-blocking"
+      ],
+      "id": "q09",
+      "kind": "direct",
+      "top5": [
+        "got-tokio-blocking",
+        "dis-1535",
+        "dis-1545",
+        "dis-0687",
+        "dis-0751"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "proc-restore-backup"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "proc-restore-backup"
+      ],
+      "id": "q10",
+      "kind": "direct",
+      "top5": [
+        "dis-1525",
+        "proc-restore-backup",
+        "proc-add-migration"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "hand-refund-api"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "hand-refund-api"
+      ],
+      "id": "q11",
+      "kind": "direct",
+      "top5": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header",
+        "hand-refund-api"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "sess-typst"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "sess-typst"
+      ],
+      "id": "q12",
+      "kind": "direct",
+      "top5": [
+        "dec-pdf-typst",
+        "got-tokio-blocking",
+        "sess-typst"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 4,
+      "gold": [
+        "rule-feature-flag-cleanup"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "rule-feature-flag-cleanup"
+      ],
+      "id": "q13",
+      "kind": "direct",
+      "top5": [
+        "dis-0929",
+        "dis-0457",
+        "dis-1083",
+        "rule-feature-flag-cleanup",
+        "dis-0261"
+      ]
+    },
+    {
+      "cards": 4,
+      "first_gold_rank_in_10": 4,
+      "gold": [
+        "got-webhook-duplicates"
+      ],
+      "gold_coverage": {
+        "got-webhook-duplicates": 0.0
+      },
+      "gold_in_top5": [
+        "got-webhook-duplicates"
+      ],
+      "id": "q14",
+      "kind": "paraphrase",
+      "top5": [
+        "dup-webhook-replay",
+        "hand-checkout-perf",
+        "dup-idempotency-header",
+        "got-webhook-duplicates"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-money-integer-cents"
+      ],
+      "gold_coverage": {
+        "dec-money-integer-cents": 0.0
+      },
+      "gold_in_top5": [
+        "dec-money-integer-cents"
+      ],
+      "id": "q15",
+      "kind": "paraphrase",
+      "top5": [
+        "dec-money-integer-cents"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "fact-prod-region"
+      ],
+      "gold_coverage": {
+        "fact-prod-region": 0.0
+      },
+      "gold_in_top5": [
+        "fact-prod-region"
+      ],
+      "id": "q16",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-0207",
+        "dis-0441",
+        "fact-prod-region"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 4,
+      "gold": [
+        "fact-oncall"
+      ],
+      "gold_coverage": {
+        "fact-oncall": 0.667
+      },
+      "gold_in_top5": [
+        "fact-oncall"
+      ],
+      "id": "q17",
+      "kind": "paraphrase_stem",
+      "top5": [
+        "dis-1541",
+        "dis-1593",
+        "dis-1267",
+        "fact-oncall",
+        "dis-0109"
+      ]
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-migration-lock"
+      ],
+      "gold_coverage": {
+        "got-migration-lock": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q18",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 4,
+      "first_gold_rank_in_10": 4,
+      "gold": [
+        "got-json-bigint"
+      ],
+      "gold_coverage": {
+        "got-json-bigint": 0.0
+      },
+      "gold_in_top5": [
+        "got-json-bigint"
+      ],
+      "id": "q19",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1503",
+        "dec-money-integer-cents",
+        "dis-0405",
+        "got-json-bigint"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "fact-vat-sync"
+      ],
+      "gold_coverage": {
+        "fact-vat-sync": 0.167
+      },
+      "gold_in_top5": [
+        "fact-vat-sync"
+      ],
+      "id": "q20",
+      "kind": "paraphrase_stem",
+      "top5": [
+        "dis-1633",
+        "fact-vat-sync",
+        "hand-checkout-perf"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-idempotency-header",
+        "rule-idempotency-keys"
+      ],
+      "id": "q21",
+      "kind": "near_duplicate",
+      "top5": [
+        "dup-idempotency-header",
+        "rule-idempotency-keys",
+        "dec-auth-sessions-cookies",
+        "fact-payment-provider",
+        "dis-0925"
+      ]
+    },
+    {
+      "cards": 4,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-log-no-pii",
+        "dup-log-pii"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-log-pii",
+        "rule-log-no-pii"
+      ],
+      "id": "q22",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-log-no-pii",
+        "dup-log-pii",
+        "dis-1749",
+        "dis-0555"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-migration-expand-contract",
+        "rule-migrations-additive"
+      ],
+      "id": "q23",
+      "kind": "near_duplicate",
+      "top5": [
+        "dup-migration-expand-contract",
+        "rule-migrations-additive",
+        "dis-1005",
+        "proc-release",
+        "rule-pr-small"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "got-timeout-pool",
+        "dup-pool-exhaustion"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-pool-exhaustion",
+        "got-timeout-pool"
+      ],
+      "id": "q24",
+      "kind": "near_duplicate",
+      "top5": [
+        "dis-1407",
+        "dup-pool-exhaustion",
+        "got-timeout-pool",
+        "dis-1857",
+        "dis-0669"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ],
+      "id": "q25",
+      "kind": "near_duplicate",
+      "top5": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay",
+        "dup-idempotency-header",
+        "proc-onboard-merchant",
+        "fact-payment-provider"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 2,
+      "gold": [
+        "fact-service-ports"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-service-ports"
+      ],
+      "id": "q26",
+      "kind": "direct",
+      "top5": [
+        "dec-frontend-spa",
+        "fact-service-ports",
+        "got-cors-preflight",
+        "proc-local-setup",
+        "rule-secrets-env"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-commit-conventional"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "rule-commit-conventional"
+      ],
+      "id": "q27",
+      "kind": "direct",
+      "top5": [
+        "rule-commit-conventional",
+        "rule-pr-small",
+        "dis-1645",
+        "dis-1517",
+        "dup-migration-expand-contract"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-test-flaky-time"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-test-flaky-time"
+      ],
+      "id": "q28",
+      "kind": "direct",
+      "top5": [
+        "got-test-flaky-time",
+        "dis-1505",
+        "dis-1635",
+        "dis-1351",
+        "dis-1975"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "proc-add-migration"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "proc-add-migration"
+      ],
+      "id": "q29",
+      "kind": "direct",
+      "top5": [
+        "proc-add-migration",
+        "rule-test-db-isolated",
+        "dis-1449",
+        "got-migration-lock",
+        "rule-migrations-additive"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "proc-onboard-merchant"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "proc-onboard-merchant"
+      ],
+      "id": "q30",
+      "kind": "direct",
+      "top5": [
+        "proc-onboard-merchant",
+        "dis-1665",
+        "dis-1283",
+        "hand-onboarding-wizard",
+        "dis-1095"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": 3,
+      "gold": [
+        "fact-slo"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-slo"
+      ],
+      "id": "q31",
+      "kind": "direct",
+      "top5": [
+        "dec-api-versioning-header",
+        "dis-0497",
+        "fact-slo",
+        "dis-1271",
+        "dis-1737"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-frontend-spa"
+      ],
+      "gold_coverage": {
+        "dec-frontend-spa": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q32",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1521",
+        "dis-1727",
+        "dis-1329",
+        "dis-0559",
+        "dis-1251"
+      ]
+    },
+    {
+      "cards": 4,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-timestamps-utc"
+      ],
+      "gold_coverage": {
+        "dec-timestamps-utc": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q33",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1951",
+        "got-test-flaky-time",
+        "dis-0855",
+        "dis-1387"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "rule-test-db-isolated"
+      ],
+      "gold_coverage": {
+        "rule-test-db-isolated": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q34",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-0179",
+        "dis-1783",
+        "dis-0765",
+        "dis-1945",
+        "dis-1043"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-cargo-cache-ci"
+      ],
+      "gold_coverage": {
+        "got-cargo-cache-ci": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q35",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-0495",
+        "dis-0981",
+        "dis-0403",
+        "dis-1577",
+        "dis-1617"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-pagination-ties"
+      ],
+      "gold_coverage": {
+        "got-pagination-ties": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q36",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1585",
+        "dis-1515",
+        "dis-0603",
+        "dis-0173",
+        "dis-0883"
+      ]
+    },
+    {
+      "cards": 4,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "proc-reindex-search"
+      ],
+      "gold_coverage": {
+        "proc-reindex-search": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q37",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1879",
+        "dis-1329",
+        "dis-1011",
+        "hand-search-trgm"
+      ]
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "rule-no-unwrap-handlers"
+      ],
+      "gold_coverage": {
+        "rule-no-unwrap-handlers": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q38",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-slo"
+      ],
+      "gold_coverage": {
+        "fact-slo": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q39",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-observability-otel"
+      ],
+      "gold_coverage": {
+        "dec-observability-otel": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q40",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-0565",
+        "dis-1587",
+        "dis-1583",
+        "dis-1567",
+        "dis-1927"
+      ]
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-ci-runtime"
+      ],
+      "gold_coverage": {
+        "fact-ci-runtime": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q41",
+      "kind": "paraphrase",
+      "top5": [
+        "dup-idempotency-header",
+        "dis-0083",
+        "dis-0603",
+        "dis-1681",
+        "dis-1129"
+      ]
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-feature-flags-db"
+      ],
+      "gold_coverage": {
+        "dec-feature-flags-db": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q42",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 5,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "dec-email-postmark"
+      ],
+      "gold_coverage": {
+        "dec-email-postmark": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q43",
+      "kind": "paraphrase",
+      "top5": [
+        "dis-1639",
+        "dis-1699",
+        "dis-1593",
+        "dis-1719",
+        "dis-1829"
+      ]
+    }
+  ],
+  "recall": {
+    "memory_search": {
+      "by_kind": {
+        "direct": {
+          "hit5": 0.8947,
+          "n": 19,
+          "precision_at_5": 0.1977,
+          "recall5": 0.8947,
+          "rr": 0.6838
+        },
+        "near_duplicate": {
+          "hit5": 1.0,
+          "n": 5,
+          "precision_at_5": 0.4167,
+          "recall5": 1.0,
+          "rr": 0.9
+        },
+        "paraphrase": {
+          "hit5": 0.2353,
+          "n": 17,
+          "precision_at_5": 0.0727,
+          "recall5": 0.2353,
+          "rr": 0.1078
+        },
+        "paraphrase_stem": {
+          "hit5": 1.0,
+          "n": 2,
+          "precision_at_5": 0.25,
+          "recall5": 1.0,
+          "rr": 0.375
+        }
+      },
+      "bytes_per_call": {
+        "calls": 43,
+        "max_bytes": 1608,
+        "mean_bytes": 1158,
+        "mean_tokens_est": 290,
+        "min_bytes": 55
+      },
+      "cards_returned": 173,
+      "gold_cards_returned": 33,
+      "hit_at_5": 0.6512,
+      "mrr_at_10": 0.4669,
+      "precision_at_5": 0.1908,
+      "questions": 43,
+      "recall_at_5": 0.6512,
+      "text_channel_bytes_per_call": {
+        "calls": 43,
+        "max_bytes": 1475,
+        "mean_bytes": 1043,
+        "mean_tokens_est": 261,
+        "min_bytes": 14
+      }
+    }
+  },
+  "recall_holdout": {
+    "cards_returned": 44,
+    "hit_at_5": 0.1,
+    "mrr_at_10": 0.1167,
+    "per_question": [
+      {
+        "cards": 3,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-auth-sessions-cookies"
+        ],
+        "gold_coverage": {
+          "dec-auth-sessions-cookies": 0.0
+        },
+        "id": "h01",
+        "top5": [
+          "dup-log-pii",
+          "proc-onboard-merchant",
+          "got-upload-clock-skew"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-deploy-rolling-drain"
+        ],
+        "gold_coverage": {
+          "dec-deploy-rolling-drain": 0.0
+        },
+        "id": "h02",
+        "top5": [
+          "dis-0503",
+          "dis-0111",
+          "dis-1103",
+          "dis-1065",
+          "dis-1939"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-pdf-typst"
+        ],
+        "gold_coverage": {
+          "dec-pdf-typst": 0.0
+        },
+        "id": "h03",
+        "top5": [
+          "dis-1673",
+          "dis-0801",
+          "dis-1455",
+          "dis-1537",
+          "dis-1847"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "got-upload-clock-skew"
+        ],
+        "gold_coverage": {
+          "got-upload-clock-skew": 0.0
+        },
+        "id": "h04",
+        "top5": [
+          "dis-1481",
+          "dis-1991",
+          "dup-webhook-replay",
+          "dis-0535",
+          "dis-0947"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "got-docker-arm-build"
+        ],
+        "gold_coverage": {
+          "got-docker-arm-build": 0.0
+        },
+        "id": "h05",
+        "top5": [
+          "dis-1907",
+          "dis-1375",
+          "dis-0961",
+          "dis-0715",
+          "dis-1579"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": 6,
+        "gold": [
+          "rule-secrets-env"
+        ],
+        "gold_coverage": {
+          "rule-secrets-env": 0.0
+        },
+        "id": "h06",
+        "top5": [
+          "dec-auth-sessions-cookies",
+          "dup-idempotency-header",
+          "rule-idempotency-keys",
+          "proc-rotate-db-password",
+          "dis-1137"
+        ]
+      },
+      {
+        "cards": 1,
+        "first_gold_rank_in_10": 1,
+        "gold": [
+          "rule-rate-limits-public"
+        ],
+        "gold_coverage": {
+          "rule-rate-limits-public": 0.143
+        },
+        "id": "h07",
+        "top5": [
+          "rule-rate-limits-public"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "proc-rotate-db-password"
+        ],
+        "gold_coverage": {
+          "proc-rotate-db-password": 0.0
+        },
+        "id": "h08",
+        "top5": [
+          "dis-0821",
+          "dis-0843",
+          "dis-0793",
+          "dis-0587",
+          "dis-0745"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "fact-retention"
+        ],
+        "gold_coverage": {
+          "fact-retention": 0.0
+        },
+        "id": "h09",
+        "top5": [
+          "dis-1783",
+          "dis-1583",
+          "dis-0317",
+          "dis-0427",
+          "dis-1681"
+        ]
+      },
+      {
+        "cards": 5,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "fact-pg-version"
+        ],
+        "gold_coverage": {
+          "fact-pg-version": 0.0
+        },
+        "id": "h10",
+        "top5": [
+          "dis-1609",
+          "dis-1293",
+          "dis-1529",
+          "dis-1485",
+          "dis-0293"
+        ]
+      }
+    ],
+    "precision_at_5": 0.0227,
+    "questions": 10
+  },
+  "semantic_channel": {
+    "embedding_model": "pinned all-MiniLM-L6-v2",
+    "mode": "hybrid (lexical + entity + semantic)",
+    "server_health": "enabled"
+  },
+  "session_injection": {
+    "events": [
+      {
+        "event": "SessionStart",
+        "injected_bytes": 694,
+        "injected_tokens_est": 174,
+        "stdout_bytes": 829
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/jobs/queue.rs",
+        "injected_bytes": 209,
+        "injected_tokens_est": 52,
+        "stdout_bytes": 287
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/billing/money.rs",
+        "injected_bytes": 300,
+        "injected_tokens_est": 75,
+        "stdout_bytes": 379
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/api/handlers/refund.rs",
+        "injected_bytes": 179,
+        "injected_tokens_est": 45,
+        "stdout_bytes": 257
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/orders/list.rs",
+        "injected_bytes": 300,
+        "injected_tokens_est": 75,
+        "stdout_bytes": 379
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/telemetry.rs",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "templates/invoice.typ",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "migrations/0042_add_tax_column.sql",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "console/src/App.tsx",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/payments/webhooks.rs",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "docs/README.md",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PreCompact",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "Stop",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      }
+    ],
+    "note": "SessionStart + 10 Edit PostToolUse on distinct files + PreCompact + Stop, bytes of additionalContext",
+    "post_tool_use_bytes": 988,
+    "session_start_bytes": 694,
+    "total_injected_bytes": 1682,
+    "total_injected_tokens_est": 420
+  },
+  "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
+  "usage_after_hooks_delta": 0,
+  "zero_hit": {
+    "memory_search": {
+      "correct_zero_hit": 7,
+      "queries": 14,
+      "rows": [
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w1",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w2",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w3",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w4",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w5",
+          "top": []
+        },
+        {
+          "bytes": 736,
+          "hits": 3,
+          "id": "w6",
+          "top": [
+            "dis-1983",
+            "dis-1361",
+            "dis-1369"
+          ]
+        },
+        {
+          "bytes": 1419,
+          "hits": 5,
+          "id": "w7",
+          "top": [
+            "fact-payment-provider",
+            "dup-idempotency-header",
+            "rule-idempotency-keys",
+            "dis-1706",
+            "dis-1200"
+          ]
+        },
+        {
+          "bytes": 371,
+          "hits": 1,
+          "id": "w8",
+          "top": [
+            "rule-migrations-additive"
+          ]
+        },
+        {
+          "bytes": 1384,
+          "hits": 5,
+          "id": "w9",
+          "top": [
+            "dec-queue-postgres",
+            "dis-1769",
+            "dis-1931",
+            "dis-0297",
+            "dis-0447"
+          ]
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w10",
+          "top": []
+        },
+        {
+          "bytes": 555,
+          "hits": 2,
+          "id": "w11",
+          "top": [
+            "dec-pdf-typst",
+            "sess-typst"
+          ]
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w12",
+          "top": []
+        },
+        {
+          "bytes": 1081,
+          "hits": 5,
+          "id": "w13",
+          "top": [
+            "dis-1372",
+            "dis-1808",
+            "dis-1862",
+            "dis-1032",
+            "dis-1992"
+          ]
+        },
+        {
+          "bytes": 306,
+          "hits": 1,
+          "id": "w14",
+          "top": [
+            "fact-oncall"
+          ]
+        }
+      ]
+    }
+  },
+  "zero_hit_holdout": {
+    "correct_zero_hit": 2,
+    "queries": 5,
+    "rows": [
+      {
+        "bytes": 455,
+        "hits": 2,
+        "id": "hw1",
+        "top": [
+          "dis-1032",
+          "dis-1862"
+        ]
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw2",
+        "top": []
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw3",
+        "top": []
+      },
+      {
+        "bytes": 1157,
+        "hits": 5,
+        "id": "hw4",
+        "top": [
+          "dis-1361",
+          "dis-1035",
+          "dis-0514",
+          "dis-0560",
+          "dis-0446"
+        ]
+      },
+      {
+        "bytes": 1532,
+        "hits": 5,
+        "id": "hw5",
+        "top": [
+          "dis-1241",
+          "dis-1861",
+          "dis-1119",
+          "dis-1543",
+          "dis-0907"
+        ]
+      }
+    ]
+  }
+}

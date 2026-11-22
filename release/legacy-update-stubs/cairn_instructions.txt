@@ -1,0 +1,1 @@
+Retired in 0.1.6. Run `cairn setup <server-url> --agent claude|codex|opencode`.

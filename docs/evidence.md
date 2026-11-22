@@ -53,8 +53,8 @@ This is **not** evidence that the complete Cairn runtime is implemented. It is e
 | Classify interfaces | Compatibility categories and inventory table in [CM-CONTRACT-001](contracts/agentmemory-baseline.md) | Complete for the initial baseline; full tool/schema diff remains a Layer 1 gate |
 | Define vocabulary | [Product model](product.md#product-model), [Policy](policy.md) | Complete for Phase 0 |
 | Define automatic capture, retention, correction, privacy, and sharing behavior | [Cairn Memory Autopilot and Sharing Policy](policy.md) | Complete as a proposed product policy |
-| Build representative fixtures | [`fixtures/phase-0/`](../fixtures/phase-0/) | Complete as redacted contract fixtures |
-| Create a versioned golden corpus | [`fixtures/phase-0/golden-corpus/v0.1/cases.json`](../fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
+| Build representative fixtures | [`docs/fixtures/phase-0/`](fixtures/phase-0/) | Complete as redacted contract fixtures |
+| Create a versioned golden corpus | [`docs/fixtures/phase-0/golden-corpus/v0.1/cases.json`](fixtures/phase-0/golden-corpus/v0.1/cases.json) | Complete as a baseline; no score is claimed yet |
 | Record unresolved decisions in ADRs | [ADR 0005](adr/0005-phase-0-product-boundaries.md) and [collaborative memory open questions](specs/collaborative-memory.md#open-questions) | Complete; unresolved items remain intentionally open |
 
 ## Source snapshot
@@ -121,7 +121,7 @@ Layer 1 completion checks are now present. Layer 2 is implemented and verified:
 - The embedded viewer is a dependency-free local HTML surface served by `cairn-server`; `apps/web` is the first Next.js console and the viewer remains.
 - The CLI and MCP no longer open a store file or take an account token. `cargo test -p cairn-client` passed on 2026-11-15 (15 unit tests and 5 integration tests in `crates/client/tests/agent_flow.rs`, which run the real `cairn` binary and `cairn mcp` against the file-store router; the PostgreSQL case is ignored without `CAIRN_TEST_DATABASE_URL`). The credential rules are in [CM-CONTRACT-008](contracts/auth-layer3.md) and the tool table in [CM-CONTRACT-002](contracts/mcp-layer1.md).
 - The MCP adapter covers the Layer 1 compatibility set and direct capture aliases, not the upstream full registry or modern protocol-era discovery.
-- The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](contracts/export-v1.md).
+- The upstream full export schema and complete MCP argument/result registry still need source-level extraction; Cairn's local v1 export is defined in [CM-CONTRACT-003](archive/contracts/export-v1.md).
 - The golden corpus defines expected behavior but has not been scored against a running implementation.
 - Retention durations and the future encrypted-cache implementation remain policy-configurable follow-up work; the Layer 3 policy forbids unencrypted response caches and defines tombstone/revocation purge behavior. The first authentication model is resolved by ADR 0008.
 - Project maintenance and cross-person membership are implemented: the maintenance report lists stale and superseded project memories, and a teammate joins a project through the committed `.cairn/project.json`, an owner can share a promoted memory with that member, and keep a project team. The promotion and merge boundary is defined in [CM-CONTRACT-009](contracts/project-layer4.md) and [ADR 0009](adr/0009-explicit-project-promotion.md). Offline purge of a device that never syncs again, encryption, and federation remain unimplemented.
@@ -739,3 +739,184 @@ This MCP rerun did not compact. An earlier OpenCode 2.1.4 loopback session in
 step. Claude Code and Codex native probes in this point-5 pass did not emit a
 compaction event. Their compaction check remains the fixture `SessionStart`
 with `source` `compact`.
+
+## v0.1.6 point 2 — routine cleanup and explicit saves (2026-11-19)
+
+The console Memories page no longer requests the review queue on load. A
+`Show near-duplicates` control fetches open reviews on demand and filters to
+`band: near_duplicate`; the component and its explicit dismiss, contradict,
+and supersede actions are reused. The similarity scan publishes only
+`near_duplicate` pairs, so a 0.5 cosine pair creates no review. Historical
+`possible_conflict` rows remain in storage and the API.
+
+Explicit saves reuse one record for the same owner, scope, project, kind,
+lifecycle, context, `supersedes`, and meaning-bearing fields. Evidence is
+excluded from identity and merged; a no-op retry does not rewrite
+`changed_at`. The file store scans owned live records. PostgreSQL takes a
+transaction advisory lock keyed by owner and SHA-256 identity fingerprint,
+compares the same identity in Rust, and updates only the record, `changed_by`,
+and `changed_at`. No migration was added.
+
+Checks on this machine (Andress-MacBook-Air):
+
+- `cargo test --workspace --lib`: 239 passed (core 157, server 35).
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p cairn-core -p cairn-storage -p cairn-server --all-targets -- -D warnings`: passed.
+- `npm run typecheck` and `npm run lint` in `apps/web`: passed.
+- `./scripts/smoke_mcp.sh`: passed.
+- `./scripts/smoke_web.sh`: passed.
+- Disposable `pgvector/pgvector:pg17` container: all 56
+  `cairn-storage --test postgres` ignored tests passed in fresh databases,
+  including `postgres_identical_save_reuses_one_row_and_merges_evidence`,
+  `postgres_concurrent_identical_saves_keep_one_row_and_all_evidence`, and
+  `postgres_possible_conflict_cosine_publishes_no_review`; all 3
+  `cairn-server --test project_model` ignored tests passed.
+- The 2 `cairn-server --test semantic` ignored tests were not runnable:
+  `CAIRN_TEST_EMBEDDING_MODEL_DIR` is unset (`NotPresent`). They are not part
+  of this change's path.
+
+No browser automation was used. The point-1 edit in
+`scripts/cairn_instructions.txt` was left untouched.
+
+## v0.1.6 point 3 — empty-session close is not an error (2026-11-21)
+
+Root cause: `distill_job_end` (`crates/core/src/jobs.rs`) classified the
+`session has no retained observations` validation error as a permanent failure.
+An auto-close of a session with nothing retained therefore quarantined its
+distill job, logged `automatic session close failed`, and the `SessionEnd` hook
+reported an unavailable close from the HTTP 400. On PostgreSQL the quarantine
+also cleared `pending_since` by capture time (`clear_covered_pending`).
+
+The empty case is now success. `is_empty_session` is a strict prefix match (also
+through PostgreSQL's `core validation error:` wrapper, so a session id cannot
+pass for it). `POST session/end` answers `200 {"status":"empty"}` on both
+stores; no summary, handoff, or note is written and `ended_at` stays unset. On
+PostgreSQL `execute_claimed_distill` clears `pending_since` after the savepoint
+rollback, under `SELECT … FOR UPDATE` on the session row and only when a
+re-check finds no retained observation, so a capture that committed first keeps
+the marker and one that commits later sets it again. The file store has no
+marker; its idle sweep only reads sessions with retained observations.
+Unknown sessions, forgotten or superseded summaries, store and database errors,
+and malformed job keys are unchanged. No migration was added.
+
+Reproduced first: the core test `an_empty_session_close_is_a_normal_outcome_…`
+and the classification assertion failed (one quarantine row), as did the server
+test `ending_an_empty_session_is_an_empty_status_without_quarantine` (HTTP 400)
+and the PostgreSQL test
+`postgres_empty_session_close_is_a_normal_outcome_and_clears_pending`.
+`postgres_empty_close_keeps_a_concurrent_captures_pending_marker` blocks the
+settlement write, pushes a capture, and checks the marker survives and the
+capture is distilled by the next sweep. It does not reach the narrower window
+between the empty read and the row lock; that ordering rests on the lock.
+Two PostgreSQL tests that asserted the old quarantine were updated
+(`postgres_idle_sweep_…_closes_an_empty_one_quietly`) or removed
+(`postgres_quarantine_cleanup_keeps_a_newer_captures_pending_marker`, replaced
+by the new race test). The admin job-discard server test now makes its
+quarantine with an unknown session.
+
+Checks on this machine (Andress-MacBook-Air):
+
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p cairn-core -p cairn-storage -p cairn-server -p cairn-client --all-targets -- -D warnings`: passed.
+- `cargo test --workspace --lib`: passed (core 157, server 36, client 45).
+- `scripts/validate_phase0.py`, `test_agent_hooks.py`, `test_agent_setup.py`,
+  `test_download_embedding_model.py`, `./scripts/smoke_mcp.sh`: passed.
+- Disposable `pgvector/pgvector:pg17` container, each ignored test in a fresh
+  database: all 62 ignored tests passed across `cairn-storage --test postgres`
+  (57), `cairn-storage --test jobs`, `cairn-client --test agent_flow`, and
+  `cairn-server --test project_model`. The two tests changed after the first
+  full run were rerun alone and passed.
+- `cairn-server --test semantic` was not run (no embedding model directory).
+
+## v0.1.6 step 1 — benchmark harness and baseline (2026-11-21)
+
+Every later 0.1.6 token-diet or retrieval step reports against this harness, so the numbers
+below are the "before". No product code changed in this step.
+
+**What it is.** `scripts/bench.py` starts a disposable `pgvector/pgvector:pg17` container and the
+real `cairn-server` on it, creates an account, a device token and a git checkout with a committed
+`.cairn/project.json` (`cairn init`), loads `bench/fixtures/corpus.json` through `/remember`, then
+measures through the real `cairn mcp` binary and the real `scripts/cairn_hook.py`. It needs Docker,
+Python 3 and a build of `cairn-server` and `cairn-client`; it needs no network and no LLM. The corpus
+is 70 synthetic memories about a fictional order-fulfilment project (12 decisions, 10 rules, 12
+gotchas, 8 procedures, 10 facts, 4 handoffs, 4 session summaries, 6 near-duplicates of existing
+memories, 4 off-topic distractors). `bench/fixtures/questions.json` has 25 questions with gold
+memory ids (13 direct, 7 paraphrases that share no content word with the gold memory, 5 whose gold
+is a near-duplicate pair; the harness fails if a paraphrase shares a word) and 5 weak queries that
+should return nothing. Token figures are `bytes / 4`, an estimate, not a tokenizer count.
+
+```bash
+python3 scripts/download_embedding_model.py ~/.cache/cairn-bench/minilm   # once; pinned, checksummed
+python3 scripts/bench.py --out bench/result.json --label my-change         # about 80 s
+python3 scripts/bench.py --out bench/lexical.json --lexical-only           # no embedding model
+```
+
+The model directory is `--model-dir`, `CAIRN_BENCH_EMBEDDING_MODEL_DIR`,
+`CAIRN_TEST_EMBEDDING_MODEL_DIR`, then `~/.cache/cairn-bench/minilm`. If none holds a model the run
+is lexical-only and `semantic_channel.mode` in the JSON says so. `--dump-injected FILE` also writes the
+text each hook event injected. Metrics: (a) tool count, `tools/list` bytes, `initialize.instructions`
+bytes; (b) `additionalContext` bytes for SessionStart, 10 `Edit` PostToolUse events on distinct files
+and Stop; (c) recall@5 (fraction of gold found in the top 5), hit@5 (any gold in the top 5) and MRR@10
+for `memory_search` and `memory_recall`; (d) bytes per call for search, resume, why_changed, get and
+context (full MCP result, plus the text channel alone); (e) how many weak queries return zero hits.
+
+**Determinism.** Four consecutive full runs produced byte-identical JSON. Three sources of
+non-determinism were found and handled in the harness, not in the product:
+
+- `LocalEmbeddings::query` uses `try_lock`; while a background embedding job holds the model, a search
+  silently falls back to lexical-only. The scripted session creates captures that trigger embedding
+  jobs, so the harness waits until every memory has its vector before each hook event.
+- `created_at` has one-second resolution and the session brief ranks rules and decisions by it, with
+  ties broken by id. The harness aligns each rule/decision save to a wall-clock second boundary
+  (about 22 s of the run) so the brief does not depend on where a second ticks during the load.
+- Recall increments access counts, which feed ranking, so the query order is part of the definition.
+
+**Baseline** (`bench/baseline-0.1.6-pre.json`, code at `2ea9479`, hybrid lexical + entity + semantic
+with the pinned MiniLM model):
+
+| Metric | Value |
+|---|---|
+| MCP tools | 38 |
+| `tools/list` | 18,356 B (~4,589 tokens est) |
+| `initialize.instructions` | 1,896 B (~474 tokens est) |
+| Hook injection, scripted session (start + 10 edits + stop) | 6,803 B (~1,701 tokens est); SessionStart 1,077 B, the 10 edits 5,726 B |
+| Fixed cost per session, eager-schema hosts (tools + instructions + hooks) | 27,055 B (~6,764 tokens est) |
+| Fixed cost per session, deferred-schema hosts (names + instructions + hooks) | 9,368 B (~2,342 tokens est) |
+| `memory_search`: recall@5 / hit@5 / MRR@10 over 25 questions | 0.720 / 0.720 / 0.547 |
+| `memory_recall`: same | 0.720 / 0.720 / 0.547 |
+| By question kind (recall@5, MRR@10) | direct 1.00, 0.72; near-duplicate 1.00, 0.87; paraphrase 0.00, 0.00 |
+| Zero-hit correct (5 weak queries) | 4 of 5 for both tools |
+| `memory_search` bytes per call, limit 5 | mean 2,119 (min 106, max 3,056) |
+| `memory_recall` bytes per call, limit 5 | mean 2,497 |
+| `memory_resume` limit 2 | 6,726 B (2 results) |
+| `memory_why_changed` limit 3 | mean 13,981 B (3 queries) |
+| `memory_get` | mean 4,288 B (decision, gotcha, procedure, session summary) |
+| `memory_context` limit 5 | 2,012 B |
+
+Lexical-only run on the same corpus (`--lexical-only`): recall@5 0.14, hit@5 0.16, MRR@10 0.16,
+zero-hit 5 of 5, search 197 B per call, hook injection 4,532 B. The plain `plainto_tsquery` AND of
+all query terms finds almost nothing on its own; recall depends on the semantic channel.
+
+**Observations worth acting on in later steps** (measured, not changed here):
+
+- All 7 paraphrase questions miss: none of their gold memories appears in the top 5 (often nothing is
+  returned), because a vector-only hit does not pass the relevance floor.
+- The weak query "guitar tuning for drop D" returns `rule-migrations-additive` because the rule
+  contains the word "drop"; the floor accepts any distinctive token in a rule or decision.
+- The first PostToolUse still re-injects the full instructions (1,896 B), which the MCP
+  `initialize.instructions` already carries.
+- The SessionStart brief is non-empty (1,077 B) when saves carry the project id, but its
+  `last_handoff` section stays empty because explicit saves carry no branch, and its rule and decision
+  order rests on one-second `created_at` with ties falling back to the oldest id.
+- `memory_why_changed` costs about 14 KB for 3 hits and `memory_resume` about 6.7 KB for 2, both far
+  above `memory_search`.
+
+**Limitations.** The corpus is small (70 memories, 25 questions); one question is about 4 points of
+recall. Synthetic text is cleaner than real memories. Byte counts are the full JSON-RPC `result`
+(content text and `structuredContent` both), so they count a host that bills both channels; the
+text-channel-only size is also recorded. `memory_resume` is measured on the corpus's handoff and
+session-summary memories, not on summaries distilled from a real session. The run needs Docker and
+about 80 s; it was run on macOS arm64 only.
+
+Checks on this machine (Andress-MacBook-Air): the harness ran end to end five times (four hybrid runs
+with identical output, one lexical-only run); no Rust was changed.

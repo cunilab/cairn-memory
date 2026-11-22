@@ -59,4 +59,4 @@ a below-75 confidence cutoff.
 - `crates/storage/src/lib.rs`
 - `crates/server/src/lib.rs`
 - `crates/storage/tests/postgres.rs`
-- `docs/contracts/lifecycle-v1.md`
+- `docs/archive/contracts/lifecycle-v1.md`

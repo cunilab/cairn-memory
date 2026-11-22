@@ -11,6 +11,7 @@ replacement for the project documentation.
 - Keep entries short and link to the authoritative source.
 - Update or supersede an existing entry when the project changes.
 - Treat current code and `docs/` as authoritative if anything conflicts here.
+- Entries dated before 0.1.6 describe the retired file store, viewer, sync pull and import. Contracts and audits they cite now live in `docs/archive/`; the 0.1.6 design is `docs/specs/0.1.6-foundation.md`.
 - Never store secrets, tokens, private payloads, or temporary task progress.
 
 ## Durable project context
@@ -249,9 +250,9 @@ should include the reason they matter and the evidence that supports them.
 
 - **Type:** workflow rule
 - **Status:** active
-- **Summary:** Rust changes must follow the self-contained `RUST_IDIOMS.md` rule, which covers ownership, borrowing, error handling, API design, state transitions, async/database safety, privacy, documentation, rustfmt, and Clippy verification. OpenCode loads it automatically with `MEMORY.md`.
+- **Summary:** Rust changes must follow the self-contained `docs/RUST_IDIOMS.md` rule, which covers ownership, borrowing, error handling, API design, state transitions, async/database safety, privacy, documentation, rustfmt, and Clippy verification. OpenCode loads it automatically with `MEMORY.md`.
 - **Reason:** The project needs one durable, agent-visible Rust standard rather than relying on an external reading list or inconsistent local style decisions.
-- **Evidence:** `RUST_IDIOMS.md`; `AGENTS.md`; `opencode.jsonc`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- **Evidence:** `docs/RUST_IDIOMS.md`; `AGENTS.md`; `opencode.jsonc`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 
 ### 2026-11-12 — Hook transport uses one explicit credential
 
@@ -353,6 +354,14 @@ when an ADR, specification, or implementation resolves them.
 - **Summary:** CLI, stdio MCP, and `scripts/cairn_hook.py` read the server URL and device credential from one JSON file. An unmanaged hook uses `--config`, then non-empty `CAIRN_CONFIG`, then `$XDG_CONFIG_HOME/cairn/config.json` (else `~/.config/cairn/config.json`, else `%APPDATA%`). An installed `--cairn-managed` hook uses a non-empty `CAIRN_CONFIG` when set, otherwise the setup-time `--config`. `cairn setup <server-url>` still takes the token on stdin and writes the selected file. A present `CAIRN_URL` or `CAIRN_DEVICE_TOKEN`, including an empty export, is ignored with one stderr warning and no value. A real HTTP 401 names the file and says to set `CAIRN_CONFIG` to it before `cairn setup <server-url>`. The credential is redacted before a 401 body is clipped. Server environment and outbox replay arguments are unchanged. v0.1.5 adds no server LLM.
 - **Reason:** A stale env pair was overriding `config.json` and failing as a silent HTTP 401.
 - **Evidence:** `docs/adr/0014-memory-scopes-distillation-and-hybrid-recall.md`; `crates/client/src/lib.rs`; `scripts/cairn_hook.py`; `cargo test -p cairn-client --lib`; `cargo test -p cairn-client --test agent_flow`; `python3 scripts/smoke_hook_auth.py`; `python3 scripts/test_agent_hooks.py`; `./scripts/smoke_mcp.sh`; `./scripts/smoke_full_flow.sh`
+
+### 2026-11-21 — The agent hook is the Rust `cairn hook`; Python is gone
+
+- **Type:** decision
+- **Status:** active
+- **Summary:** Hook, outbox and agent setup are Rust (`cairn hook <Event>`, `crates/client/src/{hook,setup}`); `cairn setup --agent` writes `<exe> hook <Event> --agent <a> --config <cfg> --cairn-managed` and replaces old `python3 cairn_hook.py` entries. `/sync/push` and `/context` are deleted; capture is `POST /observe` with a typed `kind`. The older entries above that name `cairn_hook.py`, `cairn_outbox.py`, `sync/push` or their smokes record the retired design.
+- **Reason:** Two languages with hand-synced redaction and setup copies (A7); no Python at runtime.
+- **Evidence:** `docs/specs/0.1.6-step4-capture.md`; `docs/contracts/hook-v1.md`; `crates/client/tests/{hook,setup}.rs`
 
 ## Entry template
 

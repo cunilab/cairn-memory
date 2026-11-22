@@ -5,8 +5,9 @@
 //! `notifications/initialized`, `tools/list`, `tools/call`, and `ping`. The tool table and
 //! its REST mapping live in [`crate::tools`]; this module only speaks the protocol.
 
-use crate::tools;
 use crate::{Client, Config, Error};
+use crate::{present, tools};
+use cairn_core::account::ClientKind;
 use serde_json::{Map, Value, json};
 use std::io::{self, BufRead, Write};
 
@@ -60,7 +61,7 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(config: Config) -> Self {
         Self {
-            client: Client::new(config),
+            client: Client::identified(config, crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
             initialized: false,
         }
     }
@@ -150,11 +151,7 @@ impl McpServer {
             "tools/list" | "tools/call" if !self.initialized => {
                 rpc_error(id, -32002, "MCP session is not initialized")
             }
-            "tools/list" => {
-                let definitions: Vec<Value> =
-                    tools::tools().iter().map(tools::Tool::definition).collect();
-                rpc_result(id, json!({ "tools": definitions }))
-            }
+            "tools/list" => rpc_result(id, tools::tools_list()),
             "tools/call" => self.call_tool(id, params),
             _ => rpc_error(id, -32601, format!("method not found: {method}")),
         }
@@ -182,7 +179,7 @@ impl McpServer {
                 "title": "Cairn",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": crate::agents::INSTRUCTIONS
+            "instructions": tools::instructions()
         });
         rpc_result(id, result)
     }
@@ -195,35 +192,23 @@ impl McpServer {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return rpc_error(id, -32602, "tools/call requires a tool name");
         };
-        let Some(tool) = tools::find(name) else {
+        let Some(tool) = tools::find_by_name(name) else {
             return rpc_error(id, -32602, format!("unknown tool: {name}"));
         };
-        let mut arguments = match params.get("arguments") {
+        let arguments = match params.get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
-        // MCP-only view switch. It is not a REST field.
-        let expanded = arguments
-            .remove("expanded")
-            .is_some_and(|value| value.as_bool() == Some(true));
-
-        match tools::call(&self.client, tool, &arguments) {
-            Ok(value) => rpc_result(id, crate::present::present(tool.name, expanded, value)),
-            Err(error) => rpc_result(id, tool_failure(error.to_string())),
+        match tools::call(&self.client, tool, arguments) {
+            Ok(value) => rpc_result(id, present::success(&value)),
+            Err(error) => rpc_result(id, present::failure(&error.to_string())),
         }
     }
 }
 
 pub fn run_stdio(config: Config) -> Result<(), Error> {
     McpServer::new(config).run_stdio()
-}
-
-fn tool_failure(message: String) -> Value {
-    json!({
-        "isError": true,
-        "content": [{"type": "text", "text": message}]
-    })
 }
 
 fn rpc_result(id: Value, result: Value) -> String {
@@ -270,9 +255,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "cairn-memory");
         assert_eq!(init["result"]["serverInfo"]["title"], "Cairn");
         let instructions = init["result"]["instructions"].as_str().unwrap();
-        assert!(instructions.contains("cairn-memory"));
-        assert!(instructions.contains("memory_save"));
-        assert!(instructions.contains("memory_get"));
+        assert_eq!(instructions, tools::instructions());
         assert!(
             server
                 .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
@@ -286,26 +269,16 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        for expected in [
-            "memory_observe",
-            "memory_recall",
-            "memory_save",
-            "memory_get",
-            "memory_list",
-        ] {
-            assert!(names.contains(&expected), "{expected}");
-        }
-        for removed in [
-            "memory_promote",
-            "memory_account_bootstrap",
-            "memory_account_register",
-            "memory_project_invite",
-            "memory_project_team_add",
-            "memory_project_team_remove",
-            "memory_sessions",
-        ] {
-            assert!(!names.contains(&removed), "{removed}");
-        }
+        assert_eq!(
+            names,
+            [
+                "memory_search",
+                "memory_get",
+                "memory_save",
+                "memory_feedback",
+                "memory_forget"
+            ]
+        );
     }
 
     #[test]
@@ -315,21 +288,21 @@ mod tests {
 
         let missing = call(&mut server, 2, "tools/call", json!({"name": "memory_save"}));
         assert_eq!(missing["result"]["isError"], true);
-        assert!(
-            missing["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("scope")
-        );
+        assert_eq!(missing["result"]["content"][0]["text"], "kind is required");
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));
         assert_eq!(unknown["error"]["code"], -32602);
+        // CLI verbs are not MCP tool names.
+        for verb in ["search", "get", "save", "feedback", "forget"] {
+            let reply = call(&mut server, 3, "tools/call", json!({"name": verb}));
+            assert_eq!(reply["error"]["code"], -32602, "{verb}");
+        }
 
         let unreachable = call(
             &mut server,
             4,
             "tools/call",
-            json!({"name": "memory_diagnose", "arguments": {}}),
+            json!({"name": "memory_search", "arguments": {"query": "x"}}),
         );
         assert_eq!(unreachable["result"]["isError"], true);
         assert!(!unreachable.to_string().contains("test-token"));
@@ -348,7 +321,7 @@ mod tests {
         call(&mut server, 1, "initialize", json!({}));
 
         let side_effect = json!({"jsonrpc": "2.0", "method": "tools/call",
-            "params": {"name": "memory_diagnose", "arguments": {}}});
+            "params": {"name": "memory_search", "arguments": {"query": "x"}}});
         assert!(server.handle_line(&side_effect.to_string()).is_none());
         assert_eq!(
             listener.accept().unwrap_err().kind(),

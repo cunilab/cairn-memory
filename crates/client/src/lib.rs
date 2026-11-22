@@ -2,13 +2,16 @@
 //! API with a device token. Humans use the web console; this crate never holds an account
 //! session and never touches a store file.
 
-pub mod agents;
+pub mod doctor;
+pub mod hook;
 pub mod mcp;
 pub mod present;
 pub mod project;
+pub mod setup;
 pub mod tools;
 pub mod update;
 
+use cairn_core::account::{ClientKind, client_user_agent};
 use serde_json::{Value, json};
 use std::fmt;
 use std::fs;
@@ -236,10 +239,11 @@ fn normalize_url(url: &str) -> Result<String, Error> {
         _ => return Err(bad("scheme must be https (or http on loopback)")),
     }
     let scheme = uri.scheme_str().unwrap_or("https");
-    Ok(format!(
-        "{scheme}://{authority}{}",
-        uri.path().trim_end_matches('/')
-    ))
+    // Every route already starts with `/cairn-memory`, so a URL pasted with that suffix
+    // would request `/cairn-memory/cairn-memory/...`. Drop it once, here.
+    let path = uri.path().trim_end_matches('/');
+    let path = path.strip_suffix("/cairn-memory").unwrap_or(path);
+    Ok(format!("{scheme}://{authority}{path}"))
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -261,11 +265,23 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: Config) -> Self {
+        Self::with_timeout(config, REQUEST_TIMEOUT)
+    }
+
+    pub fn with_timeout(config: Config, timeout: Duration) -> Self {
+        Self::identified(config, timeout, "", ClientKind::Cli)
+    }
+
+    /// A client that says who it is on every request, `User-Agent: cairn/<version> (<agent>;
+    /// <kind>)`, so the console can show each device's client version and check-ins. `agent` is
+    /// `claude`, `codex` or `opencode` when the caller knows its host, else empty.
+    pub fn identified(config: Config, timeout: Duration, agent: &str, kind: ClientKind) -> Self {
         let mut builder = ureq::Agent::config_builder()
+            .user_agent(client_user_agent(env!("CARGO_PKG_VERSION"), agent, kind))
             .max_redirects(0)
             .max_redirects_will_error(false)
             .http_status_as_error(false)
-            .timeout_global(Some(REQUEST_TIMEOUT))
+            .timeout_global(Some(timeout))
             // The system trust store, so a server behind a private CA works.
             .tls_config(
                 ureq::tls::TlsConfig::builder()
@@ -578,6 +594,32 @@ mod tests {
     }
 
     #[test]
+    fn requests_say_which_client_and_agent_they_come_from() {
+        for (agent, kind, expected) in [
+            ("", ClientKind::Cli, "cairn/VERSION (cli)"),
+            ("claude", ClientKind::Hook, "cairn/VERSION (claude; hook)"),
+            ("", ClientKind::Mcp, "cairn/VERSION (mcp)"),
+            ("not-an-agent", ClientKind::Hook, "cairn/VERSION (hook)"),
+        ] {
+            let (url, request) =
+                serve_once("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_owned());
+            let client = Client::identified(
+                Config::new(&url, TOKEN).unwrap(),
+                Duration::from_secs(5),
+                agent,
+                kind,
+            );
+            client.get("/cairn-memory/auth/me").unwrap();
+            let sent = request.recv().unwrap().to_ascii_lowercase();
+            let expected = expected.replace("VERSION", env!("CARGO_PKG_VERSION"));
+            assert!(
+                sent.contains(&format!("user-agent: {expected}")),
+                "{expected}: {sent}"
+            );
+        }
+    }
+
+    #[test]
     fn a_base_path_is_kept_and_prefixes_every_request() {
         for (given, kept) in [
             (
@@ -606,6 +648,45 @@ mod tests {
                 .recv()
                 .unwrap()
                 .starts_with("GET /agent/cairn-memory/auth/me ")
+        );
+    }
+
+    #[test]
+    fn a_url_ending_in_the_api_prefix_is_not_prefixed_twice() {
+        for (given, kept) in [
+            (
+                "http://127.0.0.1:58080/cairn-memory",
+                "http://127.0.0.1:58080",
+            ),
+            (
+                "http://127.0.0.1:58080/cairn-memory/",
+                "http://127.0.0.1:58080",
+            ),
+            (
+                "https://cairn.example.test/agent/cairn-memory",
+                "https://cairn.example.test/agent",
+            ),
+            ("http://127.0.0.1:58080", "http://127.0.0.1:58080"),
+            (
+                "https://cairn.example.test/agent",
+                "https://cairn.example.test/agent",
+            ),
+            (
+                "https://cairn.example.test/not-cairn-memory",
+                "https://cairn.example.test/not-cairn-memory",
+            ),
+        ] {
+            assert_eq!(Config::new(given, TOKEN).unwrap().url(), kept, "{given}");
+        }
+        let (url, request) =
+            serve_once("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_owned());
+        let client = Client::new(Config::new(&format!("{url}/cairn-memory"), TOKEN).unwrap());
+        client.get("/cairn-memory/health").unwrap();
+        assert!(
+            request
+                .recv()
+                .unwrap()
+                .starts_with("GET /cairn-memory/health ")
         );
     }
 

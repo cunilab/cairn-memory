@@ -13,22 +13,21 @@ How changes reach `main`, how a release is cut, and how installed clients update
 - `main` is the trunk and is always releasable. Nobody pushes to it directly.
 - Work happens on a short-lived branch named `feat/`, `fix/`, `docs/`, or `chore/` plus a short name (for example `fix/CM-123-outbox-retry`), merged by pull request and then deleted.
 - A pull request needs every required check green. The required checks are the CI job names:
-  - `Rust format and clippy`
-  - `Rust tests`
-  - `PostgreSQL tests` (each ignored test runs against its own fresh PostgreSQL 17 database with pgvector, see `scripts/ci_postgres_tests.sh`)
+  - `Rust format and clippy` (also checks that `cairn-core` has no `sqlx`, `tokio`, `axum` or `reqwest` dependency)
+  - `Rust tests` (a `pgvector/pgvector:pg17` service and the pinned MiniLM model; `CAIRN_TEST_REQUIRE_DB=1`, so a missing database fails instead of skipping)
   - `Build on macos-15` and `Build on windows-latest`
   - `Web console typecheck, lint, build`
-  - `Python hook and outbox tests`
   - `Documentation validation`
-  - `Acceptance smokes` (`scripts/smoke_full_flow.sh`, `scripts/smoke_mcp.sh`, `scripts/smoke_postgres.sh`, and `scripts/smoke_web.sh`)
+  - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
+  - `Bench` (`scripts/bench.py --min-hit5 0.68`; uploads the result JSON)
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
-- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the PostgreSQL tests job.
+- The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
 
 ## Cut a release
 
 Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[workspace.package]` of the root `Cargo.toml`.
 
-1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, set `VERSION` in `scripts/cairn_outbox.py` to the same value (it forms the hook's `cairn-hook/<version>` User-Agent; `scripts/smoke_outbox.py` fails when they differ), and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
+1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description (ADR 0004 requires them with a release).
 2. Open the pull request, wait for the required checks, merge it.
 3. Tag the merge commit on `main` and push the tag:
 
@@ -41,7 +40,7 @@ Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[w
 4. The `Release` workflow then:
    - fails unless the tag equals the workspace version, is `MAJOR.MINOR.PATCH` (no pre-release suffix), and points at a commit on `main`;
    - builds the CLI natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`; the server uses the same macOS/Windows targets and `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` on Linux, because ONNX Runtime requires glibc;
-   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, `cairn_hook.py`, `cairn_outbox.py`, `cairn_instructions.txt`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
+   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
    - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-memory-server` and `ghcr.io/cunilab/cairn-memory-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (each platform is built natively, then merged into one multi-arch manifest). How to run them: [deploy](./deploy.md).
 5. A bad release is not edited in place: delete the release and tag, fix on a branch, and release the next patch version. Clients never install a version lower than their own.
 
@@ -104,13 +103,10 @@ Cairn-owned hooks, MCP entry, and OpenCode `plugins/cairn/index.js`. URL-only
 setup still downloads the hook scripts of the matching published release.
 A script that differs from the recorded checksum is kept as `<name>.bak`.
 
-Default MCP search, smart search, recall, context, and reflect return short
-cards. `memory_save` and `memory_lesson_save` return `memory_id`, `kind`,
-`scope`, and `status`. `memory_get` and export stay full. Default agent search
-and the related recall routes omit raw captures until `includeCaptures` or
-`--include-captures`. A relevance floor can return no hits. Graph and
-similarity-review text is TOON; their structured content stays JSON. There is
-no server LLM.
+`memory_search` returns short cards (`id`, `kind`, `title`, `summary`, `score`,
+and `status` for a stale memory). `memory_save` returns `id`, `status` and
+`deduplicated`. `memory_get` returns full records. A relevance floor can return
+no hits. Results are one JSON text channel. There is no server LLM.
 
 OpenCode 2.1.4 omits the MCP registry on the first prompt of a cold session.
 The second prompt in that warmed session advertises the Cairn tools. The
@@ -145,11 +141,31 @@ client makes `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` together replace the config
 file, drops `CAIRN_CONFIG`, and brings back the previous MCP payloads, default
 capture visibility, relevance behavior, and Stop save-ask.
 
+## 0.1.6 upgrade notes
+
+0.1.6 replaces the storage and the memory model; see the [0.1.6 foundation specification](specs/0.1.6-foundation.md).
+There is no migration from 0.1.5. The server uses PostgreSQL only, with five migrations (`migrations/0001` to `0005`)
+in the schema `cairn`. A database that still has the old `public.cairn_memories` table is refused at startup with
+`pre-0.1.6 database; recreate it`; the server never drops data itself. The file store, `--store`, the embedded
+`/viewer`, `/import`, `/sync/pull` and the similarity-review routes and tools are gone. Upgrade the server and the
+CLI together: the MCP tool set and the shape of `memory_save` changed.
+
+The agent hook is now the `cairn hook` command and the Python scripts are gone. `POST /sync/push` and `/context` are removed, so a machine that still runs the Python hook cannot capture until it is updated. On every machine: install the new `cairn`, then re-run `cairn setup <server-url> --agent claude|codex|opencode` (the token comes on stdin). That replaces the old `python3 cairn_hook.py` entries, deletes the old `hook/` scripts and `hook-state.sqlite3`, and leaves an old version 2 outbox untouched. `cairn update` also rewrites the commands of agents that already have them.
+
+The server URL given to `cairn setup` may end in `/cairn-memory`; the client drops that suffix once, so `https://host`, `https://host/cairn-memory` and a reverse-proxy prefix such as `https://host/agent` all work.
+
+The release also carries three stub assets, `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt`
+(`release/legacy-update-stubs`). An installed 0.1.5 `cairn update` downloads and checksums them before it swaps
+the binary and aborts when one is missing, so they must stay in `release.yml` until 0.1.5 clients are gone;
+`scripts/check_update_assets.py` (the Documentation validation job) fails when a name the 0.1.5 client asks for is
+no longer published. 0.1.5 records their checksums in `hook/installed.json`, so the first `cairn setup` of 0.1.6
+deletes them (`retire_python`).
+
 ## How clients update
 
 - `cairn --version` prints the installed version.
-- `cairn update --check` reports whether a newer release exists. `cairn update` downloads the binary for the compile-time target and the hook scripts, verifies each against the release's `SHA256SUMS`, stages the binary next to the running one with the same permission bits, runs `<staged> --version` (2 second limit) and requires it to print `cairn <new version>`, and only then replaces the running executable (an atomic rename on unix; on Windows the old file is renamed to `cairn.exe.old`, or `cairn.exe.old-<time>` if that name is stuck, and removed on a later run). Any failure leaves the installed `cairn` untouched; an unwritable directory fails with a message to re-run with permission to write there.
-- `cairn setup` installs the hook scripts of the release for the running binary's version (`v<version>`), and `cairn update` installs those of the release it installs, so scripts and binary always match. They go in `hook/` next to the config file (`~/.config/cairn/hook/` by default, mode 0700), and `hook/installed.json` records their checksums. A script that differs from the recorded one was edited locally: its content is kept as `<name>.bak` and the command prints a note. A build with no matching release (a development build) skips the hook scripts.
+- `cairn update --check` reports whether a newer release exists. `cairn update` downloads the binary for the compile-time target, verifies it against the release's `SHA256SUMS`, stages the binary next to the running one with the same permission bits, runs `<staged> --version` (2 second limit) and requires it to print `cairn <new version>`, and only then replaces the running executable (an atomic rename on unix; on Windows the old file is renamed to `cairn.exe.old`, or `cairn.exe.old-<time>` if that name is stuck, and removed on a later run). Any failure leaves the installed `cairn` untouched; an unwritable directory fails with a message to re-run with permission to write there.
+- The hook is the `cairn` binary itself (`cairn hook <Event>`), so there are no scripts to match. `cairn setup --agent` writes the hook commands with the absolute path of the running executable, and after replacing the binary `cairn update` rewrites those commands for every agent that already has a Cairn hook, so they follow the executable.
 - Interactive commands print one line to stderr when a newer release is known, for example `cairn 0.2.0 is available (you have 0.1.0) — run `cairn update``. The release check runs at most once every 24 hours (2 second timeout, failures silent, result cached in `update-check.json` beside the config). It never runs for `cairn mcp`, `cairn update`, when stderr is not a terminal, or when `CAIRN_NO_UPDATE_CHECK=1`. The hook and the MCP server never check or update.
 - `CAIRN_UPDATE_URL` replaces the GitHub latest-release API URL (it must end in `/latest`) in debug builds only, for tests; a release build ignores it. Update URLs must be https; plain http to loopback is accepted in debug builds only.
 - `cairn-server` is not self-updating: operators download it from the release and follow the migration notes ([ADR 0004](./adr/0004-trunk-based-development-and-release.md)).

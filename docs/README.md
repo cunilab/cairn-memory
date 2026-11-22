@@ -8,26 +8,26 @@ status: draft
 
 These documents describe Cairn Memory, an AI-managed, person-owned memory layer built on the AgentMemory foundation with Graphify-inspired code relationships, as implementation proceeds. They are intentionally small enough to review and change. Detailed feature behavior belongs in `docs/specs/` documents when a feature is ready to build.
 
-`apps/web` is the first Next.js console. [Architecture](./architecture.md) names that console next to the Rust API and the embedded viewer.
+`apps/web` is the first Next.js console. [Architecture](./architecture.md) names that console next to the Rust API.
 
 | Document | ID | What it owns |
 | --- | --- | --- |
 | [Product](./product.md) | CM-PRODUCT-001 | AI-managed personal memory, ownership model, users, boundaries, and success signals |
 | [Roadmap](./roadmap.md) | CM-ROADMAP-001 | Layered product phases, outcomes, and milestone gates |
-| [Architecture](./architecture.md) | CM-ARCH-001 | Edge, sync, system structure, interfaces, data ownership, and flows |
-| [Data flow guide](./data-flow.md) | CM-GUIDE-001 | Diagram-first explainer of capture, memory lifecycle, recall, projects, sharing, authentication, sync, use cases, and tools as implemented today |
+| [Architecture](./architecture.md) | CM-ARCH-001 | Crate map, data ownership, interfaces, and the main flows of the 0.1.6 server |
+| [Data flow guide](./data-flow.md) | CM-GUIDE-001 | Diagram-first explainer of capture, save, consolidation, recall, and projects as implemented in 0.1.6 |
 | [Autopilot and sharing policy](./policy.md) | CM-POLICY-001 | Automatic capture, retention, privacy, ownership, correction, and sharing rules |
 | [Phase 0 evidence](./evidence.md) | CM-EVIDENCE-001 | Recorded Phase 0 artifacts, source snapshot, checks, and limitations |
 | [AgentMemory compatibility baseline](./contracts/agentmemory-baseline.md) | CM-CONTRACT-001 | Upstream REST, MCP, hook, CLI, environment, lifecycle, and portability contracts |
 | [Layer 1 MCP compatibility contract](./contracts/mcp-layer1.md) | CM-CONTRACT-002 | Device-token network CLI and MCP stdio proxy, tool manifest, and limitations |
-| [Cairn export format v1](./contracts/export-v1.md) | CM-CONTRACT-003 | Versioned portable state, import merge rules, and tombstones |
-| [Layer 1 lifecycle classification](./contracts/lifecycle-v1.md) | CM-CONTRACT-004 | Importance, sensitivity, confidence, freshness, retention, and expiration |
-| [Layer 1 hook capture adapter](./contracts/hook-v1.md) | CM-CONTRACT-005 | Portable automatic hook ingestion and normalized capture fields |
+| [Layer 1 hook capture adapter](./contracts/hook-v1.md) | CM-CONTRACT-005 | `cairn hook` events, typed capture, injection budget, outbox and setup |
 | [Layer 2 branch-aware continuity](./contracts/continuity-v1.md) | CM-CONTRACT-006 | Memory scopes, context-aware retrieval, and omitted-result recovery |
-| [Layer 3 trusted device sync](./contracts/sync-layer3.md) | CM-CONTRACT-007 | Device identity, authenticated replay, cursors, rotation, revocation, and outbox |
 | [Layer 3 self-hosted account authentication](./contracts/auth-layer3.md) | CM-CONTRACT-008 | Account bootstrap, hashed sessions, logout, and device ownership |
 | [Layer 4 project promotion](./contracts/project-layer4.md) | CM-CONTRACT-009 | Project registration and explicit evidence-backed promotion |
-| [Superseded Layer 5 explicit project memory share](./contracts/share-layer5.md) | CM-CONTRACT-010 | Membership through the committed project file, project team, explicit share, member read, revoke, and retained delete |
+| [0.1.6 foundation specification](./specs/0.1.6-foundation.md) | CM-SPEC-004 | Schema, Rust model, module map, routes, test strategy and build order of the 0.1.6 rewrite |
+| [Rust idioms and review rules](./RUST_IDIOMS.md) | CM-STD-002 | Rust quality rules for every agent and contributor |
+| [Hook setup examples](./examples/README.md) | CM-GUIDE-002 | Claude Code hook wiring for `cairn hook` |
+| [Phase 0 fixtures](./fixtures/phase-0/README.md) | CM-GUIDE-003 | Redacted contract fixtures and the golden corpus |
 | [Release process](./release.md) | CM-REL-001 | Trunk-based flow, required checks, cutting a release, and how clients update |
 | [Deployment layout](./deploy.md) | CM-DEPLOY-001 | Dokploy and Traefik layout for PostgreSQL, `cairn-server`, and the console, with the `/agent` API path |
 | [Documentation standards](./standards.md) | CM-STD-001 | Document lifecycle, ownership, review, and evidence rules |
@@ -49,21 +49,13 @@ These documents describe Cairn Memory, an AI-managed, person-owned memory layer 
 | [Memory context and promotion](./specs/memory-context-and-promotion.md) | CM-SPEC-002 | Scope escalation, branch/worktree context, and context packing |
 | [Graph-assisted retrieval](./specs/graph-assisted-retrieval.md) | CM-SPEC-003 | Graph RAG, embeddings, hybrid retrieval, and code context |
 | [Memory confidence and correction survey](./research/memory-confidence-and-correction.md) | CM-RESEARCH-001 | Source survey of confidence scales, relatedness cutoffs, and how a corrected record is kept or replaced |
-| [Desktop UI baseline — 2026-11-11](./audits/2026-11-11-desktop-ui-baseline.md) | CM-AUDIT-001 | Desktop Playwright observations for login, projects, and project detail |
-| [shadcn/ui and Next.js research — 2026-11-11](./audits/2026-11-11-shadcn-next.md) | CM-AUDIT-002 | Installed UI stack compared with current shadcn/ui and Next.js docs |
-| [Mobile and accessibility — 2026-11-11](./audits/2026-11-11-mobile-a11y.md) | CM-AUDIT-003 | Phone-width layout and focused accessibility checks |
-| [Sign-in flow task 1 — 2026-11-12](./audits/2026-11-12-signin-task.md) | CM-AUDIT-004 | Auth proxy, sign-in, and session redirect evidence for the first UI fix |
-| [Projects list task 2 — 2026-11-12](./audits/2026-11-12-projects-list.md) | CM-AUDIT-005 | Projects list card target, empty state, and loading evidence |
-| [Project detail display task 3 — 2026-11-12](./audits/2026-11-12-project-detail.md) | CM-AUDIT-006 | Project detail empty team, missing project, and wrapping evidence |
-| [Delete and revoke confirmation task 4 — 2026-11-12](./audits/2026-11-12-actions.md) | CM-AUDIT-007 | Confirmation dialogs for retained delete and share revoke |
-| [Memory capture and persistence — 2026-11-12](./audits/2026-11-12-memory-capture.md) | CM-AUDIT-008 | Capture admission, redaction, event identity, and file/PostgreSQL durability |
-| [Account search limit — 2026-11-13](./audits/2026-11-13-account-search-limit.md) | CM-AUDIT-009 | File account search, resume, and unresolved keep that person's rows and contradiction ids; other retrieval residuals stay open |
-| [Recall filter and contradiction targets — 2026-11-13](./audits/2026-11-13-recall-filter-eligibility.md) | CM-AUDIT-010 | Global filter inheritance is contractual; a contradiction target must itself be eligible for recall |
-| [PostgreSQL search cap — 2026-11-13](./audits/2026-11-13-postgres-search-cap.md) | CM-AUDIT-011 | The 512-row search bound is undocumented; context and why-changed report from the capped list |
-| [File store supersedes ownership — 2026-11-13](./audits/2026-11-13-file-supersedes-ownership.md) | CM-AUDIT-012 | A foreign `supersedes` link no longer hides another account's memory in the file store (fixed, review accepted); foreign `forgottenIds` on import is open and a project-import gap is unverified |
-| [File import tombstone ownership — 2026-11-13](./audits/2026-11-13-file-import-tombstone-ownership.md) | CM-AUDIT-013 | A file account import could tombstone ids it does not own and hide another account's memory; finding 1 fixed with option 1 (owned or same-bundle ids only) and independently accepted; finding 2 (an account can forget an unowned legacy row) and finding 3 (tombstoning another account's ids through the `source_event_ids` of the caller's own row) were reproduced and fixed with strict ownership for account forget and source cascades and independently accepted for the file store; the project-import gap is CM-AUDIT-014 |
-| [File import project_id ownership — 2026-11-13](./audits/2026-11-13-file-import-project-id.md) | CM-AUDIT-014 | A file account import can add a row with another account's `project_id` to that account's owner project view and hide its project memory there (reproduced; fixed with owner-only project-linked imports and owner views that skip other accounts' rows; finding 1 independently accepted for the file store; the `project_maintenance` caller check, PostgreSQL and old-data repair stay open) |
-| [Project registry access — 2026-11-13](./audits/2026-11-13-project-registry-access.md) | CM-AUDIT-015 | The file-store project registry (branches, worktrees, entities, freshness, merge, close) was open to any account that knew the project id and a merge could copy another account's memory; fixed with owner-only access and independently accepted for the file store, nine registry operations (maintenance accepted separately); PostgreSQL, old aliased branches, the first-registrar claim and lenient helpers elsewhere stay open |
+
+## Archive
+
+`archive/` holds records of work that no longer describes the code. Do not rely on them for current behavior.
+
+- `archive/contracts/`: export v1, lifecycle v1, Layer 3 sync and the superseded Layer 5 share contract (the file store, import, sync pull and lifecycle fields were removed in 0.1.6).
+- `archive/audits/`: the 2026-11-11 to 2026-11-13 UI and file-store audits (CM-AUDIT-001 to CM-AUDIT-015) with their screenshots.
 
 ## Planned later
 

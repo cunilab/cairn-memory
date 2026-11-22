@@ -162,5 +162,5 @@ decision 2 no longer lists invites.
 - `migrations/0009_layer5_share_policy.sql`
 - `migrations/0010_layer5_team_space.sql`
 - `crates/client/src/project.rs`
-- `docs/contracts/share-layer5.md`
+- `docs/archive/contracts/share-layer5.md`
 - `docs/contracts/project-layer4.md`
