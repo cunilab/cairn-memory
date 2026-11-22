@@ -1327,3 +1327,169 @@ async fn restatement_promotes_a_candidate() {
     assert_eq!(column_rank(store, &older).await, "normal");
     db.finish().await;
 }
+
+async fn handoff_stamp(store: &cairn_store::Store, id: &str) -> (String, String) {
+    let row =
+        sqlx::query("SELECT updated_at::text AS at, summary FROM memories WHERE memory_id = $1")
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    (row.get("at"), row.get("summary"))
+}
+
+async fn session_origin(store: &cairn_store::Store, person: &str, session: &str) -> String {
+    let context: serde_json::Value =
+        sqlx::query_scalar("SELECT context FROM sessions WHERE person_id = $1 AND session_id = $2")
+            .bind(person)
+            .bind(session)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    context["origin"].as_str().unwrap_or("").to_owned()
+}
+
+/// One checkout's captures, with a file name that makes this session's handoff its own.
+async fn distill_checkout(
+    store: &cairn_store::Store,
+    person: &str,
+    session: &str,
+    file: &str,
+    project: &str,
+    origin: Option<&str>,
+) -> (bool, usize) {
+    let take =
+        |event: String, kind: &str, content: String, ok: Option<bool>, file: Option<&str>| {
+            let mut input = capture(&event, session, kind, &content, ok, Some(project), file);
+            input.context.origin = origin.map(str::to_owned);
+            input
+        };
+    store
+        .capture(
+            person,
+            take(
+                format!("{session}-c1"),
+                "command",
+                format!("cargo test\nexit 101: error[E0308]: mismatched types in {file}"),
+                Some(false),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            take(
+                format!("{session}-e1"),
+                "edit",
+                format!("Edit {file}\nx"),
+                None,
+                Some(file),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            take(
+                format!("{session}-c2"),
+                "command",
+                "cargo test".to_owned(),
+                Some(true),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            take(
+                format!("{session}-a1"),
+                "assistant",
+                format!("Decision: keep {file} in Postgres\nReason: one database is enough here"),
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let report = store.distill_session(person, session).await.unwrap();
+    (report.handoff, report.notes)
+}
+
+#[tokio::test]
+async fn automated_session_never_overwrites_handoff() {
+    use cairn_core::process::distill::handoff_id;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    let work = WorkContext {
+        project_id: Some(pid.clone()),
+        repository: Some("github.com/acme/one".to_owned()),
+        branch: Some("feat".to_owned()),
+        worktree: Some("wt-1".to_owned()),
+        ..WorkContext::default()
+    };
+    let id = handoff_id(&person, &work);
+    distill_checkout(store, &person, "person", "src/billing/money.rs", &pid, None).await;
+    let before = handoff_stamp(store, &id).await;
+
+    let (handoff, saved) = distill_checkout(
+        store,
+        &person,
+        "auto",
+        "src/billing/tax.rs",
+        &pid,
+        Some("automation"),
+    )
+    .await;
+    let after = handoff_stamp(store, &id).await;
+    let origin = session_origin(store, &person, "auto").await;
+    assert!(
+        !handoff && saved > 0 && after == before && origin == "automation",
+        "handoff_written={handoff} notes={saved} origin={origin} same_row={}",
+        after == before
+    );
+    let candidates: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE kind <> 'handoff' AND rank = 'candidate'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(
+        candidates >= i64::try_from(saved).unwrap(),
+        "notes stay candidates"
+    );
+    let events = store
+        .list_audit(&person, &Default::default())
+        .await
+        .unwrap();
+    let automated = events
+        .iter()
+        .filter(|event| {
+            event.action == "session_distilled"
+                && event.metadata["automated"] == serde_json::json!(true)
+        })
+        .count();
+    assert_eq!(automated, 1, "{events:?}");
+
+    let (later_handoff, _) =
+        distill_checkout(store, &person, "later", "src/billing/later.rs", &pid, None).await;
+    assert!(
+        later_handoff,
+        "a later normal session still writes the handoff"
+    );
+    assert_ne!(handoff_stamp(store, &id).await, before);
+    db.finish().await;
+}

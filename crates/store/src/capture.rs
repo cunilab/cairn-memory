@@ -292,14 +292,22 @@ impl Store {
                 "session has no retained observations: {session_id}"
             )));
         };
-        let (session_project, session_device): (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT project_id, device_id FROM sessions WHERE person_id = $1 AND session_id = $2",
+        let (session_project, session_device, session_context): (
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT project_id, device_id, context FROM sessions WHERE person_id = $1 AND session_id = $2",
         )
         .bind(person_id)
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await?
         .unwrap_or_default();
+        let automated = session_context
+            .get("origin")
+            .and_then(|value| value.as_str())
+            == Some("automation");
         let device = session_device.as_deref();
         // The checkout only; each note adds the files it is about.
         let work = WorkContext {
@@ -338,7 +346,8 @@ impl Store {
             }
         }
         let mut handoff_written = None;
-        if let Some(handoff) = output.handoff {
+        // An automated session keeps its notes and leaves the checkout's handoff alone.
+        if let Some(handoff) = output.handoff.filter(|_| !automated) {
             let new = prepare_save(
                 handoff,
                 &work,
@@ -401,6 +410,7 @@ impl Store {
                     "notes": report.notes,
                     "device_id": session_device,
                     "ids": ids,
+                    "automated": automated,
                 }),
             )
             .await?;
@@ -557,8 +567,8 @@ async fn upsert_session(
         pending,
         device_id,
     } = touch;
-    // Only the git state and the recent files are kept on the session; a later write merges
-    // over the keys it carries and NULL means "nothing new to remember".
+    // Git state, recent files and an automation origin are kept on the session; a later write
+    // merges over the keys it carries and NULL means "nothing new to remember".
     let has_git = work.repository.is_some()
         || work.branch.is_some()
         || work.worktree.is_some()
@@ -572,6 +582,9 @@ async fn upsert_session(
     }
     if !recent_files.is_empty() {
         context.insert("recent_files".into(), recent_files.into());
+    }
+    if let Some(origin) = work.origin.as_deref().filter(|origin| !origin.is_empty()) {
+        context.insert("origin".into(), origin.into());
     }
     let context = (!context.is_empty()).then_some(serde_json::Value::Object(context));
     sqlx::query(

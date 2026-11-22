@@ -42,7 +42,7 @@ impl Payload {
         }
     }
 
-    fn text(&self, key: &str) -> Option<&str> {
+    pub(super) fn text(&self, key: &str) -> Option<&str> {
         self.0
             .get(key)
             .and_then(Value::as_str)

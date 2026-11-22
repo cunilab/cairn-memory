@@ -53,6 +53,9 @@ pub struct SessionState {
     /// The no-project hint was injected; it is once per session.
     #[serde(default)]
     pub hinted: bool,
+    /// An automated or subagent session: no Stop ask, and its distill does not replace the handoff.
+    #[serde(default)]
+    pub automated: bool,
 }
 
 fn push_capped(list: &mut Vec<String>, value: &str, cap: usize) {

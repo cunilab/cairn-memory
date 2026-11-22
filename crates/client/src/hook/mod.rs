@@ -169,6 +169,7 @@ struct Hook<'a> {
 impl Hook<'_> {
     /// The text to inject, if the event injects any.
     fn handle(&self) -> Result<Option<String>, String> {
+        self.note_automation();
         match self.event {
             "SessionStart" => Ok(self.start()),
             "UserPromptSubmit" => {
@@ -179,7 +180,7 @@ impl Hook<'_> {
                 self.capture(prompt).map(|()| None)
             }
             "PostToolUse" => self.tool(),
-            "Stop" => {
+            "Stop" | "SubagentStop" => {
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
                 }
@@ -189,7 +190,12 @@ impl Hook<'_> {
                 {
                     self.checkpoint(generation);
                 }
-                Ok(self.stop_nudge())
+                // SubagentStop captures like Stop and never asks.
+                if self.event == "SubagentStop" {
+                    Ok(None)
+                } else {
+                    Ok(self.stop_nudge())
+                }
             }
             "PreCompact" => {
                 if let Some(generation) = self
@@ -365,11 +371,35 @@ impl Hook<'_> {
                     .unwrap_or(false))
     }
 
+    /// This event, or one already stored for the session, is an automated or subagent run.
+    /// Re-checked on every event: some hosts skip `SessionStart` for a subagent.
+    fn automated_now(&self) -> bool {
+        std::env::var("CAIRN_SESSION_ORIGIN").ok().as_deref() == Some("automation")
+            || self.payload.text("agent_id").is_some()
+            || self.payload.text("agent_type").is_some()
+            || self.event == "SubagentStop"
+    }
+
+    fn note_automation(&self) {
+        if self.automated_now() {
+            self.with_state(|state| state.automated = true);
+        }
+    }
+
+    fn automated(&self) -> bool {
+        self.automated_now() || self.with_state(|state| state.automated).unwrap_or(false)
+    }
+
     /// The one-time Stop reminder: the session edited files, ran a test command or wrote a
     /// `Decision:` line, and never saved. Not when the host is already continuing because of a
-    /// Stop hook (`stop_hook_active`), and not for OpenCode, whose plugin cannot continue a turn.
+    /// Stop hook (`stop_hook_active`), not for an automated or subagent session, and not for
+    /// OpenCode, whose plugin cannot continue a turn.
     fn stop_nudge(&self) -> Option<String> {
-        if self.payload.flag("stop_hook_active") || self.agent == "opencode" || !self.nudging() {
+        if self.payload.flag("stop_hook_active")
+            || self.automated()
+            || self.agent == "opencode"
+            || !self.nudging()
+        {
             return None;
         }
         let decided = self
@@ -544,6 +574,9 @@ impl Hook<'_> {
         let event_id = capture.event_id(&self.session_id);
         let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
+        if self.automated() {
+            context.origin = Some("automation".to_owned());
+        }
         let mut body = json!({
             "event_id": event_id,
             "session_id": self.session_id,

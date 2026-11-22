@@ -29,6 +29,10 @@ pub struct WorkContext {
     pub tests: Vec<String>,
     #[serde(default)]
     pub services: Vec<String>,
+    /// `"automation"` for an automated or subagent session. `upsert_session` copies it onto
+    /// `sessions.context`; it is not a git fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// What the hook captured (CM-SPEC-006 C4).
