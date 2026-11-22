@@ -1,25 +1,9 @@
 use super::model::{Kind, Scope};
 use crate::error::Error;
 
-pub const NOTE_TTL_SECONDS: i64 = 90 * 86_400;
-pub const HANDOFF_TTL_SECONDS: i64 = 14 * 86_400;
-/// Expired memories are hard-deleted by the idle sweep this long after expiry.
-pub const EXPIRED_GRACE_SECONDS: i64 = 30 * 86_400;
-
-/// A system-derived gotcha or fact (distilled from a capture) lapses unless it keeps being used.
-pub const SYSTEM_TTL_SECONDS: i64 = 180 * 86_400;
-
-/// `system` is true for `Origin::System`. A promoted global copy is system-made too but lives as
-/// long as its sources do (CM-SPEC-008 §4.3), so only non-global system gotchas and facts expire.
-pub fn expires_at(kind: Kind, system: bool, scope: Scope, created_at: i64) -> Option<i64> {
-    match kind {
-        Kind::Note => Some(created_at + NOTE_TTL_SECONDS),
-        Kind::Handoff => Some(created_at + HANDOFF_TTL_SECONDS),
-        Kind::Gotcha | Kind::Fact if system && scope != Scope::Global => {
-            Some(created_at + SYSTEM_TTL_SECONDS)
-        }
-        _ => None,
-    }
+/// Memories are not expired. The column stays; every kind is written with `NULL`.
+pub fn expires_at(_kind: Kind, _system: bool, _scope: Scope, _created_at: i64) -> Option<i64> {
+    None
 }
 
 /// The scope a save gets when the agent names none.
@@ -85,21 +69,17 @@ mod tests {
     #[test]
     fn expiry_follows_kind_and_origin() {
         let at = |kind, system, scope| expires_at(kind, system, scope, 10);
-        assert_eq!(
-            at(Kind::Note, false, Scope::Personal),
-            Some(10 + 90 * 86_400)
-        );
-        assert_eq!(
-            at(Kind::Handoff, true, Scope::Personal),
-            Some(10 + 14 * 86_400)
-        );
-        assert_eq!(at(Kind::Decision, true, Scope::Personal), None);
-        for kind in [Kind::Gotcha, Kind::Fact] {
-            assert_eq!(at(kind, true, Scope::Personal), Some(10 + 180 * 86_400));
+        for kind in [
+            Kind::Note,
+            Kind::Handoff,
+            Kind::Decision,
+            Kind::Gotcha,
+            Kind::Fact,
+            Kind::Rule,
+        ] {
+            assert_eq!(at(kind, true, Scope::Personal), None);
             assert_eq!(at(kind, false, Scope::Project), None);
-            // a promoted copy is not expired by age
             assert_eq!(at(kind, true, Scope::Global), None);
         }
-        assert_eq!(at(Kind::Rule, true, Scope::Personal), None);
     }
 }

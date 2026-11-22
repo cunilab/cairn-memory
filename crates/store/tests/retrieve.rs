@@ -618,13 +618,17 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
     .execute(store.pool())
     .await
     .unwrap();
-    assert_eq!(channels().await, (1, 1, 1), "only the live memory remains");
+    assert_eq!(
+        channels().await,
+        (3, 3, 3),
+        "superseded and old rows stay searchable; forgotten does not"
+    );
     sqlx::query("UPDATE memories SET status = 'stale' WHERE memory_id = $1")
         .bind(&ids[3])
         .execute(store.pool())
         .await
         .unwrap();
-    assert_eq!(channels().await, (1, 1, 1), "stale stays searchable");
+    assert_eq!(channels().await, (3, 3, 3), "stale stays searchable");
     db.finish().await;
 }
 
@@ -1593,5 +1597,251 @@ async fn digest_searchable_not_in_brief() {
         "{}",
         digest.summary
     );
+    db.finish().await;
+}
+
+async fn equalize(store: &cairn_store::Store, ids: &[&str]) {
+    let text = "Shared marker wording for the rank test exactly";
+    for id in ids {
+        sqlx::query("UPDATE memories SET title = $2, summary = $2, reason = $3, updated_at = now() - interval '400 days' WHERE memory_id = $1")
+            .bind(id)
+            .bind(text)
+            .bind("because the test says why this is true")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store
+            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn superseded_is_searchable_ranked_below_and_labelled() {
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let old = db
+        .store
+        .save(&me, rule("Cache sessions in Redis"), &work)
+        .await
+        .unwrap()
+        .id;
+    let mut newer = rule("Cache sessions in Postgres");
+    newer.supersedes = Some(old.clone());
+    let new = db.store.save(&me, newer, &work).await.unwrap().id;
+    equalize(&db.store, &[&old, &new]).await;
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Shared marker wording",
+            Some(&tilted(1.0, 1)),
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<&str> = cards.results.iter().map(|card| card.id.as_str()).collect();
+    assert!(
+        ids.contains(&old.as_str()) && ids.contains(&new.as_str()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.iter().position(|id| *id == new).unwrap()
+            < ids.iter().position(|id| *id == old).unwrap(),
+        "replacement ranks first: {ids:?}"
+    );
+    let label = cards
+        .results
+        .iter()
+        .find(|card| card.id == old)
+        .unwrap()
+        .label
+        .clone()
+        .unwrap();
+    assert_eq!(label, format!("replaced by {new}"));
+    assert!(label.len() <= 42, "{label}");
+    assert!(
+        cards
+            .results
+            .iter()
+            .find(|card| card.id == new)
+            .unwrap()
+            .label
+            .is_none()
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn stale_labels() {
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let live = db
+        .store
+        .save(&me, rule("Live marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let voted = db
+        .store
+        .save(&me, rule("Voted marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let missing = db
+        .store
+        .save(&me, rule("Missing marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'feedback' WHERE memory_id = $1",
+    )
+    .bind(&voted)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE usage SET wrong = 2 WHERE memory_id = $1")
+        .bind(&voted)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'missing' WHERE memory_id = $1",
+    )
+    .bind(&missing)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    equalize(&db.store, &[&live, &voted, &missing]).await;
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Shared marker wording",
+            Some(&tilted(1.0, 1)),
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let pos = |id: &str| cards.results.iter().position(|card| card.id == id).unwrap();
+    assert!(
+        pos(&live) < pos(&voted) && pos(&live) < pos(&missing),
+        "{:?}",
+        cards.results
+    );
+    let label = |id: &str| {
+        cards
+            .results
+            .iter()
+            .find(|card| card.id == id)
+            .unwrap()
+            .label
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(label(&voted), "voted wrong 2x");
+    assert_eq!(label(&missing), "file deleted");
+    assert!(label(&voted).len() <= 16 && label(&missing).len() <= 16);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn forget_keeps_content_but_hides() {
+    use cairn_core::memory::Status;
+    use cairn_core::retrieve::filter::Filter;
+    use cairn_store::memory::ListFilter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext {
+        files: vec!["src/kept.rs".into()],
+        ..WorkContext::default()
+    };
+    let other = db
+        .store
+        .save(&me, rule("Other kept rule"), &WorkContext::default())
+        .await
+        .unwrap()
+        .id;
+    let mut body = rule("Forget keeps this rule");
+    body.supersedes = Some(other);
+    let id = db.store.save(&me, body, &work).await.unwrap().id;
+    db.store
+        .upsert_embedding(&id, "h", &tilted(1.0, 1))
+        .await
+        .unwrap();
+    assert!(db.store.forget(&me, &id).await.unwrap());
+    let row: (String, String, i32, i64, i64) = sqlx::query_as(
+        "SELECT title, summary,
+                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END,
+                (SELECT count(*) FROM entities WHERE memory_id = $1),
+                (SELECT count(*) FROM links WHERE source_id = $1 OR target_id = $1)
+           FROM memories WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, "Forget keeps this rule");
+    assert!(!row.1.is_empty());
+    assert_eq!(
+        (row.2, row.4),
+        (1, 1),
+        "embedding and the supersedes link stay"
+    );
+    assert!(row.3 >= 1, "entities stay");
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Forget keeps this rule",
+            None,
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(cards.results.iter().all(|card| card.id != id));
+    let listed = db.store.list(&me, &ListFilter::default()).await.unwrap();
+    assert!(listed.memories.iter().all(|memory| memory.id != id));
+    let admin = db
+        .store
+        .list(
+            &me,
+            &ListFilter {
+                statuses: vec![Status::Forgotten],
+                see_forgotten: true,
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin.memories.len(), 1);
+    assert_eq!(admin.memories[0].status, Status::Forgotten);
+    let brief = db
+        .store
+        .brief(&me, &WorkContext::default(), &[])
+        .await
+        .unwrap();
+    assert!(!brief.contains("Forget keeps this rule"), "{brief}");
     db.finish().await;
 }

@@ -305,7 +305,14 @@ async fn ranking_follows_the_match_not_the_kind_or_the_age_of_the_embedding() {
         }
         let cards = search("release cairn").await;
         assert_eq!(cards[0]["id"], new["id"], "settled {settled}: {cards:?}");
-        assert!(cards.iter().all(|c| c["id"] != old["id"]));
+        assert!(
+            cards
+                .iter()
+                .position(|card| card["id"] == old["id"])
+                .unwrap_or(1)
+                > 0,
+            "the superseded procedure stays below the replacement: {cards:?}"
+        );
     }
     app.finish().await;
 }

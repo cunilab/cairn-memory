@@ -237,14 +237,14 @@ async fn stats_usage_stale_expiry_and_jobs() {
 
     let stats = app.get("stats", &admin).await;
     assert_eq!(
-        stats["memories"]["total"], 5,
-        "the expired one is not counted: {stats}"
+        stats["memories"]["total"], 6,
+        "an old expires_at stays in the count: {stats}"
     );
     assert_eq!(stats["memories"]["expired_30d"], 1);
     assert_eq!(stats["usage"]["fetched_30d"], 2);
     assert_eq!(stats["usage"]["helpful_30d"], 1);
     // Durable and active: a, b, e (c and d are stale). Fetched: a, b.
-    assert_eq!(stats["usage"]["never_fetched"], 1);
+    assert_eq!(stats["usage"]["never_fetched"], 2);
     let top = stats["usage"]["top"].as_array().unwrap();
     assert_eq!(top[0]["id"], a);
     assert_eq!(

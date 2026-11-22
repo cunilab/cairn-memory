@@ -8,9 +8,11 @@ use cairn_core::capture::{
 };
 use cairn_core::capture::{redact_sensitive_content, redact_work_context};
 use cairn_core::id::now_seconds;
-use cairn_core::memory::kind::EXPIRED_GRACE_SECONDS;
 use cairn_core::memory::{Fields, Scope};
-use cairn_core::process::distill::{distill, handoff_id};
+use cairn_core::process::distill::distill;
+
+/// shortcut: links.origin CHECK lacks system; widen when the user approves an allowlist line
+const HANDOFF_CHAIN_ORIGIN: &str = "agent";
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
 use cairn_core::process::{Origin, prepare_save};
 use sqlx::Row;
@@ -23,7 +25,8 @@ pub(crate) const RECENT_FILE_MAX_BYTES: usize = 512;
 pub struct DistillReport {
     pub notes: usize,
     pub handoff: bool,
-    /// The stored handoff had files or open items and the new one had neither, so it was left.
+    /// The new handoff is thin and an older one in the chain has files or open questions, so the
+    /// brief keeps that older one.
     pub handoff_kept: bool,
 }
 
@@ -276,9 +279,9 @@ impl Store {
             .collect()
     }
 
-    /// The `distill` job body: typed notes become personal memories, and the handoff for the
-    /// session is written (or replaced) under a derived id. A session with no retained
-    /// observation is an error whose text `is_empty_session` recognises.
+    /// The `distill` job body: typed notes become memories, and the checkout's handoff is a new
+    /// row linked to the previous one. A session with no retained observation is an error whose
+    /// text `is_empty_session` recognises.
     pub async fn distill_session(
         &self,
         person_id: &str,
@@ -384,63 +387,83 @@ impl Store {
                 Origin::System,
                 now_seconds(),
             )?;
-            let id = handoff_id(person_id, &work);
-            // The id is fixed per checkout. Forgetting a handoff forgets that content, not the
-            // checkout: the same content stays forgotten, a later handoff replaces the row.
-            // A live handoff that already names files or open items is kept when the new one
-            // has neither.
+            // Each handoff is its own row. The previous one of this checkout (same person, repo,
+            // branch, worktree and project) is superseded and linked newer → older.
             let mut tx = self.pool.begin().await?;
-            let existing = sqlx::query(
-                "SELECT status, identity_hash, fields,
-                        (expires_at IS NULL OR expires_at > now())::bool AS live
-                   FROM memories WHERE memory_id = $1 AND owner_id = $2 FOR UPDATE",
+            let previous = sqlx::query(
+                "SELECT memory_id, status, fields FROM memories
+                  WHERE owner_id = $1 AND kind = 'handoff'
+                    AND repo IS NOT DISTINCT FROM $2 AND repo_branch IS NOT DISTINCT FROM $3
+                    AND repo_worktree IS NOT DISTINCT FROM $4
+                    AND project_id IS NOT DISTINCT FROM $5
+                  ORDER BY created_at DESC, memory_id DESC LIMIT 1 FOR UPDATE",
             )
-            .bind(&id)
             .bind(person_id)
+            .bind(&new.context.repo)
+            .bind(&new.context.branch)
+            .bind(&new.context.worktree)
+            .bind(session_project.as_deref())
             .fetch_optional(&mut *tx)
             .await?;
-            let forgotten_same = match &existing {
+            let kept = match &previous {
                 Some(row) => {
-                    row.try_get::<String, _>("status")? == "forgotten"
-                        && row.try_get::<String, _>("identity_hash")? == new.identity_hash
+                    let fields: serde_json::Value = row.try_get("fields")?;
+                    matches!(
+                        row.try_get::<String, _>("status")?.as_str(),
+                        "active" | "stale"
+                    ) && (json_list_nonempty(&fields, "files")
+                        || json_list_nonempty(&fields, "open_questions"))
+                        && handoff_is_thin(&new.fields)
                 }
                 None => false,
             };
-            let keep = !forgotten_same
-                && match &existing {
-                    Some(row) => {
-                        let fields: serde_json::Value = row.try_get("fields")?;
-                        matches!(
-                            row.try_get::<String, _>("status")?.as_str(),
-                            "active" | "stale"
-                        ) && row.try_get("live")?
-                            && (json_list_nonempty(&fields, "files")
-                                || json_list_nonempty(&fields, "open_questions"))
-                            && handoff_is_thin(&new.fields)
+            match insert_memory(
+                &mut tx,
+                person_id,
+                session_project.as_deref(),
+                &new,
+                None,
+                device,
+            )
+            .await
+            {
+                Ok(saved) => {
+                    if let Some(row) = &previous {
+                        let old: String = row.try_get("memory_id")?;
+                        if old != saved.id {
+                            sqlx::query(&format!(
+                                "INSERT INTO links (source_id, target_id, relation, origin)
+                                 VALUES ($1, $2, 'supersedes', '{HANDOFF_CHAIN_ORIGIN}')
+                                 ON CONFLICT (source_id, target_id, relation) DO NOTHING"
+                            ))
+                            .bind(&saved.id)
+                            .bind(&old)
+                            .execute(&mut *tx)
+                            .await?;
+                            sqlx::query(
+                                "UPDATE memories SET status = 'superseded', stale_cause = NULL,
+                                        status_changed_at = now(), updated_at = now()
+                                  WHERE memory_id = $1 AND status IN ('active','stale')",
+                            )
+                            .bind(&old)
+                            .execute(&mut *tx)
+                            .await?;
+                        }
                     }
-                    None => false,
-                };
-            if keep {
-                report.handoff_kept = true;
-                kept_id = Some(id);
-            } else if !forgotten_same {
-                sqlx::query("DELETE FROM memories WHERE memory_id = $1 AND owner_id = $2")
-                    .bind(&id)
-                    .bind(person_id)
-                    .execute(&mut *tx)
-                    .await?;
-                insert_memory(
-                    &mut tx,
-                    person_id,
-                    session_project.as_deref(),
-                    &new,
-                    Some(&id),
-                    device,
-                )
-                .await?;
-                report.handoff = true;
-                handoff_written = Some(id);
-            }
+                    if !saved.deduplicated {
+                        report.handoff = true;
+                        handoff_written = Some(saved.id);
+                    }
+                    if kept && !saved.deduplicated {
+                        report.handoff_kept = true;
+                        kept_id = previous.as_ref().map(|row| row.get("memory_id"));
+                    }
+                    Ok(())
+                }
+                // The same content was forgotten; it stays forgotten.
+                Err(StoreError::Conflict(_)) => Ok(()),
+                Err(error) => Err(error),
+            }?;
             tx.commit().await?;
         }
         sqlx::query(
@@ -477,7 +500,8 @@ impl Store {
     }
 
     /// Housekeeping, safe to run often: closes idle sessions with pending captures (queueing their
-    /// distill), and hard-deletes memories 30 days past expiry, expired observations and old done jobs.
+    /// distill), and deletes expired observations, old done jobs and old retrieval-log rows.
+    /// Memories are never deleted.
     pub async fn sweep(&self) -> Result<SweepReport> {
         let mut report = SweepReport::default();
         let mut tx = self.pool.begin().await?;
@@ -499,34 +523,6 @@ impl Store {
             enqueue_tx(&mut tx, JobKind::Distill, &key).await?;
         }
         report.sessions_closed = idle.len() as u64;
-        // Cairn says what lapsed, once per expiry, before the row can be swept away. A promoted
-        // copy has no person to tell; its withdrawal is reported by `reconcile_promoted`.
-        let lapsed = sqlx::query(&format!(
-            "UPDATE memories SET expiry_noted_for = expires_at
-              WHERE expires_at <= now() AND expiry_noted_for IS DISTINCT FROM expires_at
-                AND status <> 'forgotten' AND owner_id <> '{}'
-              RETURNING owner_id, memory_id, kind",
-            crate::consolidate::SYSTEM_OWNER
-        ))
-        .fetch_all(&mut *tx)
-        .await?;
-        report.memories_deleted = sqlx::query(&format!(
-            "DELETE FROM memories WHERE expires_at < now() - make_interval(secs => {EXPIRED_GRACE_SECONDS})"
-        ))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        // A system-derived memory nobody has used since it went stale lapses after 90 days. An
-        // agent's memory never does: stale only ranks it lower and shows why.
-        sqlx::query(
-            "UPDATE memories m SET expires_at = now()
-              WHERE m.origin = 'system' AND m.status = 'stale' AND m.status_changed_at < now() - interval '90 days'
-                AND m.expires_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.memory_id = m.memory_id
-                                   AND u.last_used_at > m.status_changed_at)",
-        )
-        .execute(&mut *tx)
-        .await?;
         report.observations_deleted =
             sqlx::query("DELETE FROM observations WHERE expires_at < now()")
                 .execute(&mut *tx)
@@ -553,43 +549,11 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        self.note_expired(lapsed).await?;
         // A failed retry must not stop the reconcile pass.
         let retried = self.retry_quarantined().await;
         self.reconcile_promoted().await?;
         retried?;
         Ok(report)
-    }
-}
-
-impl Store {
-    /// One `memories_expired` event per owner for the memories a sweep saw lapse.
-    async fn note_expired(&self, lapsed: Vec<sqlx::postgres::PgRow>) -> Result<()> {
-        let mut by_owner: std::collections::BTreeMap<String, Vec<(String, String)>> =
-            std::collections::BTreeMap::new();
-        for row in lapsed {
-            by_owner
-                .entry(row.try_get("owner_id")?)
-                .or_default()
-                .push((row.try_get("memory_id")?, row.try_get("kind")?));
-        }
-        for (owner, memories) in by_owner {
-            let mut by_kind = std::collections::BTreeMap::<&str, i64>::new();
-            for (_, kind) in &memories {
-                *by_kind.entry(kind.as_str()).or_default() += 1;
-            }
-            // The count is exact; the ids (for the titles under it) stop at 50.
-            let ids: Vec<&String> = memories.iter().map(|(id, _)| id).take(50).collect();
-            self.record_audit(
-                &owner,
-                None,
-                "memories_expired",
-                None,
-                serde_json::json!({"count": memories.len(), "by_kind": by_kind, "ids": ids}),
-            )
-            .await?;
-        }
-        Ok(())
     }
 }
 

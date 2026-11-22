@@ -125,8 +125,7 @@ async fn session_distills_into_notes_and_a_handoff() {
         vec![notes[0]["id"].as_str().unwrap().to_owned()]
     );
 
-    // A second distill replaces the handoff in place instead of adding one.
-    // An edit makes this handoff at least as rich as the one it replaces.
+    // A second distill adds the next handoff in the chain. An edit makes it at least as rich.
     app.post(
         "observe",
         event("e3", "next: wire the retry metric"),
@@ -149,9 +148,14 @@ async fn session_distills_into_notes_and_a_handoff() {
         .await;
     app.settle().await;
     let handoffs = app.get("memories?kind=handoff", &device).await;
-    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    let handoffs = handoffs.as_array().unwrap();
+    assert_eq!(handoffs.len(), 2);
+    let active = handoffs
+        .iter()
+        .find(|memory| memory["status"] == "active")
+        .unwrap();
     assert!(
-        handoffs[0]["fields"]["next_steps"]
+        active["fields"]["next_steps"]
             .to_string()
             .contains("retry metric")
     );
@@ -378,11 +382,19 @@ async fn supersede_and_graph() {
     let device = app.device(&admin, "d").await;
     let old = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Redis", "summary": "Sessions live in Redis.", "reason": "speed and the test says why", "scope": "personal"})).await;
     let new = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Postgres", "summary": "Sessions moved to Postgres.", "reason": "one datastore", "scope": "personal", "supersedes": old})).await;
-    // The replaced memory leaves normal search but stays readable and listed.
+    // Both stay in search. The replacement ranks above the superseded card.
     let search = app
         .post("search", json!({"query": "cache sessions"}), &device)
         .await;
-    assert_eq!(ids(&search), vec![new.clone()]);
+    assert_eq!(ids(&search)[0], new);
+    assert!(ids(&search).contains(&old));
+    let old_card = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == old)
+        .unwrap();
+    assert_eq!(old_card["label"], format!("replaced by {new}"));
     assert!(
         search["results"][0].get("status").is_none(),
         "active cards omit status"
@@ -427,7 +439,8 @@ async fn supersede_and_graph() {
     let search = app
         .post("search", json!({"query": "cache sessions"}), &device)
         .await;
-    assert_eq!(ids(&search), vec![new.clone()]);
+    assert_eq!(ids(&search)[0], new);
+    assert!(ids(&search).contains(&old));
     assert_eq!(search["results"][0]["status"], "stale");
     // Stale is never unexplained: reply, card and record all name the cause.
     assert_eq!(marked["stale_cause"], "feedback");

@@ -376,7 +376,7 @@ impl Store {
                FROM memories m
               WHERE m.project_id = $1 AND m.repo_branch IS NOT NULL
                 AND (m.scope = 'project' OR (m.kind = 'handoff' AND m.owner_id = $2))
-                AND m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+                AND m.status <> 'forgotten'
               GROUP BY m.repo_branch ORDER BY max(m.updated_at) DESC, m.repo_branch",
             epoch!("m.updated_at")
         ))
@@ -432,12 +432,12 @@ impl Store {
         let rows = sqlx::query(
             "SELECT p.project_id,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
-                        AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS memories,
+                        AND m.status IN ('active','stale')) AS memories,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
                         AND m.rank = 'candidate'
-                        AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS candidates,
+                        AND m.status IN ('active','stale')) AS candidates,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
-                        AND m.status = 'stale' AND (m.expires_at IS NULL OR m.expires_at > now())) AS stale,
+                        AND m.status = 'stale') AS stale,
                     (SELECT count(*) FROM project_members pm WHERE pm.project_id = p.project_id) AS members,
                     EXTRACT(EPOCH FROM greatest(
                         (SELECT max(m.updated_at) FROM memories m
@@ -480,8 +480,6 @@ impl Store {
                 AND s.project_id = $1 AND t.project_id = $1
                 AND s.scope = 'project' AND t.scope = 'project'
                 AND s.status IN ('active','stale') AND t.status IN ('active','stale')
-                AND (s.expires_at IS NULL OR s.expires_at > now())
-                AND (t.expires_at IS NULL OR t.expires_at > now())
               ORDER BY l.created_at, l.source_id",
         )
         .bind(project_id)

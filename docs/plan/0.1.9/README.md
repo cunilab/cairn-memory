@@ -46,7 +46,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 05 | [x] [Handoffs that are not overwritten](05-handoffs.md) | 02, 12 | — |
 | 04 | [x] [Session digest note](04-session-digest.md) | 01, 05 | — |
 | 03 | [x] [Ask once to save 0–3 notes](03-save-ask.md) | 12 | — |
-| 17 | [Always-active memory: no expiry, relations and ranking](17-expiry-keeps-data.md) (high priority: live data loss) | 00, 04, 05 | `0012_always_active` (index only) |
+| 17 | [x] [Always-active memory: no expiry, relations and ranking](17-expiry-keeps-data.md) (high priority: live data loss) | 00, 04, 05 | `0012_always_active` (index only) |
 | 06 | [User corrections become rules](06-corrections.md) | 03 | — |
 | 11 | [Proof count and rare-token veto](11-proof-and-veto.md) | 01 | `0008_proof_count` |
 | 09 | [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |

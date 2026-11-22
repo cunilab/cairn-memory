@@ -3,7 +3,7 @@ use crate::embed::vector_text;
 use crate::memory::{MEMORY_COLUMNS, MEMORY_SELECT, memory_from_row, searchable, visible};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory};
+use cairn_core::memory::{Fields, Kind, Memory, Status};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
@@ -338,7 +338,10 @@ impl Store {
         let pool = self
             .candidate_pool(person_id, query, vector, filter)
             .await?;
-        let hits = rank(&pool, filter, cairn_core::id::now_seconds());
+        let mut hits = rank(&pool, filter, cairn_core::id::now_seconds());
+        if filter.kind == Some(Kind::Handoff) {
+            hits = one_handoff_per_checkout(hits);
+        }
         let cards = pack(&hits, limit, budget);
         let ids: Vec<String> = cards.results.iter().map(|c| c.id.clone()).collect();
         self.mark_fetched(&ids).await?;
@@ -585,10 +588,10 @@ impl Store {
         let newest = "ORDER BY m.created_at DESC, m.memory_id";
         let handoff = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
+              WHERE {} AND m.status <> 'forgotten' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
                 AND m.repo = $3 AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
-              {newest} LIMIT 1",
+              {newest}",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -663,7 +666,6 @@ impl Store {
                 .await?,
             );
         }
-        rows.extend(handoff);
         rows.extend(preferences);
         let mut seen = HashSet::new();
         let mut memories = Vec::new();
@@ -671,6 +673,17 @@ impl Store {
             let memory = memory_from_row(row)?;
             if seen.insert(memory.id.clone()) {
                 memories.push(memory);
+            }
+        }
+        let mut handoff_rows = Vec::new();
+        for row in &handoff {
+            handoff_rows.push(memory_from_row(row)?);
+        }
+        if let Some(mut chosen) = preferred_handoff(&handoff_rows).cloned() {
+            // shortcut: session_brief only renders an active handoff; the stored row stays as it is
+            chosen.status = Status::Active;
+            if seen.insert(chosen.id.clone()) {
+                memories.push(chosen);
             }
         }
         self.attach(person_id, &mut memories).await?;
@@ -759,6 +772,67 @@ impl Store {
         let links: Vec<_> = memories.iter().flat_map(|m| m.links.clone()).collect();
         Ok(build(&memories, &links, filter, cap))
     }
+}
+
+fn handoff_is_thin(memory: &Memory) -> bool {
+    match &memory.fields {
+        Fields::Handoff(handoff) => handoff.files.is_empty() && handoff.open_questions.is_empty(),
+        _ => false,
+    }
+}
+
+fn newest_first(a: &&Memory, b: &&Memory) -> std::cmp::Ordering {
+    a.created_us.cmp(&b.created_us).then(b.id.cmp(&a.id))
+}
+
+/// Newest handoff of the slice. When that one is thin, the newest that is not.
+fn preferred_handoff(memories: &[Memory]) -> Option<&Memory> {
+    let newest = memories.iter().max_by(newest_first)?;
+    if !handoff_is_thin(newest) {
+        return Some(newest);
+    }
+    memories
+        .iter()
+        .filter(|memory| !handoff_is_thin(memory))
+        .max_by(newest_first)
+        .or(Some(newest))
+}
+
+fn checkout_of(memory: &Memory) -> (String, String, String, String, String) {
+    (
+        memory.owner.clone(),
+        memory.project_id.clone().unwrap_or_default(),
+        memory.context.repo.clone().unwrap_or_default(),
+        memory.context.branch.clone().unwrap_or_default(),
+        memory.context.worktree.clone().unwrap_or_default(),
+    )
+}
+
+/// `kind=handoff` returns one card per checkout: the newest, or the newest non-thin one when the
+/// newest is thin.
+fn one_handoff_per_checkout(hits: Vec<Hit>) -> Vec<Hit> {
+    let mut groups: HashMap<(String, String, String, String, String), Vec<Hit>> = HashMap::new();
+    let mut order = Vec::new();
+    for hit in hits {
+        let key = checkout_of(&hit.memory);
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(hit);
+    }
+    let mut out = Vec::new();
+    for key in order {
+        let group = groups.remove(&key).unwrap_or_default();
+        let memories: Vec<Memory> = group.iter().map(|hit| hit.memory.clone()).collect();
+        let Some(chosen) = preferred_handoff(&memories) else {
+            continue;
+        };
+        if let Some(hit) = group.into_iter().find(|hit| hit.memory.id == chosen.id) {
+            out.push(hit);
+        }
+    }
+    sort_best_first(&mut out);
+    out
 }
 
 fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {

@@ -81,20 +81,17 @@ async fn memory_list_filters_q_branch_and_expired() {
         ids(&app.get("memories?branch=feat/x", &admin).await),
         [b.as_str()]
     );
-    assert_eq!(
-        ids(&app.get("memories?status=expired", &admin).await),
-        [c.as_str()]
-    );
+    let (status, _) = app
+        .send("GET", "memories?status=expired", json!(null), Some(&admin))
+        .await;
+    assert_eq!(status, 400, "expired is not a status filter");
     assert_eq!(
         ids(&app.get("memories?status=stale", &admin).await),
         [d.as_str()]
     );
     let default = ids(&app.get("memories", &admin).await);
-    assert!(
-        !default.contains(&c),
-        "an expired memory is listed only when asked for"
-    );
-    assert_eq!(default.len(), 3);
+    assert!(default.contains(&c), "an old expires_at stays in the list");
+    assert_eq!(default.len(), 4);
     let (status, body) = app
         .send(
             "GET",

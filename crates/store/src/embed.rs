@@ -26,7 +26,7 @@ impl Store {
     pub async fn pending_embeddings(&self, limit: i64) -> Result<Vec<EmbedItem>> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+              WHERE m.status <> 'forgotten'
                 AND m.embedding IS NULL
               ORDER BY m.created_at, m.memory_id LIMIT $1"
         ))
@@ -43,7 +43,7 @@ impl Store {
         loop {
             let ids: Vec<String> = sqlx::query_scalar(
                 "SELECT m.memory_id FROM memories m
-                  WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+                  WHERE m.status <> 'forgotten'
                     AND m.embedding IS NULL
                     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'embed' AND j.job_key = m.memory_id
                                        AND j.status IN ('pending', 'running'))
@@ -63,13 +63,12 @@ impl Store {
         }
     }
 
-    /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten or
-    /// expired memory has no item.
+    /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten memory
+    /// has no item.
     pub async fn embed_items(&self, ids: &[String]) -> Result<Vec<EmbedItem>> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE m.memory_id = ANY($1) AND m.status <> 'forgotten'
-                AND (m.expires_at IS NULL OR m.expires_at > now())"
+              WHERE m.memory_id = ANY($1) AND m.status <> 'forgotten'"
         ))
         .bind(ids)
         .fetch_all(&self.pool)

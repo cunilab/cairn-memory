@@ -22,10 +22,10 @@ pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
         Scope::Global => -0.05,
         _ => 0.0,
     };
-    let status = if m.status == Status::Stale {
-        -0.20
-    } else {
-        0.0
+    let status = match m.status {
+        Status::Superseded => -0.30,
+        Status::Stale => -0.20,
+        _ => 0.0,
     };
     let fresh = if now - m.updated_at <= FRESH_SECONDS {
         0.05
@@ -155,5 +155,18 @@ mod tests {
         low.updated_at = -100 * 86_400;
         low.rank = Rank::Candidate;
         assert_eq!(adjust(&low, &ctx(), 0), -ADJUST_CAP);
+    }
+
+    #[test]
+    fn superseded_sits_at_the_floor() {
+        use crate::memory::model::Rank;
+
+        let mut m = memory("a", Kind::Fact, Scope::Personal);
+        m.updated_at = -100 * 86_400;
+        m.status = Status::Superseded;
+        let plain = WorkContext::default();
+        assert_eq!(adjust(&m, &plain, 0), -ADJUST_CAP);
+        m.rank = Rank::Candidate;
+        assert_eq!(adjust(&m, &plain, 0), -ADJUST_CAP);
     }
 }

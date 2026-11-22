@@ -315,7 +315,7 @@ async fn merge_promotes_branch_and_expires_handoff() {
         let (store, a, pid) = (store, a.clone(), pid.clone());
         async move {
             sqlx::query(
-                "SELECT expires_at <= now() AS expired FROM memories
+                "SELECT coalesce(expires_at <= now(), false) AS expired FROM memories
                   WHERE kind = 'handoff' AND project_id = $1 AND repo_branch = $2",
             )
             .bind(&pid)
@@ -364,8 +364,8 @@ async fn merge_promotes_branch_and_expires_handoff() {
             .as_deref(),
         Some("other")
     );
-    // the merged branch's handoff is gone from reads and its row is expired; the other lives
-    assert!(handoffs("feat").await.unwrap());
+    // neither handoff is expired; both stay readable
+    assert!(!handoffs("feat").await.unwrap());
     assert!(!handoffs("other").await.unwrap());
     db.finish().await;
 }
@@ -433,9 +433,9 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
         written[0].title
     );
     let digest_id = written[0].id.clone();
-    // another session of the same checkout: the same notes dedupe and the handoff is replaced
+    // another session of the same checkout: the same notes and the same handoff dedupe
     let second = store.distill_session(&a, "s2").await.unwrap();
-    assert!(second.handoff);
+    assert!(!second.handoff);
     let all = store
         .list(&a, &ListFilter::default())
         .await
@@ -478,17 +478,9 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
             .any(|e| e.name == "src/billing/money.rs")
     );
     assert_eq!(of(Kind::Fact).len(), 1);
-    // system gotcha and fact lapse after 180 days; the handoff after 14
-    let days = |m: &cairn_core::memory::Memory| {
-        (m.expires_at.unwrap() - cairn_core::id::now_seconds()) / 86_400
-    };
-    assert!(
-        (179..=180).contains(&days(gotcha[0])),
-        "{}",
-        days(gotcha[0])
-    );
-    assert!((179..=180).contains(&days(of(Kind::Fact)[0])));
-    assert!((13..=14).contains(&days(of(Kind::Handoff)[0])));
+    assert!(gotcha[0].expires_at.is_none());
+    assert!(of(Kind::Fact)[0].expires_at.is_none());
+    assert!(of(Kind::Handoff)[0].expires_at.is_none());
     // another branch of the same project gets its own handoff
     store
         .capture(&a, edit_capture("o1", "s3", "other", "src/x.rs", &pid))
@@ -582,8 +574,11 @@ async fn sweep_expires_unused_stale_and_purges_distilled_observations() {
     .fetch_all(store.pool())
     .await
     .unwrap();
-    // titles sort: Billing (recent), Queue claims (old, unused), Queue retries (used)
-    assert_eq!(expired, [false, true, false]);
+    assert_eq!(
+        expired,
+        [false, false, false],
+        "sweep does not expire memories"
+    );
     db.finish().await;
 }
 
@@ -650,16 +645,15 @@ async fn fetch_extends_system_expiry_but_not_a_promoted_copy() {
         .await
         .unwrap();
     assert!(
-        expiry(gotcha.clone()).await > 179.0,
-        "a fetch restarts the 180 days"
+        expiry(gotcha.clone()).await < 11.0,
+        "a fetch does not move expires_at"
     );
-    // a helpful vote does too
     shorten(gotcha.clone()).await;
     store
         .feedback(&a, &gotcha, cairn_store::memory::Vote::Helpful)
         .await
         .unwrap();
-    assert!(expiry(gotcha.clone()).await > 179.0);
+    assert!(expiry(gotcha.clone()).await < 11.0);
     // an agent memory and a promoted global copy are left alone
     let rule_id = store
         .save(
@@ -831,7 +825,7 @@ async fn stale_never_expires_an_agent_memory() {
     .collect();
     for (id, expires) in expires {
         // Only system-derived rows lapse; an agent's memory stays, stale and down-ranked.
-        assert_eq!(expires, id == derived, "{id}");
+        assert!(!expires, "{id} is not expired by sweep");
     }
     assert_eq!(status(&db, &a, &durable).await.0, Status::Stale);
     db.finish().await;
@@ -970,7 +964,7 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
     assert_eq!(branch(theirs).await.as_deref(), Some("dev"));
     assert_eq!(branch(their_digest).await.as_deref(), Some("dev"));
     let expired: Vec<(String, bool)> = sqlx::query(
-        "SELECT owner_id, expires_at <= now() AS expired FROM memories WHERE kind = 'handoff'",
+        "SELECT owner_id, coalesce(expires_at <= now(), false) AS expired FROM memories WHERE kind = 'handoff'",
     )
     .fetch_all(store.pool())
     .await
@@ -980,7 +974,7 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
     .collect();
     assert_eq!(expired.len(), 2);
     for (owner, expired) in expired {
-        assert_eq!(expired, owner == a, "only the reporter's handoff expires");
+        assert!(!expired, "{owner} handoff stays");
     }
     db.finish().await;
 }

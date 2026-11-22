@@ -106,7 +106,6 @@ impl Store {
             let names: Vec<String> = sqlx::query_scalar(&format!(
                 "SELECT e.name FROM entities e JOIN memories m ON m.memory_id = e.memory_id
                   WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind = $2 AND {IN_REPO}
-                    AND (m.expires_at IS NULL OR m.expires_at > now())
                     AND (m.repo_branch IS NULL OR m.repo_branch = ANY($3))
                     AND (m.status = 'active' OR (m.status = 'stale' AND m.stale_cause = 'missing'))
                   GROUP BY e.name
@@ -185,7 +184,6 @@ impl Store {
             "SELECT m.memory_id, m.status, e.kind, e.name
                FROM memories m JOIN entities e ON e.memory_id = m.memory_id
               WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind IN ('file','symbol') AND {IN_REPO}
-                AND (m.expires_at IS NULL OR m.expires_at > now())
                 AND (m.repo_branch IS NULL OR m.repo_branch = ANY($3))
                 AND (m.status = 'active' OR (m.status = 'stale' AND m.stale_cause = 'missing'))
                 AND m.memory_id IN (SELECT r.memory_id FROM entities r WHERE r.name = ANY($2)
@@ -280,17 +278,7 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Handoffs first (they are not promoted), then everything else moves to the default branch.
-        sqlx::query(
-            "UPDATE memories SET expires_at = now()
-              WHERE kind = 'handoff' AND project_id = $1 AND repo_branch = ANY($2) AND owner_id = $3
-                AND (expires_at IS NULL OR expires_at > now())",
-        )
-        .bind(&state.project_id)
-        .bind(&merged)
-        .bind(person_id)
-        .execute(&mut *tx)
-        .await?;
+        // Handoffs stay; they are not promoted onto the default branch.
         let promoted: Vec<String> = sqlx::query_scalar(
             "UPDATE memories SET repo_branch = $3, updated_at = now()
               WHERE project_id = $1 AND kind <> 'handoff' AND repo_branch = ANY($2) AND owner_id = $4

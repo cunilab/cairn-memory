@@ -1,7 +1,7 @@
 {
  "tools": [
   {
-   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory. kind=handoff returns the last session handoff. Fetch full records with memory_get.",
+   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory; label says why (replaced by, voted wrong, file deleted). kind=handoff returns the last session handoff. Fetch full records with memory_get.",
    "inputSchema": {
     "properties": {
      "kind": {

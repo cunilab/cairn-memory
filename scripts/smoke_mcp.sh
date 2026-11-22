@@ -120,7 +120,11 @@ try:
     newer = dict(record, title="Scoped record v2", summary="Typed RPC record, replaced", supersedes=saved["id"])
     newer_id = result_json(call(32, "tools/call", {"name":"memory_save", "arguments":newer}))["id"]
     rows = result_json(call(7, "tools/call", {"name": "memory_search", "arguments": {"query": "scoped record typed RPC", "limit": 5}}))["results"]
-    assert [m["id"] for m in rows] == [newer_id], "the replaced memory leaves search"
+    ids = [m["id"] for m in rows]
+    assert ids[0] == newer_id and saved["id"] in ids, ids
+    old_card = next(m for m in rows if m["id"] == saved["id"])
+    assert old_card["status"] == "superseded"
+    assert old_card["label"] == f"replaced by {newer_id}", old_card
     old = result_json(call(33, "tools/call", {"name": "memory_get", "arguments": {"ids": [saved["id"]]}}))["memories"][0]
     assert old["status"] == "superseded"
     assert any(l["relation"] == "supersedes" and l["source"] == newer_id for l in old["links"]), old

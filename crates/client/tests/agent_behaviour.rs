@@ -101,7 +101,7 @@ fn save_with_a_reason() {
     assert_eq!(again["deduplicated"], true);
 }
 
-/// Scenario 3: a correction is a save with `supersedes`; search stops returning the old one.
+/// Scenario 3: a correction is a save with `supersedes`; both stay searchable and the new one ranks first.
 #[test]
 fn correct_via_supersedes() {
     let Some(server) = Server::start() else {
@@ -139,10 +139,19 @@ fn correct_via_supersedes() {
         .iter()
         .map(|card| card["id"].as_str().unwrap())
         .collect();
+    let new_at = ids.iter().position(|id| *id == new.as_str());
+    let old_at = ids.iter().position(|id| *id == old.as_str());
     assert!(
-        ids.contains(&new.as_str()) && !ids.contains(&old.as_str()),
+        new_at.is_some() && old_at.is_some() && new_at.unwrap() < old_at.unwrap(),
         "{ids:?}"
     );
+    let old_card = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == old)
+        .unwrap();
+    assert_eq!(old_card["label"], format!("replaced by {new}"));
 }
 
 /// Scenario 4: two wrong votes from a member make a memory stale; its owner can forget it.

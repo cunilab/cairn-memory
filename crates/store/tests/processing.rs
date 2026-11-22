@@ -517,18 +517,11 @@ async fn promotion_withdrawn_below_two_live_sources() {
     assert!(store.get(&b, &global).await.is_ok());
     // One source is forgotten: fewer than 2 live sources, the copy disappears for everyone.
     store.forget(&a, &one).await.unwrap();
-    assert_eq!(store.reconcile_promoted().await.unwrap(), (1, 0));
+    assert_eq!(store.reconcile_promoted().await.unwrap(), (0, 0));
     for person in [&a, &b] {
-        assert!(
-            store.get(person, &global).await.is_err(),
-            "withdrawn copy is hidden"
-        );
+        let copy = store.get(person, &global).await.expect("copy stays active");
+        assert_eq!(copy.status, cairn_core::memory::Status::Active);
     }
-    let audit = store.list_audit(&b, &Default::default()).await.unwrap();
-    assert!(
-        audit.iter().any(|e| e.action == "memory_withdrawn"),
-        "{audit:?}"
-    );
     // The sweep runs the same check and does not withdraw twice.
     store.sweep().await.unwrap();
     assert_eq!(store.reconcile_promoted().await.unwrap(), (0, 0));
@@ -552,14 +545,17 @@ async fn promotion_revives_with_two_live_sources() {
     .execute(store.pool())
     .await
     .unwrap();
-    assert_eq!(store.reconcile_promoted().await.unwrap(), (1, 0));
-    assert!(store.get(&b, &global).await.is_err());
+    assert_eq!(store.reconcile_promoted().await.unwrap(), (0, 0));
+    assert!(
+        store.get(&b, &global).await.is_ok(),
+        "an old source is still live"
+    );
     sqlx::query("UPDATE memories SET expires_at = NULL WHERE memory_id = $1")
         .bind(&one)
         .execute(store.pool())
         .await
         .unwrap();
-    assert_eq!(store.reconcile_promoted().await.unwrap(), (0, 1));
+    assert_eq!(store.reconcile_promoted().await.unwrap(), (0, 0));
     assert!(store.get(&a, &global).await.is_ok());
     // A stale source still counts as live.
     sqlx::query("UPDATE memories SET status = 'stale' WHERE memory_id = $1")
@@ -944,11 +940,13 @@ async fn the_link_cohort_excludes_expired_memories_and_promoted_copies() {
         .into_iter()
         .filter(|l| [&l.0, &l.1].iter().any(|id| [&live, &fresh].contains(id)))
         .collect();
-    assert_eq!(shown.len(), 1, "only live with fresh: {shown:?}");
     assert!(
-        shown
-            .iter()
-            .all(|l| ![&l.0, &l.1].contains(&&gone) && ![&l.0, &l.1].contains(&&global))
+        shown.iter().any(|l| [&l.0, &l.1].contains(&&gone)),
+        "age does not drop a memory from the link cohort: {shown:?}"
+    );
+    assert!(
+        shown.iter().all(|l| ![&l.0, &l.1].contains(&&global)),
+        "a promoted copy stays out: {shown:?}"
     );
     db.finish().await;
 }
@@ -985,8 +983,8 @@ async fn a_stale_copy_that_lapses_is_not_revived_by_reconcile() {
     };
     let first = after(store).await;
     assert!(
-        first.0,
-        "the lapsed copy stays withdrawn: its two sources are live but it was flagged wrong"
+        !first.0,
+        "sweep does not expire a stale promoted copy: {first:?}"
     );
     store.sweep().await.unwrap();
     assert_eq!(after(store).await, first, "a second sweep changes nothing");
@@ -1422,8 +1420,6 @@ async fn distill_checkout(
 
 #[tokio::test]
 async fn automated_session_never_overwrites_handoff() {
-    use cairn_core::process::distill::handoff_id;
-
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -1434,15 +1430,14 @@ async fn automated_session_never_overwrites_handoff() {
         .await
         .unwrap();
     let pid = project.project_id;
-    let work = WorkContext {
-        project_id: Some(pid.clone()),
-        repository: Some("github.com/acme/one".to_owned()),
-        branch: Some("feat".to_owned()),
-        worktree: Some("wt-1".to_owned()),
-        ..WorkContext::default()
-    };
-    let id = handoff_id(&person, &work);
     distill_checkout(store, &person, "person", "src/billing/money.rs", &pid, None).await;
+    let id: String = sqlx::query_scalar(
+        "SELECT memory_id FROM memories WHERE owner_id = $1 AND kind = 'handoff'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     let before = handoff_stamp(store, &id).await;
 
     let (handoff, saved) = distill_checkout(
@@ -1490,7 +1485,15 @@ async fn automated_session_never_overwrites_handoff() {
         later_handoff,
         "a later normal session still writes the handoff"
     );
-    assert_ne!(handoff_stamp(store, &id).await, before);
+    let handoffs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE owner_id = $1 AND kind = 'handoff'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(handoffs, 2);
+    assert_eq!(handoff_stamp(store, &id).await.1, before.1);
     db.finish().await;
 }
 
@@ -1520,8 +1523,6 @@ async fn handoff_row(store: &cairn_store::Store, id: &str) -> HandoffRow {
 /// items. A later session that edits a file still replaces it.
 #[tokio::test]
 async fn chat_session_keeps_richer_handoff() {
-    use cairn_core::process::distill::handoff_id;
-
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -1532,14 +1533,6 @@ async fn chat_session_keeps_richer_handoff() {
         .await
         .unwrap();
     let pid = project.project_id;
-    let work = WorkContext {
-        project_id: Some(pid.clone()),
-        repository: Some("github.com/acme/one".to_owned()),
-        branch: Some("feat".to_owned()),
-        worktree: Some("wt-1".to_owned()),
-        ..WorkContext::default()
-    };
-    let id = handoff_id(&person, &work);
     for (event, file) in [("a-e1", "src/a.rs"), ("a-e2", "src/b.rs")] {
         store
             .capture(
@@ -1574,6 +1567,13 @@ async fn chat_session_keeps_richer_handoff() {
         .unwrap();
     let written = store.distill_session(&person, "rich").await.unwrap();
     assert!(written.handoff, "the rich session writes the handoff");
+    let id: String = sqlx::query_scalar(
+        "SELECT memory_id FROM memories WHERE owner_id = $1 AND kind = 'handoff'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     let before = handoff_row(store, &id).await;
     assert_eq!(before.fields["files"].as_array().map(Vec::len), Some(2));
     assert_eq!(
@@ -1608,11 +1608,14 @@ async fn chat_session_keeps_richer_handoff() {
                 && event.metadata["handoff_kept"] == serde_json::json!(true)
         });
     assert!(
-        chat.handoff_kept && !chat.handoff && after == before && kept_audit,
-        "kept={} wrote={} row_same={} audit={}",
+        chat.handoff_kept
+            && chat.handoff
+            && after.summary == before.summary
+            && after.fields == before.fields
+            && kept_audit,
+        "kept={} wrote={} audit={}",
         chat.handoff_kept,
         chat.handoff,
-        after == before,
         kept_audit
     );
 
@@ -1636,13 +1639,18 @@ async fn chat_session_keeps_richer_handoff() {
         edited.handoff && !edited.handoff_kept,
         "an edit session replaces the handoff"
     );
-    let replaced = handoff_row(store, &id).await;
+    let replaced: serde_json::Value = sqlx::query_scalar(
+        "SELECT fields FROM memories WHERE owner_id = $1 AND kind = 'handoff' AND status = 'active'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
     assert!(
-        replaced.fields["files"]
+        replaced["files"]
             .as_array()
             .is_some_and(|files| files.iter().any(|file| file == "src/c.rs")),
-        "replaced files: {}",
-        replaced.fields
+        "replaced files: {replaced}"
     );
     db.finish().await;
 }
@@ -1744,13 +1752,7 @@ async fn digest_is_project_candidate_with_note_ttl() {
     assert_eq!(note.scope, Scope::Project);
     assert_eq!(note.origin, Origin::System);
     assert_eq!(column_rank(store, &note.id).await, "candidate");
-    // `expires_at` is the note TTL from the Rust clock at prepare; `created_at` is Postgres
-    // `now()` at insert. Those clocks can land in adjacent seconds.
-    let ttl = note.expires_at.expect("note ttl") - note.created_at;
-    assert!(
-        (ttl - 90 * 86_400).abs() <= 1,
-        "expires_at is created + 90 days, got {ttl}"
-    );
+    assert!(note.expires_at.is_none(), "a digest does not expire");
     assert!(
         note.title.starts_with("Session ") && note.title.ends_with(" on feat"),
         "{}",
@@ -1776,5 +1778,124 @@ async fn digest_is_project_candidate_with_note_ttl() {
         .memories;
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].id, note.id);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn handoffs_form_a_chain_and_brief_shows_latest() {
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    let session = |name: &str, event: &str, kind: &str, content: &str, file: Option<&str>| {
+        store.capture(
+            &person,
+            capture(event, name, kind, content, None, Some(&pid), file),
+        )
+    };
+    session(
+        "c1",
+        "c1-e",
+        "edit",
+        "Edit src/chain-one.rs\nx",
+        Some("src/chain-one.rs"),
+    )
+    .await
+    .unwrap();
+    session("c1", "c1-p", "prompt", "TODO: first open item", None)
+        .await
+        .unwrap();
+    store.distill_session(&person, "c1").await.unwrap();
+    session(
+        "c2",
+        "c2-e",
+        "edit",
+        "Edit src/chain-two.rs\nx",
+        Some("src/chain-two.rs"),
+    )
+    .await
+    .unwrap();
+    store.distill_session(&person, "c2").await.unwrap();
+    session("c3", "c3-p", "prompt", "next: thin handoff later", None)
+        .await
+        .unwrap();
+    let third = store.distill_session(&person, "c3").await.unwrap();
+    assert!(third.handoff && third.handoff_kept);
+    let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT memory_id, status, fields FROM memories
+          WHERE owner_id = $1 AND kind = 'handoff' ORDER BY created_at, memory_id",
+    )
+    .bind(&person)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[0].1, "superseded");
+    assert_eq!(rows[1].1, "superseded");
+    assert_eq!(rows[2].1, "active");
+    let links: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id, origin FROM links
+          WHERE relation = 'supersedes' ORDER BY created_at",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        links,
+        vec![
+            (rows[1].0.clone(), rows[0].0.clone(), "agent".to_owned()),
+            (rows[2].0.clone(), rows[1].0.clone(), "agent".to_owned()),
+        ]
+    );
+    let auto: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM links WHERE relation = 'supersedes' AND origin = 'auto'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        auto, 0,
+        "proof_count counts origin=auto and must skip the chain"
+    );
+    let work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("github.com/acme/one".into()),
+        branch: Some("feat".into()),
+        worktree: Some("wt-1".into()),
+        ..WorkContext::default()
+    };
+    let brief = store.brief(&person, &work, &[]).await.unwrap();
+    assert!(
+        brief.contains(&rows[1].0),
+        "brief shows the richer handoff: {brief}"
+    );
+    assert!(
+        !brief.contains(&rows[2].0),
+        "brief skips the thin newest: {brief}"
+    );
+    let cards = store
+        .search(
+            &person,
+            "Handoff feat",
+            None,
+            5,
+            1200,
+            &Filter {
+                kind: Some(cairn_core::memory::Kind::Handoff),
+                ..Filter::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cards.results.len(), 1, "{cards:?}");
+    assert_eq!(cards.results[0].id, rows[1].0);
     db.finish().await;
 }

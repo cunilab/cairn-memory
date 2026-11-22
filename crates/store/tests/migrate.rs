@@ -21,7 +21,8 @@ async fn migrate_twice_is_a_no_op() {
             "0004_processing",
             "0005_console",
             "0006_agent_instructions",
-            "0007_memory_rank"
+            "0007_memory_rank",
+            "0012_always_active"
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -203,6 +204,106 @@ async fn rank_backfill_keeps_rows_normal() {
             .await
             .unwrap();
     assert_eq!(again, after);
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+}
+
+#[tokio::test]
+async fn test_0012_is_additive_on_populated_db() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_always_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, file) in [
+        ("0001_foundation", "0001_foundation.sql"),
+        ("0002_capture", "0002_capture.sql"),
+        ("0003_retrieval", "0003_retrieval.sql"),
+        ("0004_processing", "0004_processing.sql"),
+        ("0005_console", "0005_console.sql"),
+        ("0006_agent_instructions", "0006_agent_instructions.sql"),
+        ("0007_memory_rank", "0007_memory_rank.sql"),
+    ] {
+        let sql = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../migrations")
+                .join(file),
+        )
+        .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_old', 'old@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash, identity_hash, origin, status)
+         VALUES ('mem_live', 'per_old', 'personal', 'fact', 'Live fact kept', 'A fact that already existed here.', 'e1', 'i1', 'agent', 'active'),
+                ('mem_old', 'per_old', 'personal', 'fact', 'Old fact kept', 'A superseded fact that already existed.', 'e2', 'i2', 'agent', 'superseded')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    store.migrate().await.expect("apply 0012");
+    let after: Vec<String> =
+        sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(count_after, count_before);
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname LIKE 'memories_embedding_hnsw%' ORDER BY 1",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        indexes,
+        ["memories_embedding_hnsw", "memories_embedding_hnsw_always"]
+    );
+    store.migrate().await.expect("idempotent");
     sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .execute(store.pool())
         .await

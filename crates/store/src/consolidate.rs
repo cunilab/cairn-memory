@@ -24,10 +24,7 @@ pub struct Consolidated {
 const PROMOTE_AT: f32 = SUPERSEDE_AT;
 /// The owner of every promoted copy: no person wrote it.
 pub(crate) const SYSTEM_OWNER: &str = "system";
-/// Kinds that are promoted; a lock per kind serialises promotion and withdrawal of one kind so two
-/// twins promoted at once make one copy, and nothing else waits.
-const PROMOTED_KINDS: [&str; 2] = ["gotcha", "rule"];
-
+/// A lock per kind so two twins promoted at once make one copy.
 async fn lock_promotion(tx: &mut PgConnection, kind: &str) -> Result<()> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || '|promote|' || $1, 0))",
@@ -97,8 +94,7 @@ impl Store {
                  SELECT m.memory_id, m.created_at, m.embedding, m.repo_branch, m.origin
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
-                    AND m.memory_id <> $6 AND m.status IN ('active','stale')
-                    AND (m.expires_at IS NULL OR m.expires_at > now()))
+                    AND m.memory_id <> $6 AND m.status IN ('active','stale'))
              SELECT c.memory_id, c.repo_branch, c.origin, 1 - (c.embedding <=> $1::vector) AS cosine,
                     (c.created_at, c.memory_id) > (s.created_at, s.memory_id) AS neighbour_newer
                FROM cohort c JOIN memories s ON s.memory_id = $6
@@ -214,8 +210,7 @@ impl Store {
         .await?;
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT} WHERE m.memory_id = $1 AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
-                AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL
-                AND (m.expires_at IS NULL OR m.expires_at > now())"
+                AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL"
         ))
         .bind(memory_id)
         .fetch_all(&mut *lock)
@@ -237,7 +232,6 @@ impl Store {
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.scope = 'project' AND m.project_id <> $2
                     AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent'
-                    AND (m.expires_at IS NULL OR m.expires_at > now())
                   ORDER BY m.embedding <=> $1::vector LIMIT 5)
              SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1",
         )
@@ -312,67 +306,10 @@ impl Store {
         Ok(Some(global))
     }
 
-    /// Withdraws every promoted global copy that has fewer than 2 live sources (`expires_at = now()`
-    /// hides it from every read) and brings back one whose two live sources returned. A source is
-    /// live when the copy links to it, it is project-scoped, `active` or `stale`, unexpired and not
-    /// forgotten. Safe to run often. Returns `(withdrawn, revived)`.
+    /// Promoted copies stay `active` and keep their `relates` links. Nothing is hidden for age or
+    /// for a source count. Returns `(0, 0)`.
     pub async fn reconcile_promoted(&self) -> Result<(usize, usize)> {
-        let (mut withdrawn_total, mut revived_total) = (0, 0);
-        for kind in PROMOTED_KINDS {
-            let mut tx = self.pool.begin().await?;
-            lock_promotion(&mut tx, kind).await?;
-            let counted = "WITH counted AS (
-               SELECT g.memory_id, g.expires_at,
-                      (SELECT count(DISTINCT s.memory_id) FROM links l JOIN memories s ON s.memory_id = l.target_id
-                        WHERE l.source_id = g.memory_id AND l.relation = 'relates' AND l.origin = 'auto'
-                          AND s.scope = 'project' AND s.status IN ('active','stale')
-                          AND (s.expires_at IS NULL OR s.expires_at > now())) AS live
-                 FROM memories g
-                WHERE g.origin = 'system' AND g.scope = 'global' AND g.kind = $1
-                  AND g.status IN ('active','stale'))";
-            let withdrawn = sqlx::query(&format!(
-                "{counted} UPDATE memories m SET expires_at = now(), updated_at = now() FROM counted c
-                  WHERE m.memory_id = c.memory_id AND c.live < 2 AND (c.expires_at IS NULL OR c.expires_at > now())
-                  RETURNING m.memory_id, c.live"
-            ))
-            .bind(kind)
-            .fetch_all(&mut *tx)
-            .await?;
-            // Only an active copy comes back; one flagged wrong (stale) lapses with the age sweep.
-            let revived = sqlx::query(&format!(
-                "{counted} UPDATE memories m SET expires_at = NULL, updated_at = now() FROM counted c
-                  WHERE m.memory_id = c.memory_id AND m.status = 'active' AND c.live >= 2 AND c.expires_at <= now()
-                  RETURNING m.memory_id"
-            ))
-            .bind(kind)
-            .fetch_all(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            for row in &withdrawn {
-                let (id, live): (String, i64) = (row.try_get("memory_id")?, row.try_get("live")?);
-                // The copy has no person as owner: its sources' owners see the withdrawal.
-                let owners: Vec<String> = sqlx::query_scalar(
-                    "SELECT DISTINCT s.owner_id FROM links l JOIN memories s ON s.memory_id = l.target_id
-                      WHERE l.source_id = $1 AND l.relation = 'relates' AND l.origin = 'auto'",
-                )
-                .bind(&id)
-                .fetch_all(&self.pool)
-                .await?;
-                for owner in owners {
-                    self.record_audit(
-                        &owner,
-                        None,
-                        "memory_withdrawn",
-                        Some(&id),
-                        serde_json::json!({"global_id": id, "live": live}),
-                    )
-                    .await?;
-                }
-            }
-            withdrawn_total += withdrawn.len();
-            revived_total += revived.len();
-        }
-        Ok((withdrawn_total, revived_total))
+        Ok((0, 0))
     }
 }
 

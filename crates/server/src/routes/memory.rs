@@ -62,7 +62,7 @@ pub struct ListQuery {
     kind: Option<Kind>,
     #[serde(rename = "projectId", alias = "project_id")]
     project_id: Option<String>,
-    /// A status, or `expired` for memories past `expires_at` that are not yet swept away.
+    /// A memory status. `forgotten` is listed only for an admin.
     status: Option<String>,
     branch: Option<String>,
     /// A web search over title, summary, reason and fields.
@@ -216,13 +216,10 @@ pub async fn list(
     Agent(account): Agent,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    let (expired, statuses) = match query.status.as_deref() {
-        None | Some("") => (false, Vec::new()),
-        Some("expired") => (true, Vec::new()),
-        Some(other) => (
-            false,
-            vec![other.parse::<Status>().map_err(ApiError::invalid)?],
-        ),
+    let status = query.status.as_deref().filter(|status| !status.is_empty());
+    let statuses = match status {
+        None => Vec::new(),
+        Some(status) => vec![status.parse::<Status>().map_err(ApiError::invalid)?],
     };
     let page = state
         .store
@@ -237,7 +234,7 @@ pub async fn list(
                 cursor: query.cursor,
                 branch: query.branch.filter(|b| !b.is_empty()),
                 q: query.q,
-                expired,
+                see_forgotten: account.is_admin && status == Some("forgotten"),
             },
         )
         .await?;
@@ -339,7 +336,7 @@ pub async fn feedback(
     Ok(Json(reply))
 }
 
-/// Forget: the owner's memory is blanked and stays forgotten.
+/// Forget: the owner's memory stays, hidden from search, with its text kept.
 pub async fn forget(
     State(state): State<AppState>,
     caller: Caller,

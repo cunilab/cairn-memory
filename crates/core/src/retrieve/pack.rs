@@ -1,6 +1,6 @@
 //! The shapes search returns, and the diversity cap, token budget and limit that keep a response small.
 
-use crate::memory::{EntityKind, Kind, Memory, Status};
+use crate::memory::{EntityKind, Kind, Memory, Relation, Status};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -25,6 +25,9 @@ pub struct Card {
     /// Why a stale card is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_cause: Option<String>,
+    /// Why this card ranks below a replacement or a clean one. Omitted when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
     /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
@@ -45,6 +48,26 @@ fn is_zero(n: &usize) -> bool {
 
 fn is_active(status: &Status) -> bool {
     *status == Status::Active
+}
+
+/// `replaced by <id>` from the newest `supersedes` link aimed at this memory; `voted wrong <n>x`
+/// or `file deleted` for a stale card. Active cards omit it.
+fn card_label(memory: &Memory) -> Option<String> {
+    match memory.status {
+        Status::Superseded => memory
+            .links
+            .iter()
+            .rev()
+            .find(|link| link.relation == Relation::Supersedes && link.target == memory.id)
+            .map(|link| format!("replaced by {}", link.source)),
+        Status::Stale if memory.stale_cause.as_deref() == Some("feedback") => {
+            Some(format!("voted wrong {}x", memory.usage.wrong))
+        }
+        Status::Stale if memory.stale_cause.as_deref() == Some("missing") => {
+            Some("file deleted".to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Default response budget, in tokens (estimated as bytes / 4, as the bench does).
@@ -91,6 +114,7 @@ impl Packer {
             summary: hit.memory.summary.clone(),
             status: hit.memory.status,
             stale_cause: hit.memory.stale_cause.clone(),
+            label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
         };
         let cost = serde_json::to_string(&card).map_or(0, |json| json.len()) + 1;

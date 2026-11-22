@@ -35,6 +35,7 @@ import { announceMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
 import type { MemoryView } from "@/lib/generated/MemoryView";
+import { memoryLabel } from "@/app/memories/_components/memory-label";
 
 const OUT_LABEL: Record<string, string> = {
   relates: "Related",
@@ -155,9 +156,7 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
                 ? memory.stale_cause
                 : "Cairn doubts this memory."}
           </p>
-          <p className="text-xs text-muted-foreground">
-            Stale memories that stay unused for 90 days expire on their own.
-          </p>
+
         </Section>
       ) : null}
       <Lineage memory={memory} open={open} />
@@ -304,6 +303,27 @@ export function MemorySheet() {
                 <>
                   <KindBadge kind={memory.kind} />
                   <StatusBadge status={memory.status} cause={memory.stale_cause} />
+                  {(() => {
+                    const label = memoryLabel({
+                      id: memory.id,
+                      status: memory.status,
+                      stale_cause: memory.stale_cause,
+                      wrong: memory.usage.wrong,
+                      links: memory.links,
+                    });
+                    if (!label) return null;
+                    return label.id ? (
+                      <button
+                        type="button"
+                        className="rounded-sm text-left text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onClick={() => set({ memory: label.id })}
+                      >
+                        {label.text}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{label.text}</span>
+                    );
+                  })()}
                   <span className="text-xs text-muted-foreground">
                     {memory.project_name ?? words(memory.scope)}
                     {memory.context.branch ? ` · ${memory.context.branch}` : ""}
@@ -319,7 +339,7 @@ export function MemorySheet() {
           {current === null ? <div className="px-4"><LoadingBlock label="Loading memory…" rows={5} /></div> : null}
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
-              <p className="text-sm text-muted-foreground">This memory was forgotten or expired.</p>
+              <p className="text-sm text-muted-foreground">This memory was forgotten.</p>
               <Button type="button" variant="outline" onClick={close}>
                 Close
               </Button>

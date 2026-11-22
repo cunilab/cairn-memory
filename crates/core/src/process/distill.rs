@@ -349,7 +349,14 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
             &format!("Session {} on {place}", date(last.captured_at)),
             TITLE_MAX,
         ),
-        summary: clip(&format!("Changed {listed}. Tests: {tests}."), SUMMARY_MAX),
+        summary: clip(
+            &if tests.is_empty() {
+                format!("Changed {listed}.")
+            } else {
+                format!("Changed {listed}. Tests: {tests}.")
+            },
+            SUMMARY_MAX,
+        ),
         reason: "Derived from the captures of one session.".to_owned(),
         fields: None,
         evidence,
@@ -1108,6 +1115,16 @@ mod tests {
             "Changed f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, +2 more. Tests: cargo test pass."
         );
         assert!(!summary.contains("zephyr-quilt"));
+    }
+
+    #[test]
+    fn digest_omits_tests_when_there_are_none() {
+        let summary = distill(&[edit("e1", "src/a.rs")])
+            .digest
+            .expect("digest")
+            .summary;
+        assert_eq!(summary, "Changed src/a.rs.");
+        assert!(!summary.contains("Tests:"), "{summary}");
     }
 
     #[test]
