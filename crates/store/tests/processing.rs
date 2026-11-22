@@ -1493,3 +1493,156 @@ async fn automated_session_never_overwrites_handoff() {
     assert_ne!(handoff_stamp(store, &id).await, before);
     db.finish().await;
 }
+
+#[derive(Debug, PartialEq)]
+struct HandoffRow {
+    at: String,
+    summary: String,
+    fields: serde_json::Value,
+}
+
+async fn handoff_row(store: &cairn_store::Store, id: &str) -> HandoffRow {
+    let row = sqlx::query(
+        "SELECT updated_at::text AS at, summary, fields FROM memories WHERE memory_id = $1",
+    )
+    .bind(id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    HandoffRow {
+        at: row.get("at"),
+        summary: row.get("summary"),
+        fields: row.get("fields"),
+    }
+}
+
+/// A rich handoff stays when a later chat in the same checkout has no files and no open
+/// items. A later session that edits a file still replaces it.
+#[tokio::test]
+async fn chat_session_keeps_richer_handoff() {
+    use cairn_core::process::distill::handoff_id;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    let work = WorkContext {
+        project_id: Some(pid.clone()),
+        repository: Some("github.com/acme/one".to_owned()),
+        branch: Some("feat".to_owned()),
+        worktree: Some("wt-1".to_owned()),
+        ..WorkContext::default()
+    };
+    let id = handoff_id(&person, &work);
+    for (event, file) in [("a-e1", "src/a.rs"), ("a-e2", "src/b.rs")] {
+        store
+            .capture(
+                &person,
+                capture(
+                    event,
+                    "rich",
+                    "edit",
+                    &format!("Edit {file}\nx"),
+                    None,
+                    Some(&pid),
+                    Some(file),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .capture(
+            &person,
+            capture(
+                "a-p1",
+                "rich",
+                "prompt",
+                "TODO: fix flaky test",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let written = store.distill_session(&person, "rich").await.unwrap();
+    assert!(written.handoff, "the rich session writes the handoff");
+    let before = handoff_row(store, &id).await;
+    assert_eq!(before.fields["files"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        before.fields["open_questions"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    store
+        .capture(
+            &person,
+            capture(
+                "b-p1",
+                "chat",
+                "prompt",
+                "we should maybe adjust the roadmap, need to think\nnext: revisit later",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let chat = store.distill_session(&person, "chat").await.unwrap();
+    let after = handoff_row(store, &id).await;
+    let kept_audit = store
+        .list_audit(&person, &Default::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|event| {
+            event.action == "session_distilled"
+                && event.metadata["handoff_kept"] == serde_json::json!(true)
+        });
+    assert!(
+        chat.handoff_kept && !chat.handoff && after == before && kept_audit,
+        "kept={} wrote={} row_same={} audit={}",
+        chat.handoff_kept,
+        chat.handoff,
+        after == before,
+        kept_audit
+    );
+
+    store
+        .capture(
+            &person,
+            capture(
+                "c-e1",
+                "edits",
+                "edit",
+                "Edit src/c.rs\nx",
+                None,
+                Some(&pid),
+                Some("src/c.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    let edited = store.distill_session(&person, "edits").await.unwrap();
+    assert!(
+        edited.handoff && !edited.handoff_kept,
+        "an edit session replaces the handoff"
+    );
+    let replaced = handoff_row(store, &id).await;
+    assert!(
+        replaced.fields["files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == "src/c.rs")),
+        "replaced files: {}",
+        replaced.fields
+    );
+    db.finish().await;
+}

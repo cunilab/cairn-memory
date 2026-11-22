@@ -311,3 +311,184 @@ fn subagent_event_on_the_parent_session_still_asks() {
         "the parent still has its edits"
     );
 }
+
+impl Fake {
+    fn observes(&self) -> Vec<Value> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|req| req.path.ends_with("/observe"))
+            .map(|req| req.body.clone())
+            .collect()
+    }
+}
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success(),
+        "{args:?}"
+    );
+}
+
+/// `rm` is not a file tool. The checkpoint Edit must still name the deleted path, and a
+/// file that was already dirty at SessionStart must stay off that list.
+#[test]
+fn shell_deletes_count_as_changed_files() {
+    let (server, env) = harness("rm-files");
+    std::fs::write(env.repo.join("tracked.txt"), "keep\n").unwrap();
+    std::fs::write(env.repo.join("other.txt"), "base\n").unwrap();
+    git(&env.repo, &["add", "tracked.txt", "other.txt"]);
+    git(&env.repo, &["commit", "-q", "-m", "files"]);
+    std::fs::write(env.repo.join("other.txt"), "dirty before the session\n").unwrap();
+    env.run("SessionStart", &env.payload("s", json!({})), &[]);
+    std::fs::remove_file(env.repo.join("tracked.txt")).unwrap();
+    let call = json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm tracked.txt"},
+        "tool_response": {"success": true},
+        "tool_use_id": "rm1"
+    });
+    env.run("PostToolUse", &env.payload("s", call), &[]);
+    env.run("Stop", &env.payload("s", json!({})), &[]);
+    let files: Vec<String> = server
+        .observes()
+        .into_iter()
+        .filter(|body| body["kind"] == "edit")
+        .flat_map(|body| {
+            body["context"]["files"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|file| file.as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        files.iter().any(|file| file == "tracked.txt"),
+        "deleted path missing from {files:?}"
+    );
+    assert!(
+        !files.iter().any(|file| file == "other.txt"),
+        "pre-dirty path listed in {files:?}"
+    );
+    let _ = std::fs::remove_dir_all(env.home.join(".."));
+}
+
+/// No git: an edit under the project root is relative to that root. An edit in /tmp is not
+/// stored, and the handoff summary counts it as outside the project.
+#[test]
+fn no_git_edits_relative_to_project_root() {
+    use cairn_core::capture::{CaptureKind, Observation, WorkContext};
+    use cairn_core::process::distill::distill;
+
+    let server = fake();
+    let root = std::env::temp_dir().join(format!(
+        "cairn-hook-nogit-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let repo = root.join("proj");
+    let home = root.join("home");
+    std::fs::create_dir_all(repo.join(".cairn")).unwrap();
+    std::fs::write(
+        repo.join(".cairn/project.json"),
+        r#"{"project_id":"prj_plain"}"#,
+    )
+    .unwrap();
+    assert!(!repo.join(".git").exists());
+    let config = home.join("cairn/config.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        json!({"url": server.url, "token": "cdt_testtoken1234567890"}).to_string(),
+    )
+    .unwrap();
+    let env = Env { home, repo };
+    let outside = std::env::temp_dir().join(format!("cairn-outside-{}", std::process::id()));
+    env.run("SessionStart", &env.payload("s", json!({})), &[]);
+    let edit = |path: &str, id: &str| {
+        json!({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": path, "old_string": "a", "new_string": "b"},
+            "tool_response": {"success": true},
+            "tool_use_id": id
+        })
+    };
+    env.run(
+        "PostToolUse",
+        &env.payload("s", edit("src/inside.rs", "in")),
+        &[],
+    );
+    env.run(
+        "PostToolUse",
+        &env.payload("s", edit(&outside.to_string_lossy(), "out")),
+        &[],
+    );
+    env.run("Stop", &env.payload("s", json!({})), &[]);
+
+    let observes = server.observes();
+    let outside_text = outside.to_string_lossy().into_owned();
+    assert!(
+        observes
+            .iter()
+            .all(|body| !body.to_string().contains(&outside_text)),
+        "a path outside the project was stored: {observes:?}"
+    );
+    let edits: Vec<&Value> = observes
+        .iter()
+        .filter(|body| body["kind"] == "edit")
+        .collect();
+    assert!(
+        edits.iter().any(|body| body["context"]["files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == "src/inside.rs"))),
+        "inside edit missing: {edits:?}"
+    );
+    assert!(
+        edits
+            .iter()
+            .any(|body| body["context"]["outside_files"] == 1),
+        "outside count missing: {edits:?}"
+    );
+
+    let observations: Vec<Observation> = edits
+        .iter()
+        .map(|body| Observation {
+            event_id: body["event_id"].as_str().unwrap_or("e").to_owned(),
+            session_id: "s".to_owned(),
+            content: body["content"].as_str().unwrap_or("edit").to_owned(),
+            kind: CaptureKind::Edit,
+            ok: None,
+            role: "tool".to_owned(),
+            source: "edit".to_owned(),
+            content_hash: String::new(),
+            context: serde_json::from_value::<WorkContext>(body["context"].clone())
+                .unwrap_or_default(),
+            captured_at: 1_790_000_000,
+            expires_at: 0,
+        })
+        .collect();
+    let handoff = distill(&observations).handoff.expect("handoff");
+    assert!(
+        handoff.summary.contains("(1 outside the project)"),
+        "{}",
+        handoff.summary
+    );
+    assert!(
+        handoff.fields.unwrap()["files"]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|file| file == "src/inside.rs")),
+        "handoff files"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 const MAX_TYPED_NOTES: usize = 64;
 const MAX_GOTCHAS: usize = 3;
-const HANDOFF_FILES_MAX: usize = 20;
+pub const HANDOFF_FILES_MAX: usize = 20;
 /// Normalised commands starting with one of these are "the test command" (D3).
 const TEST_COMMANDS: [&str; 13] = [
     "cargo test",
@@ -292,19 +292,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
             }
             let lower = line.to_ascii_lowercase();
             let mut used = false;
-            if has_marker(
-                &lower,
-                &[
-                    "next step",
-                    "next:",
-                    "follow up",
-                    "follow-up",
-                    "should ",
-                    "need to ",
-                    "todo",
-                    "remaining",
-                ],
-            ) {
+            if is_next_step(&line) {
                 used |= push_unique(&mut next_steps, &line);
             }
             if has_marker(
@@ -349,6 +337,12 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
     if !edited && next_steps.is_empty() && open.is_empty() {
         return None;
     }
+    let outside = observations
+        .iter()
+        .filter(|observation| observation.kind == CaptureKind::Edit)
+        .map(|observation| observation.context.outside_files)
+        .max()
+        .unwrap_or(0);
     let place = last
         .context
         .branch
@@ -364,12 +358,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         kind: Kind::Handoff,
         title: clip(&format!("Handoff: {place}"), TITLE_MAX),
         summary: clip(
-            &format!(
-                "{} files edited; {} open items; last activity {}.",
-                files.len(),
-                open.len(),
-                date(last.captured_at)
-            ),
+            &handoff_summary(files.len(), outside, open.len(), &date(last.captured_at)),
             SUMMARY_MAX,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
@@ -541,6 +530,25 @@ fn is_boilerplate(line: &str) -> bool {
 
 fn has_marker(lower: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| lower.contains(marker))
+}
+
+/// `next:` or `todo:` at the start of the line, after an optional `- ` or `* `.
+fn is_next_step(line: &str) -> bool {
+    let line = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line);
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("next:") || lower.starts_with("todo:")
+}
+
+fn handoff_summary(files: usize, outside: u32, open: usize, when: &str) -> String {
+    let edited = if outside > 0 {
+        format!("{files} files edited ({outside} outside the project)")
+    } else {
+        format!("{files} files edited")
+    };
+    format!("{edited}; {open} open items; last activity {when}.")
 }
 
 fn push_unique(list: &mut Vec<String>, value: &str) -> bool {
@@ -806,6 +814,31 @@ mod tests {
             )])
             .notes
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn next_steps_need_explicit_marker() {
+        let vague = distill(&[prompt(
+            "p1",
+            "we should maybe adjust the roadmap, need to think",
+        )]);
+        let steps = vague
+            .handoff
+            .and_then(|handoff| handoff.fields)
+            .map(|fields| fields["next_steps"].clone())
+            .unwrap_or(json!([]));
+        assert_eq!(steps, json!([]));
+
+        let marked = distill(&[prompt("p2", "next: wire the web report")]);
+        assert_eq!(
+            marked.handoff.expect("next").fields.unwrap()["next_steps"],
+            json!(["next: wire the web report"])
+        );
+        let todo = distill(&[prompt("p3", "TODO: fix flaky test")]);
+        assert_eq!(
+            todo.handoff.expect("todo").fields.unwrap()["next_steps"],
+            json!(["TODO: fix flaky test"])
         );
     }
 

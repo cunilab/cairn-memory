@@ -246,6 +246,33 @@ fn symbol_matches(top: &Path, symbols: &[String]) -> Option<std::collections::Ha
     matches!(code, Some(0 | 1)).then(|| text.lines().map(str::to_owned).collect())
 }
 
+/// Paths from `git status --porcelain` (untracked included), repo-relative, deduplicated,
+/// stopping at `limit`.
+pub fn dirty_files(cwd: &Path, limit: usize) -> Vec<String> {
+    let mut files = Vec::new();
+    let Some(status) = git_raw(cwd, &["status", "--porcelain=v1", "-z"]) else {
+        return files;
+    };
+    let mut entries = status.split('\0');
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let path = &entry[3..];
+        if entry
+            .bytes()
+            .take(2)
+            .any(|status| matches!(status, b'R' | b'C'))
+        {
+            entries.next();
+        }
+        if !path.is_empty() && files.len() < limit && !files.iter().any(|seen| seen == path) {
+            files.push(path.to_owned());
+        }
+    }
+    files
+}
+
 /// `git status` paths (untracked included) then the last five commits' files: repo-relative,
 /// deduplicated, at most 20.
 pub fn recent_files(cwd: &Path) -> Vec<String> {
@@ -331,6 +358,17 @@ pub fn repo_relative(value: &str, cwd: &Path, top: Option<&Path>) -> Option<Stri
         .collect::<Vec<_>>()
         .join("/");
     (!text.is_empty()).then_some(text)
+}
+
+/// A usable path that does not land inside `top`. Empty and oversized values are not counted.
+pub fn outside_project(value: &str, cwd: &Path, top: Option<&Path>) -> bool {
+    if value.is_empty() || value.contains('\n') || value.len() > 512 {
+        return false;
+    }
+    let Some(top) = top else {
+        return false;
+    };
+    repo_relative(value, cwd, Some(top)).is_none()
 }
 
 /// `.cairnignore` in the folder or any ancestor up to the git top (every ancestor outside git).

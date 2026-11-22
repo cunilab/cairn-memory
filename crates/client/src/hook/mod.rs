@@ -12,10 +12,10 @@ mod state;
 
 use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
-use cairn_core::capture::{WorkContext, redact_work_context};
-use cairn_core::id::now_seconds;
+use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
+use cairn_core::id::{now_seconds, sha256_hex};
 use cairn_core::instructions::{DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_stop_nudge};
-use cairn_core::process::distill::{has_typed_line, is_test_command};
+use cairn_core::process::distill::{HANDOFF_FILES_MAX, has_typed_line, is_test_command};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -30,6 +30,31 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const DOWN_SECONDS: i64 = 30;
 const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
+/// Already-dirty paths recorded at SessionStart.
+const BASELINE_MAX: usize = 200;
+
+/// Dirty paths that were clean at SessionStart, then tool edits, capped at `HANDOFF_FILES_MAX`.
+fn changed_paths(state: &SessionState, cwd: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut push = |path: &str| {
+        if !path.is_empty()
+            && files.len() < HANDOFF_FILES_MAX
+            && !files.iter().any(|seen| seen == path)
+        {
+            files.push(path.to_owned());
+        }
+    };
+    let limit = state.baseline_dirty.len() + HANDOFF_FILES_MAX;
+    for path in git::dirty_files(cwd, limit) {
+        if !state.baseline_dirty.iter().any(|seen| seen == &path) {
+            push(&path);
+        }
+    }
+    for path in &state.edited {
+        push(path);
+    }
+    files
+}
 
 /// `cairn save ...` (any path to the binary): a save through the CLI instead of the MCP tool.
 fn is_cairn_save(command: &str) -> bool {
@@ -188,6 +213,7 @@ impl Hook<'_> {
                     .with_state(|s| s.dirty.then_some(s.generation))
                     .flatten()
                 {
+                    self.capture_changed_files();
                     self.checkpoint(generation);
                 }
                 // SubagentStop captures like Stop and never asks.
@@ -202,6 +228,7 @@ impl Hook<'_> {
                     .with_state(|s| s.worked.then_some(s.generation))
                     .flatten()
                 {
+                    self.capture_changed_files();
                     self.checkpoint(generation);
                 }
                 Ok(None)
@@ -284,6 +311,8 @@ impl Hook<'_> {
 
     fn start(&self) -> Option<String> {
         state::sweep(&self.state_dir());
+        let dirty = git::dirty_files(&self.cwd, BASELINE_MAX);
+        self.with_state(|state| state.baseline_dirty = dirty);
         let body = json!({
             "session_id": self.session_id,
             "context": self.work_context(),
@@ -497,6 +526,11 @@ impl Hook<'_> {
             let mut notes = Vec::new();
             for (given, new_text) in tool.edits() {
                 let Some(path) = git::repo_relative(&given, &self.cwd, self.top.as_deref()) else {
+                    if git::outside_project(&given, &self.cwd, self.top.as_deref()) {
+                        self.with_state(|s| {
+                            s.outside_edits = s.outside_edits.saturating_add(1);
+                        });
+                    }
                     continue;
                 };
                 self.with_state(|s| s.remember_edit(&path));
@@ -567,6 +601,39 @@ impl Hook<'_> {
     /// check remembers a capture only once it is sent or queued, so one that never left is sent
     /// again after the cause (a bad token, a busy outbox) is fixed.
     fn capture(&self, capture: Option<Capture>) -> Result<(), String> {
+        self.capture_outside(capture, 0)
+    }
+
+    /// Paths dirty since SessionStart, plus tool edits, capped. Skipped when that set is empty
+    /// or the same set was already sent. `outside_edits` rides along as a count.
+    fn capture_changed_files(&self) {
+        let cwd = self.cwd.clone();
+        let Some(Some((files, outside, hash))) = self.with_state(|state| {
+            let files = changed_paths(state, &cwd);
+            if files.is_empty() {
+                return None;
+            }
+            let hash = sha256_hex(&files.iter().map(String::as_str).collect::<Vec<_>>());
+            if state.files_sent.as_deref() == Some(hash.as_str()) {
+                return None;
+            }
+            Some((files, state.outside_edits, hash))
+        }) else {
+            return;
+        };
+        let capture = Capture {
+            kind: CaptureKind::Edit,
+            ok: None,
+            content: format!("changed files\n{}", files.join("\n")),
+            files,
+            commands: Vec::new(),
+        };
+        if self.capture_outside(Some(capture), outside).is_ok() {
+            self.with_state(|state| state.files_sent = Some(hash));
+        }
+    }
+
+    fn capture_outside(&self, capture: Option<Capture>, outside_files: u32) -> Result<(), String> {
         let Some(capture) = capture else {
             return Ok(());
         };
@@ -580,6 +647,7 @@ impl Hook<'_> {
         let event_id = capture.event_id(&self.session_id);
         let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
+        context.outside_files = outside_files;
         // Origin sticks in the jsonb merge, so only an env-marked session may set it.
         if self.session_automated() {
             context.origin = Some("automation".to_owned());
@@ -653,7 +721,13 @@ impl Hook<'_> {
             .map_err(|message| eprintln!("cairn hook: {message}"))
             .ok()?;
         let worked = locked.state.worked;
-        locked.delete();
+        drop(locked);
+        if worked {
+            self.capture_changed_files();
+        }
+        if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
+            locked.delete();
+        }
         if worked {
             let body = json!({"session_id": self.session_id});
             if let Err(error) = self.post("/cairn-memory/session/end", &body) {

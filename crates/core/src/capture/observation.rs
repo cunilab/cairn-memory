@@ -9,6 +9,10 @@ pub const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
 pub const OBSERVATION_CLIP_BYTES: usize = 2 * 1024;
 pub const OBSERVATION_TTL_SECONDS: i64 = 30 * 86_400;
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 /// The client's work context. Unknown keys are ignored.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
@@ -21,6 +25,9 @@ pub struct WorkContext {
     pub commit: Option<String>,
     #[serde(default)]
     pub files: Vec<String>,
+    /// How many edits were outside the project root. A count only: the paths stay on the client.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub outside_files: u32,
     #[serde(default)]
     pub symbols: Vec<String>,
     #[serde(default)]

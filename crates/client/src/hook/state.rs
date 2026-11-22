@@ -32,6 +32,15 @@ pub struct SessionState {
     /// Repo files edited in this session (distinct, at most `EDITED_MAX`), for the Stop reminder.
     #[serde(default)]
     pub edited: Vec<String>,
+    /// Paths already dirty at SessionStart (`git status --porcelain`), at most 200.
+    #[serde(default)]
+    pub baseline_dirty: Vec<String>,
+    /// Edits outside the project root. A count only; the paths are not stored.
+    #[serde(default)]
+    pub outside_edits: u32,
+    /// Hash of the changed-file set last sent on a checkpoint.
+    #[serde(default)]
+    pub files_sent: Option<String>,
     /// A recognised test command ran, or a `Decision:`-style line was written.
     #[serde(default)]
     pub worked_signal: bool,

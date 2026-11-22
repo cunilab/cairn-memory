@@ -126,9 +126,22 @@ async fn session_distills_into_notes_and_a_handoff() {
     );
 
     // A second distill replaces the handoff in place instead of adding one.
+    // An edit makes this handoff at least as rich as the one it replaces.
     app.post(
         "observe",
-        event("e3", "Next step: wire the retry metric"),
+        event("e3", "next: wire the retry metric"),
+        &device,
+    )
+    .await;
+    app.post(
+        "observe",
+        json!({
+            "event_id": "e4",
+            "session_id": "s1",
+            "kind": "edit",
+            "content": "Edit src/queue.rs\nx",
+            "context": context
+        }),
         &device,
     )
     .await;

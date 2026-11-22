@@ -8,8 +8,8 @@ use cairn_core::capture::{
 };
 use cairn_core::capture::{redact_sensitive_content, redact_work_context};
 use cairn_core::id::now_seconds;
-use cairn_core::memory::Scope;
 use cairn_core::memory::kind::EXPIRED_GRACE_SECONDS;
+use cairn_core::memory::{Fields, Scope};
 use cairn_core::process::distill::{distill, handoff_id};
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
 use cairn_core::process::{Origin, prepare_save};
@@ -23,6 +23,8 @@ pub(crate) const RECENT_FILE_MAX_BYTES: usize = 512;
 pub struct DistillReport {
     pub notes: usize,
     pub handoff: bool,
+    /// The stored handoff had files or open items and the new one had neither, so it was left.
+    pub handoff_kept: bool,
 }
 
 /// What one sweep did.
@@ -346,6 +348,7 @@ impl Store {
             }
         }
         let mut handoff_written = None;
+        let mut kept_id = None;
         // An automated session keeps its notes and leaves the checkout's handoff alone.
         if let Some(handoff) = output.handoff.filter(|_| !automated) {
             let new = prepare_save(
@@ -358,14 +361,43 @@ impl Store {
             let id = handoff_id(person_id, &work);
             // The id is fixed per checkout. Forgetting a handoff forgets that content, not the
             // checkout: the same content stays forgotten, a later handoff replaces the row.
+            // A live handoff that already names files or open items is kept when the new one
+            // has neither.
             let mut tx = self.pool.begin().await?;
-            let forgotten: Option<String> = sqlx::query_scalar(
-                "SELECT identity_hash FROM memories WHERE memory_id = $1 AND status = 'forgotten' FOR UPDATE",
+            let existing = sqlx::query(
+                "SELECT status, identity_hash, fields,
+                        (expires_at IS NULL OR expires_at > now())::bool AS live
+                   FROM memories WHERE memory_id = $1 AND owner_id = $2 FOR UPDATE",
             )
             .bind(&id)
+            .bind(person_id)
             .fetch_optional(&mut *tx)
             .await?;
-            if forgotten.as_deref() != Some(new.identity_hash.as_str()) {
+            let forgotten_same = match &existing {
+                Some(row) => {
+                    row.try_get::<String, _>("status")? == "forgotten"
+                        && row.try_get::<String, _>("identity_hash")? == new.identity_hash
+                }
+                None => false,
+            };
+            let keep = !forgotten_same
+                && match &existing {
+                    Some(row) => {
+                        let fields: serde_json::Value = row.try_get("fields")?;
+                        matches!(
+                            row.try_get::<String, _>("status")?.as_str(),
+                            "active" | "stale"
+                        ) && row.try_get("live")?
+                            && (json_list_nonempty(&fields, "files")
+                                || json_list_nonempty(&fields, "open_questions"))
+                            && handoff_is_thin(&new.fields)
+                    }
+                    None => false,
+                };
+            if keep {
+                report.handoff_kept = true;
+                kept_id = Some(id);
+            } else if !forgotten_same {
                 sqlx::query("DELETE FROM memories WHERE memory_id = $1 AND owner_id = $2")
                     .bind(&id)
                     .bind(person_id)
@@ -381,7 +413,7 @@ impl Store {
                 )
                 .await?;
                 report.handoff = true;
-                handoff_written = Some(id.clone());
+                handoff_written = Some(id);
             }
             tx.commit().await?;
         }
@@ -395,17 +427,17 @@ impl Store {
         .bind(started)
         .execute(&self.pool)
         .await?;
-        if report.handoff || report.notes > 0 {
-            let ids: Vec<&String> = handoff_written.iter().chain(&written).collect();
+        if report.handoff || report.notes > 0 || report.handoff_kept {
+            let recorded = handoff_written.clone().or(kept_id);
+            let ids: Vec<&String> = recorded.iter().chain(&written).collect();
             self.record_audit(
                 person_id,
                 None,
                 "session_distilled",
-                handoff_written
-                    .as_deref()
-                    .or(written.first().map(String::as_str)),
+                recorded.as_deref().or(written.first().map(String::as_str)),
                 serde_json::json!({
-                    "handoff_id": handoff_written,
+                    "handoff_id": recorded,
+                    "handoff_kept": report.handoff_kept,
                     "branch": work.branch,
                     "notes": report.notes,
                     "device_id": session_device,
@@ -532,6 +564,20 @@ impl Store {
             .await?;
         }
         Ok(())
+    }
+}
+
+fn json_list_nonempty(fields: &serde_json::Value, key: &str) -> bool {
+    fields
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn handoff_is_thin(fields: &Fields) -> bool {
+    match fields {
+        Fields::Handoff(handoff) => handoff.files.is_empty() && handoff.open_questions.is_empty(),
+        _ => false,
     }
 }
 
