@@ -4,7 +4,7 @@ use cairn_core::capture::{ObservationInput, WorkContext};
 use cairn_core::memory::{Kind, Scope, Status};
 use cairn_store::memory::ListFilter;
 use cairn_store::repo::RepoState;
-use cairn_store::testing::{TestDb, rule};
+use cairn_store::testing::{TestDb, rule, save_input};
 use serde_json::json;
 use sqlx::Row;
 
@@ -903,5 +903,70 @@ async fn a_forgotten_handoff_does_not_block_the_checkout() {
     .await
     .unwrap();
     assert_eq!(live, 1);
+    db.finish().await;
+}
+
+/// The live false stale: a gotcha citing `.cairn/project.json` in bare prose was stored with the
+/// entity `cairn/project.json` (leading dot cut), which no checkout has, so the repo check marked
+/// it `missing` and never revived it.
+#[tokio::test]
+async fn a_dot_directory_file_in_prose_is_checked_under_its_real_name() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (store, a) = (&db.store, db.person("a").await);
+    let pid = project(&db, &a).await;
+    let id = store
+        .save(
+            &a,
+            save_input(json!({
+                "kind": "gotcha", "title": "cairn init 404 after a server data wipe",
+                "summary": "cairn init returns 404 project not found after a server data wipe.",
+                "reason": "The committed project file outlives the server data.",
+                "fields": {
+                    "symptom": "cairn init returns 404 project not found after a server data wipe",
+                    "cause": "Committed .cairn/project.json points at a project id the fresh server does not have",
+                    "fix": "Move project.json aside and run cairn init again"
+                }
+            })),
+            &work(&pid, "main", &[], &[]),
+        )
+        .await
+        .unwrap()
+        .id;
+    let memory = store.get(&a, &id).await.unwrap();
+    assert!(
+        memory
+            .entities
+            .iter()
+            .any(|e| e.name == ".cairn/project.json"),
+        "{:?}",
+        memory.entities
+    );
+    assert!(
+        !memory
+            .entities
+            .iter()
+            .any(|e| e.name == "cairn/project.json")
+    );
+
+    // The hook asks about the real name, finds it, and the memory stays active.
+    let check = store.brief_check(&a, &pid, "main").await.unwrap().unwrap();
+    assert!(check.files.contains(&".cairn/project.json".to_owned()));
+    let mut present = state(&pid, "main");
+    present.files_present = strings(&[".cairn/project.json"]);
+    store.repo_state(&a, &present).await.unwrap();
+    assert_eq!(status(&db, &a, &id).await, (Status::Active, None));
+
+    // Gone then back: stale `missing`, then active again with the cause cleared.
+    let mut gone = state(&pid, "main");
+    gone.files_missing = strings(&[".cairn/project.json"]);
+    assert_eq!(store.repo_state(&a, &gone).await.unwrap().stale, 1);
+    assert_eq!(
+        status(&db, &a, &id).await,
+        (Status::Stale, Some("missing".to_owned()))
+    );
+    assert_eq!(store.repo_state(&a, &present).await.unwrap().revived, 1);
+    assert_eq!(status(&db, &a, &id).await, (Status::Active, None));
     db.finish().await;
 }

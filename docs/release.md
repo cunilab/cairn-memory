@@ -172,6 +172,14 @@ machine. Re-running `cairn setup` is needed only when `cairn doctor` warns; when
 Memories saved by 0.1.6 keep the old identity hash (it included the reason), so saving the same text once more makes a
 duplicate that consolidation merges; there is no backfill.
 
+## 0.1.8 upgrade notes
+
+0.1.8 changes no schema and no tool; the details are in [the 0.1.8 release notes](release-notes-0.1.8.md). Upgrade the
+server and the CLI together, start the new server on the existing database (no wipe), and run `cairn update` on each
+machine. Entity extraction keeps the leading dot of a bare dot-directory path (`.cairn/project.json`), and search cards,
+`memory_get` records and the `memory_feedback` reply carry `stale_cause`. Memories saved earlier keep their stored
+entities (no backfill): one the old extractor marked `missing` stays stale until it is saved again with `supersedes`.
+
 ## How clients update
 
 - `cairn --version` prints the installed version.

@@ -140,6 +140,9 @@ pub struct Record {
     pub kind: Kind,
     pub scope: Scope,
     pub status: Status,
+    /// Why a stale record is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_cause: Option<String>,
     pub title: String,
     pub summary: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -163,6 +166,7 @@ impl From<&Memory> for Record {
             kind: m.kind,
             scope: m.scope,
             status: m.status,
+            stale_cause: m.stale_cause.clone(),
             title: m.title.clone(),
             summary: m.summary.clone(),
             reason: m.reason.clone(),

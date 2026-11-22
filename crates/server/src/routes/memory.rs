@@ -225,7 +225,15 @@ pub async fn feedback(
         .store
         .feedback(&account.person_id, &body.id, vote)
         .await?;
-    Ok(Json(json!({"id": body.id, "status": status})))
+    let mut reply = json!({"id": body.id, "status": status});
+    // A vote cannot lift a stale that came from the repo check: say why it is still stale.
+    if status == Status::Stale {
+        let memory = state.store.get(&account.person_id, &body.id).await?;
+        if let Some(cause) = memory.stale_cause {
+            reply["stale_cause"] = json!(cause);
+        }
+    }
+    Ok(Json(reply))
 }
 
 /// Forget: the owner's memory is blanked and stays forgotten.

@@ -22,6 +22,9 @@ pub struct Card {
     /// Only when the memory is not `active` (a stale memory still ranks, lower).
     #[serde(default, skip_serializing_if = "is_active")]
     pub status: Status,
+    /// Why a stale card is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_cause: Option<String>,
     /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
     /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
@@ -87,6 +90,7 @@ impl Packer {
             title: hit.memory.title.clone(),
             summary: hit.memory.summary.clone(),
             status: hit.memory.status,
+            stale_cause: hit.memory.stale_cause.clone(),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
         };
         let cost = serde_json::to_string(&card).map_or(0, |json| json.len()) + 1;
@@ -187,6 +191,12 @@ mod tests {
         stale.memory.status = Status::Stale;
         let json = serde_json::to_value(pack(&[stale], 5, 1200)).expect("json");
         assert_eq!(json["results"][0]["status"], "stale");
+        assert!(json["results"][0].get("stale_cause").is_none());
+        let mut missing = hit("m", 0.3);
+        missing.memory.status = Status::Stale;
+        missing.memory.stale_cause = Some("missing".into());
+        let json = serde_json::to_value(pack(&[missing], 5, 1200)).expect("json");
+        assert_eq!(json["results"][0]["stale_cause"], "missing");
     }
 
     #[test]

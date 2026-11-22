@@ -122,7 +122,10 @@ fn push_code(out: &mut Vec<Entity>, code: &str, worktree: Option<&str>) {
 
 /// Bare prose: paths and symbols only, never inside a URL and never a word of 3 characters or fewer.
 fn push_word(out: &mut Vec<Entity>, word: &str, worktree: Option<&str>) {
-    let word = word.trim_matches(|c: char| ",:()[]\"'!;".contains(c) || c == '.');
+    // Only the end loses `.`: a leading one is part of a dot directory (`.cairn/project.json`).
+    let word = word
+        .trim_start_matches(|c: char| ",:()[]\"'!;".contains(c))
+        .trim_end_matches(|c: char| ",:()[]\"'!;.".contains(c));
     if word.contains("://") || word.chars().count() <= 3 {
         return;
     }
@@ -389,6 +392,25 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == EntityKind::Term)
         );
+    }
+
+    #[test]
+    fn bare_dot_directory_paths_keep_their_leading_dot() {
+        // The live false-stale gotcha: `.cairn/project.json` was cut to `cairn/project.json`.
+        let got = from_text(
+            "Committed .cairn/project.json points at a project id; also (./.github/ci.yml), see src/a.rs.",
+        );
+        assert!(has(&got, EntityKind::File, ".cairn/project.json"));
+        assert!(has(&got, EntityKind::Module, ".cairn"));
+        assert!(has(&got, EntityKind::File, ".github/ci.yml"));
+        assert!(has(&got, EntityKind::File, "src/a.rs"));
+        assert!(!has(&got, EntityKind::File, "cairn/project.json"));
+        // Relative parents stay outside the repo (judged by IN_REPO), not mangled into `/x.rs`.
+        assert!(has(
+            &from_text("see ../x/y.rs now"),
+            EntityKind::File,
+            "../x/y.rs"
+        ));
     }
 
     #[test]

@@ -11,6 +11,10 @@ export type Card = { id: string, kind: Kind, title: string, summary: string,
  */
 status?: Status, 
 /**
+ * Why a stale card is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
+ */
+stale_cause?: string | null, 
+/**
  * Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
  * whatever else matched. The order of cards can still tell apart two that both show 1.0.
  */
