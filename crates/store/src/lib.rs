@@ -50,6 +50,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0006_agent_instructions",
         include_str!("../../../migrations/0006_agent_instructions.sql"),
     ),
+    (
+        "0007_memory_rank",
+        include_str!("../../../migrations/0007_memory_rank.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

@@ -4,6 +4,7 @@ use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::{new_id, now_seconds};
 use cairn_core::memory::kind::SYSTEM_TTL_SECONDS;
+use cairn_core::memory::model::Rank;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
     Usage,
@@ -56,7 +57,7 @@ macro_rules! memory_columns {
     () => {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
-    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status,
+    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
@@ -106,6 +107,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         entities: Vec::new(),
         links: Vec::new(),
         status: parse(row, "status")?,
+        rank: parse(row, "rank")?,
         stale_cause: row.try_get("stale_cause")?,
         origin: parse(row, "origin")?,
         expires_at: row.try_get("expires_at")?,
@@ -253,6 +255,7 @@ impl Store {
         .bind(memory_ids)
         .execute(&self.pool)
         .await?;
+        promote_candidates(&self.pool, memory_ids).await?;
         extend_system_expiry(&self.pool, memory_ids).await?;
         Ok(())
     }
@@ -480,7 +483,9 @@ impl Store {
                 .await?;
         }
         if vote == Vote::Helpful {
-            extend_system_expiry(&mut *tx, &[memory_id.to_owned()]).await?;
+            let ids = [memory_id.to_owned()];
+            promote_candidates(&mut *tx, &ids).await?;
+            extend_system_expiry(&mut *tx, &ids).await?;
         }
         tx.commit().await?;
         Ok(new_status)
@@ -625,6 +630,23 @@ pub(crate) async fn link_tx(
     Ok(())
 }
 
+/// A fetch, a helpful vote, a duplicate save, or a consolidate re-statement confirms a candidate.
+pub(crate) async fn promote_candidates<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    memory_ids: &[String],
+) -> Result<()> {
+    if memory_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE memories SET rank = 'normal' WHERE memory_id = ANY($1) AND rank = 'candidate'",
+    )
+    .bind(memory_ids)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Inserts a derived memory with its entities, usage row, agent links and embed job. An identical
 /// memory (same owner, scope, project and identity hash) returns as a duplicate, or is revived when
 /// it had expired; a forgotten one is a 409. `fixed_id` is for the deterministic handoff id.
@@ -642,11 +664,20 @@ pub(crate) async fn insert_memory(
         project_id
     };
     let id = fixed_id.map_or_else(|| new_id("mem"), str::to_owned);
+    // A distilled note starts low. Handoffs and promoted global copies stay at the normal rank.
+    let rank = if new.origin == Origin::System
+        && new.kind != Kind::Handoff
+        && new.scope != Scope::Global
+    {
+        Rank::Candidate
+    } else {
+        Rank::Normal
+    };
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -670,6 +701,7 @@ pub(crate) async fn insert_memory(
     .bind(new.expires_at.map(|t| t as f64))
     .bind(new.origin.as_str())
     .bind(device_id)
+    .bind(rank.as_str())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
@@ -688,6 +720,8 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
+        // Saving the same note again confirms it.
+        promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
         // Saving again after expiry gives the same memory a new life; until the sweep deletes the
         // row it would otherwise stay hidden while the save reported success.
         let revived: bool = existing.try_get("expired")?;

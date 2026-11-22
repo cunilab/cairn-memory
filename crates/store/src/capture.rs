@@ -8,6 +8,7 @@ use cairn_core::capture::{
 };
 use cairn_core::capture::{redact_sensitive_content, redact_work_context};
 use cairn_core::id::now_seconds;
+use cairn_core::memory::Scope;
 use cairn_core::memory::kind::EXPIRED_GRACE_SECONDS;
 use cairn_core::process::distill::{distill, handoff_id};
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
@@ -312,7 +313,13 @@ impl Store {
         let output = distill(&observations);
         let mut report = DistillReport::default();
         let mut written: Vec<String> = Vec::new();
-        for note in output.notes {
+        let note_scope = if session_project.is_some() {
+            Scope::Project
+        } else {
+            Scope::Personal
+        };
+        for mut note in output.notes {
+            note.input.scope = Some(note_scope);
             let note_work = WorkContext {
                 files: note.files,
                 ..work.clone()

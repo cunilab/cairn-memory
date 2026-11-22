@@ -36,6 +36,7 @@ text_enum!(Scope { Personal => "personal", Project => "project", Global => "glob
 text_enum!(Status {
     Active => "active", Stale => "stale", Superseded => "superseded", Forgotten => "forgotten",
 });
+text_enum!(Rank { Candidate => "candidate", Normal => "normal" });
 text_enum!(Relation {
     Relates => "relates", Causes => "causes", Fixes => "fixes", DependsOn => "depends_on",
     Supersedes => "supersedes", Contradicts => "contradicts",
@@ -107,6 +108,7 @@ pub struct Memory {
     #[serde(skip)]
     pub links: Vec<Link>,
     pub status: Status,
+    pub rank: Rank,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_cause: Option<String>,

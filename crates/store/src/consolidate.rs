@@ -454,5 +454,8 @@ async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()
     .bind(older)
     .execute(&mut *tx)
     .await?;
+    // The newer side restates the older one, which confirms it.
+    let confirmed = [newer.to_owned()];
+    crate::memory::promote_candidates(&mut *tx, &confirmed).await?;
     Ok(())
 }

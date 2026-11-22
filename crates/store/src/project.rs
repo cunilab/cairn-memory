@@ -51,8 +51,10 @@ pub struct BranchSummary {
 /// What the project list shows next to each project.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProjectCounts {
-    /// Live project memories (active or stale).
+    /// Live project memories (active or stale), including candidates.
     pub memories: i64,
+    /// Of `memories`, how many are still rank `candidate`.
+    pub candidates: i64,
     pub stale: i64,
     pub members: i64,
     /// The latest memory change or session in the project.
@@ -432,6 +434,9 @@ impl Store {
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
                         AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS memories,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
+                        AND m.rank = 'candidate'
+                        AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS candidates,
+                    (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
                         AND m.status = 'stale' AND (m.expires_at IS NULL OR m.expires_at > now())) AS stale,
                     (SELECT count(*) FROM project_members pm WHERE pm.project_id = p.project_id) AS members,
                     EXTRACT(EPOCH FROM greatest(
@@ -449,6 +454,7 @@ impl Store {
                     r.try_get("project_id")?,
                     ProjectCounts {
                         memories: r.try_get("memories")?,
+                        candidates: r.try_get("candidates")?,
                         stale: r.try_get("stale")?,
                         members: r.try_get("members")?,
                         last_activity_at: r.try_get("last_activity_at")?,

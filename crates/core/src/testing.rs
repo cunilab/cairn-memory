@@ -1,5 +1,6 @@
 //! Pure builders for core unit tests. No IO.
 
+use crate::memory::model::Rank;
 use crate::memory::{Context, Fields, Kind, Memory, Scope, Status, Usage, fields};
 use crate::process::Origin;
 
@@ -20,6 +21,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         entities: Vec::new(),
         links: Vec::new(),
         status: Status::Active,
+        rank: Rank::Normal,
         stale_cause: None,
         origin: Origin::Agent,
         expires_at: None,

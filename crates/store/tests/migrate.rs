@@ -20,7 +20,8 @@ async fn migrate_twice_is_a_no_op() {
             "0003_retrieval",
             "0004_processing",
             "0005_console",
-            "0006_agent_instructions"
+            "0006_agent_instructions",
+            "0007_memory_rank"
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -112,4 +113,99 @@ async fn pre_0_1_6_database_is_refused() {
         .execute(admin.pool())
         .await
         .unwrap();
+}
+
+/// A database at the pre-rank schema (0001–0006) already has rows. Adding `rank` keeps every row
+/// and backfills `normal`.
+#[tokio::test]
+async fn rank_backfill_keeps_rows_normal() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_rank_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, file) in [
+        ("0001_foundation", "0001_foundation.sql"),
+        ("0002_capture", "0002_capture.sql"),
+        ("0003_retrieval", "0003_retrieval.sql"),
+        ("0004_processing", "0004_processing.sql"),
+        ("0005_console", "0005_console.sql"),
+        ("0006_agent_instructions", "0006_agent_instructions.sql"),
+    ] {
+        let sql = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../migrations")
+                .join(file),
+        )
+        .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_old', 'old@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash, identity_hash, origin)
+         VALUES ('mem_agent', 'per_old', 'personal', 'fact', 'Agent fact kept', 'An agent fact that already existed.', 'e1', 'i1', 'agent'),
+                ('mem_system', 'per_old', 'personal', 'gotcha', 'System gotcha kept', 'A system gotcha that already existed.', 'e2', 'i2', 'system')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(before, ["mem_agent", "mem_system"]);
+    store.migrate().await.expect("apply rank migration");
+    let after: Vec<(String, String)> =
+        sqlx::query_as("SELECT memory_id, rank FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        [
+            ("mem_agent".to_owned(), "normal".to_owned()),
+            ("mem_system".to_owned(), "normal".to_owned()),
+        ]
+    );
+    store.migrate().await.expect("idempotent");
+    let again: Vec<(String, String)> =
+        sqlx::query_as("SELECT memory_id, rank FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(again, after);
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
 }

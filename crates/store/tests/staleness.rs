@@ -368,7 +368,7 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
     assert!(all.iter().all(|m| !m.title.starts_with("Session ")));
     let gotcha = of(Kind::Gotcha);
     assert_eq!(gotcha.len(), 1);
-    assert_eq!(gotcha[0].scope, Scope::Personal);
+    assert_eq!(gotcha[0].scope, Scope::Project);
     assert_eq!(
         gotcha[0].title,
         "`cargo test` failed until money.rs changed"

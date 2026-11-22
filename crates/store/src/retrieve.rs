@@ -585,7 +585,7 @@ impl Store {
         let newest = "ORDER BY m.created_at DESC, m.memory_id";
         let handoff = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND m.kind = 'handoff' AND m.owner_id = $1
+              WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
                 AND m.repo = $3 AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
               {newest} LIMIT 1",
@@ -600,7 +600,7 @@ impl Store {
         .await?;
         let preferences = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND m.kind = 'preference' AND m.scope = 'personal'
+              WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.kind = 'preference' AND m.scope = 'personal'
                 AND m.owner_id = $1
               {newest} LIMIT 2",
             visible("m", "$1")
@@ -613,7 +613,7 @@ impl Store {
         let project_items = |extra: &str, order: &str, limit: i32| {
             format!(
                 "{MEMORY_SELECT}
-                  WHERE {} AND m.status = 'active' AND m.scope = 'project' AND m.project_id = $2
+                  WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.scope = 'project' AND m.project_id = $2
                     AND m.kind IN ('rule','decision','gotcha')
                     AND (m.repo_branch IS NULL OR m.repo_branch = $3
                          OR CASE WHEN $4::text IS NULL THEN m.repo_branch IN ('main','master')

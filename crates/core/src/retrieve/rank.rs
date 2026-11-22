@@ -1,12 +1,14 @@
 use crate::capture::WorkContext;
+use crate::memory::model::Rank;
 use crate::memory::{Kind, Memory, Scope, Status};
 
 /// Total of every adjustment, as a share of the fused score.
 pub const ADJUST_CAP: f32 = 0.30;
 const FRESH_SECONDS: i64 = 30 * 86_400;
 
-/// The score multiplier is `1 + adjust`: scope closeness, status, freshness, explicit feedback and
-/// kind, capped at ±30 %. Reading a memory never raises its score (A17).
+/// The score multiplier is `1 + adjust`: scope closeness, status, freshness, explicit feedback,
+/// kind and a lower rank for a candidate, capped at ±30 %. Reading a memory never raises its
+/// score (A17).
 pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     let scope = match m.scope {
         _ if ctx.project_id.is_some()
@@ -39,7 +41,12 @@ pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
         Kind::Note => -0.05,
         Kind::Handoff => -0.10,
     };
-    (scope + status + fresh + used + kind).clamp(-ADJUST_CAP, ADJUST_CAP)
+    let candidate = if m.rank == Rank::Candidate {
+        -0.10
+    } else {
+        0.0
+    };
+    (scope + status + fresh + used + kind + candidate).clamp(-ADJUST_CAP, ADJUST_CAP)
 }
 
 /// The status after the votes changed. `wrong >= 2`, or `wrong >= 1` with the owner among them,
@@ -127,5 +134,26 @@ mod tests {
         assert_eq!(after(Status::Stale, true, 1, true), Status::Stale);
         // A memory stale for a missing file is not revived by votes.
         assert_eq!(after(Status::Stale, false, 0, false), Status::Stale);
+    }
+
+    #[test]
+    fn candidate_ranks_lower() {
+        use crate::memory::model::Rank;
+
+        let mut normal = memory("a", Kind::Fact, Scope::Personal);
+        normal.updated_at = -100 * 86_400;
+        normal.rank = Rank::Normal;
+        let mut candidate = normal.clone();
+        candidate.rank = Rank::Candidate;
+        let plain = WorkContext::default();
+        assert_eq!(adjust(&normal, &plain, 0), 0.0);
+        assert_eq!(adjust(&candidate, &plain, 0), -0.10);
+
+        let mut low = memory("b", Kind::Handoff, Scope::Global);
+        low.status = Status::Stale;
+        low.usage.wrong = 9;
+        low.updated_at = -100 * 86_400;
+        low.rank = Rank::Candidate;
+        assert_eq!(adjust(&low, &ctx(), 0), -ADJUST_CAP);
     }
 }

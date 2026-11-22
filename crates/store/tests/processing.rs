@@ -1033,3 +1033,294 @@ async fn quarantined_twins_of_one_key_do_not_fail_the_sweep() {
     assert_eq!((snapshot.pending, snapshot.quarantined), (1, 0));
     db.finish().await;
 }
+
+async fn column_rank(store: &cairn_store::Store, id: &str) -> String {
+    sqlx::query_scalar("SELECT rank FROM memories WHERE memory_id = $1")
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+fn capture(
+    event: &str,
+    session: &str,
+    kind: &str,
+    content: &str,
+    ok: Option<bool>,
+    project: Option<&str>,
+    file: Option<&str>,
+) -> cairn_core::capture::ObservationInput {
+    let mut context = serde_json::json!({
+        "repository": "github.com/acme/one",
+        "branch": "feat",
+        "worktree": "wt-1",
+    });
+    if kind == "command" {
+        context["commands"] = serde_json::json!([content.lines().next().unwrap_or("")]);
+    }
+    if let Some(file) = file {
+        context["files"] = serde_json::json!([file]);
+    }
+    if let Some(project) = project {
+        context["project_id"] = serde_json::json!(project);
+    }
+    serde_json::from_value(serde_json::json!({
+        "event_id": event,
+        "session_id": session,
+        "kind": kind,
+        "ok": ok,
+        "content": content,
+        "context": context,
+    }))
+    .unwrap()
+}
+
+async fn distill_fail_fix(
+    store: &cairn_store::Store,
+    person: &str,
+    session: &str,
+    project: Option<&str>,
+) {
+    let fail = "cargo test\nexit 101: error[E0308]: mismatched types in src/billing/money.rs";
+    store
+        .capture(
+            person,
+            capture(
+                &format!("{session}-c1"),
+                session,
+                "command",
+                fail,
+                Some(false),
+                project,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            capture(
+                &format!("{session}-e1"),
+                session,
+                "edit",
+                "Edit src/billing/money.rs\nx",
+                None,
+                project,
+                Some("src/billing/money.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            capture(
+                &format!("{session}-c2"),
+                session,
+                "command",
+                "cargo test",
+                Some(true),
+                project,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            person,
+            capture(
+                &format!("{session}-a1"),
+                session,
+                "assistant",
+                "Decision: keep the queue in Postgres\nReason: one database is enough here",
+                None,
+                project,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.distill_session(person, session).await.unwrap();
+}
+
+#[tokio::test]
+async fn distilled_notes_take_project_scope_and_candidate_rank() {
+    use cairn_core::memory::Kind;
+    use cairn_core::process::Origin;
+    use cairn_store::memory::ListFilter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id.clone();
+    distill_fail_fix(store, &person, "in-project", Some(&pid)).await;
+    distill_fail_fix(store, &person, "no-project", None).await;
+
+    let all = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let gotcha = all
+        .iter()
+        .find(|m| m.kind == Kind::Gotcha && m.project_id.as_deref() == Some(pid.as_str()))
+        .expect("project gotcha");
+    assert_eq!(gotcha.scope, Scope::Project, "project session");
+    assert_eq!(column_rank(store, &gotcha.id).await, "candidate");
+    assert_eq!(gotcha.origin, Origin::System);
+    for kind in [Kind::Fact, Kind::Decision] {
+        let note = all
+            .iter()
+            .find(|m| m.kind == kind && m.project_id.as_deref() == Some(pid.as_str()))
+            .unwrap_or_else(|| panic!("project {kind:?}"));
+        assert_eq!(note.scope, Scope::Project);
+        assert_eq!(column_rank(store, &note.id).await, "candidate");
+        assert_eq!(note.origin, Origin::System);
+    }
+    let lone = all
+        .iter()
+        .find(|m| m.kind == Kind::Gotcha && m.project_id.is_none())
+        .expect("personal gotcha");
+    assert_eq!(lone.scope, Scope::Personal);
+    assert_eq!(column_rank(store, &lone.id).await, "candidate");
+    let handoffs: Vec<_> = all.iter().filter(|m| m.kind == Kind::Handoff).collect();
+    assert_eq!(handoffs.len(), 2);
+    for handoff in handoffs {
+        assert_eq!(handoff.scope, Scope::Personal);
+        assert_eq!(column_rank(store, &handoff.id).await, "normal");
+    }
+    let counts = store
+        .project_counts(std::slice::from_ref(&pid))
+        .await
+        .unwrap();
+    let project_notes = all
+        .iter()
+        .filter(|m| m.scope == Scope::Project && m.project_id.as_deref() == Some(pid.as_str()))
+        .count() as i64;
+    assert!(project_notes >= 1);
+    assert_eq!(counts[&pid].memories, project_notes);
+    assert_eq!(counts[&pid].candidates, project_notes);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn using_a_candidate_promotes_it() {
+    use cairn_core::memory::Kind;
+    use cairn_store::memory::{ListFilter, Vote};
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    distill_fail_fix(store, &person, "s1", Some(&pid)).await;
+    let all = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let id = |kind| {
+        all.iter()
+            .find(|m| m.kind == kind)
+            .unwrap_or_else(|| panic!("{kind:?}"))
+            .id
+            .clone()
+    };
+    let (gotcha, fact, decision) = (id(Kind::Gotcha), id(Kind::Fact), id(Kind::Decision));
+    assert_eq!(column_rank(store, &gotcha).await, "candidate");
+    store
+        .mark_fetched(std::slice::from_ref(&gotcha))
+        .await
+        .unwrap();
+    assert_eq!(column_rank(store, &gotcha).await, "normal");
+    assert_eq!(column_rank(store, &fact).await, "candidate");
+    store.feedback(&person, &fact, Vote::Helpful).await.unwrap();
+    assert_eq!(column_rank(store, &fact).await, "normal");
+    assert_eq!(column_rank(store, &decision).await, "candidate");
+    store
+        .capture(
+            &person,
+            capture(
+                "s2-a1",
+                "s2",
+                "assistant",
+                "Decision: keep the queue in Postgres\nReason: one database is enough here",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.distill_session(&person, "s2").await.unwrap();
+    assert_eq!(column_rank(store, &decision).await, "normal");
+    let decisions = store
+        .list(
+            &person,
+            &ListFilter {
+                kind: Some(Kind::Decision),
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(decisions.len(), 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn restatement_promotes_a_candidate() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let work = in_project(&project.project_id, &[]);
+    let older = store
+        .save(&person, rule("Queue claims use leases"), &work)
+        .await
+        .unwrap()
+        .id;
+    let newer = store
+        .save(&person, rule("Queue claims still use leases"), &work)
+        .await
+        .unwrap()
+        .id;
+    store
+        .upsert_embedding(&older, "h1", &tilted(1.0, 1))
+        .await
+        .unwrap();
+    store
+        .upsert_embedding(&newer, "h2", &tilted(0.99, 1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&newer)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let out = store.consolidate_memory(&older).await.unwrap();
+    assert_eq!(out.superseded, vec![older.clone()]);
+    assert_eq!(column_rank(store, &newer).await, "normal");
+    assert_eq!(column_rank(store, &older).await, "normal");
+    db.finish().await;
+}

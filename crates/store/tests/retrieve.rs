@@ -1420,3 +1420,51 @@ async fn lexical_or_channel_caps_the_rows_it_ranks() {
     assert_eq!(found.first().map(|(id, _)| id.as_str()), Some("m77"));
     db.finish().await;
 }
+
+#[tokio::test]
+async fn brief_skips_candidates() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let (project, _) = store
+        .init_project(&me, "github.com/acme/cairn", None)
+        .await
+        .unwrap();
+    let work = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        repository: Some("github.com/acme/cairn".into()),
+        branch: Some("main".into()),
+        ..WorkContext::default()
+    };
+    store
+        .save(&me, rule("Keep this rule visible"), &work)
+        .await
+        .unwrap();
+    let gotcha = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "gotcha",
+                "scope": "project",
+                "title": "Candidate gotcha stays out",
+                "summary": "A low-rank gotcha must not enter the session brief.",
+                "reason": "Seen once in a session.",
+                "fields": {"symptom": "brief showed it", "fix": "leave it candidate"}
+            })),
+            &work,
+        )
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&gotcha)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    assert!(brief.contains("Keep this rule visible"), "{brief}");
+    assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
+    db.finish().await;
+}

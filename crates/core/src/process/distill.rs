@@ -209,7 +209,7 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                 evidence,
                 supersedes: None,
                 contradicts: None,
-                scope: Some(Scope::Personal),
+                scope: None,
             },
             files,
         });
@@ -257,7 +257,7 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
             evidence: vec![passed.event_id.clone()],
             supersedes: None,
             contradicts: None,
-            scope: Some(Scope::Personal),
+            scope: None,
         },
         files: Vec::new(),
     })
@@ -520,7 +520,7 @@ impl Draft {
             evidence: vec![self.event_id],
             supersedes: None,
             contradicts: None,
-            scope: Some(Scope::Personal),
+            scope: None,
         };
         (input, self.files)
     }
@@ -642,7 +642,7 @@ mod tests {
             "qdrant"
         );
         assert_eq!(decision.evidence, vec!["e1".to_owned()]);
-        assert_eq!(decision.scope, Some(Scope::Personal));
+        assert_eq!(decision.scope, None);
         assert!(d.notes[1].input.reason.starts_with("Distilled"));
     }
 
