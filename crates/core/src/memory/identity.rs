@@ -22,15 +22,25 @@ pub fn evidence_hash(evidence: &[String]) -> String {
     sha256_hex(&parts)
 }
 
-/// SHA-256 of `kind, title, summary, reason, fields`. Inputs must already be redacted.
-pub fn identity_hash(
-    kind: Kind,
-    title: &str,
-    summary: &str,
-    reason: &str,
-    fields: &Value,
-) -> String {
-    sha256_hex(&[kind.as_str(), title, summary, reason, &fields.to_string()])
+/// Lowercase with runs of whitespace collapsed, so a re-save that only differs in case or
+/// spacing is the same memory.
+fn squash(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// SHA-256 of `kind, title, summary, fields` (title and summary squashed). The reason is not
+/// part of the identity: the same note saved again with another reason is a duplicate, not a
+/// new version. Inputs must already be redacted.
+pub fn identity_hash(kind: Kind, title: &str, summary: &str, fields: &Value) -> String {
+    sha256_hex(&[
+        kind.as_str(),
+        &squash(title),
+        &squash(summary),
+        &fields.to_string(),
+    ])
 }
 
 #[cfg(test)]
@@ -48,10 +58,16 @@ mod tests {
     #[test]
     fn identity_changes_with_any_part() {
         let f = json!({"source": "x"});
-        let base = identity_hash(Kind::Fact, "t", "s", "r", &f);
-        assert_eq!(base, identity_hash(Kind::Fact, "t", "s", "r", &f));
-        assert_ne!(base, identity_hash(Kind::Rule, "t", "s", "r", &f));
-        assert_ne!(base, identity_hash(Kind::Fact, "t", "s", "r2", &f));
-        assert_ne!(base, identity_hash(Kind::Fact, "t", "s", "r", &json!({})));
+        let base = identity_hash(Kind::Fact, "t", "s", &f);
+        assert_eq!(base, identity_hash(Kind::Fact, "t", "s", &f));
+        assert_ne!(base, identity_hash(Kind::Rule, "t", "s", &f));
+        assert_ne!(base, identity_hash(Kind::Fact, "t", "s2", &f));
+        assert_ne!(base, identity_hash(Kind::Fact, "t", "s", &json!({})));
+        // Case and spacing do not make a new identity.
+        assert_eq!(base, identity_hash(Kind::Fact, " T ", "S", &f));
+        assert_eq!(
+            identity_hash(Kind::Fact, "A  b", "c\nd", &f),
+            identity_hash(Kind::Fact, "a b", "c d", &f)
+        );
     }
 }

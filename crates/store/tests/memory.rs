@@ -476,6 +476,54 @@ async fn list_is_paged_newest_first() {
 }
 
 #[tokio::test]
+async fn a_near_identical_save_is_deduplicated_and_changed_text_is_not() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let save = |title: &str, summary: &str, reason: &str| {
+        let input = save_input(
+            serde_json::json!({"kind":"fact","title":title,"summary":summary,"reason":reason}),
+        );
+        let (store, me) = (db.store.clone(), me.clone());
+        async move {
+            store
+                .save(&me, input, &WorkContext::default())
+                .await
+                .unwrap()
+        }
+    };
+    let first = save(
+        "Deploys run from the main branch",
+        "Every deploy is cut from main after the checks pass.",
+        "Agreed in the release review and written down here.",
+    )
+    .await;
+    assert!(!first.deduplicated);
+    // Same kind, title and summary: another reason, case or spacing is still the same memory.
+    let again = save(
+        "deploys  run from the Main branch",
+        "Every deploy is cut from main after the checks pass.",
+        "A different reason, written the second time this was saved.",
+    )
+    .await;
+    assert_eq!(
+        (again.deduplicated, again.id.as_str()),
+        (true, first.id.as_str())
+    );
+    // Changed text is a new memory.
+    let changed = save(
+        "Deploys run from the main branch",
+        "Every deploy is cut from main after the checks and a manual approval.",
+        "Agreed in the release review and written down here.",
+    )
+    .await;
+    assert!(!changed.deduplicated);
+    assert_ne!(changed.id, first.id);
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn feedback_moves_status_and_usage() {
     let Some(db) = TestDb::new().await else {
         return;
