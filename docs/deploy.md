@@ -28,7 +28,7 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 | `CAIRN_EMBEDDING_MODEL_DIR` | `/opt/cairn/models/minilm` by default in the image; a provisioned directory for standalone servers |
 | `CAIRN_PUBLIC_URL` | Optional, recommended: the address agents are given, e.g. `https://cairn.example.test/agent`. The console shows it in the device setup command and in every fix command (`cairn setup <url>`). Without it the console forwards the address the browser used (`x-forwarded-host` and `-proto`, plus `x-forwarded-prefix: /agent` for a public host) and the server answers with that, so a deploy that follows the routing below still shows `https://cairn.example.test/agent`. A console on `localhost` forwards nothing, and the server answers with the address a request reached it on |
 
-Without it the server falls back to the JSON file store and needs `--store`; the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
+The server exits at startup without it (`missing --database-url <url> or CAIRN_DATABASE_URL`); the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
 
 The production server image uses Debian trixie slim for the CPU ONNX runtime,
 includes the pinned MiniLM model, and targets `linux/amd64` and `linux/arm64`.

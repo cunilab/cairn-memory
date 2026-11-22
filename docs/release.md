@@ -17,7 +17,6 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Rust tests` (a `pgvector/pgvector:pg17` service and the pinned MiniLM model; `CAIRN_TEST_REQUIRE_DB=1`, so a missing database fails instead of skipping)
   - `Build on macos-15` and `Build on windows-latest`
   - `Web console typecheck, lint, build`
-  - `Python hook and outbox tests`
   - `Documentation validation`
   - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
   - `Bench` (`scripts/bench.py --min-hit5 0.68`; uploads the result JSON)
@@ -145,7 +144,7 @@ capture visibility, relevance behavior, and Stop save-ask.
 ## 0.1.6 upgrade notes
 
 0.1.6 replaces the storage and the memory model; see the [0.1.6 foundation specification](specs/0.1.6-foundation.md).
-There is no migration from 0.1.5. The server uses PostgreSQL only, with one migration (`migrations/0001_foundation.sql`)
+There is no migration from 0.1.5. The server uses PostgreSQL only, with five migrations (`migrations/0001` to `0005`)
 in the schema `cairn`. A database that still has the old `public.cairn_memories` table is refused at startup with
 `pre-0.1.6 database; recreate it`; the server never drops data itself. The file store, `--store`, the embedded
 `/viewer`, `/import`, `/sync/pull` and the similarity-review routes and tools are gone. Upgrade the server and the
@@ -154,6 +153,13 @@ CLI together: the MCP tool set and the shape of `memory_save` changed.
 The agent hook is now the `cairn hook` command and the Python scripts are gone. `POST /sync/push` and `/context` are removed, so a machine that still runs the Python hook cannot capture until it is updated. On every machine: install the new `cairn`, then re-run `cairn setup <server-url> --agent claude|codex|opencode` (the token comes on stdin). That replaces the old `python3 cairn_hook.py` entries, deletes the old `hook/` scripts and `hook-state.sqlite3`, and leaves an old version 2 outbox untouched. `cairn update` also rewrites the commands of agents that already have them.
 
 The server URL given to `cairn setup` may end in `/cairn-memory`; the client drops that suffix once, so `https://host`, `https://host/cairn-memory` and a reverse-proxy prefix such as `https://host/agent` all work.
+
+The release also carries three stub assets, `cairn_hook.py`, `cairn_outbox.py` and `cairn_instructions.txt`
+(`release/legacy-update-stubs`). An installed 0.1.5 `cairn update` downloads and checksums them before it swaps
+the binary and aborts when one is missing, so they must stay in `release.yml` until 0.1.5 clients are gone;
+`scripts/check_update_assets.py` (the Documentation validation job) fails when a name the 0.1.5 client asks for is
+no longer published. 0.1.5 records their checksums in `hook/installed.json`, so the first `cairn setup` of 0.1.6
+deletes them (`retire_python`).
 
 ## How clients update
 

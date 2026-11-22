@@ -40,6 +40,13 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
 - Sign-in has no rate limit or lockout (a password guess costs one Argon2 check). Put a limit in your reverse proxy if the console is public.
 - Set `CAIRN_PUBLIC_URL` on the server (for example `https://cairn.example.test/agent`) to pin the `cairn setup` address the console shows. Without it the console passes the browser's own address to the server, which adds `/agent` for a public host.
 
+## Known limitations (planned for 0.1.7)
+
+- No CI job builds the server and web Dockerfiles on pull requests; the images are first built when a tag is pushed.
+- The optional `CAIRN_SCHEMA` variable (PostgreSQL schema, default `cairn`) is not yet documented in the deploy guide.
+- `apps/web/package.json` still says version 0.1.0.
+- The "Agents / Hook" paragraph of the deploy guide and the hook-v1 contract may still contain Python-era wording.
+
 ## Upgrade steps (one machine)
 
 1. Deploy the 0.1.6 server with a **fresh database**.
