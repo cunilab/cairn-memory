@@ -55,6 +55,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../migrations/0007_memory_rank.sql"),
     ),
     (
+        "0008_proof_count",
+        include_str!("../../../migrations/0008_proof_count.sql"),
+    ),
+    (
         "0012_always_active",
         include_str!("../../../migrations/0012_always_active.sql"),
     ),

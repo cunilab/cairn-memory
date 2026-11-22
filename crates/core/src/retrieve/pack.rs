@@ -31,6 +31,9 @@ pub struct Card {
     /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
     /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
+    /// How many times this knowledge was saved. Omitted the first time.
+    #[serde(default, skip_serializing_if = "seen_once")]
+    pub seen: u32,
 }
 
 /// `more` counts hits cut by the limit or the budget; a caller raises either to see them.
@@ -44,6 +47,10 @@ pub struct Cards {
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+fn seen_once(n: &u32) -> bool {
+    *n < 2
 }
 
 fn is_active(status: &Status) -> bool {
@@ -116,6 +123,7 @@ impl Packer {
             stale_cause: hit.memory.stale_cause.clone(),
             label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
+            seen: hit.memory.proof_count,
         };
         let cost = serde_json::to_string(&card).map_or(0, |json| json.len()) + 1;
         if self.out.len() == self.limit || (self.used + cost > self.budget && !self.out.is_empty())
@@ -299,5 +307,21 @@ mod tests {
         let c = pack(&[big, hit("b", 0.5)], 5, 200);
         assert_eq!(ids(&c), ["a"]);
         assert_eq!(c.more, 1);
+    }
+
+    #[test]
+    fn card_unchanged_for_single_proof() {
+        let mut one = hit("a", 0.3);
+        one.memory.proof_count = 1;
+        let json = serde_json::to_string(&pack(&[one], 5, 1200)).expect("json");
+        assert_eq!(
+            json,
+            r#"{"results":[{"id":"a","kind":"fact","title":"title a","summary":"summary a","score":0.3}]}"#
+        );
+        let mut repeated = hit("b", 0.3);
+        repeated.memory.proof_count = 3;
+        let value = serde_json::to_value(pack(&[repeated], 5, 1200)).expect("json");
+        assert_eq!(value["results"][0]["seen"], 3);
+        assert!(value["results"][0].get("proof_count").is_none());
     }
 }

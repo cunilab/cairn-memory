@@ -109,6 +109,8 @@ pub struct Memory {
     pub links: Vec<Link>,
     pub status: Status,
     pub rank: Rank,
+    /// Times this knowledge was saved, including the first. At least 1.
+    pub proof_count: u32,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_cause: Option<String>,

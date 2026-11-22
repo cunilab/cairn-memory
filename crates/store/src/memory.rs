@@ -58,6 +58,7 @@ macro_rules! memory_columns {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
+    m.proof_count,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
@@ -108,6 +109,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         links: Vec::new(),
         status: parse(row, "status")?,
         rank: parse(row, "rank")?,
+        proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
         origin: parse(row, "origin")?,
         expires_at: row.try_get("expires_at")?,
@@ -746,8 +748,12 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
-        // Saving the same note again confirms it.
+        // Saving the same note again confirms it and counts as another sighting.
         promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
+        sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
         // Identity ignores the reason, so a correction that only changes it dedupes onto its own
         // target: keep the new reason and skip the self-link.
         if new.supersedes.as_deref() == Some(id.as_str()) {

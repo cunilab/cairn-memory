@@ -1040,6 +1040,14 @@ async fn column_rank(store: &cairn_store::Store, id: &str) -> String {
         .unwrap()
 }
 
+async fn column_proof(store: &cairn_store::Store, id: &str) -> i32 {
+    sqlx::query_scalar("SELECT proof_count FROM memories WHERE memory_id = $1")
+        .bind(id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
 fn capture(
     event: &str,
     session: &str,
@@ -1323,6 +1331,54 @@ async fn restatement_promotes_a_candidate() {
     assert_eq!(out.superseded, vec![older.clone()]);
     assert_eq!(column_rank(store, &newer).await, "normal");
     assert_eq!(column_rank(store, &older).await, "normal");
+    assert_eq!(column_proof(store, &newer).await, 2);
+    assert_eq!(column_proof(store, &older).await, 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn duplicate_saves_count_proofs() {
+    use cairn_core::memory::model::Rank;
+    use cairn_core::retrieve::pack::{Hit, pack};
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha",
+        "title": "Retry the webhook once",
+        "summary": "The provider delivers the same webhook twice after a timeout.",
+        "reason": "A second delivery double-charges the customer.",
+        "fields": {"symptom": "two charges", "cause": "a retry", "fix": "dedupe the event id"}
+    }));
+    let work = WorkContext::default();
+    let first = store.save(&person, input.clone(), &work).await.unwrap();
+    assert!(!first.deduplicated);
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&first.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let second = store.save(&person, input.clone(), &work).await.unwrap();
+    let third = store.save(&person, input, &work).await.unwrap();
+    assert!(second.deduplicated && third.deduplicated);
+    assert_eq!(second.id, first.id);
+    assert_eq!(third.id, first.id);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM memories WHERE memory_id = $1")
+        .bind(&first.id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert_eq!(column_proof(store, &first.id).await, 3);
+    assert_eq!(column_rank(store, &first.id).await, "normal");
+    let memory = store.get(&person, &first.id).await.unwrap();
+    assert_eq!(memory.rank, Rank::Normal);
+    let cards = pack(&[Hit { memory, score: 1.0 }], 5, 1200);
+    let json = serde_json::to_value(&cards).unwrap();
+    assert_eq!(json["results"][0]["seen"], 3);
     db.finish().await;
 }
 

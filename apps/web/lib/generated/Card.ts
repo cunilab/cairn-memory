@@ -22,4 +22,8 @@ label?: string | null,
  * Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
  * whatever else matched. The order of cards can still tell apart two that both show 1.0.
  */
-score: number, };
+score: number, 
+/**
+ * How many times this knowledge was saved. Omitted the first time.
+ */
+seen?: number, };

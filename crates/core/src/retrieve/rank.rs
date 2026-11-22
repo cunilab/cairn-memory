@@ -7,8 +7,8 @@ pub const ADJUST_CAP: f32 = 0.30;
 const FRESH_SECONDS: i64 = 30 * 86_400;
 
 /// The score multiplier is `1 + adjust`: scope closeness, status, freshness, explicit feedback,
-/// kind and a lower rank for a candidate, capped at ±30 %. Reading a memory never raises its
-/// score (A17).
+/// kind, a lower rank for a candidate, and repeated proof, capped at ±30 %. Reading a memory
+/// never raises its score (A17).
 pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     let scope = match m.scope {
         _ if ctx.project_id.is_some()
@@ -46,7 +46,9 @@ pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     } else {
         0.0
     };
-    (scope + status + fresh + used + kind + candidate).clamp(-ADJUST_CAP, ADJUST_CAP)
+    // 0.02 for each save after the first, and no more than +0.06.
+    let proof = 0.02 * (m.proof_count.min(4) as f32 - 1.0);
+    (scope + status + fresh + used + kind + candidate + proof).clamp(-ADJUST_CAP, ADJUST_CAP)
 }
 
 /// The status after the votes changed. `wrong >= 2`, or `wrong >= 1` with the owner among them,
@@ -168,5 +170,34 @@ mod tests {
         assert_eq!(adjust(&m, &plain, 0), -ADJUST_CAP);
         m.rank = Rank::Candidate;
         assert_eq!(adjust(&m, &plain, 0), -ADJUST_CAP);
+    }
+
+    #[test]
+    fn proof_count_boost_capped() {
+        let mut plain_memory = memory("a", Kind::Fact, Scope::Personal);
+        plain_memory.updated_at = -100 * 86_400;
+        let plain = WorkContext::default();
+        assert_eq!(adjust(&plain_memory, &plain, 0), 0.0);
+        plain_memory.proof_count = 2;
+        assert_eq!(adjust(&plain_memory, &plain, 0), 0.02);
+        plain_memory.proof_count = 3;
+        assert_eq!(adjust(&plain_memory, &plain, 0), 0.04);
+        plain_memory.proof_count = 4;
+        assert_eq!(adjust(&plain_memory, &plain, 0), 0.06);
+        plain_memory.proof_count = 9;
+        assert_eq!(adjust(&plain_memory, &plain, 0), 0.06);
+
+        let mut best = memory("b", Kind::Rule, Scope::Project);
+        best.context.branch = Some("main".into());
+        best.usage.helpful = 9;
+        best.proof_count = 9;
+        assert_eq!(adjust(&best, &ctx(), 0), ADJUST_CAP);
+
+        let mut low = memory("c", Kind::Handoff, Scope::Global);
+        low.status = Status::Stale;
+        low.usage.wrong = 9;
+        low.updated_at = -100 * 86_400;
+        low.proof_count = 9;
+        assert_eq!(adjust(&low, &ctx(), 0), -ADJUST_CAP);
     }
 }

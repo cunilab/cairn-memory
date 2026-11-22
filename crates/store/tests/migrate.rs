@@ -22,6 +22,7 @@ async fn migrate_twice_is_a_no_op() {
             "0005_console",
             "0006_agent_instructions",
             "0007_memory_rank",
+            "0008_proof_count",
             "0012_always_active"
         ]
     );
@@ -204,6 +205,141 @@ async fn rank_backfill_keeps_rows_normal() {
             .await
             .unwrap();
     assert_eq!(again, after);
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+}
+
+/// A 0.1.8 database (0001–0006) already has rows and supersede links. `proof_count` keeps every
+/// row, counts only automatic supersedes (`source_id` is the newer side), and a second run
+/// changes nothing. A handoff chain (`origin = 'agent'`) adds no proof.
+#[tokio::test]
+async fn proof_backfill_idempotent() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_proof_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, file) in [
+        ("0001_foundation", "0001_foundation.sql"),
+        ("0002_capture", "0002_capture.sql"),
+        ("0003_retrieval", "0003_retrieval.sql"),
+        ("0004_processing", "0004_processing.sql"),
+        ("0005_console", "0005_console.sql"),
+        ("0006_agent_instructions", "0006_agent_instructions.sql"),
+    ] {
+        let sql = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../migrations")
+                .join(file),
+        )
+        .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_old', 'old@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash, identity_hash, origin)
+         VALUES
+           ('mem_new', 'per_old', 'personal', 'gotcha', 'Use node 20', 'Use node 20 for the desktop app today.', 'e1', 'i1', 'agent'),
+           ('mem_old', 'per_old', 'personal', 'gotcha', 'Use node 20 once', 'An older note of the same gotcha.', 'e2', 'i2', 'agent'),
+           ('mem_old2', 'per_old', 'personal', 'gotcha', 'Use node 20 twice', 'Another older note of the same gotcha.', 'e3', 'i3', 'agent'),
+           ('mem_hand_new', 'per_old', 'personal', 'handoff', 'Session today', 'The latest handoff on this checkout.', 'e4', 'i4', 'system'),
+           ('mem_hand_old', 'per_old', 'personal', 'handoff', 'Session yesterday', 'The previous handoff on this checkout.', 'e5', 'i5', 'system'),
+           ('mem_plain', 'per_old', 'personal', 'fact', 'Plain fact kept', 'A fact with no supersede link at all.', 'e6', 'i6', 'agent')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO links (source_id, target_id, relation, origin) VALUES
+           ('mem_new', 'mem_old', 'supersedes', 'auto'),
+           ('mem_new', 'mem_old2', 'supersedes', 'auto'),
+           ('mem_hand_new', 'mem_hand_old', 'supersedes', 'agent')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    store.migrate().await.expect("apply proof migration");
+    let after: Vec<(String, i32)> =
+        sqlx::query_as("SELECT memory_id, proof_count FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let ids: Vec<String> = after.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(ids, before, "no row lost");
+    assert!(after.iter().all(|(_, proof)| *proof >= 1));
+    assert_eq!(
+        after,
+        [
+            ("mem_hand_new".into(), 1),
+            ("mem_hand_old".into(), 1),
+            ("mem_new".into(), 3),
+            ("mem_old".into(), 1),
+            ("mem_old2".into(), 1),
+            ("mem_plain".into(), 1),
+        ]
+    );
+    store.migrate().await.expect("idempotent");
+    let again: Vec<(String, i32)> =
+        sqlx::query_as("SELECT memory_id, proof_count FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(again, after);
+    sqlx::query("UPDATE memories SET proof_count = 9 WHERE memory_id = 'mem_new'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE memories m SET proof_count = 1 + s.n
+           FROM (SELECT source_id, count(*) n FROM links
+                  WHERE relation = 'supersedes' AND origin = 'auto' GROUP BY 1) s
+          WHERE m.memory_id = s.source_id AND m.proof_count < 1 + s.n",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let kept: i32 =
+        sqlx::query_scalar("SELECT proof_count FROM memories WHERE memory_id = 'mem_new'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(kept, 9, "backfill never lowers");
     sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .execute(store.pool())
         .await

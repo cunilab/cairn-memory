@@ -16,6 +16,10 @@ export type Memory = { id: string, owner: string, project_id: string | null, sco
  */
 fields: Fields, evidence?: Array<string>, evidence_count: number, context: Context, entities?: Array<Entity>, status: Status, rank: Rank, 
 /**
+ * Times this knowledge was saved, including the first. At least 1.
+ */
+proof_count: number, 
+/**
  * Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
  */
 stale_cause?: string | null, 
