@@ -96,12 +96,9 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/memories/{id}", get(memory::get))
         .route("/cairn-memory/feedback", post(memory::feedback))
         .route("/cairn-memory/forget", post(memory::forget))
-        .route("/cairn-memory/delete", post(memory::delete))
         // retrieve
         .route("/cairn-memory/search", post(retrieve::search))
         .route("/cairn-memory/session/brief", post(retrieve::brief))
         .route("/cairn-memory/session/topic", post(retrieve::topic))
         .route("/cairn-memory/graph", get(retrieve::graph))
-        .route("/cairn-memory/export", post(retrieve::export))
-        .route("/cairn-memory/diagnose", get(retrieve::diagnose))
 }

@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { cairn } from "@/lib/cairn";
+import { ApiError, cairn } from "@/lib/cairn";
+import type { Health } from "@/lib/generated/Health";
 import { signInFailureMessage } from "@/lib/session";
 
 export function LoginForm({
@@ -27,10 +28,10 @@ export function LoginForm({
   // An empty server has no account to sign in to: offer first-account setup instead.
   useEffect(() => {
     let cancelled = false;
-    cairn<{ bootstrap_required?: boolean }>("health")
+    cairn<Health>("health")
       .then((health) => {
         if (!cancelled) {
-          setBootstrap(health.bootstrap_required === true);
+          setBootstrap(health.bootstrap_required);
         }
       })
       .catch(() => {})
@@ -63,7 +64,7 @@ export function LoginForm({
           : bootstrap
             ? "Account setup failed"
             : "Sign-in failed";
-      setError(signInFailureMessage(message));
+      setError(signInFailureMessage(cause instanceof ApiError ? cause.code : null, message));
     } finally {
       setPending(false);
     }

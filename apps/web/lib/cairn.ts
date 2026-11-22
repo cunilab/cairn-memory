@@ -1,12 +1,17 @@
-import { isSessionRequired, SessionRequiredError } from "@/lib/session";
+import type { ErrorBody } from "@/lib/generated/ErrorBody";
+import type { ErrorCode } from "@/lib/generated/ErrorCode";
+import { isSessionRequired } from "@/lib/proxy";
+import { SessionRequiredError } from "@/lib/session";
 
-/** A failed API call. `status` lets a caller tell "not found" from "server down". */
+/** A failed API call. `status` tells "not found" from "server down"; `code` is the server's stable error code. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  readonly code: ErrorCode | null;
+  constructor(message: string, status: number, code: ErrorCode | null = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -31,14 +36,12 @@ async function request(path: string, init?: RequestInit): Promise<{ body: unknow
   }
 
   if (!response.ok) {
-    const message =
-      body && typeof body === "object" && "error" in body
-        ? String((body as { error: unknown }).error)
-        : text || response.statusText;
-    if (isSessionRequired(response.status, message)) {
+    const failure = body && typeof body === "object" && "error" in body ? (body as ErrorBody) : null;
+    const message = failure ? String(failure.error) : text || response.statusText;
+    if (isSessionRequired(response.status, failure?.code)) {
       throw new SessionRequiredError(message);
     }
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, failure?.code ?? null);
   }
 
   return { body, headers: response.headers };

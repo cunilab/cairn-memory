@@ -8,7 +8,7 @@ npm install
 CAIRN_API_URL=http://127.0.0.1:3111 npm run dev
 ```
 
-`npm run typecheck` runs `tsc --noEmit`.
+`npm run typecheck` runs `tsc --noEmit`. Wire types live in `lib/generated` (ts-rs; regenerate with `cargo test --workspace --features ts export_bindings`). The proxy forwards only the prefixes in `lib/proxy.ts`.
 
 ## Layout
 

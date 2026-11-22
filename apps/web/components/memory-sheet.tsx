@@ -27,7 +27,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { useAccount } from "@/hooks/use-account";
 import { useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { forgetMemoryImpact } from "@/lib/action-copy";
@@ -103,8 +102,8 @@ function Lineage({
   open: (id: string) => void;
 }) {
   const groups = new Map<string, LinkView[]>();
-  for (const link of memory.links ?? []) {
-    const incoming = link.direction === "in" || (!link.direction && link.target === memory.id);
+  for (const link of memory.links) {
+    const incoming = link.direction === "in";
     const name = (incoming ? IN_LABEL : OUT_LABEL)[link.relation] ?? words(link.relation);
     groups.set(name, [...(groups.get(name) ?? []), link]);
   }
@@ -118,7 +117,7 @@ function Lineage({
           <div key={name}>
             <dt className="text-xs font-medium text-muted-foreground">{name}</dt>
             {links.map((link) => {
-              const otherId = link.other?.id ?? (link.source === memory.id ? link.target : link.source);
+              const otherId = link.other?.id ?? (link.direction === "out" ? link.target : link.source);
               return (
                 <dd key={`${link.source}:${link.relation}:${link.target}`} className="flex items-center gap-2 py-0.5">
                   {link.other ? <KindBadge kind={link.other.kind} /> : null}
@@ -176,7 +175,7 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
       {memory.status === "stale" ? (
         <Section title="Why stale">
           <p className="text-sm [overflow-wrap:anywhere]">
-            {memory.missing_entities && memory.missing_entities.length > 0
+            {memory.missing_entities.length > 0
               ? `${memory.missing_entities.join(", ")} no longer exists${memory.context.branch ? ` on ${memory.context.branch}` : ""}.`
               : memory.stale_cause
                 ? memory.stale_cause
@@ -211,8 +210,7 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
       ) : null}
       <Section title="Details">
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          {memory.usage ? (
-            <>
+          <>
               <dt className="text-muted-foreground">Usage</dt>
               <dd className="tabular-nums">
                 Fetched {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong}
@@ -224,7 +222,6 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
                 ) : null}
               </dd>
             </>
-          ) : null}
           <dt className="text-muted-foreground">Created</dt>
           <dd>
             <Time value={memory.created_at} />
@@ -257,7 +254,6 @@ type Load = { id: string; memory: MemoryView | null; error: string | null; missi
  */
 export function MemorySheet() {
   const router = useRouter();
-  const account = useAccount();
   const [params, set] = useQueryParams();
   const id = params.get("memory");
   const [loaded, setLoaded] = useState<Load | null>(null);
@@ -299,13 +295,13 @@ export function MemorySheet() {
   // A result for another id is stale: show loading until the current one lands.
   const current = loaded && loaded.id === id ? loaded : null;
   const memory = current?.memory ?? null;
-  const canForget = memory !== null && (memory.owner_is_me ?? memory.owner === account?.person_id);
+  const canForget = memory?.owner_is_me === true;
 
   async function forget() {
     if (!memory) return;
     setPending(true);
     try {
-      await cairn("delete", { method: "POST", body: JSON.stringify({ id: memory.id }) });
+      await cairn("forget", { method: "POST", body: JSON.stringify({ id: memory.id }) });
       toast.success("Memory forgotten");
       announceMemoriesChanged();
       setConfirming(false);

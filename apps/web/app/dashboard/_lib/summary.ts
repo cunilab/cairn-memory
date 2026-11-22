@@ -1,12 +1,5 @@
-// Pure helpers for the dashboard copy. No imports, so node:test runs them.
-
-/** Server-side usage report (step 7a). */
-export interface UsageDays {
-  days: { day: string; tokens: number; lookups: number; hits: number }[];
-  total_tokens: number;
-  lookups: number;
-  hit_ratio: number;
-}
+// Pure helpers for the dashboard copy. Only type imports, so node:test runs them.
+import type { UsageDays } from "@/lib/generated/UsageDays";
 
 /** One generated sentence of value: numbers only, estimates marked with "~". */
 export function valueSentence(usage: UsageDays | undefined, days = 30): string {

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   ActivityIcon,
   BrainIcon,
+  DownloadIcon,
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -28,7 +29,9 @@ import {
 } from "@/components/ui/command";
 import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
+import { toast } from "sonner";
 import { cairn } from "@/lib/cairn";
+import { downloadExport } from "@/lib/export";
 import { THEMES } from "@/lib/theme";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 
@@ -104,8 +107,20 @@ export function CommandPalette({
             </CommandItem>
           ))}
         </CommandGroup>
-        {/* TODO(7a): add "Export memories" once GET /memories/export exists. */}
         <CommandGroup heading="Actions">
+          <CommandItem
+            value="export memories download"
+            onSelect={() => {
+              onOpenChange(false);
+              downloadExport().then(
+                () => toast.success("Export ready"),
+                (cause: unknown) => toast.error(cause instanceof Error ? cause.message : "Could not export."),
+              );
+            }}
+          >
+            <DownloadIcon />
+            Export memories
+          </CommandItem>
           <CommandItem value="create device token setup agent" onSelect={() => go("/settings?tab=devices&create=1")}>
             <KeyRoundIcon />
             Create device token

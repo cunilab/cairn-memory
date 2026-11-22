@@ -66,11 +66,8 @@ api_port="$(printf '%s\n' "$ports" | sed -n '1p')"
 web_port="$(printf '%s\n' "$ports" | sed -n '2p')"
 
 node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --input-type=module <<'JS'
-import {
-  isNoBodyStatus,
-  isSessionRequired,
-  signInFailureMessage,
-} from "./apps/web/lib/session.ts";
+import { isNoBodyStatus, isSessionRequired, upstreamPath } from "./apps/web/lib/proxy.ts";
+import { signInFailureMessage } from "./apps/web/lib/session.ts";
 
 for (const status of [101, 204, 205, 304]) {
   if (!isNoBodyStatus(status)) {
@@ -82,30 +79,22 @@ for (const status of [200, 400, 401, 500]) {
     throw new Error(`status ${status} can carry a body`);
   }
 }
-for (const message of [
-  "Bearer token is required",
-  "authentication failed",
-  "account authentication failed",
-  "account session is expired or revoked",
-]) {
-  if (!isSessionRequired(401, message)) {
-    throw new Error(`expected sign-in redirect for ${message}`);
+if (!isSessionRequired(401, "session_required")) {
+  throw new Error("expected sign-in redirect for session_required");
+}
+for (const [status, code] of [[401, "invalid_credentials"], [401, "unauthorized"], [403, "forbidden"], [500, "session_required"]]) {
+  if (isSessionRequired(status, code)) {
+    throw new Error(`${status} ${code} must not redirect to sign-in`);
   }
 }
-if (isSessionRequired(401, "invalid account credentials")) {
-  throw new Error("a failed sign-in must stay on the form");
-}
-if (isSessionRequired(401, "does not own this project")) {
-  throw new Error("an authorization failure must not redirect to sign-in");
-}
-if (isSessionRequired(500, "Bearer token is required")) {
-  throw new Error("a server failure must not redirect to sign-in");
-}
-if (signInFailureMessage("invalid account credentials") !== "Email or password is incorrect.") {
+if (signInFailureMessage("invalid_credentials", "invalid account credentials") !== "Email or password is incorrect.") {
   throw new Error("credential failure copy");
 }
-if (signInFailureMessage("authentication rate limit exceeded") !== "authentication rate limit exceeded") {
+if (signInFailureMessage("validation", "email is required") !== "email is required") {
   throw new Error("unrelated auth errors must pass through");
+}
+if (upstreamPath(["memories", ".."]) !== null || upstreamPath(["delete"]) !== null) {
+  throw new Error("the proxy allowlist is open");
 }
 JS
 
@@ -327,8 +316,10 @@ if "set-cookie:" not in headers or "cairn_token=" not in headers or "httponly" n
     raise SystemExit("login did not set an httpOnly cairn_token cookie")
 if '"token"' in body:
     raise SystemExit("login response still contains a token field")
-if "max-age=2592000" not in headers:
-    raise SystemExit("login cookie is not a 30 day session")
+import re
+age = re.search(r"max-age=(\d+)", headers)
+if age is None or not 2591000 <= int(age.group(1)) <= 2592000:
+    raise SystemExit("login cookie does not live until the server session ends")
 PY
 
 me_body="$workdir/me.body"
@@ -494,6 +485,7 @@ assert created["token"] and created["device"]["name"] == "console device"
 assert created["token"] not in raw, "list leaked a token"
 assert "console device" in {item["name"] for item in listed}
 assert "token" not in json.dumps(listed)
+assert all("health" in item for item in listed), "devices carry their health"
 device_id = created["device"]["device_id"]
 open(os.environ["DEVICE_CREATED"] + ".id", "w").write(device_id)
 PY
@@ -530,9 +522,17 @@ fi
 
 # Owner controls through the web session: saving a project memory, and the read-only branch list
 # derived from the branch each memory was saved on.
+# `remember` is an agent route the console proxy does not forward, so it goes to the API with the
+# owner's session token; everything else goes through the console proxy.
+owner_token="$(awk '$6 == "cairn_token" { print $7 }' "$owner_jar")"
 owner_ok() {
-  owner_code="$(curl -sS -o "$workdir/owner-post.body" -b "$owner_jar" -w '%{http_code}' \
-    -H 'content-type: application/json' -d "$3" "${web}/api/cairn/$2")"
+  if [ "$2" = remember ]; then
+    owner_code="$(curl -sS -o "$workdir/owner-post.body" -w '%{http_code}' -H "authorization: Bearer ${owner_token}" \
+      -H 'content-type: application/json' -d "$3" "${api}/cairn-memory/remember")"
+  else
+    owner_code="$(curl -sS -o "$workdir/owner-post.body" -b "$owner_jar" -w '%{http_code}' \
+      -H 'content-type: application/json' -d "$3" "${web}/api/cairn/$2")"
+  fi
   if [ "$owner_code" != "200" ]; then
     printf '%s\n' "$1 failed: ${owner_code}" >&2
     cat "$workdir/owner-post.body" >&2
@@ -553,13 +553,27 @@ for removed in "POST projects/verify" "POST projects/${project_id}/branches" "PO
   removed_code="$(curl -sS -o /dev/null -w '%{http_code}' -X "${removed%% *}" -b "$owner_jar" \
     -H 'content-type: application/json' -d '{}' "${web}/api/cairn/${removed#* }")"
   case "$removed_code" in
-    404 | 405) ;;
+    400 | 404 | 405) ;;
     *)
       printf '%s\n' "removed route ${removed} answered ${removed_code}" >&2
       exit 1
       ;;
   esac
 done
+# The proxy forwards only allowlisted first segments; the retired routes never reach the server.
+for refused in "POST delete" "POST export" "GET diagnose" "GET livez"; do
+  refused_code="$(curl -sS -o "$workdir/refused.body" -w '%{http_code}' -X "${refused%% *}" -b "$owner_jar" \
+    -H 'content-type: application/json' -d '{}' "${web}/api/cairn/${refused#* }")"
+  if [ "$refused_code" != "400" ] || ! grep -q path_not_allowed "$workdir/refused.body"; then
+    printf '%s\n' "route ${refused} was not refused by the proxy: ${refused_code}" >&2
+    exit 1
+  fi
+done
+dotdot_code="$(curl -sS -o /dev/null --path-as-is -b "$owner_jar" -w '%{http_code}' "${web}/api/cairn/memories/%2e%2e/%2e%2e/livez")"
+if [ "$dotdot_code" = "200" ]; then
+  printf '%s\n' "a dot segment escaped the allowlist" >&2
+  exit 1
+fi
 for page in dashboard memories activity graph projects settings "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
@@ -573,7 +587,7 @@ if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
   exit 1
 fi
 
-for report in diagnose "projects/${project_id}/conflicts" graph; do
+for report in "stats?tz=420&days=30" "projects/${project_id}/conflicts" graph "auth/audit?actor=person&limit=5" "auth/audit?actor=system&type=memory_merged,links_added"; do
   report_code="$(curl -sS -o "$workdir/report.body" -b "$owner_jar" -w '%{http_code}' \
     "${web}/api/cairn/${report}")"
   if [ "$report_code" != "200" ]; then
@@ -582,6 +596,31 @@ for report in diagnose "projects/${project_id}/conflicts" graph; do
     exit 1
   fi
 done
+curl -fsS -o "$workdir/stats.body" -b "$owner_jar" "${web}/api/cairn/stats?tz=420&days=7"
+curl -fsS -o "$workdir/export.body" -b "$owner_jar" "${web}/api/cairn/memories/export"
+curl -fsS -o "$workdir/dry.body" -b "$owner_jar" -H 'content-type: application/json' \
+  --data-binary "@$workdir/export.body" "${web}/api/cairn/memories/import?dry_run=1"
+STATS="$workdir/stats.body" EXPORT="$workdir/export.body" DRY="$workdir/dry.body" python3 - <<'PY'
+import json, os
+stats = json.load(open(os.environ["STATS"], encoding="utf-8"))
+for key in ("usage_days", "bench", "memory_health", "devices_attention", "first_run", "capture", "jobs"):
+    assert key in stats, key
+assert len(stats["usage_days"]["days"]) == 7, stats["usage_days"]
+export = json.load(open(os.environ["EXPORT"], encoding="utf-8"))
+assert export["version"] == 1 and isinstance(export["memories"], list), export
+dry = json.load(open(os.environ["DRY"], encoding="utf-8"))
+assert dry["new"] == 0 and dry["invalid"] == [], dry  # everything exported already exists
+assert dry["duplicate"] == len(export["memories"]), dry
+PY
+# Forget through the web: the same erase the memory sheet runs.
+owner_ok "save a memory to forget" remember '{"kind":"note","scope":"personal","title":"Forget me from the console","summary":"A throwaway note for the forget smoke.","reason":"Web smoke verification"}'
+forget_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$workdir/owner-post.body")"
+owner_ok "forget a memory" forget "{\"id\":\"${forget_id}\"}"
+forgotten_code="$(curl -sS -o /dev/null -b "$owner_jar" -w '%{http_code}' "${web}/api/cairn/memories/${forget_id}")"
+if [ "$forgotten_code" != "404" ]; then
+  printf '%s\n' "a forgotten memory still answers: ${forgotten_code}" >&2
+  exit 1
+fi
 bad_headers="$workdir/bad.headers"
 bad_body="$workdir/bad.body"
 bad_code="$(curl -sS -o "$bad_body" -D "$bad_headers" -w '%{http_code}' \
@@ -596,8 +635,8 @@ BAD_HEADERS="$bad_headers" BAD_BODY="$bad_body" python3 - <<'PY'
 import json, os
 body = json.load(open(os.environ["BAD_BODY"], encoding="utf-8"))
 headers = open(os.environ["BAD_HEADERS"], encoding="utf-8").read().lower()
-if body.get("error") != "invalid account credentials":
-    raise SystemExit("invalid login did not keep the credential error")
+if body.get("error") != "invalid account credentials" or body.get("code") != "invalid_credentials":
+    raise SystemExit("invalid login did not keep the credential error and code")
 if "cairn_token=" in headers:
     raise SystemExit("invalid login set a session cookie")
 PY
@@ -638,7 +677,7 @@ fi
 REVOKED_BODY="$revoked_body" python3 - <<'PY'
 import json, os
 body = json.load(open(os.environ["REVOKED_BODY"], encoding="utf-8"))
-if body.get("error") != "account session is expired or revoked":
+if body.get("error") != "account session is expired or revoked" or body.get("code") != "session_required":
     raise SystemExit("revoked session error was rewritten")
 PY
 
@@ -652,7 +691,7 @@ fi
 ANON_BODY="$anon_body" python3 - <<'PY'
 import json, os
 body = json.load(open(os.environ["ANON_BODY"], encoding="utf-8"))
-if body.get("error") != "Bearer token is required":
+if body.get("error") != "Bearer token is required" or body.get("code") != "session_required":
     raise SystemExit("missing session error was rewritten")
 PY
 

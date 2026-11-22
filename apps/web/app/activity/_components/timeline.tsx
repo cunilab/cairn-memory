@@ -8,14 +8,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
 import { cn } from "@/lib/utils";
 import type { AuditEvent } from "@/lib/generated/AuditEvent";
-import {
-  dayKey,
-  dayLabel,
-  describeEvent,
-  isSystemAction,
-  TIMELINE_FILTERS,
-  touchedMemories,
-} from "../_lib/events";
+import { dayKey, dayLabel, describeEvent, TIMELINE_FILTERS, touchedMemories } from "../_lib/events";
 import { useAudit } from "../_lib/use-audit";
 
 function Row({ event }: { event: AuditEvent }) {
@@ -68,22 +61,23 @@ function Row({ event }: { event: AuditEvent }) {
 }
 
 export function Timeline() {
-  const { events, error, retry } = useAudit();
   const [params, set] = useQueryParams();
   const [now] = useState(() => Math.floor(Date.now() / 1000));
   const filter = TIMELINE_FILTERS.find((item) => item.value === params.get("type")) ?? TIMELINE_FILTERS[0];
+  const { events, error, retry, hasMore, loadingMore, loadOlder } = useAudit(
+    "system",
+    filter.value === "all" ? [] : filter.actions,
+  );
 
   const days = useMemo(() => {
-    const kept = (events ?? []).filter(
-      (event) => isSystemAction(event.action) && (filter.actions as readonly string[]).includes(event.action),
-    );
+    const kept = events ?? [];
     const groups = new Map<string, AuditEvent[]>();
     for (const event of kept) {
       const key = dayKey(event.created_at);
       groups.set(key, [...(groups.get(key) ?? []), event]);
     }
     return [...groups];
-  }, [events, filter]);
+  }, [events]);
 
   if (error) return <ErrorAlert message={error} onRetry={retry} />;
   if (events === null) return <LoadingBlock label="Loading timeline…" rows={6} />;
@@ -130,7 +124,13 @@ export function Timeline() {
           </section>
         ))
       )}
-      {/* TODO(7a): "Load older" pages with `before` once the audit endpoint supports it. */}
+      {hasMore ? (
+        <div className="flex justify-center">
+          <Button type="button" variant="outline" disabled={loadingMore} onClick={() => void loadOlder()}>
+            {loadingMore ? "Loading…" : "Load older"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

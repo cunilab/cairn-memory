@@ -6,7 +6,6 @@ pub mod capture;
 pub mod consolidate;
 pub mod device;
 pub mod embed;
-pub mod export;
 pub mod jobs;
 pub mod link;
 pub mod memory;

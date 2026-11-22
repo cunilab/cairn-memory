@@ -78,7 +78,7 @@ export function GraphView() {
     };
   }, [key, query, router]);
 
-  // TODO(7a): `status` joins the shared filters once graph nodes carry it; `kind` is applied here until then.
+  // Graph nodes carry no status, so `status` is not a graph filter; `kind` is applied here.
   const graph = useMemo<Graph | null>(() => {
     const full = loaded?.graph;
     if (!full || !kind) return full ?? null;

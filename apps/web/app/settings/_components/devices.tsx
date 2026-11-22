@@ -64,9 +64,9 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
-import type { Device } from "@/lib/generated/Device";
 import type { DeviceView } from "@/lib/generated/DeviceView";
 import type { DeviceRegistration } from "@/lib/generated/DeviceRegistration";
+import type { Health } from "@/lib/generated/Health";
 
 const AGENTS = [
   { value: "claude", label: "Claude" },
@@ -84,9 +84,6 @@ const HEALTH = {
 
 const POLL_MS = 3000;
 const POLL_LIMIT_MS = 10 * 60 * 1000;
-
-/** Registration and last use share a stamp until the device is first used. */
-const neverUsed = (device: Device) => device.last_seen_at === device.created_at;
 
 type DeviceAction = { device: DeviceView; kind: "revoke" | "rotate" };
 type Issued = { registration: DeviceRegistration; baseline: number; rotated: boolean };
@@ -106,7 +103,7 @@ function TokenStep({
   serverUrl: string | null;
   onAgent: (agent: Agent) => void;
   onDone: () => void;
-  connected: boolean;
+  connected: string | null;
   waitExpired: boolean;
 }) {
   const [shown, setShown] = useState(false);
@@ -164,7 +161,6 @@ function TokenStep({
             <code className="min-w-0 flex-1 rounded-md border bg-muted p-3 font-mono text-sm break-all">{command}</code>
             <CopyButton text={command} label="Copy" />
           </div>
-          {/* TODO(7a): `GET /health` returns `public_url`; until then the person fills in the address. */}
           {serverUrl === null ? (
             <p className="text-muted-foreground">Replace <code>&lt;server-url&gt;</code> with this server&apos;s address.</p>
           ) : null}
@@ -173,10 +169,10 @@ function TokenStep({
         <li className="flex flex-col gap-1">
           <span className="font-medium">3. Start a new {agent} session</span>
           <p aria-live="polite" className="flex items-center gap-2 text-muted-foreground">
-            {connected ? (
+            {connected !== null ? (
               <>
                 <CheckIcon className="size-4 text-success" aria-hidden />
-                Connected. This device checked in.
+                Connected{connected ? `: ${connected}` : ""}. This device checked in.
               </>
             ) : waitExpired ? (
               "Still waiting. Run cairn doctor on that machine to see what is wrong."
@@ -206,15 +202,14 @@ export function Devices() {
   const [agent, setAgent] = useState<Agent>("claude");
   const [createOpen, setCreateOpen] = useState(false);
   const [issued, setIssued] = useState<Issued | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState<string | null>(null);
   const [waitExpired, setWaitExpired] = useState(false);
   const [action, setAction] = useState<DeviceAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  // TODO(7a): from `GET /health` (`public_url`).
-  const serverUrl: string | null = null;
+  const [serverUrl, setServerUrl] = useState<string | null>(null);
   const acting = useRef(false);
 
   useResetOnHide(() => {
@@ -223,7 +218,7 @@ export function Devices() {
     setName("");
     setCreateOpen(false);
     setIssued(null);
-    setConnected(false);
+    setConnected(null);
     setWaitExpired(false);
     setAction(null);
     setError(null);
@@ -238,6 +233,17 @@ export function Devices() {
   }, [router]);
 
   const load = useCallback(() => cairn<DeviceView[]>("devices"), []);
+
+  // The setup command needs the address `cairn setup` is given.
+  useEffect(() => {
+    let cancelled = false;
+    cairn<Health>("health")
+      .then((health) => !cancelled && setServerUrl(health.public_url))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -289,8 +295,8 @@ export function Devices() {
         .then((listed) => {
           setDevices(listed);
           const row = listed.find((d) => d.device_id === issuedId);
-          if (row && row.last_seen_at > baseline) {
-            setConnected(true);
+          if (row && (row.last_hook_at !== null || row.last_seen_at > baseline)) {
+            setConnected([row.agent, row.client_version].filter(Boolean).join(" "));
             clearInterval(timer);
           }
         })
@@ -300,7 +306,7 @@ export function Devices() {
   }, [issuedId, baseline, load]);
 
   function issue(registration: DeviceRegistration, rotated: boolean) {
-    setConnected(false);
+    setConnected(null);
     setWaitExpired(false);
     setIssued({ registration, baseline: registration.device.last_seen_at, rotated });
   }
@@ -388,9 +394,6 @@ export function Devices() {
     }
   }
 
-  const hasAgent = devices?.some((d) => d.agent) ?? false;
-  const hasVersion = devices?.some((d) => d.client_version) ?? false;
-
   const columns = useMemo<ColumnDef<DeviceView>[]>(() => {
     const cols: ColumnDef<DeviceView>[] = [
       {
@@ -399,34 +402,30 @@ export function Devices() {
         cell: ({ row }) => <span className="font-medium break-words">{row.original.name}</span>,
       },
     ];
-    if (hasAgent) {
-      cols.push({
+    cols.push(
+      {
         id: "agent",
         header: "Agent",
         accessorFn: (d) => d.agent ?? "",
         cell: ({ row }) => row.original.agent ?? <span className="text-muted-foreground">—</span>,
         meta: { className: "hidden md:table-cell" },
-      });
-    }
-    if (hasVersion) {
-      cols.push({
+      },
+      {
         id: "client",
         header: "Client",
         accessorFn: (d) => d.client_version ?? "",
         cell: ({ row }) => row.original.client_version ?? <span className="text-muted-foreground">—</span>,
         meta: { className: "hidden md:table-cell" },
-      });
-    }
-    cols.push(
+      },
       {
-        accessorKey: "last_seen_at",
+        id: "last_hook_at",
         header: "Last check-in",
-        sortingFn: (a, b) => Number(a.original.last_seen_at) - Number(b.original.last_seen_at),
+        accessorFn: (d) => d.last_hook_at ?? 0,
         cell: ({ row }) =>
-          neverUsed(row.original) ? (
+          row.original.last_hook_at === null ? (
             <span className="text-xs text-muted-foreground">Never</span>
           ) : (
-            <Time value={row.original.last_seen_at} className="text-xs whitespace-nowrap text-muted-foreground" />
+            <Time value={row.original.last_hook_at} className="text-xs whitespace-nowrap text-muted-foreground" />
           ),
         meta: { className: "hidden sm:table-cell" },
       },
@@ -445,6 +444,12 @@ export function Devices() {
                 {entry.text}
               </span>
               {d.health_reason ? <span className="text-xs text-muted-foreground">{d.health_reason}</span> : null}
+              {d.fix_command && d.health !== "working" ? (
+                <span className="inline-flex flex-wrap items-center gap-1">
+                  <code className="font-mono text-xs break-all">{d.fix_command}</code>
+                  <CopyButton text={d.fix_command} label="Copy fix command" />
+                </span>
+              ) : null}
             </span>
           );
         },
@@ -498,7 +503,7 @@ export function Devices() {
       },
     );
     return cols;
-  }, [hasAgent, hasVersion, pending]);
+  }, [pending]);
 
   const createButton = (
     <Button
@@ -530,7 +535,7 @@ export function Devices() {
           columns={columns}
           getRowId={(device) => device.device_id}
           filterPlaceholder="Filter devices"
-          initialSort={[{ id: "last_seen_at", desc: true }]}
+          initialSort={[{ id: "last_hook_at", desc: true }]}
           empty={
             <Empty className="border-0 p-6">
               <EmptyHeader>

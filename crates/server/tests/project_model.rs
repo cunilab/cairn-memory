@@ -192,12 +192,12 @@ async fn shared_project_model() {
     let (status, _) = app
         .send(
             "POST",
-            "delete",
+            "forget",
             json!({"id": rule_id}),
             Some(&author_device),
         )
         .await;
-    assert_eq!(status, 204);
+    assert_eq!(status, 200);
     let seen = app
         .get(&format!("projects/{id}/memories"), &stranger_device)
         .await;

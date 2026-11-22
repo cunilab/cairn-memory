@@ -1,32 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
-import { cairn } from "@/lib/cairn";
-import type { Device } from "@/lib/generated/Device";
+import { Button } from "@/components/ui/button";
 import type { AuditEvent } from "@/lib/generated/AuditEvent";
-import { auditLabel, isSystemAction } from "../_lib/events";
+import { auditLabel } from "../_lib/events";
 import { useAudit } from "../_lib/use-audit";
 
 export function AuditTable() {
-  const { events, error, retry } = useAudit();
-  const [devices, setDevices] = useState<Map<string, string>>(new Map());
+  const { events, error, retry, hasMore, loadingMore, loadOlder } = useAudit("person");
 
-  // TODO(7a): `AuditEvent.device_name` replaces this lookup.
-  useEffect(() => {
-    let cancelled = false;
-    cairn<Device[]>("devices")
-      .then((rows) => !cancelled && setDevices(new Map(rows.map((d) => [d.device_id, d.name]))))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const rows = useMemo(() => (events ?? []).filter((event) => !isSystemAction(event.action)), [events]);
   const columns = useMemo<ColumnDef<AuditEvent>[]>(
     () => [
       {
@@ -50,29 +36,35 @@ export function AuditTable() {
       {
         id: "device",
         header: "Device",
-        accessorFn: (e) => (e.device_id ? (devices.get(e.device_id) ?? e.device_id) : ""),
-        cell: ({ row }) => {
-          const id = row.original.device_id;
-          return id ? (devices.get(id) ?? id) : <span className="text-muted-foreground">—</span>;
-        },
+        accessorFn: (e) => e.device_name ?? "",
+        cell: ({ row }) => row.original.device_name ?? <span className="text-muted-foreground">—</span>,
         meta: { className: "hidden md:table-cell" },
       },
     ],
-    [devices],
+    [],
   );
 
   if (error) return <ErrorAlert message={error} onRetry={retry} />;
   if (events === null) return <LoadingBlock label="Loading audit log…" rows={6} />;
   return (
-    <DataTable
-      label="audit log"
-      data={rows}
-      columns={columns}
-      getRowId={(e) => e.audit_id}
-      filterPlaceholder="Filter audit log"
-      initialSort={[{ id: "created_at", desc: true }]}
-      pageSize={20}
-      empty={<p className="p-6 text-sm text-muted-foreground">No sign-ins or changes recorded yet.</p>}
-    />
+    <div className="flex flex-col gap-3">
+      <DataTable
+        label="audit log"
+        data={events}
+        columns={columns}
+        getRowId={(e) => e.audit_id}
+        filterPlaceholder="Filter audit log"
+        initialSort={[{ id: "created_at", desc: true }]}
+        pageSize={20}
+        empty={<p className="p-6 text-sm text-muted-foreground">No sign-ins or changes recorded yet.</p>}
+      />
+      {hasMore ? (
+        <div className="flex justify-center">
+          <Button type="button" variant="outline" disabled={loadingMore} onClick={() => void loadOlder()}>
+            {loadingMore ? "Loading…" : "Load older"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }

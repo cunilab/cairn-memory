@@ -56,7 +56,6 @@ export function ProjectList() {
     };
   }, [router, attempt]);
 
-  const counts = projects?.some((p) => p.memories !== undefined) ?? false;
   const columns = useMemo<ColumnDef<ProjectView>[]>(() => {
     const cols: ColumnDef<ProjectView>[] = [
       {
@@ -87,28 +86,26 @@ export function ProjectList() {
         meta: { className: "hidden sm:table-cell" },
       },
     ];
-    if (counts) {
-      for (const [id, header] of [["memories", "Memories"], ["stale", "Stale"], ["members", "Members"]] as const) {
-        cols.push({
-          id,
-          header,
-          accessorFn: (p) => p[id] ?? 0,
-          cell: ({ row }) => <span className="tabular-nums">{row.original[id] ?? "—"}</span>,
-          meta: { className: "hidden md:table-cell" },
-        });
-      }
+    for (const [id, header] of [["memories", "Memories"], ["stale", "Stale"], ["members", "Members"]] as const) {
+      cols.push({
+        id,
+        header,
+        accessorFn: (p) => p[id],
+        cell: ({ row }) => <span className="tabular-nums">{row.original[id].toLocaleString()}</span>,
+        meta: { className: "hidden md:table-cell" },
+      });
     }
     cols.push({
       id: "updated",
-      header: counts ? "Last activity" : "Updated",
-      accessorFn: (p) => Number(p.last_activity_at ?? p.updated_at),
+      header: "Last activity",
+      accessorFn: (p) => p.last_activity_at ?? p.updated_at,
       cell: ({ row }) => (
         <Time value={row.original.last_activity_at ?? row.original.updated_at} className="text-xs whitespace-nowrap text-muted-foreground" />
       ),
       meta: { className: "hidden md:table-cell" },
     });
     return cols;
-  }, [counts]);
+  }, []);
 
   if (error) {
     return <ErrorAlert message={error} onRetry={() => { setError(null); setProjects(null); setAttempt((n) => n + 1); }} />;

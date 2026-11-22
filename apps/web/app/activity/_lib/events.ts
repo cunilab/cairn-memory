@@ -7,6 +7,7 @@ export const SYSTEM_ACTIONS = [
   "memory_merged",
   "links_added",
   "memory_promoted",
+  "memory_withdrawn",
   "repo_state",
   "memories_expired",
   "session_distilled",
@@ -70,10 +71,11 @@ export function describeEvent(event: AuditEvent): string {
       return `Cairn linked ${plural(n, "memory", "memories")}${entity ? ` that ${n === 1 ? "cites" : "cite"} ${entity}` : ""}`;
     }
     case "memory_promoted": {
-      const kind = text(m.kind) || "memory";
-      const seen = count(m.projects);
-      return `Cairn shared a ${kind} with everyone${seen > 0 ? ` (seen in ${plural(seen, "project", "projects")})` : ""}`;
+      const from = Array.isArray(m.sources) ? m.sources.length : 0;
+      return `Cairn shared a memory with everyone${from > 0 ? `, promoted from ${plural(from, "matching memory", "matching memories")}` : ""}`;
     }
+    case "memory_withdrawn":
+      return "Cairn withdrew a shared memory: fewer than 2 live sources remain";
     case "repo_state": {
       const parts = [
         count(m.stale) > 0 ? `marked ${count(m.stale).toLocaleString()} stale` : "",
@@ -101,10 +103,9 @@ export function describeEvent(event: AuditEvent): string {
   }
 }
 
-/** Memories an event touched, for the inline expand. Empty until the server sends titles. */
+/** Memories an event touched, for the inline expand (titles the reader may still see). */
 export function touchedMemories(event: AuditEvent): { id: string; title: string }[] {
-  const titles = event.titles ?? {};
-  return Object.entries(titles as Record<string, string>).map(([id, title]) => ({ id, title }));
+  return Object.entries(event.titles ?? {}).flatMap(([id, title]) => (title ? [{ id, title }] : []));
 }
 
 /** Local calendar day of an epoch-seconds stamp, `YYYY-MM-DD`. */

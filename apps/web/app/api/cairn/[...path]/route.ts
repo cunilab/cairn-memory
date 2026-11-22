@@ -1,33 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isNoBodyStatus, isSessionRequired } from "@/lib/session";
+import type { ErrorBody } from "@/lib/generated/ErrorBody";
+import type { Session } from "@/lib/generated/Session";
+import { cookieMaxAge, isNoBodyStatus, isSessionRequired, upstreamPath } from "@/lib/proxy";
 
 const COOKIE = "cairn_token";
-// Matches the server session lifetime.
-const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 
 type Context = { params: Promise<{ path: string[] }> };
 
-function upstreamUrl(path: string[], search: string): URL {
+function upstreamUrl(path: string, search: string): URL {
   const base = process.env.CAIRN_API_URL ?? "http://127.0.0.1:3111";
   const url = new URL(base);
   const prefix = url.pathname.replace(/\/$/, "");
-  url.pathname = `${prefix}/cairn-memory/${path.map((segment) => encodeURIComponent(segment)).join("/")}`;
+  url.pathname = `${prefix}/cairn-memory/${path}`;
   url.search = search;
   return url;
 }
 
-function cookieOptions(request: NextRequest) {
+function cookieOptions(request: NextRequest, maxAge: number) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
     path: "/",
-    maxAge: SESSION_MAX_AGE,
+    maxAge,
     secure: request.nextUrl.protocol === "https:",
   };
 }
 
 async function proxy(request: NextRequest, context: Context) {
   const { path } = await context.params;
+  const target = upstreamPath(path);
+  if (target === null) {
+    return NextResponse.json({ error: "path not allowed", code: "path_not_allowed" }, { status: 400 });
+  }
   const joined = path.join("/");
   const headers = new Headers();
   const contentType = request.headers.get("content-type");
@@ -46,7 +50,7 @@ async function proxy(request: NextRequest, context: Context) {
 
   let upstream: Response;
   try {
-    upstream = await fetch(upstreamUrl(path, request.nextUrl.search), {
+    upstream = await fetch(upstreamUrl(target, request.nextUrl.search), {
       method: request.method,
       headers,
       body: rawBody ? rawBody : undefined,
@@ -63,9 +67,9 @@ async function proxy(request: NextRequest, context: Context) {
     (joined === "auth/login" || joined === "auth/bootstrap" || joined === "auth/register") &&
     upstream.ok
   ) {
-    let payload: { token?: unknown };
+    let payload: Partial<Session>;
     try {
-      payload = JSON.parse(new TextDecoder().decode(bytes)) as { token?: unknown };
+      payload = JSON.parse(new TextDecoder().decode(bytes)) as Partial<Session>;
     } catch {
       return NextResponse.json({ error: "Login response was not JSON" }, { status: 502 });
     }
@@ -80,10 +84,13 @@ async function proxy(request: NextRequest, context: Context) {
         { status: 502 },
       );
     }
+    if (typeof payload.expires_at !== "number") {
+      return NextResponse.json({ error: "Login response did not include an expiry" }, { status: 502 });
+    }
     const sessionToken = payload.token;
     delete payload.token;
     const response = NextResponse.json(payload, { status: upstream.status });
-    response.cookies.set(COOKIE, sessionToken, cookieOptions(request));
+    response.cookies.set(COOKIE, sessionToken, cookieOptions(request, cookieMaxAge(payload.expires_at, Math.floor(Date.now() / 1000))));
     return response;
   }
 
@@ -98,9 +105,9 @@ async function proxy(request: NextRequest, context: Context) {
   if (
     request.method === "POST" &&
     joined === "auth/logout" &&
-    (upstream.ok || isSessionRequired(upstream.status, upstreamError(bytes)))
+    (upstream.ok || isSessionRequired(upstream.status, upstreamCode(bytes)))
   ) {
-    response.cookies.set(COOKIE, "", { ...cookieOptions(request), maxAge: 0 });
+    response.cookies.set(COOKIE, "", cookieOptions(request, 0));
   }
 
   return response;
@@ -118,15 +125,14 @@ function responseHeaders(upstream: Response): Headers {
   return headers;
 }
 
-function upstreamError(bytes: ArrayBuffer): string {
+function upstreamCode(bytes: ArrayBuffer): unknown {
   if (bytes.byteLength === 0) {
-    return "";
+    return undefined;
   }
   try {
-    const payload = JSON.parse(new TextDecoder().decode(bytes)) as { error?: unknown };
-    return typeof payload.error === "string" ? payload.error : "";
+    return (JSON.parse(new TextDecoder().decode(bytes)) as Partial<ErrorBody>).code;
   } catch {
-    return "";
+    return undefined;
   }
 }
 

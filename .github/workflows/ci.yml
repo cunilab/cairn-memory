@@ -44,6 +44,13 @@ jobs:
             echo "Cairn has no auth rate limiter or lockout, and jobs are read-only (retried automatically)" >&2
             exit 1
           fi
+      - name: the web reads no retired route and matches no English error text (CM-SPEC-009)
+        # Quoted names only: "memories/export" (the current export) and "@/lib/export" do not match.
+        run: |
+          if grep -rnE --exclude-dir=generated --exclude='*.test.ts' "SESSION_REQUIRED_MESSAGES|[\"'\`](delete|diagnose|export)[\"'\`]|/cairn-memory/(delete|diagnose|export)" apps/web/app apps/web/components apps/web/lib apps/web/hooks crates/server/src; then
+            echo "the console uses /forget, /stats and GET /memories/export, and switches on error codes" >&2
+            exit 1
+          fi
       - name: cairn-core stays pure (no sqlx, tokio, axum or reqwest)
         run: |
           tree="$(cargo tree -p cairn-core -e normal --locked)"
@@ -119,6 +126,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - run: npm test
 
   acceptance-smokes:
     name: Acceptance smokes

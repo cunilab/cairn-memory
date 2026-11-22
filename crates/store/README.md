@@ -8,7 +8,7 @@ change transactional. A `testing` feature adds `TestDb`, one schema per test.
 ## Entry points
 - `Store::{connect, open, migrate}`; `StoreError`.
 - Modules add `impl Store`: `account`, `device`, `project`, `memory` (save, get, list, feedback, forget,
-  links), `capture`, `retrieve` (search, brief, topic notes, graph, diagnose),
+  links), `capture`, `retrieve` (search, brief, topic notes, graph),
   `embed`, `consolidate`, `jobs`, `export`.
 - `testing::TestDb` reads `CAIRN_TEST_DATABASE_URL`.
 

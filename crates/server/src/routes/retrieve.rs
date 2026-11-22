@@ -9,8 +9,6 @@ use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
 use cairn_core::retrieve::pack::{BUDGET_DEFAULT, Cards};
-use cairn_store::export::Export;
-use cairn_store::retrieve::Diagnostics;
 use cairn_store::usage::Lookup;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -217,16 +215,4 @@ pub async fn graph(
             .graph(&account.person_id, &filter, query.cap)
             .await?,
     ))
-}
-
-/// The memories and links the person can see.
-pub async fn export(State(state): State<AppState>, Agent(account): Agent) -> ApiResult<Export> {
-    Ok(Json(state.store.export(&account.person_id).await?))
-}
-
-pub async fn diagnose(
-    State(state): State<AppState>,
-    Agent(account): Agent,
-) -> ApiResult<Diagnostics> {
-    Ok(Json(state.store.diagnose(&account.person_id).await?))
 }

@@ -1139,7 +1139,7 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
 }
 
 #[tokio::test]
-async fn diagnose_counts_only_my_jobs() {
+async fn job_counts_only_my_jobs() {
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -1165,8 +1165,8 @@ async fn diagnose_counts_only_my_jobs() {
         )
         .await
         .unwrap();
-    assert_eq!(store.diagnose(&me).await.unwrap().jobs_pending, 2);
-    assert_eq!(store.diagnose(&other).await.unwrap().jobs_pending, 5);
+    assert_eq!(store.person_job_counts(&me).await.unwrap().0, 2);
+    assert_eq!(store.person_job_counts(&other).await.unwrap().0, 5);
     db.finish().await;
 }
 

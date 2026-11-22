@@ -228,10 +228,10 @@ async fn audit_records_listed_actions() {
     )
     .await;
     let forgotten = app.save(&admin_device, rule("Forget me via forget")).await;
-    let deleted = app.save(&admin_device, rule("Forget me via delete")).await;
+    let forgotten_again = app.save(&admin_device, rule("Forget me again")).await;
     app.post("forget", json!({"id": forgotten}), &admin_device)
         .await;
-    app.post("delete", json!({"id": deleted}), &admin_device)
+    app.post("forget", json!({"id": forgotten_again}), &admin_device)
         .await;
     app.post(
         &format!("projects/{project}/rename"),

@@ -3,25 +3,29 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
-import { ListTodoIcon } from "lucide-react";
 import { DataTable } from "@/components/data-table";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import { Badge } from "@/components/ui/badge";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { Job } from "@/lib/generated/Job";
+import type { JobCounts } from "@/lib/generated/JobCounts";
 import type { JobSnapshot } from "@/lib/generated/JobSnapshot";
+import type { Stats } from "@/lib/generated/Stats";
+
+/** Admins get the rows; everyone else gets their own counts from `/stats`. */
+type Queue = JobCounts & { quarantine?: Job[] };
 
 /** Read-only: Cairn retries failed jobs by itself, so there is nothing for a person to press. */
 export function Jobs() {
   const router = useRouter();
   const account = useAccount();
   const admin = account?.is_admin === true;
-  const [queue, setQueue] = useState<JobSnapshot | null>(null);
+  const [queue, setQueue] = useState<Queue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   useResetOnHide(() => {
@@ -30,9 +34,9 @@ export function Jobs() {
   });
 
   useEffect(() => {
-    if (!admin) return;
+    if (account === undefined) return;
     let cancelled = false;
-    cairn<JobSnapshot>("admin/jobs")
+    (admin ? cairn<JobSnapshot>("admin/jobs") : cairn<Stats>("stats?days=7").then((stats) => stats.jobs))
       .then((next) => {
         if (cancelled) return;
         setQueue(next);
@@ -49,7 +53,7 @@ export function Jobs() {
     return () => {
       cancelled = true;
     };
-  }, [admin, attempt, router]);
+  }, [account, admin, attempt, router]);
 
   const retry = useCallback(() => {
     setQueue(null);
@@ -100,21 +104,7 @@ export function Jobs() {
     [],
   );
 
-  // TODO(7a): non-admins see their own counts from `/stats` (`jobs`). Until then only admins can read the queue.
   if (account === undefined) return <LoadingBlock label="Loading jobs…" rows={3} />;
-  if (!admin) {
-    return (
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <ListTodoIcon />
-          </EmptyMedia>
-          <EmptyTitle>Job details are for admins</EmptyTitle>
-          <EmptyDescription>Cairn processes your memories in the background and retries on its own.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    );
-  }
   if (error) return <ErrorAlert message={error} onRetry={retry} />;
   if (queue === null) return <LoadingBlock label="Loading jobs…" rows={4} />;
 
@@ -125,6 +115,7 @@ export function Jobs() {
         <QueueCount label="Running" value={queue.running} />
         <QueueCount label="Stopped retrying" value={queue.quarantined} />
       </dl>
+      {queue.quarantine ? (
       <DataTable
         columns={columns}
         data={queue.quarantine}
@@ -140,6 +131,7 @@ export function Jobs() {
           </Empty>
         }
       />
+      ) : null}
       <p className="text-sm text-muted-foreground">
         Cairn retries failed jobs automatically. A job that fails 5 times stops, and is tried again after the next server update and after 24 hours.
       </p>

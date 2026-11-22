@@ -347,7 +347,19 @@ async fn search_ranks_filters_and_never_leaks() {
 }
 
 #[tokio::test]
-async fn supersede_graph_export_and_diagnose() {
+async fn export_diagnose_delete_are_gone() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "d").await;
+    for (method, path) in [("POST", "export"), ("GET", "diagnose"), ("POST", "delete")] {
+        let (status, _) = app.send(method, path, json!({}), Some(&device)).await;
+        assert_eq!(status, 404, "{method} /{path} is gone");
+    }
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn supersede_and_graph() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "d").await;
@@ -385,18 +397,6 @@ async fn supersede_graph_export_and_diagnose() {
         .send("GET", "graph?cap=5", json!(null), Some(&device))
         .await;
     assert_eq!(status, 400);
-
-    let export = app.post("export", json!({}), &device).await;
-    assert_eq!(
-        (
-            export["memories"].as_array().unwrap().len(),
-            export["links"].as_array().unwrap().len()
-        ),
-        (2, 1)
-    );
-    let diagnose = app.get("diagnose", &device).await;
-    assert_eq!(diagnose["memories"], 2);
-    assert_eq!(diagnose["by_status"]["superseded"], 1);
 
     // Feedback: a wrong vote from the owner makes a memory stale and ranks it lower.
     let marked = app

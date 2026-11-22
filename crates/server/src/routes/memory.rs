@@ -3,7 +3,7 @@ use crate::auth::{Agent, Caller, Web};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
@@ -236,17 +236,6 @@ pub async fn forget(
 ) -> ApiResult<Value> {
     let id = erase(&state, &caller, body).await?;
     Ok(Json(json!({"id": id, "status": "forgotten"})))
-}
-
-/// The console's delete: the same erase, no body. The console moves to `/forget`; this route
-/// goes when it has.
-pub async fn delete(
-    State(state): State<AppState>,
-    caller: Caller,
-    Json(body): Json<Target>,
-) -> Result<StatusCode, ApiError> {
-    erase(&state, &caller, body).await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn erase(state: &AppState, caller: &Caller, body: Target) -> Result<String, ApiError> {

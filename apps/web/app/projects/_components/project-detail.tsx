@@ -134,15 +134,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         meta: { className: "hidden sm:table-cell" },
       },
     ];
-    if (data?.members.some((m) => m.last_active_at !== undefined)) {
-      cols.push({
-        id: "active",
-        header: "Last active",
-        accessorFn: (m) => m.last_active_at ?? 0,
-        cell: ({ row }) => <Time value={row.original.last_active_at} className="text-xs whitespace-nowrap text-muted-foreground" />,
-        meta: { className: "hidden md:table-cell" },
-      });
-    }
+    cols.push({
+      id: "active",
+      header: "Last active",
+      accessorFn: (m) => m.last_active_at ?? 0,
+      cell: ({ row }) => <Time value={row.original.last_active_at} className="text-xs whitespace-nowrap text-muted-foreground" />,
+      meta: { className: "hidden md:table-cell" },
+    });
     cols.push({
       id: "transfer",
       header: () => <span className="sr-only">Actions</span>,
@@ -155,7 +153,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         ) : null,
     });
     return cols;
-  }, [canTransfer, data?.members]);
+  }, [canTransfer]);
 
   const staleColumns = useMemo<ColumnDef<MemoryView>[]>(
     () => [
@@ -174,7 +172,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               {row.original.title}
             </button>
             <p className="line-clamp-2 text-sm text-muted-foreground">
-              {(row.original as MemoryView & { stale_cause?: string | null }).stale_cause ?? row.original.summary}
+              {row.original.stale_cause ?? row.original.summary}
             </p>
           </div>
         ),

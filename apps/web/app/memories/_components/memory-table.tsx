@@ -26,11 +26,11 @@ import type { ProjectView } from "@/lib/generated/ProjectView";
 
 const PAGE = 50;
 const KINDS = ["decision", "rule", "gotcha", "procedure", "fact", "preference", "note", "handoff"];
-// TODO(7a): add { value: "expired" } once the server lists memories past `expires_at`.
 const STATUSES: FilterOption[] = [
   { value: "active", label: "Active" },
   { value: "stale", label: "Stale" },
   { value: "superseded", label: "Superseded" },
+  { value: "expired", label: "Expired" },
 ];
 const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
   value: kind,
@@ -62,8 +62,10 @@ export function MemoryTable() {
     if (project) query.set("projectId", project);
     if (kind) query.set("kind", kind);
     if (status) query.set("status", status);
+    if (branch) query.set("branch", branch);
+    if (q.trim()) query.set("q", q.trim());
     return query.toString();
-  }, [project, kind, status]);
+  }, [project, kind, status, branch, q]);
   const key = `${serverQuery}#${attempt}`;
   useResetOnHide(() => {
     setPage(null);
@@ -146,17 +148,7 @@ export function MemoryTable() {
     }
   }
 
-  const projectName = useMemo(() => new Map(projects.map((p) => [p.project_id, p.name])), [projects]);
-  // TODO(7a): `q` and `branch` become server params (`search_tsv`, branch column). Until then
-  // they narrow the pages loaded so far.
-  const rows = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    return (page?.items ?? []).filter(
-      (m) =>
-        (!branch || m.context?.branch === branch) &&
-        (!needle || `${m.title} ${m.summary}`.toLowerCase().includes(needle)),
-    );
-  }, [page, branch, q]);
+  const rows = page?.items ?? [];
 
   const active = [project, kind, status, branch, q].filter(Boolean).length;
   const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.name }));
@@ -190,10 +182,10 @@ export function MemoryTable() {
       {
         id: "project",
         header: "Project",
-        accessorFn: (m) => (m.project_id ? (projectName.get(m.project_id) ?? "") : m.scope),
+        accessorFn: (m) => m.project_name ?? m.scope,
         cell: ({ row }) => {
           const m = row.original;
-          if (m.project_id) return projectName.get(m.project_id) ?? "—";
+          if (m.project_id) return m.project_name ?? "—";
           return m.scope === "global" ? "Global" : "Personal";
         },
         meta: { className: "hidden md:table-cell" },
@@ -202,11 +194,14 @@ export function MemoryTable() {
         accessorKey: "status",
         header: "Status",
         cell: ({ row }) => (
-          <StatusBadge
-            status={row.original.status}
-            cause={(row.original as MemoryView & { stale_cause?: string | null }).stale_cause}
-          />
+          <StatusBadge status={row.original.status} cause={row.original.stale_cause} />
         ),
+      },
+      {
+        accessorKey: "fetched",
+        header: "Used",
+        cell: ({ row }) => <span className="text-sm tabular-nums">{row.original.fetched.toLocaleString()}</span>,
+        meta: { className: "hidden md:table-cell" },
       },
       {
         accessorKey: "updated_at",
@@ -215,7 +210,7 @@ export function MemoryTable() {
         meta: { className: "hidden md:table-cell" },
       },
     ],
-    [openMemory, projectName],
+    [openMemory],
   );
 
   const controls = (

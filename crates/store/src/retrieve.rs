@@ -18,7 +18,7 @@ use serde::Serialize;
 use sqlx::postgres::PgArguments;
 use sqlx::query::Query;
 use sqlx::{Postgres, Row};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Fused hits whose neighbours are added to the candidate pool.
 const NEIGHBOUR_SEEDS: usize = 32;
@@ -112,18 +112,6 @@ struct Pool {
     fused: Vec<(String, f32)>,
     entity_hits: HashSet<String>,
     by_id: HashMap<String, Candidate>,
-}
-
-/// Counts for `GET /diagnose`: what the person can see, and their own share of the job queue.
-#[derive(Clone, Debug, Serialize)]
-pub struct Diagnostics {
-    pub memories: i64,
-    pub by_kind: BTreeMap<String, i64>,
-    pub by_status: BTreeMap<String, i64>,
-    pub by_scope: BTreeMap<String, i64>,
-    pub jobs_pending: i64,
-    pub jobs_running: i64,
-    pub jobs_quarantined: i64,
 }
 
 /// One note the hook may inject when a file is first edited.
@@ -768,38 +756,6 @@ impl Store {
         let memories = self.visible_memories(person_id).await?;
         let links: Vec<_> = memories.iter().flat_map(|m| m.links.clone()).collect();
         Ok(build(&memories, &links, filter, cap))
-    }
-
-    pub async fn diagnose(&self, person_id: &str) -> Result<Diagnostics> {
-        let mut out = Diagnostics {
-            memories: 0,
-            by_kind: BTreeMap::new(),
-            by_status: BTreeMap::new(),
-            by_scope: BTreeMap::new(),
-            jobs_pending: 0,
-            jobs_running: 0,
-            jobs_quarantined: 0,
-        };
-        for (column, map) in [
-            ("kind", &mut out.by_kind),
-            ("status", &mut out.by_status),
-            ("scope", &mut out.by_scope),
-        ] {
-            let rows = sqlx::query(&format!(
-                "SELECT m.{column} AS k, count(*) AS n FROM memories m WHERE {} GROUP BY m.{column}",
-                visible("m", "$1")
-            ))
-            .bind(person_id)
-            .fetch_all(&self.pool)
-            .await?;
-            for row in rows {
-                map.insert(row.try_get("k")?, row.try_get("n")?);
-            }
-        }
-        out.memories = out.by_status.values().sum();
-        (out.jobs_pending, out.jobs_running, out.jobs_quarantined) =
-            self.person_job_counts(person_id).await?;
-        Ok(out)
     }
 }
 

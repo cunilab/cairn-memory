@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAccount } from "@/hooks/use-account";
+import { useAttention } from "@/hooks/use-attention";
 import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
 import { THEMES, type Theme } from "@/lib/theme";
@@ -63,20 +64,18 @@ const WORKSPACE = [
   { href: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
-// TODO(7a): a dot on Settings when a device needs attention and on Activity when a job is
-// quarantined, from `/stats` (`devices_attention`, `jobs.quarantined`). Empty until then.
-const ATTENTION: Record<string, string> = {};
-
 function NavItem({
   href,
   label,
   icon: Icon,
   pathname,
+  attention,
 }: {
   href: string;
   label: string;
   icon: typeof FolderIcon;
   pathname: string;
+  attention?: string;
 }) {
   const { setOpenMobile } = useSidebar();
   return (
@@ -89,9 +88,7 @@ function NavItem({
         <Icon />
         <span>{label}</span>
       </SidebarMenuButton>
-      {ATTENTION[href] ? (
-        <SidebarMenuBadge aria-label={ATTENTION[href]}>•</SidebarMenuBadge>
-      ) : null}
+      {attention ? <SidebarMenuBadge aria-label={attention}>•</SidebarMenuBadge> : null}
     </SidebarMenuItem>
   );
 }
@@ -170,6 +167,7 @@ function AccountMenu() {
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
+  const attention = useAttention();
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -187,7 +185,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <SidebarGroupContent>
             <SidebarMenu>
               {WORKSPACE.map((item) => (
-                <NavItem key={item.href} {...item} pathname={pathname} />
+                <NavItem key={item.href} {...item} pathname={pathname} attention={attention[item.href]} />
               ))}
             </SidebarMenu>
           </SidebarGroupContent>
