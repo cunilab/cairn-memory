@@ -314,9 +314,11 @@ mod tests {
         let mut server = server();
         call(&mut server, 1, "initialize", json!({}));
 
-        let missing = call(&mut server, 2, "tools/call", json!({"name": "memory_save"}));
+        // memory_save has no top-level required, so a missing field is the server's
+        // error. memory_get still rejects missing ids locally, before any request.
+        let missing = call(&mut server, 2, "tools/call", json!({"name": "memory_get"}));
         assert_eq!(missing["result"]["isError"], true);
-        assert_eq!(missing["result"]["content"][0]["text"], "kind is required");
+        assert_eq!(missing["result"]["content"][0]["text"], "ids is required");
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));
         assert_eq!(unknown["error"]["code"], -32602);

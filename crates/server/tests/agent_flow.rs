@@ -126,3 +126,38 @@ async fn save_items_partial_success() {
     assert_eq!(rows(&device).await, 5);
     app.finish().await;
 }
+
+/// A single save has no schema `required` array. `SaveInput` still rejects a
+/// missing title: `kind`, `title` and `summary` have no serde default.
+#[tokio::test]
+async fn single_save_missing_title_is_rejected() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let member = app.member(&admin, "member").await;
+    let device = app.device(&member, "laptop").await;
+    let (status, body) = app
+        .send(
+            "POST",
+            "remember",
+            json!({
+                "kind": "fact",
+                "summary": "A single save with no title must be rejected.",
+                "reason": "The server still requires title when items is absent."
+            }),
+            Some(&device),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "validation");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("title")),
+        "{body}"
+    );
+    assert_eq!(
+        app.get("memories", &device).await.as_array().unwrap().len(),
+        0
+    );
+    app.finish().await;
+}

@@ -67,8 +67,7 @@ pub const TOOLS: [Tool; 5] = [
                     "supersedes":{"type":"string"},
                     "contradicts":{"type":"string"},
                     "scope":{"type":"string"}},
-                  "required":["kind","title","summary"]}}},
-              "required":["kind","title","summary"]})
+                  "required":["kind","title","summary"]}}}})
         },
     },
     Tool {
@@ -124,25 +123,20 @@ pub fn tools_list() -> Value {
 /// comes from git unless the caller sent one.
 pub fn call(client: &Client, tool: &Tool, mut args: Map<String, Value>) -> Result<Value, Error> {
     let schema = (tool.schema)();
-    // A batch omits the single-note fields. The server rejects a mix, and a list longer than 3.
-    let batched =
-        tool.name == "memory_save" && args.get("items").is_some_and(|value| !value.is_null());
-    if !batched {
-        for key in schema["required"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-        {
-            let present = match args.get(key) {
-                None | Some(Value::Null) => false,
-                Some(Value::String(text)) => !text.trim().is_empty(),
-                Some(Value::Array(items)) => !items.is_empty(),
-                Some(_) => true,
-            };
-            if !present {
-                return Err(Error::Input(format!("{key} is required")));
-            }
+    for key in schema["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let present = match args.get(key) {
+            None | Some(Value::Null) => false,
+            Some(Value::String(text)) => !text.trim().is_empty(),
+            Some(Value::Array(items)) => !items.is_empty(),
+            Some(_) => true,
+        };
+        if !present {
+            return Err(Error::Input(format!("{key} is required")));
         }
     }
     if !args.contains_key("context")
@@ -266,6 +260,24 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    /// An items-only save must be valid in the published schema. Hosts that
+    /// enforce top-level `required` reject it; a top-level `anyOf` is rejected
+    /// by the Anthropic API. Each item still names its own required fields.
+    #[test]
+    fn memory_save_schema_has_no_top_level_required() {
+        let schema = (find("memory_save").unwrap().schema)();
+        assert!(
+            schema.get("required").is_none(),
+            "top-level required rejects an items-only save: {schema}"
+        );
+        assert!(schema.get("anyOf").is_none(), "{schema}");
+        assert!(schema.get("oneOf").is_none(), "{schema}");
+        assert_eq!(
+            schema["properties"]["items"]["items"]["required"],
+            json!(["kind", "title", "summary"])
+        );
     }
 
     #[test]

@@ -152,11 +152,6 @@
       "type": "string"
      }
     },
-    "required": [
-     "kind",
-     "title",
-     "summary"
-    ],
     "type": "object"
    },
    "name": "memory_save"

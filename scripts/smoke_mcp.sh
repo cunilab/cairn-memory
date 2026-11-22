@@ -76,7 +76,8 @@ try:
     assert names == ["memory_search", "memory_get", "memory_save", "memory_feedback", "memory_forget"], names
     assert len(json.dumps(tools["result"], separators=(",", ":"))) <= 3500
     schema = next(t["inputSchema"] for t in tools["result"]["tools"] if t["name"] == "memory_save")
-    assert {"kind", "title", "summary"} <= set(schema["required"])
+    assert "required" not in schema
+    assert schema["properties"]["items"]["items"]["required"] == ["kind", "title", "summary"]
 
 
     def result_json(response):
