@@ -282,3 +282,32 @@ fn normal_session_after_automation_still_asks() {
         "{reason}"
     );
 }
+
+/// Claude Code sends subagent hooks on the parent session id. That event must not
+/// mark the parent automated or stamp `context.origin`, or the parent's plain Stop
+/// never asks and the jsonb merge never clears the origin.
+#[test]
+fn subagent_event_on_the_parent_session_still_asks() {
+    let (server, env) = harness("parent-subagent");
+    env.edit("parent", &[]);
+    let call = json!({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": "src/b.rs", "old_string": "b", "new_string": "y"},
+        "tool_response": {"success": true},
+        "tool_use_id": "parent-sub",
+        "agent_id": "agent-abc123"
+    });
+    env.run("PostToolUse", &env.payload("parent", call), &[]);
+    let reason = env.stop_reason("Stop", "parent", json!({}), &[]);
+    let origin = server.saw_origin("automation");
+    assert!(
+        reason.is_some() && !origin,
+        "a plain Stop for parent must still ask, and its captures carry no origin; ask={reason:?} origin={origin}"
+    );
+    assert!(
+        reason
+            .unwrap()
+            .starts_with("You changed 2 file(s) but saved nothing to Cairn."),
+        "the parent still has its edits"
+    );
+}

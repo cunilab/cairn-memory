@@ -371,23 +371,29 @@ impl Hook<'_> {
                     .unwrap_or(false))
     }
 
-    /// This event, or one already stored for the session, is an automated or subagent run.
-    /// Re-checked on every event: some hosts skip `SessionStart` for a subagent.
-    fn automated_now(&self) -> bool {
+    /// `CAIRN_SESSION_ORIGIN=automation` marks the whole session. A subagent payload does not:
+    /// Claude Code sends those events on the parent session id.
+    fn env_automated() -> bool {
         std::env::var("CAIRN_SESSION_ORIGIN").ok().as_deref() == Some("automation")
-            || self.payload.text("agent_id").is_some()
-            || self.payload.text("agent_type").is_some()
-            || self.event == "SubagentStop"
     }
 
     fn note_automation(&self) {
-        if self.automated_now() {
+        if Self::env_automated() {
             self.with_state(|state| state.automated = true);
         }
     }
 
+    /// Stored only from the env, so a later event still counts after `SessionStart`.
+    fn session_automated(&self) -> bool {
+        Self::env_automated() || self.with_state(|state| state.automated).unwrap_or(false)
+    }
+
+    /// Suppress the ask for this event: env, state stored from the env, or this event's payload.
     fn automated(&self) -> bool {
-        self.automated_now() || self.with_state(|state| state.automated).unwrap_or(false)
+        self.session_automated()
+            || self.payload.text("agent_id").is_some()
+            || self.payload.text("agent_type").is_some()
+            || self.event == "SubagentStop"
     }
 
     /// The one-time Stop reminder: the session edited files, ran a test command or wrote a
@@ -574,7 +580,8 @@ impl Hook<'_> {
         let event_id = capture.event_id(&self.session_id);
         let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
-        if self.automated() {
+        // Origin sticks in the jsonb merge, so only an env-marked session may set it.
+        if self.session_automated() {
             context.origin = Some("automation".to_owned());
         }
         let mut body = json!({

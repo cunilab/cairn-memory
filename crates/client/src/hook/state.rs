@@ -53,7 +53,7 @@ pub struct SessionState {
     /// The no-project hint was injected; it is once per session.
     #[serde(default)]
     pub hinted: bool,
-    /// An automated or subagent session: no Stop ask, and its distill does not replace the handoff.
+    /// Set when `CAIRN_SESSION_ORIGIN=automation`. A subagent payload does not set this.
     #[serde(default)]
     pub automated: bool,
 }
