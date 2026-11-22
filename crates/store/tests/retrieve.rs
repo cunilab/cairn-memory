@@ -1845,3 +1845,55 @@ async fn forget_keeps_content_but_hides() {
     assert!(!brief.contains("Forget keeps this rule"), "{brief}");
     db.finish().await;
 }
+
+/// More than 50 handoffs on one checkout. The newest is thin; the rich one is
+/// the second newest, so a newest-first limit of 50 still reaches it.
+#[tokio::test]
+async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    sqlx::query(
+        r#"INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash,
+                                 identity_hash, fields, repo, repo_branch, repo_worktree, created_at)
+           SELECT CASE WHEN i = 51 THEN 'chain_thin_newest'
+                       WHEN i = 50 THEN 'chain_rich'
+                       ELSE 'chain_old_' || i END,
+                  $1, 'personal', 'handoff', 'Handoff', 'chain row', 'e',
+                  CASE WHEN i = 51 THEN 'chain_thin_newest'
+                       WHEN i = 50 THEN 'chain_rich'
+                       ELSE 'chain_old_' || i END,
+                  CASE WHEN i = 50 THEN '{"files":["src/pay.rs"]}'::jsonb ELSE '{}'::jsonb END,
+                  'github.com/acme/one', 'feat', 'wt-1',
+                  now() + make_interval(secs => i)
+             FROM generate_series(1, 51) i"#,
+    )
+    .bind(&me)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    let brief = db
+        .store
+        .brief(
+            &me,
+            &WorkContext {
+                repository: Some("github.com/acme/one".into()),
+                branch: Some("feat".into()),
+                worktree: Some("wt-1".into()),
+                ..WorkContext::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        brief.contains("chain_rich"),
+        "brief shows the newest rich handoff: {brief}"
+    );
+    assert!(
+        !brief.contains("chain_thin_newest"),
+        "brief skips the thin newest: {brief}"
+    );
+    db.finish().await;
+}

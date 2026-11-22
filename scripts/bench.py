@@ -544,7 +544,8 @@ def main():
                 break
             time.sleep(0.25)
         settle()
-        system = "origin = 'system' and scope = 'personal'"
+        # An in-project session's notes are project-scoped; a session with no project stays personal.
+        system = "origin = 'system' and scope in ('personal', 'project')"
         distilled = {"notes": int(sql(f"select count(*) from cairn.memories where {system} and kind <> 'handoff'") or 0),
                      "gotcha": int(sql(f"select count(*) from cairn.memories where {system} and kind = 'gotcha'") or 0),
                      "handoff": int(sql("select count(*) from cairn.memories where kind = 'handoff'") or 0) > 0}
@@ -554,7 +555,7 @@ def main():
         for query in ("session", "handoff", "cargo test"):
             shaped, _, _ = mcp.tool("memory_search", query=query, limit=10)
             session_titles += sum(1 for card in (shaped.get("results") or [])
-                                  if re.match(r"^(Session|Handoff) [0-9a-f-]{8,}", card.get("title", "")))
+                                  if re.match(r"^(Session|Handoff) [0-9a-f]{8}-[0-9a-f]{4}", card.get("title", "")))
         mcp.close()
         mcp = None
         session_bytes = {

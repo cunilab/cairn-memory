@@ -68,7 +68,7 @@ Writers of `expires_at`: `kind.rs:14` TTLs, `capture.rs:524-533` (unused system 
 - **Labels** (agent cards and web): derived at read time, no new column.
   `replaced by <id>` from the newest `supersedes` link pointing at the memory; `voted wrong <n>x` from
   `stale_cause = 'feedback'` and `usage.wrong`; `file deleted` from `stale_cause = 'missing'`. Emitted only on those
-  cards, in the card's existing status slot. Token cost: ≤ 40 bytes (`replaced by mem_` + 26-char id) on a
+  cards, in the card's existing status slot. Token cost: ≤ 42 bytes (`replaced by mem_` + 26-char id) on a
   superseded card, ≤ 16 bytes on a stale card, 0 on active cards. The web shows the same label with a link to the new id.
 - **Withdrawn promoted global copies** (`consolidate.rs:334`): no longer set `expires_at`; they stay `active`, keep
   their existing `relates` links to the originals (already written by promotion), and rank by score.

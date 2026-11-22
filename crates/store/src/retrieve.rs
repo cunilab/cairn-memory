@@ -591,7 +591,7 @@ impl Store {
               WHERE {} AND m.status <> 'forgotten' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
                 AND m.repo = $3 AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
-              {newest}",
+              {newest} LIMIT 50",
             visible("m", "$1")
         ))
         .bind(person_id)
