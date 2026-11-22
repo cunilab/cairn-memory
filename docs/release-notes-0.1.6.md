@@ -32,7 +32,7 @@ Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
 - Admin requeue/discard of jobs and memory feedback buttons are removed from the web.
 - Failed jobs that stopped retrying are tried again once after an upgrade and then every 24 hours; nobody requeues them.
 - Sign-in has no rate limit or lockout (a password guess costs one Argon2 check). Put a limit in your reverse proxy if the console is public.
-- Set `CAIRN_PUBLIC_URL` on the server so the console shows the right `cairn setup` address.
+- Set `CAIRN_PUBLIC_URL` on the server (for example `https://cairn.example.test/agent`) to pin the `cairn setup` address the console shows. Without it the console passes the browser's own address to the server, which adds `/agent` for a public host.
 
 ## Upgrade steps (one machine)
 

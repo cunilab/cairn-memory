@@ -26,7 +26,7 @@ One host, one domain: the web console and the agent API share `https://cairn.exa
 | --- | --- |
 | `CAIRN_DATABASE_URL` | `postgres://<user>:<password>@<postgres-service>:5432/<database>` |
 | `CAIRN_EMBEDDING_MODEL_DIR` | `/opt/cairn/models/minilm` by default in the image; a provisioned directory for standalone servers |
-| `CAIRN_PUBLIC_URL` | The address agents are given, e.g. `https://cairn.example.test/agent`. The console shows it in the device setup command (`cairn setup <url>`); without it the server answers with the address a request reached it on |
+| `CAIRN_PUBLIC_URL` | Optional, recommended: the address agents are given, e.g. `https://cairn.example.test/agent`. The console shows it in the device setup command and in every fix command (`cairn setup <url>`). Without it the console forwards the address the browser used (`x-forwarded-host` and `-proto`, plus `x-forwarded-prefix: /agent` for a public host) and the server answers with that, so a deploy that follows the routing below still shows `https://cairn.example.test/agent`. A console on `localhost` forwards nothing, and the server answers with the address a request reached it on |
 
 Without it the server falls back to the JSON file store and needs `--store`; the image's command passes only `--bind 0.0.0.0:3111`, so always set it.
 
@@ -42,7 +42,7 @@ see [hybrid recall](contracts/continuity-v1.md#hybrid-recall-v014).
 | --- | --- |
 | `CAIRN_API_URL` | `http://<server-app>:3111`, the internal address of the server service (read at request time) |
 
-The console's browser calls go to its own `/api/cairn/*` routes, which forward to `CAIRN_API_URL` server to server. The server needs no public route for the console.
+The console's browser calls go to its own `/api/cairn/*` routes, which forward to `CAIRN_API_URL` server to server. The server needs no public route for the console. `CAIRN_API_URL` is internal: it never appears in a setup command, because the console forwards the browser's host, not its own.
 
 ## Routing
 

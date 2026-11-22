@@ -84,7 +84,7 @@ impl Store {
             "UPDATE jobs SET status = 'quarantined', claim_id = NULL, lease_expires_at = NULL,
                     last_error = 'lease expired too many times', updated_at = now(), finished_at = now()
               WHERE kind = $1 AND status = 'running' AND lease_expires_at <= now() AND attempts >= $2
-              RETURNING kind, job_key, attempts, last_error",
+              RETURNING job_id, kind, job_key, attempts, last_error",
         )
         .bind(kind.as_str())
         .bind(JOB_ATTEMPT_CAP)
@@ -131,6 +131,14 @@ impl Store {
                     .bind(job_id)
                     .execute(&mut *tx)
                     .await?;
+                // The key works again: an older quarantined row of it no longer needs attention.
+                sqlx::query(
+                    "DELETE FROM jobs WHERE kind = $1 AND job_key = $2 AND status = 'quarantined'",
+                )
+                .bind(row.try_get::<String, _>("kind")?)
+                .bind(row.try_get::<String, _>("job_key")?)
+                .execute(&mut *tx)
+                .await?;
             }
             JobEnd::Quarantine(error) => quarantine(&mut tx, job_id, &error).await?,
             JobEnd::Retry(error) => match backoff_after(attempts) {
@@ -245,7 +253,8 @@ impl Store {
         ))
     }
 
-    pub async fn job_snapshot(&self) -> Result<JobSnapshot> {
+    /// Pending, running and quarantined jobs of everyone.
+    pub async fn job_totals(&self) -> Result<(i64, i64, i64)> {
         let counts = sqlx::query(
             "SELECT count(*) FILTER (WHERE status = 'pending') AS pending,
                     count(*) FILTER (WHERE status = 'running') AS running,
@@ -253,22 +262,31 @@ impl Store {
         )
         .fetch_one(&self.pool)
         .await?;
+        Ok((
+            counts.try_get("pending")?,
+            counts.try_get("running")?,
+            counts.try_get("quarantined")?,
+        ))
+    }
+
+    pub async fn job_snapshot(&self) -> Result<JobSnapshot> {
+        let (pending, running, quarantined) = self.job_totals().await?;
         let rows = sqlx::query(&format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE status = 'quarantined' ORDER BY updated_at DESC, job_id LIMIT 100"
         ))
         .fetch_all(&self.pool)
         .await?;
         Ok(JobSnapshot {
-            pending: counts.try_get("pending")?,
-            running: counts.try_get("running")?,
-            quarantined: counts.try_get("quarantined")?,
+            pending,
+            running,
+            quarantined,
             quarantine: rows.iter().map(job_from_row).collect::<Result<_>>()?,
         })
     }
 }
 
 async fn quarantine(tx: &mut PgConnection, job_id: &str, error: &str) -> Result<()> {
-    let row = sqlx::query("UPDATE jobs SET status = 'quarantined', claim_id = NULL, lease_expires_at = NULL, last_error = $2, updated_at = now(), finished_at = now() WHERE job_id = $1 RETURNING kind, job_key, attempts, last_error")
+    let row = sqlx::query("UPDATE jobs SET status = 'quarantined', claim_id = NULL, lease_expires_at = NULL, last_error = $2, updated_at = now(), finished_at = now() WHERE job_id = $1 RETURNING job_id, kind, job_key, attempts, last_error")
         .bind(job_id)
         .bind(error)
         .fetch_one(&mut *tx)
@@ -276,10 +294,18 @@ async fn quarantine(tx: &mut PgConnection, job_id: &str, error: &str) -> Result<
     note_quarantine(tx, &row).await
 }
 
-/// The person whose job it is sees "a job stopped" in Activity. Jobs of promoted copies belong to
-/// no person and are not reported.
+/// The person whose job it is sees "a job stopped" in Activity, once: the daily retry of the same
+/// job that fails again stays quiet. Jobs of promoted copies belong to no person and are not
+/// reported. Only the newest quarantined row of a key stays, so attention counts a key once.
 async fn note_quarantine(tx: &mut PgConnection, job: &PgRow) -> Result<()> {
+    let job_id: String = job.try_get("job_id")?;
     let (kind, key): (String, String) = (job.try_get("kind")?, job.try_get("job_key")?);
+    sqlx::query("DELETE FROM jobs WHERE kind = $1 AND job_key = $2 AND status = 'quarantined' AND job_id <> $3")
+        .bind(&kind)
+        .bind(&key)
+        .bind(&job_id)
+        .execute(&mut *tx)
+        .await?;
     let owner: Option<String> = if kind == JobKind::Distill.as_str() {
         parse_distill_key(&key).map(|(person, _)| person)
     } else {
@@ -291,6 +317,20 @@ async fn note_quarantine(tx: &mut PgConnection, job: &PgRow) -> Result<()> {
     let Some(owner) = owner.filter(|o| o != crate::consolidate::SYSTEM_OWNER) else {
         return Ok(());
     };
+    // A revived row keeps its `created_at`: an event written since the row began is its own.
+    let told: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM audit_events
+                         WHERE person_id = $1 AND action = 'job_quarantined' AND subject_id = $2
+                           AND created_at >= (SELECT created_at FROM jobs WHERE job_id = $3))",
+    )
+    .bind(&owner)
+    .bind(&key)
+    .bind(&job_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if told {
+        return Ok(());
+    }
     let error: Option<String> = job.try_get("last_error")?;
     let error: String = error.unwrap_or_default().chars().take(300).collect();
     audit_tx(

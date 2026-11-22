@@ -13,6 +13,7 @@ import type { UsageReport } from "./UsageReport";
 
 export type Stats = { memories: Counts, activity: Array<Day>, usage: UsageReport, usage_days: UsageDays, bench: Bench, stale: StaleReport, links: LinkReport, memory_health: MemoryHealth, jobs: JobCounts, projects: number, devices_checked_in: number, devices_attention: Array<DeviceAttention>, 
 /**
- * No device has checked in yet, or nothing has been captured.
+ * No device has ever checked in, or nothing has been captured. Revoking devices later does
+ * not turn it back on.
  */
 first_run: boolean, capture: Capture, };

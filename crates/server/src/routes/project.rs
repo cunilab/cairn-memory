@@ -152,7 +152,7 @@ pub async fn init(
 
 pub async fn rename(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    Web(account): Web,
     Path(project_id): Path<String>,
     Json(body): Json<Rename>,
 ) -> ApiResult<Project> {

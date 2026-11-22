@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AuditEvent } from "../../../lib/generated/AuditEvent.ts";
-import { auditLabel, dayKey, dayLabel, describeEvent, isSystemAction } from "./events.ts";
+import { readFileSync } from "node:fs";
+import { auditLabel, dayKey, dayLabel, describeEvent, TIMELINE_FILTERS } from "./events.ts";
 
 const event = (action: string, metadata: Record<string, unknown> | null = {}, extra: Partial<AuditEvent> = {}): AuditEvent => ({
   audit_id: "a",
@@ -33,8 +34,16 @@ test("missing metadata never throws and unknown actions stay visible", () => {
 test("audit labels are human and fall back to the action", () => {
   assert.equal(auditLabel("device_registered"), "Created a device token");
   assert.equal(auditLabel("custom_thing"), "Custom thing");
-  assert.equal(isSystemAction("repo_state"), true);
-  assert.equal(isSystemAction("login"), false);
+});
+
+test("every timeline chip names an action the server counts as Cairn's own", () => {
+  const rust = readFileSync(new URL("../../../../../crates/core/src/account/audit.rs", import.meta.url), "utf8");
+  const system = [...rust.slice(rust.indexOf("SYSTEM_ACTIONS"), rust.indexOf("];")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(system.length > 0);
+  assert.deepEqual(TIMELINE_FILTERS.find((f) => f.value === "all")?.actions, []);
+  for (const filter of TIMELINE_FILTERS) {
+    for (const action of filter.actions) assert.ok(system.includes(action), `${filter.value}: ${action}`);
+  }
 });
 
 test("days are labelled relative to now", () => {

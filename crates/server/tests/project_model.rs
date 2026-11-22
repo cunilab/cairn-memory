@@ -161,11 +161,24 @@ async fn shared_project_model() {
     .await;
     let listed = app.get("projects", &stranger).await;
     assert_eq!(listed[0]["role"], "owner");
+    // Rename is a console action: a device token is refused, even the owner's.
+    let (status, body) = app
+        .send(
+            "POST",
+            &format!("projects/{id}/rename"),
+            json!({"name": "Widgets 2"}),
+            Some(&stranger_device),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (401, Some("session_required"))
+    );
     let renamed = app
         .post(
             &format!("projects/{id}/rename"),
             json!({"name": "Widgets 2"}),
-            &stranger_device,
+            &stranger,
         )
         .await;
     assert_eq!(renamed["name"], "Widgets 2");
@@ -174,7 +187,7 @@ async fn shared_project_model() {
             "POST",
             &format!("projects/{id}/rename"),
             json!({"name": "no"}),
-            Some(&author_device),
+            Some(&author),
         )
         .await;
     assert_eq!(status, 403);

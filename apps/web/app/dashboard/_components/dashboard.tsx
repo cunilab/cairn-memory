@@ -242,12 +242,12 @@ export function Dashboard() {
             </p>
           </div>
         </Section>
-        <Section title="Usage" description="Your usage, last 30 days.">
+        <Section title="Usage" description="Your usage in the last 30 days, whatever range is selected. Counts memories, not requests.">
           <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-sm tabular-nums">
-            <dt>Fetched</dt><dd>{stats.usage.fetched_30d.toLocaleString()}</dd>
+            <dt>Different memories fetched</dt><dd>{stats.usage.fetched_30d.toLocaleString()}</dd>
             <dt>Marked helpful</dt><dd>{stats.usage.helpful_30d.toLocaleString()}</dd>
-            <dt>Never used (durable)</dt>
-            <dd><Link href="/memories?status=active" className="underline-offset-4 hover:underline">{stats.usage.never_fetched.toLocaleString()}</Link></dd>
+            <dt>Durable memories never fetched</dt>
+            <dd>{stats.usage.never_fetched.toLocaleString()}</dd>
           </dl>
           {stats.usage.top.length > 0 ? (
             <ul className="mt-3 flex flex-col gap-1 text-sm">

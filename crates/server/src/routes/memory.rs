@@ -293,12 +293,23 @@ pub async fn import(
         .as_array()
         .ok_or_else(|| ApiError::invalid("memories must be a list"))?;
     let dry_run = matches!(query.dry_run.as_deref(), Some("1" | "true"));
-    Ok(Json(
+    let report = state
+        .store
+        .import_memories(&account.person_id, items, dry_run)
+        .await?;
+    if !dry_run && report.new > 0 {
         state
             .store
-            .import_memories(&account.person_id, items, dry_run)
-            .await?,
-    ))
+            .record_audit(
+                &account.person_id,
+                None,
+                "memories_imported",
+                None,
+                serde_json::json!({"new": report.new, "duplicate": report.duplicate, "invalid": report.invalid.len()}),
+            )
+            .await?;
+    }
+    Ok(Json(report))
 }
 
 /// `YYYY-MM-DD` (UTC) of epoch seconds.

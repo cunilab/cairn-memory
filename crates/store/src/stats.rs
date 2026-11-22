@@ -201,9 +201,24 @@ pub struct Stats {
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub devices_checked_in: i64,
     pub devices_attention: Vec<DeviceAttention>,
-    /// No device has checked in yet, or nothing has been captured.
+    /// No device has ever checked in, or nothing has been captured. Revoking devices later does
+    /// not turn it back on.
     pub first_run: bool,
     pub capture: Capture,
+}
+
+/// What the sidebar needs: the two things that can ask for a person's attention.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, Serialize)]
+pub struct Attention {
+    pub devices_attention: Vec<DeviceAttention>,
+    pub jobs: JobCounts,
+}
+
+struct DeviceReport {
+    checked_in: i64,
+    ever_checked_in: bool,
+    attention: Vec<DeviceAttention>,
 }
 
 pub struct StatsInput<'a> {
@@ -227,6 +242,60 @@ fn ratio(part: i64, whole: i64) -> f64 {
 }
 
 impl Store {
+    /// Job counts: every job for an admin, the person's own otherwise.
+    async fn job_counts(&self, me: &str, is_admin: bool) -> Result<JobCounts> {
+        let (pending, running, quarantined) = if is_admin {
+            self.job_totals().await?
+        } else {
+            self.person_job_counts(me).await?
+        };
+        Ok(JobCounts {
+            pending,
+            running,
+            quarantined,
+        })
+    }
+
+    /// Active devices that checked in, whether any device ever did (revoked ones count), and the
+    /// ones whose client is out of date.
+    async fn device_report(&self, input: &StatsInput<'_>) -> Result<DeviceReport> {
+        let now = now_seconds();
+        let mut report = DeviceReport {
+            checked_in: 0,
+            ever_checked_in: false,
+            attention: Vec::new(),
+        };
+        for device in self.list_devices(input.person_id).await? {
+            let checked_in = device.client_version.is_some()
+                || device.legacy_hook
+                || device.last_seen_at > device.created_at;
+            report.ever_checked_in |= checked_in;
+            if device.status != DeviceStatus::Active {
+                continue;
+            }
+            report.checked_in += i64::from(checked_in);
+            if let Some(health) =
+                device_health(&device, input.server_version, input.public_url, now)
+                && health.health == DeviceHealth::UpdateNeeded
+            {
+                report.attention.push(DeviceAttention {
+                    device_id: device.device_id,
+                    name: device.name,
+                    reason: health.reason.unwrap_or_default(),
+                });
+            }
+        }
+        Ok(report)
+    }
+
+    /// The sidebar's dots, without the rest of the dashboard's queries.
+    pub async fn attention(&self, input: &StatsInput<'_>) -> Result<Attention> {
+        Ok(Attention {
+            devices_attention: self.device_report(input).await?.attention,
+            jobs: self.job_counts(input.person_id, input.is_admin).await?,
+        })
+    }
+
     pub async fn stats(&self, input: &StatsInput<'_>) -> Result<Stats> {
         let me = input.person_id;
         let vis = visible("m", "$1");
@@ -427,42 +496,14 @@ impl Store {
             linked_ratio,
         };
 
-        let (pending, running, quarantined) = if input.is_admin {
-            let all = self.job_snapshot().await?;
-            (all.pending, all.running, all.quarantined)
-        } else {
-            self.person_job_counts(me).await?
-        };
+        let jobs = self.job_counts(me, input.is_admin).await?;
         let projects: i64 =
             sqlx::query_scalar("SELECT count(*) FROM project_members WHERE person_id = $1")
                 .bind(me)
                 .fetch_one(&self.pool)
                 .await?;
 
-        let now = now_seconds();
-        let mut devices_checked_in = 0;
-        let mut devices_attention = Vec::new();
-        for device in self.list_devices(me).await? {
-            if device.status != DeviceStatus::Active {
-                continue;
-            }
-            if device.client_version.is_some()
-                || device.legacy_hook
-                || device.last_seen_at > device.created_at
-            {
-                devices_checked_in += 1;
-            }
-            if let Some(report) =
-                device_health(&device, input.server_version, input.public_url, now)
-                && report.health == DeviceHealth::UpdateNeeded
-            {
-                devices_attention.push(DeviceAttention {
-                    device_id: device.device_id,
-                    name: device.name,
-                    reason: report.reason.unwrap_or_default(),
-                });
-            }
-        }
+        let devices = self.device_report(input).await?;
         let captured: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE person_id = $1)")
                 .bind(me)
@@ -486,15 +527,13 @@ impl Store {
             stale,
             links,
             memory_health,
-            jobs: JobCounts {
-                pending,
-                running,
-                quarantined,
-            },
+            jobs,
             projects,
-            devices_checked_in,
-            devices_attention,
-            first_run: devices_checked_in == 0 || !captured,
+            devices_checked_in: devices.checked_in,
+            devices_attention: devices.attention,
+            // Once a device has ever checked in and something was captured, setup is over for
+            // good: revoking every device later does not bring the checklist back.
+            first_run: !devices.ever_checked_in || !captured,
             capture: Capture {
                 last_at: capture.try_get("last_at")?,
                 observations_7d: capture.try_get("recent")?,

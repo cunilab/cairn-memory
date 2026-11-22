@@ -357,3 +357,69 @@ async fn stats_first_run_capture_and_devices_attention() {
     );
     app.finish().await;
 }
+
+#[tokio::test]
+async fn first_run_stays_off_after_every_device_is_revoked() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop-claude").await;
+    app.send_with(
+        "POST",
+        "session/brief",
+        json!({"session_id": "s1"}),
+        Some(&device),
+        &[("user-agent", "cairn/0.1.6 (claude; hook)")],
+    )
+    .await;
+    app.post(
+        "observe",
+        json!({"event_id": "e1", "session_id": "s1", "kind": "prompt", "content": "TODO: first capture"}),
+        &device,
+    )
+    .await;
+    assert_eq!(app.get("stats", &admin).await["first_run"], false);
+    let listed = app.get("devices", &admin).await;
+    let id = listed[0]["device_id"].as_str().unwrap();
+    app.post("devices/revoke", json!({"deviceId": id}), &admin)
+        .await;
+    let stats = app.get("stats", &admin).await;
+    assert_eq!(stats["devices_checked_in"], 0);
+    assert_eq!(
+        stats["first_run"], false,
+        "months of history, no live device: {stats}"
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn attention_is_a_session_only_slice_of_stats() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let member = app.member(&admin, "member").await;
+    let device = app.device(&admin, "laptop-claude").await;
+    app.send_with(
+        "POST",
+        "session/brief",
+        json!({"session_id": "s1"}),
+        Some(&device),
+        &[("user-agent", "cairn/0.0.1 (claude; hook)")],
+    )
+    .await;
+    let attention = app.get("stats/attention", &admin).await;
+    let stats = app.get("stats", &admin).await;
+    assert_eq!(attention["devices_attention"], stats["devices_attention"]);
+    assert_eq!(attention["devices_attention"].as_array().unwrap().len(), 1);
+    assert_eq!(attention["jobs"], stats["jobs"]);
+    assert_eq!(
+        app.get("stats/attention", &member).await["devices_attention"],
+        json!([])
+    );
+    for token in [Some(device.as_str()), None] {
+        let (status, body) = app.send("GET", "stats/attention", json!(null), token).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (401, Some("session_required"))
+        );
+    }
+    app.finish().await;
+}

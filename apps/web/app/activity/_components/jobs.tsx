@@ -15,7 +15,7 @@ import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { Job } from "@/lib/generated/Job";
 import type { JobCounts } from "@/lib/generated/JobCounts";
 import type { JobSnapshot } from "@/lib/generated/JobSnapshot";
-import type { Stats } from "@/lib/generated/Stats";
+import type { Attention } from "@/lib/generated/Attention";
 
 /** Admins get the rows; everyone else gets their own counts from `/stats`. */
 type Queue = JobCounts & { quarantine?: Job[] };
@@ -36,7 +36,7 @@ export function Jobs() {
   useEffect(() => {
     if (account === undefined) return;
     let cancelled = false;
-    (admin ? cairn<JobSnapshot>("admin/jobs") : cairn<Stats>("stats?days=7").then((stats) => stats.jobs))
+    (admin ? cairn<JobSnapshot>("admin/jobs") : cairn<Attention>("stats/attention").then((next) => next.jobs))
       .then((next) => {
         if (cancelled) return;
         setQueue(next);

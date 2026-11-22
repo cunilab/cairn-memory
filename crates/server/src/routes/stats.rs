@@ -4,7 +4,7 @@ use crate::{AppState, VERSION};
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
-use cairn_store::stats::{Stats, StatsInput};
+use cairn_store::stats::{Attention, Stats, StatsInput};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -41,6 +41,28 @@ pub async fn stats(
                 is_admin: account.is_admin,
                 tz_minutes,
                 days,
+                server_version: VERSION,
+                public_url: &public_url,
+            })
+            .await?,
+    ))
+}
+
+/// The sidebar's two dots (a device needs an update, a job stopped): the cheap slice of `stats`.
+pub async fn attention(
+    State(state): State<AppState>,
+    Web(account): Web,
+    headers: HeaderMap,
+) -> ApiResult<Attention> {
+    let public_url = state.public_url(&headers);
+    Ok(Json(
+        state
+            .store
+            .attention(&StatsInput {
+                person_id: &account.person_id,
+                is_admin: account.is_admin,
+                tz_minutes: 0,
+                days: 7,
                 server_version: VERSION,
                 public_url: &public_url,
             })

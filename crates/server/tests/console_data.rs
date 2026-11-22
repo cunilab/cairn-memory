@@ -538,6 +538,38 @@ async fn health_reports_public_url_and_version() {
         )
         .await;
     assert_eq!(body["public_url"], "https://cairn.example.org");
+    // The console's proxy forwards the browser's origin; Traefik's prefix strip says where agents go.
+    let (_, body) = app
+        .send_with(
+            "GET",
+            "health",
+            json!(null),
+            None,
+            &[
+                ("host", "cairn-server:3111"),
+                ("x-forwarded-host", "cairn.example.org"),
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-prefix", "/agent/"),
+            ],
+        )
+        .await;
+    assert_eq!(body["public_url"], "https://cairn.example.org/agent");
+    let (_, body) = app
+        .send_with(
+            "GET",
+            "health",
+            json!(null),
+            None,
+            &[
+                ("host", "cairn.internal:3111"),
+                ("x-forwarded-prefix", "/a b?x=1"),
+            ],
+        )
+        .await;
+    assert_eq!(
+        body["public_url"], "http://cairn.internal:3111",
+        "a bad prefix is ignored"
+    );
     app.finish().await;
 }
 
@@ -696,6 +728,16 @@ async fn export_owned_memories_and_import_with_dry_run() {
         ids(&carols).contains(&global),
         "alice's global rule is visible to everyone"
     );
+    let alices = carols
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == global.as_str())
+        .unwrap();
+    assert_eq!(
+        alices["owner"], "",
+        "another person's id is not shown: {alices}"
+    );
     assert!(
         !ids(&carols).contains(&personal),
         "alice's personal rule stays hers"
@@ -730,5 +772,72 @@ async fn export_owned_memories_and_import_with_dry_run() {
         (status, body["code"].as_str()),
         (401, Some("session_required"))
     );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn a_project_member_imports_a_project_memory_and_export_skips_handoffs() {
+    let Some(app) = App::new().await else { return };
+    let alice = app.admin("alice").await;
+    let bob = app.member(&alice, "bob").await;
+    let (alice_d, bob_d) = (app.device(&alice, "a").await, app.device(&bob, "b").await);
+    let project = app.project(&alice_d, "github.com/acme/widgets").await;
+    app.post(
+        "projects/init",
+        json!({"project_id": project, "repository": "x"}),
+        &bob_d,
+    )
+    .await;
+    app.save(
+        &alice_d,
+        in_project(rule("Alice project rule"), &project, "main", &[]),
+    )
+    .await;
+    let handoff = app.save(&alice_d, on(rule("Alice handoff"), "main")).await;
+    sql(
+        &app,
+        &format!("UPDATE memories SET kind = 'handoff' WHERE memory_id = '{handoff}'"),
+    )
+    .await;
+    let (_, _, bytes) = app
+        .send_raw("GET", "memories/export", json!(null), Some(&alice), &[])
+        .await;
+    let export: Value = serde_json::from_slice(&bytes).unwrap();
+    let titles: Vec<&str> = export["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Alice project rule"], "no handoff in an export");
+
+    let done = app.post("memories/import", export.clone(), &bob).await;
+    assert_eq!(
+        (
+            done["new"].as_i64(),
+            done["invalid"].as_array().map(Vec::len)
+        ),
+        (Some(1), Some(0)),
+        "{done}"
+    );
+    let bobs = app.get("memories", &bob).await;
+    let mine: Vec<&Value> = bobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["owner_is_me"] == true)
+        .collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(
+        (mine[0]["title"].as_str(), mine[0]["project_id"].as_str()),
+        (Some("Alice project rule"), Some(project.as_str()))
+    );
+    let again = app.post("memories/import", export, &bob).await;
+    assert_eq!(again["duplicate"], 1, "importing twice adds nothing");
+    // Only the import that wrote something is recorded.
+    let audit = app.get("auth/audit?type=memories_imported", &bob).await;
+    let audit = audit.as_array().unwrap();
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0]["metadata"]["new"], 1);
     app.finish().await;
 }

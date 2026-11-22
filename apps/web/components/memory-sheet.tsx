@@ -2,9 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckIcon, CopyIcon } from "lucide-react";
 import { toast } from "sonner";
 import { KindBadge, StatusBadge } from "@/components/badges";
+import { CopyButton } from "@/components/copy-button";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import {
@@ -56,32 +56,6 @@ const IN_LABEL: Record<string, string> = {
 function words(key: string): string {
   const text = key.replaceAll("_", " ");
   return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-function CopyId({ id }: { id: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <span className="flex min-w-0 items-center gap-2">
-      <code className="min-w-0 font-mono text-xs break-all text-muted-foreground">{id}</code>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        aria-label="Copy memory id"
-        onClick={() => {
-          navigator.clipboard.writeText(id).then(
-            () => {
-              setCopied(true);
-              toast.success("Memory id copied");
-            },
-            () => toast.error("Could not copy. Select the id and copy it by hand."),
-          );
-        }}
-      >
-        {copied ? <CheckIcon /> : <CopyIcon />}
-      </Button>
-    </span>
-  );
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -240,7 +214,10 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
             </Fragment>
           ) : null}
         </dl>
-        <CopyId id={memory.id} />
+        <span className="flex min-w-0 flex-wrap items-center gap-2">
+          <code className="min-w-0 font-mono text-xs break-all text-muted-foreground">{memory.id}</code>
+          <CopyButton text={memory.id} label="Copy id" onCopied={() => toast.success("Memory id copied")} />
+        </span>
       </Section>
     </div>
   );

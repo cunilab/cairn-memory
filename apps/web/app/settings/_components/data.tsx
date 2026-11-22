@@ -71,7 +71,9 @@ export function DataTab() {
     setError(null);
     try {
       const report = await cairn<ImportReport>("memories/import", { method: "POST", body: dry.body });
-      toast.success(`Imported ${report.new.toLocaleString()} ${report.new === 1 ? "memory" : "memories"}`);
+      toast.success(
+        `Imported ${report.new.toLocaleString()} ${report.new === 1 ? "memory" : "memories"}${report.invalid.length > 0 ? `, ${report.invalid.length.toLocaleString()} skipped` : ""}`,
+      );
       announceMemoriesChanged();
       setDry(null);
     } catch (cause) {

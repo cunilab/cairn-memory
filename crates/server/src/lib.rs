@@ -43,7 +43,8 @@ impl AppState {
     }
 
     /// The address to tell agents: `CAIRN_PUBLIC_URL`, else the address this request came to
-    /// (a reverse proxy's `x-forwarded-host` and `x-forwarded-proto` win over `host`).
+    /// (a reverse proxy's `x-forwarded-host` and `x-forwarded-proto` win over `host`, and its
+    /// `x-forwarded-prefix` is the path it stripped, such as `/agent`).
     pub fn public_url(&self, headers: &HeaderMap) -> String {
         if let Some(url) = &self.public_url {
             return url.clone();
@@ -61,7 +62,15 @@ impl AppState {
             Some("https") => "https",
             _ => "http",
         };
-        format!("{scheme}://{}", host.unwrap_or("127.0.0.1:3111"))
+        let prefix = header("x-forwarded-prefix")
+            .map(|p| p.trim().trim_end_matches('/'))
+            .filter(|p| {
+                p.starts_with('/')
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "/._~-".contains(c))
+            })
+            .unwrap_or("");
+        format!("{scheme}://{}{prefix}", host.unwrap_or("127.0.0.1:3111"))
     }
 }
 

@@ -2,24 +2,12 @@
 
 import type { AuditEvent } from "@/lib/generated/AuditEvent";
 
-/** What Cairn did on its own. Everything else in the audit log is a person or device action. */
-export const SYSTEM_ACTIONS = [
-  "memory_merged",
-  "links_added",
-  "memory_promoted",
-  "memory_withdrawn",
-  "repo_state",
-  "memories_expired",
-  "session_distilled",
-  "job_quarantined",
-] as const;
-
-export const isSystemAction = (action: string): boolean =>
-  (SYSTEM_ACTIONS as readonly string[]).includes(action);
-
-/** Timeline filter chips; each lists the actions it keeps. `all` keeps every system action. */
+/**
+ * Timeline filter chips; each lists the audit actions it keeps. `all` lists none: the timeline
+ * asks for `actor=system`, and the server owns which actions are Cairn's own.
+ */
 export const TIMELINE_FILTERS = [
-  { value: "all", label: "All", actions: SYSTEM_ACTIONS as readonly string[] },
+  { value: "all", label: "All", actions: [] as readonly string[] },
   { value: "merges", label: "Merges", actions: ["memory_merged"] },
   { value: "links", label: "Links", actions: ["links_added"] },
   { value: "staleness", label: "Staleness", actions: ["repo_state"] },
@@ -40,6 +28,7 @@ const AUDIT_LABEL: Record<string, string> = {
   project_renamed: "Renamed a project",
   project_transferred: "Transferred a project",
   memory_forgotten: "Forgot a memory",
+  memories_imported: "Imported memories",
 };
 
 export function auditLabel(action: string): string {

@@ -62,6 +62,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
+import { baselineOf, checkedInSince, type Baseline } from "@/lib/device-checkin";
 import { cairn } from "@/lib/cairn";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { DeviceView } from "@/lib/generated/DeviceView";
@@ -86,7 +87,7 @@ const POLL_MS = 3000;
 const POLL_LIMIT_MS = 10 * 60 * 1000;
 
 type DeviceAction = { device: DeviceView; kind: "revoke" | "rotate" };
-type Issued = { registration: DeviceRegistration; baseline: number; rotated: boolean };
+type Issued = { registration: DeviceRegistration; baseline: Baseline; rotated: boolean };
 
 /** Step 2 and 3: the token (shown once), the setup command, and the wait for the first check-in. */
 function TokenStep({
@@ -280,7 +281,7 @@ export function Devices() {
 
   // Poll for the first check-in while the token dialog is open and the tab is visible.
   const issuedId = issued?.registration.device.device_id;
-  const baseline = issued?.baseline ?? 0;
+  const baseline = issued?.baseline;
   useEffect(() => {
     if (!issuedId) return;
     const started = Date.now();
@@ -295,7 +296,7 @@ export function Devices() {
         .then((listed) => {
           setDevices(listed);
           const row = listed.find((d) => d.device_id === issuedId);
-          if (row && (row.last_hook_at !== null || row.last_seen_at > baseline)) {
+          if (row && baseline && checkedInSince(row, baseline)) {
             setConnected([row.agent, row.client_version].filter(Boolean).join(" "));
             clearInterval(timer);
           }
@@ -308,7 +309,7 @@ export function Devices() {
   function issue(registration: DeviceRegistration, rotated: boolean) {
     setConnected(null);
     setWaitExpired(false);
-    setIssued({ registration, baseline: registration.device.last_seen_at, rotated });
+    setIssued({ registration, baseline: baselineOf(registration.device), rotated });
   }
 
   async function createDevice(event: FormEvent<HTMLFormElement>) {

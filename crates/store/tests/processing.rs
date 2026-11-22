@@ -1000,18 +1000,24 @@ async fn quarantined_twins_of_one_key_do_not_fail_the_sweep() {
         return;
     };
     let store = &db.store;
-    for round in 0..2 {
-        store.enqueue_job(JobKind::Link, "mem_x").await.unwrap();
-        let job = store.claim_jobs(JobKind::Link, 1).await.unwrap().remove(0);
-        store
-            .settle_job(
-                &job.job_id,
-                job.claim_id.as_deref().unwrap(),
-                JobEnd::Quarantine(format!("bad {round}")),
-            )
-            .await
-            .unwrap();
-    }
+    // Quarantining keeps one row per key, so the twin is written the way an older server left it.
+    store.enqueue_job(JobKind::Link, "mem_x").await.unwrap();
+    let job = store.claim_jobs(JobKind::Link, 1).await.unwrap().remove(0);
+    store
+        .settle_job(
+            &job.job_id,
+            job.claim_id.as_deref().unwrap(),
+            JobEnd::Quarantine("bad".into()),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (job_id, kind, job_key, status, attempts, finished_at)
+         VALUES ('job_twin', 'link', 'mem_x', 'quarantined', 5, now())",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
     assert_eq!(store.job_snapshot().await.unwrap().quarantined, 2);
     sqlx::query(
         "UPDATE jobs SET finished_at = now() - interval '25 hours' WHERE status = 'quarantined'",

@@ -161,7 +161,12 @@ impl Store {
         };
         Ok(memories
             .into_iter()
-            .map(|memory| {
+            .map(|mut memory| {
+                let owner_is_me = memory.owner == person_id;
+                // Another person's id is of no use to the console.
+                if !owner_is_me {
+                    memory.owner.clear();
+                }
                 let extra = extras.remove(&memory.id);
                 let (project_name, device_name, checked_at, changed, missing) = match extra {
                     Some(e) => (
@@ -175,7 +180,7 @@ impl Store {
                 };
                 MemoryView {
                     origin: memory.origin,
-                    owner_is_me: memory.owner == person_id,
+                    owner_is_me,
                     project_name,
                     device_name,
                     checked_at,

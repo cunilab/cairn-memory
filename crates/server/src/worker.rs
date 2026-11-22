@@ -6,6 +6,7 @@ use cairn_core::process::embed::EMBED_BATCH;
 use cairn_core::process::jobs::{
     JOB_POLL_SECONDS, JobEnd, JobKind, embed_job_end, is_empty_session, parse_distill_key,
 };
+use cairn_store::StoreError;
 use cairn_store::jobs::Job;
 use fastembed::{
     AutoDevicePolicy, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
@@ -174,6 +175,17 @@ async fn claim(state: &AppState, kind: JobKind) -> Vec<Job> {
         })
 }
 
+/// A failed job's error goes into the owner's timeline, so SQL detail stays in the server log.
+fn job_error(error: &StoreError) -> String {
+    match error {
+        StoreError::Database(_) => {
+            eprintln!("job failed: {error}");
+            "database error".into()
+        }
+        other => other.to_string(),
+    }
+}
+
 async fn settle(state: &AppState, job: &Job, end: JobEnd) {
     let claim_id = job.claim_id.as_deref().unwrap_or_default();
     if let Err(error) = state.store.settle_job(&job.job_id, claim_id, end).await {
@@ -188,7 +200,7 @@ async fn distill(state: &AppState) {
             Some((person, session)) => match state.store.distill_session(&person, &session).await {
                 Ok(_) => JobEnd::Succeeded,
                 Err(error) if is_empty_session(&error.to_string()) => JobEnd::Succeeded,
-                Err(error) => JobEnd::Retry(error.to_string()),
+                Err(error) => JobEnd::Retry(job_error(&error)),
             },
         };
         settle(state, &job, end).await;
@@ -212,7 +224,7 @@ async fn embed(state: &AppState) {
         Ok(items) => items,
         Err(error) => {
             for job in &jobs {
-                settle(state, job, JobEnd::Retry(error.to_string())).await;
+                settle(state, job, JobEnd::Retry(job_error(&error))).await;
             }
             return;
         }
@@ -257,7 +269,7 @@ async fn link(state: &AppState) {
     for job in claim(state, JobKind::Link).await {
         let end = match state.store.link_memory(&job.key).await {
             Ok(_) => JobEnd::Succeeded,
-            Err(error) => JobEnd::Retry(error.to_string()),
+            Err(error) => JobEnd::Retry(job_error(&error)),
         };
         settle(state, &job, end).await;
     }
@@ -267,8 +279,25 @@ async fn consolidate(state: &AppState) {
     for job in claim(state, JobKind::Consolidate).await {
         let end = match state.store.consolidate_memory(&job.key).await {
             Ok(_) => JobEnd::Succeeded,
-            Err(error) => JobEnd::Retry(error.to_string()),
+            Err(error) => JobEnd::Retry(job_error(&error)),
         };
         settle(state, &job, end).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_error_never_reaches_the_timeline() {
+        let secret = StoreError::Database(sqlx::Error::Protocol(
+            "insert into memories (secret_column)".into(),
+        ));
+        assert_eq!(job_error(&secret), "database error");
+        assert_eq!(
+            job_error(&StoreError::NotFound("memory".into())),
+            StoreError::NotFound("memory".into()).to_string()
+        );
     }
 }

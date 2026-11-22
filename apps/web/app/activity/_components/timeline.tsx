@@ -64,10 +64,7 @@ export function Timeline() {
   const [params, set] = useQueryParams();
   const [now] = useState(() => Math.floor(Date.now() / 1000));
   const filter = TIMELINE_FILTERS.find((item) => item.value === params.get("type")) ?? TIMELINE_FILTERS[0];
-  const { events, error, retry, hasMore, loadingMore, loadOlder } = useAudit(
-    "system",
-    filter.value === "all" ? [] : filter.actions,
-  );
+  const { events, error, retry, hasMore, loadingMore, loadOlder } = useAudit("system", filter.actions);
 
   const days = useMemo(() => {
     const kept = events ?? [];

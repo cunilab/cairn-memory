@@ -548,3 +548,89 @@ async fn quarantine_records_job_quarantined_for_the_owner() {
     assert_eq!(stats["jobs"]["quarantined"], 1);
     app.finish().await;
 }
+
+/// Claims the job of `key` (the memory's own embed job) and settles it.
+async fn settle_job_of(app: &App, kind: JobKind, key: &str, end: JobEnd) {
+    let store = &app.state.store;
+    let jobs = store.claim_jobs(kind, 10).await.unwrap();
+    let job = jobs.iter().find(|j| j.key == key).expect("the job of key");
+    store
+        .settle_job(&job.job_id, job.claim_id.as_deref().unwrap(), end)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_poison_job_is_reported_once_and_attention_clears_when_it_heals() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "d").await;
+    let id = app
+        .save(&device, rule("A rule whose job keeps failing"))
+        .await;
+    let store = &app.state.store;
+    let reported = || async {
+        app.get("auth/audit?actor=system&type=job_quarantined", &admin)
+            .await
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let quarantined = || async {
+        app.get("stats/attention", &admin).await["jobs"]["quarantined"]
+            .as_i64()
+            .unwrap()
+    };
+
+    settle_job_of(&app, JobKind::Embed, &id, JobEnd::Quarantine("boom".into())).await;
+    assert_eq!((reported().await, quarantined().await), (1, 1));
+
+    // The daily retry fails again, twice: the person is not told again, and the job stays flagged.
+    for _ in 0..2 {
+        sql(
+            &app,
+            "UPDATE jobs SET finished_at = now() - interval '25 hours' WHERE status = 'quarantined'",
+        )
+        .await;
+        store.sweep().await.unwrap();
+        settle_job_of(
+            &app,
+            JobKind::Embed,
+            &id,
+            JobEnd::Retry("still boom".into()),
+        )
+        .await;
+        assert_eq!((reported().await, quarantined().await), (1, 1));
+    }
+
+    // Once the retry works the flag clears.
+    sql(
+        &app,
+        "UPDATE jobs SET finished_at = now() - interval '25 hours' WHERE status = 'quarantined'",
+    )
+    .await;
+    store.sweep().await.unwrap();
+    settle_job_of(&app, JobKind::Embed, &id, JobEnd::Succeeded).await;
+    assert_eq!((reported().await, quarantined().await), (1, 0));
+
+    // A later failure is a new quarantine and is reported; the old row never double counts.
+    store.enqueue_job(JobKind::Embed, &id).await.unwrap();
+    settle_job_of(
+        &app,
+        JobKind::Embed,
+        &id,
+        JobEnd::Quarantine("again".into()),
+    )
+    .await;
+    assert_eq!((reported().await, quarantined().await), (2, 1));
+    store.enqueue_job(JobKind::Embed, &id).await.unwrap();
+    settle_job_of(
+        &app,
+        JobKind::Embed,
+        &id,
+        JobEnd::Quarantine("and again".into()),
+    )
+    .await;
+    assert_eq!(quarantined().await, 1, "one flagged row per job key");
+    app.finish().await;
+}
