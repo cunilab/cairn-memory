@@ -564,7 +564,113 @@ fn off_text_asks_nothing() {
     let server = fake_brief(r#"{"brief":"BRIEF","instructions":{"stop_nudge":"off"}}"#);
     let env = Env::new("ask-off", &server.url);
     env.run("SessionStart", &env.payload("s", json!({})), &[]);
+    prompt(&env, "s", "No, never use npm here", json!({}), &[]);
     env.edit("s", &[]);
     let reason = env.stop_reason("Stop", "s", json!({}), &[]);
     assert!(reason.is_none(), "off means no ask: {reason:?}");
+}
+
+fn prompt(env: &Env, session: &str, text: &str, extra: Value, envs: &[(&str, &str)]) {
+    let mut body = json!({"prompt": text});
+    if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+        body.extend(extra.clone());
+    }
+    env.run("UserPromptSubmit", &env.payload(session, body), envs);
+}
+
+/// A correction with no edits asks once, quoting that line and the word `rule`.
+#[test]
+fn correction_alone_triggers_rule_ask() {
+    let (_server, env) = harness("corr-alone");
+    let long = format!("No, never use npm here {}", "x".repeat(120));
+    prompt(&env, "s", &long, json!({}), &[]);
+    prompt(&env, "s", "always run bun test first", json!({}), &[]);
+    let reason = env
+        .stop_reason("Stop", "s", json!({}), &[])
+        .expect("a correction with no edits asks once");
+    assert!(reason.contains("rule"), "{reason}");
+    assert!(
+        !reason.contains("You changed"),
+        "no edits, so no file clause: {reason}"
+    );
+    assert!(
+        reason.contains("No, never use npm here"),
+        "the quote is the first correction: {reason}"
+    );
+    assert!(
+        !reason.contains("always run bun test first"),
+        "the second correction is not stored: {reason}"
+    );
+    let quoted = reason
+        .split_once("(\"")
+        .and_then(|(_, rest)| rest.split_once("\")"))
+        .map(|(quote, _)| quote)
+        .expect("the correction is quoted");
+    assert!(
+        quoted.chars().count() <= 100,
+        "{} chars: {quoted}",
+        quoted.chars().count()
+    );
+    assert!(
+        env.stop_reason("Stop", "s", json!({}), &[]).is_none(),
+        "the second Stop asks nothing"
+    );
+}
+
+/// One Stop ask carries the file clause and the correction clause, within 330 bytes.
+#[test]
+fn correction_with_edits_single_ask() {
+    let (_server, env) = harness("corr-edit");
+    prompt(&env, "s", "don't touch the migrations", json!({}), &[]);
+    env.edit("s", &[]);
+    let reason = env
+        .stop_reason("Stop", "s", json!({}), &[])
+        .expect("edits and a correction ask once");
+    assert!(
+        reason.contains("You changed 1 file(s)."),
+        "file clause missing: {reason}"
+    );
+    assert!(
+        reason.contains("don't touch the migrations") && reason.contains("rule"),
+        "{reason}"
+    );
+    assert!(reason.len() <= 330, "{} bytes: {reason}", reason.len());
+    assert!(
+        env.stop_reason("Stop", "s", json!({}), &[]).is_none(),
+        "still one ask per session"
+    );
+}
+
+/// A subagent payload or an automated session does not record the correction.
+#[test]
+fn subagent_corrections_ignored() {
+    let (_server, env) = harness("corr-sub");
+    prompt(
+        &env,
+        "child",
+        "No, never use npm here",
+        json!({"agent_id": "agent-abc123"}),
+        &[],
+    );
+    assert!(
+        env.stop_reason("Stop", "child", json!({}), &[]).is_none(),
+        "a subagent prompt records no correction"
+    );
+    prompt(
+        &env,
+        "typed",
+        "don't touch the migrations",
+        json!({"agent_type": "Explore"}),
+        &[],
+    );
+    assert!(
+        env.stop_reason("Stop", "typed", json!({}), &[]).is_none(),
+        "agent_type records no correction"
+    );
+    let auto = [("CAIRN_SESSION_ORIGIN", "automation")];
+    prompt(&env, "bot", "always run bun test first", json!({}), &auto);
+    assert!(
+        env.stop_reason("Stop", "bot", json!({}), &auto).is_none(),
+        "an automated session records no correction"
+    );
 }

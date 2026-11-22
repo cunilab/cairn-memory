@@ -14,8 +14,12 @@ use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
 use cairn_core::id::{now_seconds, sha256_hex};
-use cairn_core::instructions::{DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_stop_nudge};
-use cairn_core::process::distill::{HANDOFF_FILES_MAX, has_typed_line, is_test_command};
+use cairn_core::instructions::{
+    DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
+};
+use cairn_core::process::distill::{
+    HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
+};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -199,8 +203,11 @@ impl Hook<'_> {
             "SessionStart" => Ok(self.start()),
             "UserPromptSubmit" => {
                 let prompt = self.payload.prompt();
-                if prompt.as_ref().is_some_and(|p| has_typed_line(&p.content)) {
-                    self.with_state(|s| s.worked_signal = true);
+                if let Some(capture) = &prompt {
+                    if has_typed_line(&capture.content) {
+                        self.with_state(|s| s.worked_signal = true);
+                    }
+                    self.note_correction(&capture.content);
                 }
                 self.capture(prompt).map(|()| None)
             }
@@ -425,10 +432,25 @@ impl Hook<'_> {
             || self.event == "SubagentStop"
     }
 
-    /// The one-time Stop reminder: the session edited files and never saved. A test command or a
-    /// `Decision:` line alone does not ask. Not when the host is already continuing because of a
-    /// Stop hook (`stop_hook_active`), not for an automated or subagent session, not for
-    /// OpenCode, and not when the stop text is `off`.
+    /// Keeps the first correction line. An automated or subagent session records none.
+    fn note_correction(&self, content: &str) {
+        if self.automated() {
+            return;
+        }
+        let Some(line) = first_correction(content) else {
+            return;
+        };
+        self.with_state(|state| {
+            if state.correction.is_none() {
+                state.correction = Some(event::clip(&line, 100));
+            }
+        });
+    }
+
+    /// The one-time Stop reminder: the session edited files or the user corrected the agent, and
+    /// never saved. A test command or a `Decision:` line alone does not ask. Not when the host is
+    /// already continuing because of a Stop hook (`stop_hook_active`), not for an automated or
+    /// subagent session, not for OpenCode, and not when the stop text is `off`.
     fn stop_nudge(&self) -> Option<String> {
         if self.payload.flag("stop_hook_active")
             || self.automated()
@@ -444,11 +466,23 @@ impl Hook<'_> {
         self.with_state(|s| {
             s.worked_signal |= decided;
             let template = s.stop_nudge.as_deref().unwrap_or(DEFAULT_STOP_NUDGE);
-            if s.nudged || s.saved || s.edited.is_empty() || template.is_empty() {
+            let correction = s.correction.as_deref().filter(|line| !line.is_empty());
+            if s.nudged
+                || s.saved
+                || template.is_empty()
+                || (s.edited.is_empty() && correction.is_none())
+            {
                 return None;
             }
             s.nudged = true;
-            Some(fill_stop_nudge(template, s.edited.len()))
+            let files = (!s.edited.is_empty()).then(|| fill_stop_nudge(template, s.edited.len()));
+            let clause = correction.map(fill_correction_nudge);
+            match (files, clause) {
+                (Some(files), Some(clause)) => Some(format!("{files} {clause}")),
+                (Some(files), None) => Some(files),
+                (None, Some(clause)) => Some(clause),
+                (None, None) => None,
+            }
         })
         .flatten()
     }

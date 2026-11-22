@@ -11,9 +11,19 @@ pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is active for this project.
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
 pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop.";
 
+/// Appended to the Stop reminder, or sent alone, when the user corrected the agent.
+/// `{correction}` is the quoted line. The text around that quote is at most 90 bytes.
+pub const DEFAULT_CORRECTION_NUDGE: &str =
+    "You were corrected (\"{correction}\"): save it as a rule if it holds beyond this task.";
+
 /// A stop reminder with `{files}` replaced by the edited-files count.
 pub fn fill_stop_nudge(template: &str, files: usize) -> String {
     template.replace("{files}", &files.to_string())
+}
+
+/// The correction clause with `{correction}` replaced by the stored line.
+pub fn fill_correction_nudge(correction: &str) -> String {
+    DEFAULT_CORRECTION_NUDGE.replace("{correction}", correction)
 }
 
 /// Checks one stored text: at most `MAX_INSTRUCTION_BYTES`, no control characters except a
@@ -73,5 +83,18 @@ mod tests {
             validate_instruction("stop_nudge", "off"),
             Ok("off".to_owned())
         );
+    }
+
+    #[test]
+    fn correction_clause_fits_budget() {
+        let fixed = DEFAULT_CORRECTION_NUDGE.len() - "{correction}".len();
+        assert!(fixed <= 90, "{fixed}");
+        let quote = "No, never use npm here";
+        let clause = fill_correction_nudge(quote);
+        assert!(
+            clause.contains(quote) && clause.contains("rule"),
+            "{clause}"
+        );
+        assert!(clause.len() <= 90 + quote.len(), "{}", clause.len());
     }
 }

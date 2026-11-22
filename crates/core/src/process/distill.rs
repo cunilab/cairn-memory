@@ -238,6 +238,49 @@ pub fn has_typed_line(text: &str) -> bool {
     })
 }
 
+const CORRECTION_PREFIXES: &[&str] = &[
+    "no,",
+    "no ",
+    "don't ",
+    "do not ",
+    "never ",
+    "always ",
+    "stop ",
+    "please don't ",
+    "please never ",
+    "please always ",
+    "wrong",
+    "that's wrong",
+    "i told you",
+];
+
+/// A correction starts with one of [`CORRECTION_PREFIXES`] (lower-case, start of the line).
+pub fn is_correction(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    CORRECTION_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
+/// The first correction line in a prompt. Fenced code and boilerplate lines are skipped.
+pub fn first_correction(text: &str) -> Option<String> {
+    let mut fenced = false;
+    for raw in text.lines() {
+        let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || line.is_empty() || is_boilerplate(&line) {
+            continue;
+        }
+        if is_correction(&line) {
+            return Some(line);
+        }
+    }
+    None
+}
+
 /// D3: the first passing test command of the session.
 fn test_fact(observations: &[Observation]) -> Option<Note> {
     let passed = observations.iter().find(|o| {
@@ -782,6 +825,35 @@ mod tests {
         assert!(has_typed_line("gotcha: lock timeouts"));
         assert!(!has_typed_line("Decision:\nprose, no value"));
         assert!(!has_typed_line("Note: not a typed label"));
+    }
+
+    #[test]
+    fn correction_patterns() {
+        for yes in [
+            "No, never use npm here",
+            "always run bun test first",
+            "don't touch the migrations",
+        ] {
+            assert!(is_correction(yes), "{yes}");
+        }
+        for no in [
+            "can you always-on the logs?",
+            "I never saw this error before?",
+            "Decision: use bun",
+        ] {
+            assert!(!is_correction(no), "{no}");
+        }
+        let fenced = "```\nnever use npm\n```\n# never do this\n";
+        assert_eq!(
+            first_correction(fenced),
+            None,
+            "fences and headings are not corrections"
+        );
+        let after = "```sh\ndon't touch the migrations\n```\nalways run bun test first\n";
+        assert_eq!(
+            first_correction(after).as_deref(),
+            Some("always run bun test first")
+        );
     }
 
     #[test]

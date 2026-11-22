@@ -65,6 +65,10 @@ pub struct SessionState {
     /// Set when `CAIRN_SESSION_ORIGIN=automation`. A subagent payload does not set this.
     #[serde(default)]
     pub automated: bool,
+    /// The first user correction this session, clipped to 100 bytes. Not set for an automated
+    /// or subagent session.
+    #[serde(default)]
+    pub correction: Option<String>,
 }
 
 fn push_capped(list: &mut Vec<String>, value: &str, cap: usize) {
