@@ -1728,7 +1728,7 @@ fn work_without_a_save_blocks_the_first_stop_once() {
     env.edit("s1", "src/a.rs", "z");
     let reason = blocked(&stop(&env, "s1", json!({}))).expect("a reminder");
     assert!(
-        reason.starts_with("You changed 2 file(s) but saved nothing to Cairn."),
+        reason.starts_with("You changed 2 file(s). If you learned something reusable"),
         "{reason}"
     );
     assert!(reason.contains("memory_save"), "{reason}");
@@ -1797,19 +1797,18 @@ fn only_real_work_is_reminded() {
         ),
     );
     assert!(blocked(&stop(&env, "qa", json!({}))).is_none());
-    // A recognised test command counts, a plain install does not.
+    // A recognised test command with no edit does not ask, and a plain install does not.
     env.bash("inst", "bun install", json!({"exit_code": 0}));
     assert!(blocked(&stop(&env, "inst", json!({}))).is_none());
     env.bash("test", "bun test", json!({"exit_code": 0}));
-    let reason = blocked(&stop(&env, "test", json!({}))).unwrap();
     assert!(
-        reason.starts_with("You changed 0 file(s) but saved nothing"),
-        "{reason}"
+        blocked(&stop(&env, "test", json!({}))).is_none(),
+        "a test command with no edits does not ask"
     );
-    // A Decision-style line in the last assistant message counts.
+    // A Decision-style line without an edit does not ask.
     let said =
         json!({"last_assistant_message": "Done.\nDecision: use pgvector\nReason: one database"});
-    assert!(blocked(&stop(&env, "decide", said)).is_some());
+    assert!(blocked(&stop(&env, "decide", said)).is_none());
     assert!(
         blocked(&stop(
             &env,
@@ -1921,7 +1920,7 @@ fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text(
     env.edit("s1", "src/a.rs", "x");
     let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
     assert!(
-        reason.starts_with("You changed 1 file(s) but saved nothing to Cairn."),
+        reason.starts_with("You changed 1 file(s). If you learned something reusable"),
         "{reason}"
     );
     // The server is not there at session start: the built-in line goes in alone.

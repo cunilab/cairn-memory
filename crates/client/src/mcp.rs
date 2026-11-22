@@ -477,4 +477,37 @@ mod tests {
         assert_eq!(codes, [json!(-32700), json!(-32600), Value::Null]);
         assert_eq!(replies[2]["result"], json!({}));
     }
+
+    /// Compact JSON bytes of `memory_save`'s inputSchema before `items` was added.
+    #[test]
+    fn five_tools_and_schema_budget() {
+        let list = tools::tools_list();
+        let tools = list["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 5);
+        let save = tools
+            .iter()
+            .find(|tool| tool["name"] == "memory_save")
+            .unwrap();
+        let schema = save["inputSchema"].to_string();
+        const BEFORE: usize = 532;
+        assert!(
+            schema.len() >= BEFORE,
+            "schema shrank: {} < {BEFORE}",
+            schema.len()
+        );
+        let grown = schema.len() - BEFORE;
+        assert!(
+            schema.contains("\"maxItems\":3"),
+            "items schema missing: {schema}"
+        );
+        assert!(grown <= 450, "schema grew by {grown}: {schema}");
+        assert!(
+            save["description"]
+                .as_str()
+                .unwrap()
+                .contains("items: up to 3 notes in one call."),
+            "{}",
+            save["description"]
+        );
+    }
 }

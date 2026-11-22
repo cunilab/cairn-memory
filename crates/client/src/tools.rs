@@ -43,7 +43,7 @@ pub const TOOLS: [Tool; 5] = [
     },
     Tool {
         name: "memory_save",
-        description: "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses.",
+        description: "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call.",
         cli: "save",
         route: "/remember",
         schema: || {
@@ -56,7 +56,18 @@ pub const TOOLS: [Tool; 5] = [
                 "evidence":{"type":"array","items":{"type":"string"},"description":"paths, commands, commits"},
                 "supersedes":{"type":"string"},
                 "contradicts":{"type":"string"},
-                "scope":{"type":"string","enum":["project","personal","global"]}},
+                "scope":{"type":"string","enum":["project","personal","global"]},
+                "items":{"type":"array","maxItems":3,"items":{"type":"object","properties":{
+                    "kind":{"type":"string"},
+                    "title":{"type":"string","maxLength":80},
+                    "summary":{"type":"string","maxLength":240},
+                    "reason":{"type":"string"},
+                    "fields":{"type":"object"},
+                    "evidence":{"type":"array","items":{"type":"string"}},
+                    "supersedes":{"type":"string"},
+                    "contradicts":{"type":"string"},
+                    "scope":{"type":"string"}},
+                  "required":["kind","title","summary"]}}},
               "required":["kind","title","summary"]})
         },
     },
@@ -113,20 +124,25 @@ pub fn tools_list() -> Value {
 /// comes from git unless the caller sent one.
 pub fn call(client: &Client, tool: &Tool, mut args: Map<String, Value>) -> Result<Value, Error> {
     let schema = (tool.schema)();
-    for key in schema["required"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        let present = match args.get(key) {
-            None | Some(Value::Null) => false,
-            Some(Value::String(text)) => !text.trim().is_empty(),
-            Some(Value::Array(items)) => !items.is_empty(),
-            Some(_) => true,
-        };
-        if !present {
-            return Err(Error::Input(format!("{key} is required")));
+    // A batch omits the single-note fields. The server rejects a mix, and a list longer than 3.
+    let batched =
+        tool.name == "memory_save" && args.get("items").is_some_and(|value| !value.is_null());
+    if !batched {
+        for key in schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let present = match args.get(key) {
+                None | Some(Value::Null) => false,
+                Some(Value::String(text)) => !text.trim().is_empty(),
+                Some(Value::Array(items)) => !items.is_empty(),
+                Some(_) => true,
+            };
+            if !present {
+                return Err(Error::Input(format!("{key} is required")));
+            }
         }
     }
     if !args.contains_key("context")

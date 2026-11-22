@@ -19,20 +19,26 @@ struct Fake {
 }
 
 fn fake() -> Fake {
+    fake_brief(r#"{"brief":"BRIEF"}"#)
+}
+
+fn fake_brief(brief: &str) -> Fake {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
+    let brief = Arc::new(Mutex::new(brief.to_owned()));
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let log = log.clone();
-            thread::spawn(move || serve(stream, &log));
+            let brief = brief.clone();
+            thread::spawn(move || serve(stream, &log, &brief));
         }
     });
     Fake { url, seen }
 }
 
-fn serve(mut stream: std::net::TcpStream, log: &Mutex<Vec<Req>>) {
+fn serve(mut stream: std::net::TcpStream, log: &Mutex<Vec<Req>>, brief: &Mutex<String>) {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let (head_end, length) = loop {
@@ -70,13 +76,14 @@ fn serve(mut stream: std::net::TcpStream, log: &Mutex<Vec<Req>>) {
         body,
     });
     let body = if path.ends_with("/checkpoint") {
-        r#"{"status":"stored"}"#
+        r#"{"status":"stored"}"#.to_owned()
     } else if path.ends_with("/topic") {
-        r#"{"notes":[]}"#
+        r#"{"notes":[]}"#.to_owned()
     } else if path.ends_with("/brief") {
-        r#"{"brief":"BRIEF"}"#
+        brief.lock().unwrap().clone()
     } else {
         r#"{"accepted":true,"duplicate":false,"event_id":"e","project_attachment":{"status":"personal"}}"#
+            .to_owned()
     };
     let reply = format!(
         "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -278,7 +285,7 @@ fn normal_session_after_automation_still_asks() {
         .stop_reason("Stop", "person", json!({}), &[])
         .expect("a normal session in the same checkout still asks");
     assert!(
-        reason.starts_with("You changed 1 file(s) but saved nothing to Cairn."),
+        reason.starts_with("You changed 1 file(s). If you learned something reusable"),
         "{reason}"
     );
 }
@@ -307,7 +314,7 @@ fn subagent_event_on_the_parent_session_still_asks() {
     assert!(
         reason
             .unwrap()
-            .starts_with("You changed 2 file(s) but saved nothing to Cairn."),
+            .starts_with("You changed 2 file(s). If you learned something reusable"),
         "the parent still has its edits"
     );
 }
@@ -491,4 +498,73 @@ fn no_git_edits_relative_to_project_root() {
         "handoff files"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn bash(env: &Env, session: &str, command: &str) {
+    let call = json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"success": true},
+        "tool_use_id": session
+    });
+    env.run("PostToolUse", &env.payload(session, call), &[]);
+}
+
+/// One edited file asks once. A test command, a Decision line, or a save does not.
+#[test]
+fn ask_once_only_after_file_changes() {
+    let (_server, env) = harness("ask-once");
+    env.edit("files", &[]);
+    let reason = env
+        .stop_reason("Stop", "files", json!({}), &[])
+        .expect("the first Stop after an edit asks");
+    assert!(
+        reason.starts_with("You changed 1 file(s). If you learned something reusable"),
+        "{reason}"
+    );
+    assert!(reason.contains("memory_save"), "{reason}");
+    assert!(
+        env.stop_reason("Stop", "files", json!({}), &[]).is_none(),
+        "the second Stop asks nothing"
+    );
+
+    bash(&env, "tests", "cargo test");
+    assert!(
+        env.stop_reason("Stop", "tests", json!({}), &[]).is_none(),
+        "a test command with no edits does not ask"
+    );
+    assert!(
+        env.stop_reason(
+            "Stop",
+            "decide",
+            json!({"last_assistant_message": "Done.\nDecision: use pgvector\nReason: one database"}),
+            &[],
+        )
+        .is_none(),
+        "a Decision line with no edits does not ask"
+    );
+
+    env.edit("saved", &[]);
+    let save = json!({
+        "tool_name": "mcp__cairn__memory_save",
+        "tool_input": {"kind": "fact"},
+        "tool_response": {"status": "active"},
+        "tool_use_id": "saved"
+    });
+    env.run("PostToolUse", &env.payload("saved", save), &[]);
+    assert!(
+        env.stop_reason("Stop", "saved", json!({}), &[]).is_none(),
+        "a save before Stop does not ask"
+    );
+}
+
+/// The brief's stop text `off` is no ask, even after an edit.
+#[test]
+fn off_text_asks_nothing() {
+    let server = fake_brief(r#"{"brief":"BRIEF","instructions":{"stop_nudge":"off"}}"#);
+    let env = Env::new("ask-off", &server.url);
+    env.run("SessionStart", &env.payload("s", json!({})), &[]);
+    env.edit("s", &[]);
+    let reason = env.stop_reason("Stop", "s", json!({}), &[]);
+    assert!(reason.is_none(), "off means no ask: {reason:?}");
 }

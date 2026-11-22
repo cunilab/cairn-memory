@@ -14,16 +14,17 @@ pub const TOPICS_PER_SESSION: u8 = 4;
 pub const TOPIC_LOOKUPS_PER_SESSION: u8 = 16;
 
 /// The server's text for a field (`reply["instructions"][key]`) when it is usable: not empty, and
-/// cut to the stored limit on a character boundary; else the built-in default.
+/// cut to the stored limit on a character boundary; else the built-in default. A stop text of
+/// exactly `off` is no text, which disables the ask; an empty text still means the default.
 pub fn server_text(reply: &Value, key: &str, default: &str) -> String {
-    reply["instructions"][key]
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map_or_else(
-            || default.to_owned(),
-            |text| truncate(text, MAX_INSTRUCTION_BYTES).to_owned(),
-        )
+    let text = reply["instructions"][key].as_str().map(str::trim);
+    if key == "stop_nudge" && text == Some("off") {
+        return String::new();
+    }
+    text.filter(|text| !text.is_empty()).map_or_else(
+        || default.to_owned(),
+        |text| truncate(text, MAX_INSTRUCTION_BYTES).to_owned(),
+    )
 }
 
 fn one_line(text: &str) -> String {
@@ -99,6 +100,18 @@ mod tests {
         assert_eq!(server_text(&reply, "missing", "dflt"), "dflt");
         assert_eq!(server_text(&json!({}), "a", "dflt"), "dflt");
         assert_eq!(server_text(&reply, "c", "dflt").len(), 600);
+        assert_eq!(
+            server_text(
+                &json!({"instructions": {"stop_nudge": "  off  "}}),
+                "stop_nudge",
+                "dflt"
+            ),
+            ""
+        );
+        assert_eq!(
+            server_text(&json!({"instructions": {"a": "off"}}), "a", "dflt"),
+            "off"
+        );
     }
 
     #[test]

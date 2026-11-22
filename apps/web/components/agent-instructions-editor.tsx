@@ -25,7 +25,7 @@ const COPY: Record<Key, { title: string; help: string; preview: (text: string) =
   },
   stop_nudge: {
     title: "Stop reminder",
-    help: "Sent once, when a session changed files or ran tests and saved nothing to Cairn. {files} becomes the number of edited files.",
+    help: "Sent once, when a session changed files and saved nothing. {files} becomes the number of edited files. Set this to off to disable the ask.",
     preview: (text) => sampleStop(text),
     where: "Shown to the agent at Stop (with 3 edited files here)",
   },

@@ -425,10 +425,10 @@ impl Hook<'_> {
             || self.event == "SubagentStop"
     }
 
-    /// The one-time Stop reminder: the session edited files, ran a test command or wrote a
-    /// `Decision:` line, and never saved. Not when the host is already continuing because of a
-    /// Stop hook (`stop_hook_active`), not for an automated or subagent session, and not for
-    /// OpenCode, whose plugin cannot continue a turn.
+    /// The one-time Stop reminder: the session edited files and never saved. A test command or a
+    /// `Decision:` line alone does not ask. Not when the host is already continuing because of a
+    /// Stop hook (`stop_hook_active`), not for an automated or subagent session, not for
+    /// OpenCode, and not when the stop text is `off`.
     fn stop_nudge(&self) -> Option<String> {
         if self.payload.flag("stop_hook_active")
             || self.automated()
@@ -443,11 +443,11 @@ impl Hook<'_> {
             .is_some_and(|message| has_typed_line(&message.content));
         self.with_state(|s| {
             s.worked_signal |= decided;
-            if s.nudged || s.saved || !(s.worked_signal || !s.edited.is_empty()) {
+            let template = s.stop_nudge.as_deref().unwrap_or(DEFAULT_STOP_NUDGE);
+            if s.nudged || s.saved || s.edited.is_empty() || template.is_empty() {
                 return None;
             }
             s.nudged = true;
-            let template = s.stop_nudge.as_deref().unwrap_or(DEFAULT_STOP_NUDGE);
             Some(fill_stop_nudge(template, s.edited.len()))
         })
         .flatten()

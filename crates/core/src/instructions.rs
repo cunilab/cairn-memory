@@ -9,7 +9,7 @@ pub const MAX_INSTRUCTION_BYTES: usize = 600;
 pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is active for this project. Before deciding or debugging, memory_search; after a decision, fixed gotcha or finished task, memory_save with a reason.";
 
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
-pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s) but saved nothing to Cairn. If anything here is a reusable decision, gotcha or procedure, save it now with memory_save; otherwise just finish.";
+pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop.";
 
 /// A stop reminder with `{files}` replaced by the edited-files count.
 pub fn fill_stop_nudge(template: &str, files: usize) -> String {
@@ -40,7 +40,7 @@ mod tests {
     fn the_defaults_fit_and_the_placeholder_is_filled() {
         assert!(DEFAULT_SESSION_INSTRUCTION.len() <= 200);
         assert!(DEFAULT_STOP_NUDGE.len() <= MAX_INSTRUCTION_BYTES);
-        assert!(fill_stop_nudge(DEFAULT_STOP_NUDGE, 3).starts_with("You changed 3 file(s) but"));
+        assert!(fill_stop_nudge(DEFAULT_STOP_NUDGE, 3).starts_with("You changed 3 file(s)."));
         assert_eq!(fill_stop_nudge("no placeholder", 3), "no placeholder");
     }
 
@@ -53,5 +53,25 @@ mod tests {
         assert_eq!(long, "stop_nudge is 602 bytes; the limit is 600");
         assert!(validate_instruction("f", "a\u{0}b").is_err());
         assert!(validate_instruction("f", "two\nlines").is_ok());
+    }
+
+    #[test]
+    fn stop_text_fits_budget() {
+        assert_eq!(
+            DEFAULT_STOP_NUDGE,
+            "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop."
+        );
+        assert!(
+            DEFAULT_STOP_NUDGE.len() <= 170,
+            "{}",
+            DEFAULT_STOP_NUDGE.len()
+        );
+        let wrapped =
+            serde_json::json!({"decision": "block", "reason": DEFAULT_STOP_NUDGE}).to_string();
+        assert!(wrapped.len() <= 230, "{}", wrapped.len());
+        assert_eq!(
+            validate_instruction("stop_nudge", "off"),
+            Ok("off".to_owned())
+        );
     }
 }

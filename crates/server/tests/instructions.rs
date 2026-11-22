@@ -326,3 +326,48 @@ async fn a_project_override_wins_and_clearing_falls_back_to_the_global_text() {
     );
     app.finish().await;
 }
+
+/// `off` is a stored stop text, not a clear. A project sentence beats a global `off`.
+#[tokio::test]
+async fn off_disables_the_ask() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let owner = app.member(&admin, "owner").await;
+    let device = app.device(&owner, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/widgets", "name": "Widgets"}),
+            &device,
+        )
+        .await;
+    let id = project["project_id"].as_str().unwrap();
+    let path = format!("projects/{id}/agent-instructions");
+    let brief = |session: &str| {
+        app.post(
+            "session/brief",
+            json!({"session_id": session, "context": {"project_id": id, "repository": "github.com/acme/widgets"}}),
+            &device,
+        )
+    };
+
+    let set = app.post(&path, json!({"stop_nudge": "off"}), &owner).await;
+    assert_eq!(text(&set, "stop_nudge"), ("off".into(), "project".into()));
+    assert_eq!(brief("s-off").await["instructions"]["stop_nudge"], "off");
+
+    app.post("agent-instructions", json!({"stop_nudge": "off"}), &admin)
+        .await;
+    let project_text = "Project text wins. {files}";
+    let won = app
+        .post(&path, json!({"stop_nudge": project_text}), &owner)
+        .await;
+    assert_eq!(
+        text(&won, "stop_nudge"),
+        (project_text.into(), "project".into())
+    );
+    assert_eq!(
+        brief("s-project").await["instructions"]["stop_nudge"],
+        project_text
+    );
+    app.finish().await;
+}

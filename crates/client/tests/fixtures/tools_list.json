@@ -55,7 +55,7 @@
    "name": "memory_get"
   },
   {
-   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses.",
+   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call.",
    "inputSchema": {
     "properties": {
      "contradicts": {
@@ -70,6 +70,52 @@
      },
      "fields": {
       "type": "object"
+     },
+     "items": {
+      "items": {
+       "properties": {
+        "contradicts": {
+         "type": "string"
+        },
+        "evidence": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "fields": {
+         "type": "object"
+        },
+        "kind": {
+         "type": "string"
+        },
+        "reason": {
+         "type": "string"
+        },
+        "scope": {
+         "type": "string"
+        },
+        "summary": {
+         "maxLength": 240,
+         "type": "string"
+        },
+        "supersedes": {
+         "type": "string"
+        },
+        "title": {
+         "maxLength": 80,
+         "type": "string"
+        }
+       },
+       "required": [
+        "kind",
+        "title",
+        "summary"
+       ],
+       "type": "object"
+      },
+      "maxItems": 3,
+      "type": "array"
      },
      "kind": {
       "enum": [
