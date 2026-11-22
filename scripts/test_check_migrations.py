@@ -28,7 +28,8 @@ class CheckMigrationTests(unittest.TestCase):
     def test_current_tree_passes(self):
         code, out = run(ROOT)
         self.assertEqual(code, 0, out)
-        self.assertIn("migrations: 7 files, 3 allowlisted", out)
+        n = len(list((ROOT / "migrations").glob("*.sql")))
+        self.assertIn(f"migrations: {n} files, 3 allowlisted", out)
 
     def test_drop_table_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
