@@ -201,11 +201,15 @@ impl Env {
     }
 
     fn edit(&self, session: &str, envs: &[(&str, &str)]) {
+        self.edit_path(session, "src/a.rs", envs);
+    }
+
+    fn edit_path(&self, session: &str, path: &str, envs: &[(&str, &str)]) {
         let call = json!({
             "tool_name": "Edit",
-            "tool_input": {"file_path": "src/a.rs", "old_string": "a", "new_string": "x"},
+            "tool_input": {"file_path": path, "old_string": "a", "new_string": "x"},
             "tool_response": {"success": true},
-            "tool_use_id": session
+            "tool_use_id": path
         });
         self.run("PostToolUse", &self.payload(session, call), envs);
     }
@@ -639,6 +643,55 @@ fn correction_with_edits_single_ask() {
         env.stop_reason("Stop", "s", json!({}), &[]).is_none(),
         "still one ask per session"
     );
+}
+
+/// A quote longer than 95 bytes, cut on a multi-byte scalar, plus `EDITED_MAX` files, stays
+/// within 330 bytes and is valid UTF-8. `EDITED_MAX` is 64 (`hook/state.rs`).
+#[test]
+fn correction_quote_and_max_files_stay_within_330_bytes() {
+    let (_server, env) = harness("corr-cap");
+    let marker = "\n[truncated]";
+    let keep = 95 - marker.len();
+    let mut line = String::from("No, ");
+    while line.len() < keep - 1 {
+        line.push('x');
+    }
+    assert_eq!(
+        line.len(),
+        keep - 1,
+        "the next byte starts a multi-byte scalar"
+    );
+    line.push('é');
+    assert!(!line.is_char_boundary(keep), "byte {keep} falls inside é");
+    line.push_str(" and then some more text past the cap");
+    assert!(line.len() > 95, "{} bytes", line.len());
+    prompt(&env, "s", &line, json!({}), &[]);
+    for index in 0..64 {
+        env.edit_path("s", &format!("f{index}.rs"), &[]);
+    }
+    let reason = env
+        .stop_reason("Stop", "s", json!({}), &[])
+        .expect("the capped ask");
+    assert!(
+        reason.contains("You changed 64 file(s)."),
+        "file count is EDITED_MAX: {reason}"
+    );
+    assert!(reason.contains("rule"), "{reason}");
+    let quoted = reason
+        .split_once("(\"")
+        .and_then(|(_, rest)| rest.split_once("\")"))
+        .map(|(quote, _)| quote)
+        .expect("the correction is quoted");
+    assert!(quoted.len() <= 95, "{} bytes: {quoted}", quoted.len());
+    assert!(
+        !quoted.contains('é'),
+        "the scalar on the boundary is not split"
+    );
+    assert!(
+        std::str::from_utf8(reason.as_bytes()).is_ok(),
+        "reason is valid UTF-8"
+    );
+    assert!(reason.len() <= 330, "{} bytes: {reason}", reason.len());
 }
 
 /// A subagent payload or an automated session does not record the correction.

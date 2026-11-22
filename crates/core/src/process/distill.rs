@@ -254,12 +254,46 @@ const CORRECTION_PREFIXES: &[&str] = &[
     "i told you",
 ];
 
+/// Ordinary replies that share a correction prefix. Matched at the start of the line only.
+const ORDINARY_PHRASES: &[&str] = &[
+    "no problem",
+    "no worries",
+    "don't worry",
+    "never mind",
+    "nevermind",
+    "stop here",
+];
+
 /// A correction starts with one of [`CORRECTION_PREFIXES`] (lower-case, start of the line).
+/// `wrong` must end the word, so `wrongly` does not count. An ordinary reply does not either.
 pub fn is_correction(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
+    if ordinary_phrase(&lower) {
+        return false;
+    }
     CORRECTION_PREFIXES
         .iter()
-        .any(|prefix| lower.starts_with(prefix))
+        .any(|prefix| prefix_matches(&lower, prefix))
+}
+
+fn ordinary_phrase(lower: &str) -> bool {
+    ORDINARY_PHRASES.iter().any(|phrase| {
+        let Some(rest) = lower.strip_prefix(phrase) else {
+            return false;
+        };
+        rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphanumeric())
+    })
+}
+
+/// `wrong` / `that's wrong` match only when `wrong` is the whole word.
+fn prefix_matches(lower: &str, prefix: &str) -> bool {
+    let Some(rest) = lower.strip_prefix(prefix) else {
+        return false;
+    };
+    if prefix.ends_with("wrong") {
+        return rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphabetic());
+    }
+    true
 }
 
 /// The first correction line in a prompt. Fenced code and boilerplate lines are skipped.
@@ -267,7 +301,7 @@ pub fn first_correction(text: &str) -> Option<String> {
     let mut fenced = false;
     for raw in text.lines() {
         let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-        if line.starts_with("```") {
+        if line.starts_with("```") || line.starts_with("~~~") {
             fenced = !fenced;
             continue;
         }
@@ -840,6 +874,13 @@ mod tests {
             "can you always-on the logs?",
             "I never saw this error before?",
             "Decision: use bun",
+            "no problem",
+            "no worries",
+            "don't worry",
+            "never mind",
+            "nevermind",
+            "stop here",
+            "wrongly blamed the database",
         ] {
             assert!(!is_correction(no), "{no}");
         }
@@ -852,6 +893,17 @@ mod tests {
         let after = "```sh\ndon't touch the migrations\n```\nalways run bun test first\n";
         assert_eq!(
             first_correction(after).as_deref(),
+            Some("always run bun test first")
+        );
+        let tilde = "~~~\nno, never use npm\n~~~\n";
+        assert_eq!(
+            first_correction(tilde),
+            None,
+            "tilde fences are not corrections"
+        );
+        let tilde_after = "~~~sh\ndon't touch the migrations\n~~~\nalways run bun test first\n";
+        assert_eq!(
+            first_correction(tilde_after).as_deref(),
             Some("always run bun test first")
         );
     }

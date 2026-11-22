@@ -442,7 +442,7 @@ impl Hook<'_> {
         };
         self.with_state(|state| {
             if state.correction.is_none() {
-                state.correction = Some(event::clip(&line, 100));
+                state.correction = Some(event::clip(&line, 95));
             }
         });
     }
