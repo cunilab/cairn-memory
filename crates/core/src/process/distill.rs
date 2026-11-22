@@ -265,8 +265,16 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         if observation.kind != CaptureKind::Prompt {
             continue;
         }
+        let mut fenced = false;
         for line in observation.content.lines() {
             let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if line.starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced || is_boilerplate(&line) {
+                continue;
+            }
             let lower = line.to_ascii_lowercase();
             let mut used = false;
             if has_marker(
@@ -505,6 +513,15 @@ impl Draft {
 
 fn clip(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
+}
+
+/// A command, heading, quote or option line. A pasted brief (an agent preamble, a README) is full
+/// of them, and their "blocked" or "should" is not the person's own open item.
+fn is_boilerplate(line: &str) -> bool {
+    line.starts_with(['#', '$', '>'])
+        || line
+            .split(' ')
+            .any(|word| word.len() > 2 && word.starts_with("--"))
 }
 
 fn has_marker(lower: &str, markers: &[&str]) -> bool {
@@ -747,6 +764,28 @@ mod tests {
             )])
             .notes
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn handoff_ignores_pasted_commands_headings_and_code() {
+        let brief = "# Blocked, and the coordinator must act before you can continue:\n\
+            orca orchestration send --from term_1 --subject \"Blocked: x\" --task-id t\n\
+            > blocked on the reviewer\n\
+            $ cargo test --workspace # remaining\n\
+            ```sh\n\
+            todo: inside a fence\n\
+            ```\n\
+            TODO: wire the worker";
+        let d = distill(&[prompt("p1", brief), edit("e1", "src/a.rs")]);
+        let fields = d.handoff.expect("handoff").fields.unwrap();
+        assert_eq!(
+            fields["next_steps"],
+            serde_json::json!(["TODO: wire the worker"])
+        );
+        assert_eq!(
+            fields["open_questions"],
+            serde_json::json!(["TODO: wire the worker"])
         );
     }
 
