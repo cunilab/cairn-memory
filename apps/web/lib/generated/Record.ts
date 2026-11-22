@@ -8,4 +8,8 @@ import type { Status } from "./Status";
 /**
  * What an agent sees of a stored memory (`memory_get`): no owner, project or usage.
  */
-export type Record = { id: string, kind: Kind, scope: Scope, status: Status, title: string, summary: string, reason?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, };
+export type Record = { id: string, kind: Kind, scope: Scope, status: Status, 
+/**
+ * Why a stale record is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
+ */
+stale_cause?: string | null, title: string, summary: string, reason?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, };

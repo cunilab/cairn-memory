@@ -416,6 +416,28 @@ async fn supersede_and_graph() {
         .await;
     assert_eq!(ids(&search), vec![new.clone()]);
     assert_eq!(search["results"][0]["status"], "stale");
+    // Stale is never unexplained: reply, card and record all name the cause.
+    assert_eq!(marked["stale_cause"], "feedback");
+    assert_eq!(search["results"][0]["stale_cause"], "feedback");
+    let got = app.post("get", json!({"ids": [&new]}), &device).await;
+    assert_eq!(got["memories"][0]["stale_cause"], "feedback");
+    // A helpful vote cannot lift a stale from the repo check, and the reply says why.
+    sqlx::query("UPDATE memories SET stale_cause = 'missing' WHERE memory_id = $1")
+        .bind(&new)
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    let helped = app
+        .post(
+            "feedback",
+            json!({"memoryId": new, "vote": "helpful"}),
+            &device,
+        )
+        .await;
+    assert_eq!(
+        (helped["status"].as_str(), helped["stale_cause"].as_str()),
+        (Some("stale"), Some("missing"))
+    );
     let (status, _) = app
         .send(
             "POST",
