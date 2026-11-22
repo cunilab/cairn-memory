@@ -281,18 +281,45 @@ pub fn lexical_sql(narrow: &Narrow) -> String {
     )
 }
 
+/// Aliases are searched when the 0.1.9 bench clears the ship rule. See `bench/aliases-0.1.9.md`.
+pub const ALIASES_IN_SEARCH: bool = true;
+
 /// The vector channel's statement; the plan test explains the same text.
 pub fn vector_sql(narrow: &Narrow) -> String {
+    let scope = searchable("m", "$1", "$3");
+    let narrowed = narrow.sql("m", 5);
+    let memory = format!(
+        "SELECT m.memory_id, m.created_at, m.embedding <=> $2::vector AS dist
+           FROM memories m
+          WHERE m.embedding IS NOT NULL AND {scope}{narrowed}
+          ORDER BY m.embedding <=> $2::vector
+          LIMIT $4"
+    );
+    if !ALIASES_IN_SEARCH {
+        return format!(
+            "WITH c AS MATERIALIZED ({memory})
+             SELECT memory_id, (1 - dist)::float4 AS score FROM c ORDER BY dist, created_at DESC, memory_id"
+        );
+    }
     format!(
-        "WITH c AS MATERIALIZED (
-           SELECT m.memory_id, m.created_at, m.embedding <=> $2::vector AS dist
-             FROM memories m
-            WHERE m.embedding IS NOT NULL AND {}{}
-            ORDER BY m.embedding <=> $2::vector
-            LIMIT $4)
-         SELECT memory_id, (1 - dist)::float4 AS score FROM c ORDER BY dist, created_at DESC, memory_id",
-        searchable("m", "$1", "$3"),
-        narrow.sql("m", 5)
+        "WITH mem AS MATERIALIZED ({memory}),
+              als AS MATERIALIZED (
+                SELECT m.memory_id, m.created_at, a.embedding <=> $2::vector AS dist
+                  FROM memory_aliases a
+                  JOIN memories m ON m.memory_id = a.memory_id
+                 WHERE a.embedding IS NOT NULL AND {scope}{narrowed}
+                 ORDER BY a.embedding <=> $2::vector
+                 LIMIT $4),
+              best AS (
+                SELECT memory_id, min(created_at) AS created_at, min(dist) AS dist
+                  FROM (SELECT memory_id, created_at, dist FROM mem
+                        UNION ALL
+                        SELECT memory_id, created_at, dist FROM als) u
+                 GROUP BY memory_id)
+         SELECT memory_id, (1 - dist)::float4 AS score
+           FROM best
+          ORDER BY dist, created_at DESC, memory_id
+          LIMIT $4"
     )
 }
 

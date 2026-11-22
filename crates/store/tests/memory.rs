@@ -826,3 +826,104 @@ async fn a_malformed_cursor_is_a_validation_error() {
     }
     db.finish().await;
 }
+
+fn alias_input(title: &str, aliases: serde_json::Value) -> cairn_core::memory::SaveInput {
+    serde_json::from_value(serde_json::json!({
+        "kind": "fact",
+        "title": title,
+        "summary": "A summary long enough to pass the quality rule.",
+        "reason": "because the test needs one",
+        "aliases": aliases,
+    }))
+    .expect("aliases field")
+}
+
+/// Six aliases, or one of 121 characters, is rejected. Five valid ones are stored as agent rows.
+/// A supersede does not copy the old memory's aliases.
+#[tokio::test]
+async fn alias_limits() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let six = alias_input(
+        "Six aliases rejected",
+        serde_json::json!(["a", "b", "c", "d", "e", "f"]),
+    );
+    let err = db.store.save(&me, six, &work).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Validation(ref m) if m.contains("aliases")),
+        "{err}"
+    );
+    let long = alias_input("Long alias rejected", serde_json::json!(["x".repeat(121)]));
+    let err = db.store.save(&me, long, &work).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Validation(ref m) if m.contains("alias")),
+        "{err}"
+    );
+    let empty = alias_input("Empty alias rejected", serde_json::json!([""]));
+    let err = db.store.save(&me, empty, &work).await.unwrap_err();
+    assert!(matches!(err, StoreError::Validation(_)), "{err}");
+
+    let aliases = vec![
+        "one way to ask".to_owned(),
+        "two way to ask".to_owned(),
+        "three way to ask".to_owned(),
+        "four way to ask".to_owned(),
+        "y".repeat(120),
+    ];
+    let saved = db
+        .store
+        .save(
+            &me,
+            alias_input("Five aliases stored", serde_json::json!(aliases)),
+            &work,
+        )
+        .await
+        .unwrap();
+    let rows: Vec<(i16, String, String)> = sqlx::query_as(
+        "SELECT ord, source, text FROM memory_aliases WHERE memory_id = $1 ORDER BY ord",
+    )
+    .bind(&saved.id)
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 5);
+    assert!(rows.iter().all(|(_, source, _)| source == "agent"));
+    assert_eq!(
+        rows.iter().map(|(ord, _, _)| *ord).collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4]
+    );
+    assert_eq!(rows[4].2.chars().count(), 120);
+
+    let newer = db
+        .store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Replacement without aliases",
+                "summary": "A new memory that does not copy the old aliases.",
+                "reason": "because the test needs one",
+                "supersedes": saved.id,
+            })),
+            &work,
+        )
+        .await
+        .unwrap();
+    let copied: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+            .bind(&newer.id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(copied, 0, "a supersede copies nothing");
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+        .bind(&saved.id)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 5);
+    db.finish().await;
+}

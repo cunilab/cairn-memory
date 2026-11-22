@@ -356,6 +356,7 @@ fn global_copy(a: &Memory, b: &Memory) -> SaveInput {
         supersedes: None,
         contradicts: None,
         scope: Some(Scope::Global),
+        aliases: Vec::new(),
     }
 }
 

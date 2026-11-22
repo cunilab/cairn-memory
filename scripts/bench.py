@@ -153,6 +153,28 @@ def stats(values):
             "max_bytes": max(values), "mean_tokens_est": est_tokens(mean)}
 
 
+def sample_aliases():
+    """The 200-note alias lists in bench/aliases-0.1.9.md, in distractor order."""
+    text = (ROOT / "bench" / "aliases-0.1.9.md").read_text()
+    start = text.index("<!-- sample-aliases -->\n") + len("<!-- sample-aliases -->\n")
+    end = text.index("\n<!-- /sample-aliases -->", start)
+    return json.loads(text[start:end])
+
+
+def derived_aliases(memory):
+    """Title, plus a gotcha symptom, the same text the migration backfill copies."""
+    aliases = []
+    title = (memory.get("title") or "").strip()
+    if title:
+        aliases.append(title[:120])
+    symptom = str(((memory.get("fields") or {}).get("symptom") or "")).strip()
+    if memory.get("kind") == "gotcha" and symptom:
+        clipped = symptom[:120]
+        if clipped not in aliases:
+            aliases.append(clipped)
+    return aliases
+
+
 def result_ids(structured):
     rows = (structured or {}).get("results") or []
     return [row["id"] for row in rows if isinstance(row, dict) and "id" in row]
@@ -173,6 +195,8 @@ def main():
     parser.add_argument("--max-weak-hits", type=int, help="exit 1 when the main-set weak queries return more than this many cards in total (a CI gate)")
     parser.add_argument("--dump-scores", help="write gold cosine and coverage per main question and the top candidate cosines per weak query "
                         "(calibration input; starts the server with CAIRN_DEBUG_SCORES=1)")
+    parser.add_argument("--no-aliases", action="store_true",
+                        help="load the corpus and distractors with no aliases (A/B against the alias run)")
     parser.add_argument("--budget", type=int, help="pass this token budget to memory_search (default: the server default)")
     parser.add_argument("--dump-injected", help="also write the text each hook event injected to this file (contains random memory ids)")
     args = parser.parse_args()
@@ -293,8 +317,11 @@ def main():
 
         # Load the corpus through the same /remember route the save tools use.
         ids = {}
+        distractor_aliases = [] if args.no_aliases else sample_aliases()
         for memory in corpus:
             body = {k: v for k, v in memory.items() if k not in ("key", "context")}
+            if args.no_aliases:
+                body.pop("aliases", None)
             # A corpus memory's own `context.files` (step 6 §6) rides in the request context, where entities read it.
             body.update(scope="project", context={**context, **memory.get("context", {})})
             reply = http.call("/remember", body, device)
@@ -308,6 +335,12 @@ def main():
             if body["scope"] == "personal" and body["kind"] in ("rule", "decision", "gotcha"):
                 body["scope"] = "project"
             body["context"] = context
+            if args.no_aliases:
+                body.pop("aliases", None)
+            elif i < len(distractor_aliases):
+                body["aliases"] = distractor_aliases[i]
+            else:
+                body["aliases"] = derived_aliases(memory)
             ids[memory["key"]] = http.call("/remember", body, device)["id"]
         assert len(set(ids.values())) == len(corpus) + len(distractors), "a distractor was merged into another on save"
 
@@ -315,7 +348,9 @@ def main():
             # Measure only once every memory has its vector and the embed and consolidate jobs are done:
             # consolidation supersedes and links near-duplicates, which changes what search returns, so a
             # search that races it makes two runs differ.
-            missing = "(select count(*) from cairn.memories where embedding is null)" if model_dir else "0"
+            missing = ("(select count(*) from cairn.memories where embedding is null)"
+                       " + (select count(*) from cairn.memory_aliases a join cairn.memories m"
+                       " on m.memory_id = a.memory_id where a.embedding is null and m.status <> 'forgotten')") if model_dir else "0"
             busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate','link') and status in ('pending','running'))"
             for _ in range(240 + 4 * len(distractors)):
                 if int(sql(f"select {missing} + {busy}") or 0) == 0:
@@ -580,7 +615,8 @@ def main():
             "label": args.label,
             "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
             "corpus": {"memories": len(corpus), "distractors": len(distractors), "question_set": args.questions,
-                       "questions": len(questions), "weak_queries": len(weak)},
+                       "questions": len(questions), "weak_queries": len(weak),
+                       "aliases": not args.no_aliases},
             "semantic_channel": {"server_health": semantic, "embedding_model": "pinned all-MiniLM-L6-v2" if model_dir else None,
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,

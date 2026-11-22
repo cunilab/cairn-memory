@@ -55,9 +55,17 @@
    "name": "memory_get"
   },
   {
-   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call.",
+   "description": "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions a future agent might ask that this answers.",
    "inputSchema": {
     "properties": {
+     "aliases": {
+      "items": {
+       "maxLength": 120,
+       "type": "string"
+      },
+      "maxItems": 5,
+      "type": "array"
+     },
      "contradicts": {
       "type": "string"
      },
@@ -74,6 +82,14 @@
      "items": {
       "items": {
        "properties": {
+        "aliases": {
+         "items": {
+          "maxLength": 120,
+          "type": "string"
+         },
+         "maxItems": 5,
+         "type": "array"
+        },
         "contradicts": {
          "type": "string"
         },

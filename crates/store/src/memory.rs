@@ -214,6 +214,13 @@ impl Store {
         device_id: Option<&str>,
     ) -> Result<Saved> {
         let project_id = self.context_project(person_id, work).await?;
+        let mut input = input;
+        input.aliases = input
+            .aliases
+            .iter()
+            .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
+            .collect();
+        let aliases = input.aliases.clone();
         let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
         let mut tx = self.pool.begin().await?;
         let saved = insert_memory(
@@ -225,6 +232,9 @@ impl Store {
             device_id,
         )
         .await?;
+        if !saved.deduplicated {
+            insert_agent_aliases(&mut tx, &saved.id, &aliases).await?;
+        }
         tx.commit().await?;
         Ok(saved)
     }
@@ -795,6 +805,25 @@ pub(crate) async fn insert_memory(
         status: Status::Active,
         deduplicated: false,
     })
+}
+
+/// Agent aliases for a new memory, ords 0..4. A duplicate save leaves the stored rows as they are.
+async fn insert_agent_aliases(
+    tx: &mut PgConnection,
+    memory_id: &str,
+    aliases: &[String],
+) -> Result<()> {
+    for (ord, text) in aliases.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO memory_aliases (memory_id, ord, source, text) VALUES ($1, $2, 'agent', $3)",
+        )
+        .bind(memory_id)
+        .bind(ord as i16)
+        .bind(text)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
 }
 
 /// The `supersedes` and `contradicts` links a save carries; a duplicate save adds any it lacks.

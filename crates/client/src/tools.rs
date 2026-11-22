@@ -43,7 +43,7 @@ pub const TOOLS: [Tool; 5] = [
     },
     Tool {
         name: "memory_save",
-        description: "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call.",
+        description: "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions a future agent might ask that this answers.",
         cli: "save",
         route: "/remember",
         schema: || {
@@ -57,6 +57,7 @@ pub const TOOLS: [Tool; 5] = [
                 "supersedes":{"type":"string"},
                 "contradicts":{"type":"string"},
                 "scope":{"type":"string","enum":["project","personal","global"]},
+                "aliases":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":120}},
                 "items":{"type":"array","maxItems":3,"items":{"type":"object","properties":{
                     "kind":{"type":"string"},
                     "title":{"type":"string","maxLength":80},
@@ -66,7 +67,8 @@ pub const TOOLS: [Tool; 5] = [
                     "evidence":{"type":"array","items":{"type":"string"}},
                     "supersedes":{"type":"string"},
                     "contradicts":{"type":"string"},
-                    "scope":{"type":"string"}},
+                    "scope":{"type":"string"},
+                    "aliases":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":120}}},
                   "required":["kind","title","summary"]}}}})
         },
     },
@@ -260,6 +262,19 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn memory_save_alias_schema_stays_within_budget() {
+        let schema = (find("memory_save").unwrap().schema)().to_string();
+        // Compact `memory_save` inputSchema before aliases (the item 03 schema).
+        const BEFORE_ALIASES: usize = 918;
+        let grown = schema.len() - BEFORE_ALIASES;
+        assert!(grown <= 200, "alias schema grew by {grown}: {schema}");
+        assert!(schema.contains("\"maxItems\":5"), "{schema}");
+        assert!(find("memory_save").unwrap().description.contains(
+            "aliases: up to 5 short questions a future agent might ask that this answers."
+        ));
     }
 
     /// An items-only save must be valid in the published schema. Hosts that

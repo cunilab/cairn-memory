@@ -81,6 +81,9 @@ pub struct SaveInput {
     pub contradicts: Option<String>,
     #[serde(default)]
     pub scope: Option<Scope>,
+    /// Up to 5 short questions, each 1..=120 characters. Not part of `identity_hash`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// A stored memory as the server returns it.

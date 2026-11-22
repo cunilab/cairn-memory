@@ -23,6 +23,7 @@ async fn migrate_twice_is_a_no_op() {
             "0006_agent_instructions",
             "0007_memory_rank",
             "0008_proof_count",
+            "0009_memory_aliases",
             "0012_always_active"
         ]
     );
@@ -32,7 +33,7 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 17);
+    assert_eq!(tables, 18);
     // Everything lives in the test schema, nothing leaks into public.
     let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs')")
         .fetch_one(db.store.pool())
@@ -440,6 +441,164 @@ async fn test_0012_is_additive_on_populated_db() {
         ["memories_embedding_hnsw", "memories_embedding_hnsw_always"]
     );
     store.migrate().await.expect("idempotent");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+}
+
+/// A 0.1.8 database (0001–0006) already has rows. Alias backfill adds one derived title per
+/// non-forgotten memory and one clipped symptom for a gotcha, leaves forgotten rows alone, and
+/// a second run inserts nothing. Memory rows are not rewritten.
+#[tokio::test]
+async fn alias_backfill_idempotent() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_alias_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, file) in [
+        ("0001_foundation", "0001_foundation.sql"),
+        ("0002_capture", "0002_capture.sql"),
+        ("0003_retrieval", "0003_retrieval.sql"),
+        ("0004_processing", "0004_processing.sql"),
+        ("0005_console", "0005_console.sql"),
+        ("0006_agent_instructions", "0006_agent_instructions.sql"),
+    ] {
+        let sql = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../migrations")
+                .join(file),
+        )
+        .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_old', 'old@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let symptom = "s".repeat(130);
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, fields, evidence_hash, identity_hash, origin, status)
+         VALUES
+           ('mem_fact', 'per_old', 'personal', 'fact', 'Fact title kept', 'A fact that already existed.', '{}', 'e1', 'i1', 'agent', 'active'),
+           ('mem_gotcha', 'per_old', 'personal', 'gotcha', 'Gotcha title kept', 'A gotcha that already existed.', $1, 'e2', 'i2', 'agent', 'active'),
+           ('mem_empty', 'per_old', 'personal', 'gotcha', 'Empty symptom kept', 'A gotcha with no symptom text.', '{\"symptom\":\"\"}', 'e3', 'i3', 'agent', 'active'),
+           ('mem_forgot', 'per_old', 'personal', 'gotcha', 'Forgotten gotcha', 'A forgotten gotcha with a symptom.', '{\"symptom\":\"still there\"}', 'e4', 'i4', 'agent', 'forgotten'),
+           ('mem_note', 'per_old', 'personal', 'note', 'Note title kept', 'A note that already existed.', '{}', 'e5', 'i5', 'agent', 'active')",
+    )
+    .bind(serde_json::json!({ "symptom": symptom }))
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let before: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT memory_id, title, summary, fields::text, status FROM memories ORDER BY memory_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    store.migrate().await.expect("apply alias migration");
+    let after: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT memory_id, title, summary, fields::text, status FROM memories ORDER BY memory_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(after, before, "memory rows unchanged");
+    let rows: Vec<(String, i16, String, String)> = sqlx::query_as(
+        "SELECT memory_id, ord, source, text FROM memory_aliases ORDER BY memory_id, ord",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                "mem_empty".into(),
+                100,
+                "derived".into(),
+                "Empty symptom kept".into()
+            ),
+            (
+                "mem_fact".into(),
+                100,
+                "derived".into(),
+                "Fact title kept".into()
+            ),
+            (
+                "mem_gotcha".into(),
+                100,
+                "derived".into(),
+                "Gotcha title kept".into()
+            ),
+            ("mem_gotcha".into(), 101, "derived".into(), "s".repeat(120)),
+            (
+                "mem_note".into(),
+                100,
+                "derived".into(),
+                "Note title kept".into()
+            ),
+        ]
+    );
+    let sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../migrations/0009_memory_aliases.sql"),
+    )
+    .unwrap();
+    for statement in sql.split(';') {
+        let statement = statement
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if statement.trim().to_ascii_uppercase().starts_with("INSERT") {
+            sqlx::raw_sql(statement.trim())
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+    }
+    let again: Vec<(String, i16, String, String)> = sqlx::query_as(
+        "SELECT memory_id, ord, source, text FROM memory_aliases ORDER BY memory_id, ord",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(again, rows, "second run inserts 0");
+    sqlx::query(
+        "INSERT INTO memory_aliases (memory_id, ord, source, text)
+         VALUES ('mem_fact', 50, 'learned', 'a learned way to ask this')",
+    )
+    .execute(store.pool())
+    .await
+    .expect("learned is an allowed source");
     sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .execute(store.pool())
         .await

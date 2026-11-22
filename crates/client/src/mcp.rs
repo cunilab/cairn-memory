@@ -502,7 +502,8 @@ mod tests {
             schema.contains("\"maxItems\":3"),
             "items schema missing: {schema}"
         );
-        assert!(grown <= 450, "schema grew by {grown}: {schema}");
+        // Item 03 used at most 450 bytes. Item 09 adds at most 200 for aliases.
+        assert!(grown <= 650, "schema grew by {grown}: {schema}");
         assert!(
             save["description"]
                 .as_str()

@@ -11,6 +11,8 @@ pub const LIST_MAX_ITEMS: usize = 20;
 pub const LIST_ITEM_MAX: usize = 300;
 pub const FIELDS_MAX_BYTES: usize = 4 * 1024;
 pub const ID_MAX: usize = 128;
+pub const ALIAS_MAX_ITEMS: usize = 5;
+pub const ALIAS_MAX_CHARS: usize = 120;
 
 fn bad<T>(message: impl Into<String>) -> Result<T, Error> {
     Err(Error::Validation(message.into()))
@@ -42,6 +44,8 @@ pub fn validate_save(input: &SaveInput, fields: &Fields, allow_handoff: bool) ->
         ));
     }
     validate_list("evidence", &input.evidence)?;
+    // Agent rows use ords 0..4. A `learned` row (item 15) shares this cap of 5.
+    validate_aliases(&input.aliases)?;
     for (name, id) in [
         ("supersedes", &input.supersedes),
         ("contradicts", &input.contradicts),
@@ -81,6 +85,21 @@ pub fn validate_fields(fields: &Fields) -> Result<(), Error> {
     }
     if value.to_string().len() > FIELDS_MAX_BYTES {
         return bad(format!("fields must be at most {FIELDS_MAX_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+fn validate_aliases(aliases: &[String]) -> Result<(), Error> {
+    if aliases.len() > ALIAS_MAX_ITEMS {
+        return bad(format!("aliases must have at most {ALIAS_MAX_ITEMS} items"));
+    }
+    if aliases
+        .iter()
+        .any(|alias| alias.trim().is_empty() || chars(alias) > ALIAS_MAX_CHARS)
+    {
+        return bad(format!(
+            "each alias must be 1..={ALIAS_MAX_CHARS} characters"
+        ));
     }
     Ok(())
 }

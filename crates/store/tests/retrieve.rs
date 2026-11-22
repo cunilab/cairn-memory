@@ -1897,3 +1897,219 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
     );
     db.finish().await;
 }
+
+/// Alias rows are embedded by the same path as the memory, and a query whose only close vector
+/// is an alias returns that memory.
+#[tokio::test]
+async fn aliases_embedded_and_searched() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Alias search title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["how do I renew the parking permit"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let pending = store.pending_embeddings(10).await.unwrap();
+    let memory_item = pending
+        .iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .clone();
+    assert!(
+        store
+            .upsert_embedding(&id, &memory_item.source_hash, &tilted(0.2, 2))
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM jobs WHERE kind = 'embed' AND job_key = $1")
+        .bind(&id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.enqueue_missing_embeddings(10).await.unwrap(), 1);
+    let items = store.embed_items(std::slice::from_ref(&id)).await.unwrap();
+    let alias = items
+        .iter()
+        .find(|item| item.alias_ord == Some(0))
+        .expect("alias text is embedded with the memory");
+    assert_eq!(alias.text, "how do I renew the parking permit");
+    assert!(
+        store
+            .upsert_embedding(&id, &alias.source_hash, &tilted(1.0, 1))
+            .await
+            .unwrap()
+    );
+    let nulls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memory_aliases a
+           JOIN memories m ON m.memory_id = a.memory_id
+          WHERE a.embedding IS NULL AND m.status <> 'forgotten'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(nulls, 0);
+    let projects = store.member_projects(&me).await.unwrap();
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert_eq!(found[0].0, id);
+    assert!(found[0].1 > 0.99, "{found:?}");
+    db.finish().await;
+}
+
+/// Forgetting a memory keeps the alias row and hides it from vector search.
+#[tokio::test]
+async fn forgotten_aliases_not_returned() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Forgotten alias title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["where is the telescope mirror stored"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    for item in store.pending_embeddings(10).await.unwrap() {
+        let vector = if item.alias_ord.is_some() {
+            tilted(1.0, 1)
+        } else {
+            tilted(0.2, 2)
+        };
+        store
+            .upsert_embedding(&id, &item.source_hash, &vector)
+            .await
+            .unwrap();
+    }
+    let projects = store.member_projects(&me).await.unwrap();
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert_eq!(found[0].0, id);
+    assert!(store.forget(&me, &id).await.unwrap());
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert!(found.iter().all(|(hit, _)| hit != &id), "{found:?}");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+        .bind(&id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(left, 1, "forget hides the row; it does not delete it");
+    db.finish().await;
+}
+
+/// An alias whose text equals the memory embed text still gets its own vector.
+#[tokio::test]
+async fn alias_matching_embed_text_keeps_its_own_vector() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Abcdefgh",
+                "summary": "0123456789abcdefghij",
+                "reason": "0123456789",
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let pending = store.pending_embeddings(10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let text = pending[0].text.clone();
+    assert!(
+        text.chars().count() <= 120,
+        "embed text must fit an alias: {text}"
+    );
+    sqlx::query(
+        "INSERT INTO memory_aliases (memory_id, ord, source, text) VALUES ($1, 0, 'agent', $2)",
+    )
+    .bind(&id)
+    .bind(&text)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let pending = store.pending_embeddings(10).await.unwrap();
+    let memory = pending
+        .iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap();
+    let alias = pending
+        .iter()
+        .find(|item| item.alias_ord == Some(0))
+        .unwrap();
+    assert_eq!(alias.text, memory.text);
+    assert_ne!(alias.source_hash, memory.source_hash);
+    let memory_hash = memory.source_hash.clone();
+    let alias_hash = alias.source_hash.clone();
+    assert!(
+        store
+            .upsert_embedding(&id, &memory_hash, &tilted(1.0, 1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .upsert_embedding(&id, &alias_hash, &tilted(0.2, 2))
+            .await
+            .unwrap()
+    );
+    let memory_dist: f32 = sqlx::query_scalar(
+        "SELECT (embedding <=> $2::vector)::float4 FROM memories WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .bind(vector_literal(&tilted(1.0, 1)))
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let alias_dist: f32 = sqlx::query_scalar("SELECT (embedding <=> $2::vector)::float4 FROM memory_aliases WHERE memory_id = $1 AND ord = 0")
+        .bind(&id)
+        .bind(vector_literal(&tilted(0.2, 2)))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let cross: f32 = sqlx::query_scalar("SELECT (embedding <=> $2::vector)::float4 FROM memory_aliases WHERE memory_id = $1 AND ord = 0")
+        .bind(&id)
+        .bind(vector_literal(&tilted(1.0, 1)))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(memory_dist < 0.01, "memory vector {memory_dist}");
+    assert!(alias_dist < 0.01, "alias vector {alias_dist}");
+    assert!(cross > 0.5, "alias kept its own vector, cross {cross}");
+    db.finish().await;
+}

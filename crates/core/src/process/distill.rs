@@ -213,6 +213,7 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                 supersedes: None,
                 contradicts: None,
                 scope: None,
+                aliases: Vec::new(),
             },
             files,
         });
@@ -338,6 +339,7 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
             supersedes: None,
             contradicts: None,
             scope: None,
+            aliases: Vec::new(),
         },
         files: Vec::new(),
     })
@@ -440,6 +442,7 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
         supersedes: None,
         contradicts: None,
         scope: None,
+        aliases: Vec::new(),
     })
 }
 
@@ -547,6 +550,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         supersedes: None,
         contradicts: None,
         scope: Some(Scope::Personal),
+        aliases: Vec::new(),
     })
 }
 
@@ -690,6 +694,7 @@ impl Draft {
             supersedes: None,
             contradicts: None,
             scope: None,
+            aliases: Vec::new(),
         };
         (input, self.files)
     }

@@ -49,7 +49,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 17 | [x] [Always-active memory: no expiry, relations and ranking](17-expiry-keeps-data.md) (high priority: live data loss) | 00, 04, 05 | `0012_always_active` (index only) |
 | 06 | [x] [User corrections become rules](06-corrections.md) | 03 | — |
 | 11 | [x] [Proof count and rare-token veto](11-proof-and-veto.md) | 01 | `0008_proof_count` |
-| 09 | [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
+| 09 | [x] [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
 | 08 | [Per-project web report](08-project-report.md) | 01, 04, 12 | `0010_session_outcome` |
 | 07 | [Write-side bench in CI](07-write-bench.md) | 01–06, 12 | — |
 | 10 | [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
