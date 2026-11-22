@@ -81,3 +81,5 @@ Large dirty trees: capped at 200 baseline / `HANDOFF_FILES_MAX` reported paths.
 ## Open questions
 
 None.
+
+> Superseded by 17: handoffs form a `supersedes` chain per checkout (no delete + re-insert); the kept-richer rule moves to read time (17 Q1).

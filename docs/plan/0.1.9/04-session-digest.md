@@ -73,3 +73,5 @@ Search noise; mitigated by the two negative adjusts and the gate (a digest still
 ## Open questions
 
 None.
+
+> Superseded by 17: digests no longer expire (`expires_at` NULL); item 17's implementer updates the TTL test and writer.

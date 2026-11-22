@@ -1,134 +1,162 @@
 ---
 id: CM-PLAN-019-17
-title: "17 Expiry marks, never deletes or hides"
+title: "17 Always-active memory: no expiry, relations and ranking"
 status: frozen
 ---
 
-# 17 Expiry marks, never deletes or hides
+# 17 Always-active memory: no expiry, relations and ranking
 
 ## Goal
 
-A memory is never deleted and never hidden because it expired (user decision 2026-11-23, binding). Expiry only
-marks it: the row stays in `memories` with its text, embedding, entities and links; it stays visible in the web and
-in `memory_get`, and stays findable by `memory_search`, shown as `expired` with its date. The live 0.1.8 server
-deletes today, so this ships right after item 03.
+User decision 2026-11-23 (binding). A memory is never deleted and never hidden because of its age. `expires_at`/TTL
+no longer hides or deletes anything. Old versus new is handled by **relations and ranking**: a newer memory related
+to an older one ranks above it; the older one stays findable, ranked lower, with a short label saying why.
 
-Raw logs are not memories and keep their retention: `observations` (TTL and the 7-day rule), done `jobs`,
-`retrieval_log`, and item 13's 14-day search log.
+| State | In search / `memory_get` | Rank | Label on the card |
+|---|---|---|---|
+| active | yes | normal | — |
+| superseded / corrected | yes | below its replacement | `replaced by <new id>` |
+| stale by votes | yes | lower | `voted wrong <n>x` |
+| stale, file missing | yes | lower | `file deleted` |
+| withdrawn promoted global copy | yes, stays `active` | by score | — (related to its originals) |
+| old handoff | yes | lower (superseded) | `replaced by <new id>` |
+| **forgotten** | **no** (not in search, not in the brief); admin sees it in the web | — | — |
+
+`forgotten` is the only hidden state. Raw logs keep their retention: `observations`, done `jobs`, `retrieval_log`,
+item 13's 14-day search log.
 
 ## Out of scope
 
-`memory_forget` (an owner action; see "Delete paths" — it blanks the row, it does not delete it; unchanged).
-Changing TTL values (`NOTE_TTL_SECONDS`, `HANDOFF_TTL_SECONDS`, `SYSTEM_TTL_SECONDS`). Restoring rows already
-deleted by 0.1.8 (gone; a backup restore is an operator task). Ranking of expired memories (Open question 1).
-Internal processing cohorts that skip expired rows (link building `link.rs:27`, consolidation `consolidate.rs:101,218,240`,
-promotion live-source count `consolidate.rs:329`, repo/branch moves `repo.rs:109,188`): they do not hide anything from
-a reader and stay as they are.
+Restoring rows already deleted by 0.1.8 (gone; backup restore is an operator task). New relation kinds (the existing
+`supersedes` and `relates` cover every case). Changing result count or token budget. Internal processing cohorts
+(`link.rs:27`, `consolidate.rs:101,218,240`, `repo.rs:109,188`) other than dropping their `expires_at` clauses.
 
 ## Decisions it relies on
 
-D-DATA, the 2026-11-23 expiry decision above, D-TOK.
+D-DATA, D-TOK, D-LLM, D-RANK, the 2026-11-23 decision above.
 
-## Delete paths found (main branch `0.1.9` at `02e7d90`)
+## Paths found (branch `0.1.9` at `02e7d90`)
 
-| # | file:line | What it does | This item |
+| # | file:line | Today | This item |
 |---|---|---|---|
-| P1 | `crates/store/src/capture.rs:513-518` | Nightly sweep: `DELETE FROM memories WHERE expires_at < now() - EXPIRED_GRACE_SECONDS` (30 days). FK `ON DELETE CASCADE` (`migrations/0001_foundation.sql:115,125,133-134,145,153`) then removes the memory's usage, entities, links, votes rows. **Live data loss.** | Removed |
-| P2 | `crates/store/src/capture.rs:427` | Handoff write: `DELETE FROM memories WHERE memory_id = $1 AND owner_id = $2` then re-insert with the same deterministic id, when the old handoff is not kept (item 05 rule). The old handoff's text is lost. | Open question 2 (BLOCKING) |
-| P3 | `crates/store/src/memory.rs:562-609` (`forget`) | Owner action. Row stays (`status = 'forgotten'`), text/fields/embedding blanked, `identity_hash` kept; deletes its `entities`, `links` and pending embed/consolidate/link jobs. Not a hard delete of the row; content is removed on purpose by the owner. | Unchanged |
-| P4 | `crates/store/src/memory.rs:508` | Vote change: deletes the person's opposite `usage_votes` row before writing the new vote. Replaces a vote, no memory content. | Unchanged |
-| P5 | `crates/store/src/capture.rs:531,537,545,551` | Observations, done jobs, retrieval log retention. Raw logs. | Unchanged |
-| P6 | `crates/store/src/jobs.rs:136,215,303`, `crates/store/src/instructions.rs:244` | Quarantined job / server_state cleanup. No memory content. | Unchanged |
+| P1 | `crates/store/src/capture.rs:513-518` | Nightly `DELETE FROM memories WHERE expires_at < now() - 30 days`; FK cascade drops usage, entities, links, votes. **Live data loss.** | Removed |
+| P2 | `crates/store/src/capture.rs:376-427` | Handoff has a fixed id per checkout (`handoff_id`); a new handoff `DELETE`s and re-inserts it, losing the old text. | Becomes a chain (see Design) |
+| P3 | `crates/store/src/memory.rs:562-609` (`forget`) | Sets `forgotten`, blanks text/fields/embedding, deletes entities, links, jobs. | Only sets `forgotten`; keeps everything |
+| P4 | `memory.rs:508` | Replaces a person's own vote row. | Unchanged |
+| P5 | `capture.rs:531,537,545,551` | Raw log retention. | Unchanged |
+| P6 | `jobs.rs:136,215,303`, `instructions.rs:244` | Job / server_state cleanup, no memory content. | Unchanged |
 
-Paths that only *set* `expires_at` (they become marks once P1 is gone and reads stop filtering):
-`capture.rs:524-533` (unused system memory stale 90 days), `consolidate.rs:334` (promoted copy with < 2 live sources),
-`repo.rs:285` (handoffs of merged branches), TTLs from `crates/core/src/memory/kind.rs:14`.
-
-Paths that **hide** expired memories from readers (must change): `crates/store/src/memory.rs:23` (`visible`),
-`memory.rs:37` (`searchable`), `crates/core/src/project/access.rs:13` (`is_visible`, the Rust twin),
-`crates/store/src/embed.rs:29,46,72` (expired rows never get an embedding, so the vector channel cannot find them).
+Writers of `expires_at`: `kind.rs:14` TTLs, `capture.rs:524-533` (unused system memory 90 days),
+`consolidate.rs:334` (withdrawn promoted copy), `repo.rs:285` (merged-branch handoffs). Readers that hide by expiry:
+`memory.rs:23` (`visible`), `memory.rs:37` (`searchable`), `access.rs:13` (`is_visible`), `embed.rs:29,46,72`,
+`consolidate.rs:330` (live-source count).
 
 ## Design
 
-- **No migration.** The mark already exists: `expires_at <= now()` is "expired since `expires_at`", and
-  `expiry_noted_for` (0005) records that the owner was told. Migration numbering in the README is unchanged; if the
-  implementer finds a column is truly needed, it is an escalation, and the next free number is `0012` (0007–0011 reserved).
-- **Sweep** (`capture.rs`): delete the P1 statement. Keep the `lapsed` `UPDATE ... expiry_noted_for` and
-  `note_expired` (the `memories_expired` audit event) as they are. Rename `SweepReport.memories_deleted` to
-  `memories_expired` and fill it with `lapsed.len()` (memories newly marked expired this sweep, promoted copies included).
-- **Core** (`kind.rs`): remove `EXPIRED_GRACE_SECONDS` (its only use is P1).
-- **Reads**:
-  - `visible` (`memory.rs:21`): drop the `expires_at` clause; it becomes identical to `visible_even_if_expired` —
-    keep one function (`visible`) and point the callers of the other at it.
-  - `searchable` (`memory.rs:35`): drop the `expires_at` clause.
-  - `is_visible` (`access.rs:11`): drop the `expires_at` check; update its doc and the test at `access.rs:54`.
-  - `embed.rs:29,46,72`: drop the `expires_at` clause so expired rows are (re)embedded.
-  - The web/API `status=expired` filter (`memory.rs:339-352`, `routes/memory.rs:65,116`) keeps working; fix doc comments that say "not yet swept away".
-- **How expired memories appear**: the `Card`/`Memory` reply already carries `expires_at`. The web shows an
-  `expired <date>` badge on the memory table row and in `memory-sheet.tsx` when `expires_at <= now`, and the sheet text
-  "This memory was forgotten or expired." (`memory-sheet.tsx:322`) becomes "forgotten" only. Search cards for agents
-  add no new field (D-TOK): an expired card is identified by its existing `expires_at`. If cards today omit
-  `expires_at`, the implementer adds the shortest marker the card format already uses for status and reports the bytes.
-- **Ranking**: unchanged by this item (Open question 1).
+- **Expiry off.** Delete P1 and `EXPIRED_GRACE_SECONDS`. New memories get `expires_at = NULL` (TTL constants for
+  memory kinds removed from `kind.rs`); the four writers above stop setting it. Existing values stay in the column
+  (no data change) and are ignored by every reader. The `lapsed`/`expiry_noted_for`/`memories_expired` audit step is
+  removed from the sweep (nothing expires); the column `expiry_noted_for` stays. Web: drop the `status=expired`
+  filter and the "or expired" sheet text.
+- **Searchable set.** `searchable` becomes `status IN ('active','stale','superseded')` with no `expires_at` clause;
+  `visible` / `is_visible` drop the `expires_at` clause (forgotten stays excluded for non-admins); `embed.rs` embeds
+  every non-forgotten row. One shared helper, not per-call SQL.
+- **Ranking** (`rank.rs::adjust`, the one place): `Status::Superseded` → `-0.30` (the cap), `Stale` stays `-0.20`.
+  A replacement is always `active`/`stale` and therefore ranks above the version it replaced for an equal fused score.
+  Results stay ≤ 5 and within the existing budget: old versions compete for the same slots. The weak/off-topic gate
+  runs on the fused score **before** `adjust` as today, so it is unchanged; verify with the bench.
+- **Labels** (agent cards and web): derived at read time, no new column.
+  `replaced by <id>` from the newest `supersedes` link pointing at the memory; `voted wrong <n>x` from
+  `stale_cause = 'feedback'` and `usage.wrong`; `file deleted` from `stale_cause = 'missing'`. Emitted only on those
+  cards, in the card's existing status slot. Token cost: ≤ 40 bytes (`replaced by mem_` + 26-char id) on a
+  superseded card, ≤ 16 bytes on a stale card, 0 on active cards. The web shows the same label with a link to the new id.
+- **Withdrawn promoted global copies** (`consolidate.rs:334`): no longer set `expires_at`; they stay `active`, keep
+  their existing `relates` links to the originals (already written by promotion), and rank by score.
+- **Handoff chain (P2).** Each handoff is a new memory with its own id (no more `DELETE` + re-insert). The writer
+  links it to the previous handoff of the same checkout (same person + worktree/branch, the `handoff_id` key becomes
+  the chain key) with a `supersedes` link (newer → older) and marks the older `superseded`. The session brief and
+  `kind=handoff` lookup return only the newest non-forgotten handoff of the chain. The web shows the chain from the
+  links. `repo.rs:285` (merged branches) no longer expires them.
+- **Forget (P3).** Only `status = 'forgotten'`, `status_changed_at`, audit event. Text, fields, embedding, entities
+  and links are kept; pending jobs for it are cancelled as today. Hidden from search, brief and non-admin web; the
+  admin sees it in the web memory list (`status=forgotten` filter). `restore_if_unsuperseded` behaviour unchanged.
+  The `identity_hash` rule (the same content stays forgotten) is unchanged.
+- **Migration `0012_always_active`** (index only, additive): the vector index of `0003` is partial on
+  `status IN ('active','stale')`, so superseded rows would force a scan. Add
+  `CREATE INDEX ... ON memories USING hnsw (embedding ...) WHERE embedding IS NOT NULL AND status IN ('active','stale','superseded')`
+  (same opclass/params as 0003; the implementer copies them) and the matching lexical partial index if one exists.
+  The old indexes are kept (item 00 forbids DROP). No backfill: existing rows already have the statuses and links.
+  Old superseded rows without an embedding get one from the embed job.
+
+## Interactions
+
+- **01 (candidate rank):** `candidate -0.10` stacks with `superseded -0.30` under the ±30 % cap; a superseded
+  candidate sits at the floor, same as a superseded normal. No change to 01.
+- **04 (digest):** built with `expires_at = created + 90 days` and test `digest_is_project_candidate_with_note_ttl`.
+  After 17 the digest never expires; the item-17 implementer updates that test to expect `expires_at IS NULL` and
+  the digest writer in `distill.rs`/`capture.rs`. 04 gets a one-line "superseded by 17" note only.
+- **05 (kept-richer handoff):** the chain replaces "keep the old row and skip the write". Default (non-blocking Q1):
+  a thin new handoff is still written into the chain, and the brief shows the newest handoff that is not thin when
+  the newest is thin (05's richer rule moves from write to read); `DistillReport.handoff_kept` keeps its meaning.
+- **11 (merge veto):** veto yields `relates` instead of `supersedes`, so both stay `active` with no label — correct.
+  `proof_count` backfill counts `supersedes` links with `origin='auto'`; handoff chain links use `origin='system'`
+  so they are not counted.
+- **13–16 (Fixes):** F12 `fade` is already rank-only (`faded_at` penalty, cleared on fetch); it must never hide —
+  confirmed, no change. F7 `split_merge` Apply deletes one auto `supersedes` link and calls
+  `restore_if_unsuperseded`: the older memory returns to `active` and its `replaced by` label disappears; this is a
+  link removal by an admin, not memory data loss. 13's 14-day log expiry is a raw log, allowed.
 
 ## Allowed files
 
-- `crates/store/src/capture.rs` (P1 removal, report field only)
-- `crates/core/src/memory/kind.rs`
-- `crates/store/src/memory.rs` (visibility helpers, doc comments only)
-- `crates/store/src/stats.rs` (switch `visible_even_if_expired` import to `visible`)
-- `crates/core/src/project/access.rs`
-- `crates/store/src/embed.rs`
-- `crates/server/src/routes/memory.rs` (doc comment)
-- `apps/web/app/memories/_components/memory-table.tsx`, `apps/web/components/memory-sheet.tsx`
-- `apps/web/lib/generated/*` by regeneration only
-- tests: `crates/store/tests/capture.rs`, `crates/store/tests/retrieve.rs`, `crates/server/tests/retrieve.rs`, web unit test next to the table
+- `crates/store/src/capture.rs` (P1, sweep audit step, handoff chain, digest TTL)
+- `crates/core/src/memory/kind.rs`, `crates/core/src/process/distill.rs` (handoff/digest TTL only)
+- `crates/store/src/memory.rs` (visibility helpers, forget, status filter)
+- `crates/store/src/stats.rs`, `crates/store/src/embed.rs`, `crates/store/src/consolidate.rs` (withdrawn copy, live count clause), `crates/store/src/repo.rs` (merged-branch handoffs)
+- `crates/store/src/retrieve.rs` (status set, labels, latest-handoff lookup)
+- `crates/core/src/project/access.rs`, `crates/core/src/retrieve/rank.rs` (Superseded weight only)
+- `crates/server/src/routes/memory.rs`, card formatting where the status slot is rendered (implementer names the file; escalate if outside this list)
+- `migrations/0012_always_active.sql`, `crates/store/src/lib.rs` (migration list entry)
+- `apps/web/app/memories/_components/memory-table.tsx`, `apps/web/components/memory-sheet.tsx`, `apps/web/lib/generated/*` by regeneration
+- tests: `crates/store/tests/{capture,retrieve,processing,migrate}.rs`, `crates/server/tests/retrieve.rs`, web unit test next to the table
 
 ## Acceptance checks
 
-1. A memory with `expires_at = now() - 400 days` survives `sweep` with title, summary, embedding, entities and links unchanged; row count unchanged.
-2. `sweep` reports `memories_expired` = memories newly past `expires_at`, and a second sweep reports 0 (no double count); one `memories_expired` audit event per owner as today.
-3. An expired memory is returned by `memory_get`, by the web list (default view and `status=expired`), and by `memory_search` (lexical and vector channels) for a reader who could see it before it expired; a forgotten one is still not.
-4. An expired row without an embedding gets one from the embed job.
-5. The web shows `expired <date>` for it.
-6. `grep -rn "DELETE FROM memories" crates/` returns only P2 (until Open question 2 is answered).
-7. `python3 scripts/check_migrations.py` passes with no allowlist change (item 00 guard green).
-8. Upgrade test (README global acceptance 9) holds: no memory row disappears across a sweep.
+1. A memory with `expires_at = now() - 400 days` survives `sweep` unchanged and is returned by `memory_get`, web list and `memory_search` (lexical and vector).
+2. New memories of every kind are written with `expires_at IS NULL`; `grep -rn "DELETE FROM memories" crates/` returns nothing.
+3. Superseding A by B: both are searchable; for a query matching both equally B ranks above A; A's card carries `replaced by <B id>` (≤ 40 bytes).
+4. A memory stale by 2 wrong votes is searchable with `voted wrong 2x`; stale-missing with `file deleted`; both rank below an equal active memory.
+5. Three handoffs on one checkout give three rows linked newer→older by `supersedes`; the brief and `kind=handoff` return only the newest (or per Q1 default); the web shows the chain.
+6. `memory_forget` keeps title, summary, fields, embedding, entities and links; the memory is absent from search and the brief and present for the admin with `status=forgotten`.
+7. A withdrawn promoted global copy stays `active` and keeps its `relates` links.
+8. Bench: weak queries 14/14 return nothing; v2 hit@5 ≥ CI floor (0.65); v1 floors hold. Result count ≤ 5 and the search reply byte budget unchanged.
+9. `python3 scripts/check_migrations.py` passes with no allowlist change; upgrade test keeps every row count and `memory_id`.
 
 ## Tests to write first
 
-- `capture.rs::sweep_marks_expired_and_keeps_rows` (1, 2)
-- `retrieve.rs::expired_memory_is_searchable_and_gettable` (3)
-- `retrieve.rs::expired_memory_gets_embedded` (4)
-- `access.rs` unit test updated: expired is visible, forgotten is not (3)
-- web: `memory-table` renders the expired badge (5)
+- `capture.rs::sweep_never_deletes_or_expires_memories` (1, 2)
+- `retrieve.rs::superseded_is_searchable_ranked_below_and_labelled` (3), `::stale_labels` (4)
+- `processing.rs::handoffs_form_a_chain_and_brief_shows_latest` (5)
+- `retrieve.rs::forget_keeps_content_but_hides` (6)
+- `capture.rs::withdrawn_promoted_copy_stays_active` (7)
+- `migrate.rs::0012_is_additive_on_populated_db` (9); `rank.rs` unit test for the Superseded weight; web label test
 
 ## Data-safety notes
 
-Removes the only automatic hard delete of memory rows (P1). No schema change, no backfill. Rows already deleted by
-0.1.8 cannot come back from code. Until 0.1.9 is deployed the live server keeps deleting memories 30 days after
-expiry; an operator can stop it early by deploying this item alone.
+Removes every automatic delete of memory rows (P1, P2) and the content blanking of forget (P3). Migration 0012 adds
+indexes only. Until 0.1.9 deploys, the live server keeps deleting 30 days after expiry; deploying this item alone
+stops it.
 
 ## Token cost
 
-Zero new fields. Search can now return expired memories, so a result list may include them in place of others
-(same result count, same budget). Ranking decides how often (Open question 1).
+0 bytes on active cards; ≤ 16 bytes on stale cards; ≤ 40 bytes on superseded cards. Same result count and budget.
 
 ## Risks
 
-- Expired handoffs (14 days, merged branches) and 90-day notes/digests now show up in search and the handoff lookup
-  could surface an old one. The latest-handoff lookup must keep choosing the newest live handoff; the implementer
-  checks `kind=handoff` lookups prefer non-expired and reports if one needs a change (escalate, do not decide).
-- A withdrawn promoted global copy (`consolidate.rs:334`) becomes visible to everyone as expired. It was meant to
-  disappear; see Open question 3.
+- Superseded rows now compete for slots and could push out an active memory with a lower fused score; the −0.30
+  weight and the bench check (8) bound this. If v2 hit@5 drops below the floor, escalate (do not change weights freely).
+- More rows embedded (old superseded/expired): one-time embed backlog on upgrade.
 
 ## Open questions
 
-1. **Non-blocking (default: no ranking change).** Should expired memories rank lower in search (e.g. like `stale`)
-   or be excluded from the hook's automatic injection while staying findable by explicit search?
-2. **BLOCKING.** P2: when a new handoff replaces the old one for the same checkout (`capture.rs:427`), the old
-   handoff row is deleted and re-inserted under the same id, losing the old text. Does the user's "never deleted"
-   rule cover this? Options: (a) keep as is (handoff is a per-checkout slot); (b) keep the old handoff as its own
-   memory with a new id, marked expired, and write the new one under the fixed id.
-3. **Non-blocking (default: show it, marked expired).** Withdrawn promoted global copies: show them as expired to all
-   readers like any other memory, or keep the existing "nobody's to see" exclusion (`memory.rs:348`) for them only?
+1. **Non-blocking (default above).** Item 05's richer-handoff rule: apply at read (brief skips a thin newest
+   handoff for the previous richer one) or drop it (brief always shows the newest)?
