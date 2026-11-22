@@ -42,12 +42,21 @@ pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     (scope + status + fresh + used + kind).clamp(-ADJUST_CAP, ADJUST_CAP)
 }
 
-/// `stale` when `wrong >= 2`, or `wrong >= 1` from the owner. Other statuses never change here.
-pub fn status_after_wrong(current: Status, wrong: u32, owner_voted: bool) -> Status {
-    if current == Status::Active && (wrong >= 2 || (wrong >= 1 && owner_voted)) {
-        Status::Stale
-    } else {
-        current
+/// The status after the votes changed. `wrong >= 2`, or `wrong >= 1` with the owner among them,
+/// makes an `active` memory `stale`; a memory that went stale by feedback (`by_feedback`) is
+/// `active` again once that no longer holds, because a voter changed their vote. A memory that is
+/// stale for a missing file, or any other status, never changes here.
+pub fn status_after_votes(
+    current: Status,
+    by_feedback: bool,
+    wrong: u32,
+    owner_wrong: bool,
+) -> Status {
+    let stale = wrong >= 2 || (wrong >= 1 && owner_wrong);
+    match current {
+        Status::Active if stale => Status::Stale,
+        Status::Stale if by_feedback && !stale => Status::Active,
+        _ => current,
     }
 }
 
@@ -102,12 +111,21 @@ mod tests {
 
     #[test]
     fn staleness_rule() {
-        assert_eq!(status_after_wrong(Status::Active, 1, false), Status::Active);
-        assert_eq!(status_after_wrong(Status::Active, 1, true), Status::Stale);
-        assert_eq!(status_after_wrong(Status::Active, 2, false), Status::Stale);
+        let after = |current, by_feedback, wrong, owner| {
+            status_after_votes(current, by_feedback, wrong, owner)
+        };
+        assert_eq!(after(Status::Active, false, 1, false), Status::Active);
+        assert_eq!(after(Status::Active, false, 1, true), Status::Stale);
+        assert_eq!(after(Status::Active, false, 2, false), Status::Stale);
         assert_eq!(
-            status_after_wrong(Status::Superseded, 5, true),
+            after(Status::Superseded, false, 5, true),
             Status::Superseded
         );
+        // The voter who made it stale changes their vote: back to active.
+        assert_eq!(after(Status::Stale, true, 0, false), Status::Active);
+        assert_eq!(after(Status::Stale, true, 1, false), Status::Active);
+        assert_eq!(after(Status::Stale, true, 1, true), Status::Stale);
+        // A memory stale for a missing file is not revived by votes.
+        assert_eq!(after(Status::Stale, false, 0, false), Status::Stale);
     }
 }

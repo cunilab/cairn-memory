@@ -10,7 +10,7 @@ use cairn_core::memory::{
 };
 use cairn_core::process::jobs::JobKind;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
-use cairn_core::retrieve::rank::status_after_wrong;
+use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
@@ -414,11 +414,13 @@ impl Store {
         Ok(())
     }
 
-    /// `helpful` or `wrong`. Feeds ranking and, for `wrong`, the stale rule.
+    /// `helpful` or `wrong`. Feeds ranking and the stale rule. A person has one vote per memory: a
+    /// new vote replaces their earlier one, so a `helpful` after a `wrong` takes the `wrong` back
+    /// (and a memory it had made stale is active again).
     pub async fn feedback(&self, person_id: &str, memory_id: &str, vote: Vote) -> Result<Status> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
-            "SELECT m.owner_id, m.status FROM memories m WHERE m.memory_id = $2 AND {} FOR UPDATE OF m",
+            "SELECT m.owner_id, m.status, m.stale_cause FROM memories m WHERE m.memory_id = $2 AND {} FOR UPDATE OF m",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -428,18 +430,28 @@ impl Store {
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
         let owner: String = row.try_get("owner_id")?;
         let status: Status = parse(&row, "status")?;
-        // Distinct voters: a repeated vote by the same person changes nothing.
+        let by_feedback =
+            row.try_get::<Option<String>, _>("stale_cause")?.as_deref() == Some("feedback");
+        let vote_text = if vote == Vote::Helpful {
+            "helpful"
+        } else {
+            "wrong"
+        };
+        sqlx::query(
+            "DELETE FROM usage_votes WHERE memory_id = $1 AND person_id = $2 AND vote <> $3",
+        )
+        .bind(memory_id)
+        .bind(person_id)
+        .bind(vote_text)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO usage_votes (memory_id, person_id, vote) VALUES ($1, $2, $3)
              ON CONFLICT DO NOTHING",
         )
         .bind(memory_id)
         .bind(person_id)
-        .bind(if vote == Vote::Helpful {
-            "helpful"
-        } else {
-            "wrong"
-        })
+        .bind(vote_text)
         .execute(&mut *tx)
         .await?;
         let counts = sqlx::query(
@@ -447,17 +459,16 @@ impl Store {
              SELECT $1, count(*) FILTER (WHERE vote = 'helpful'), count(*) FILTER (WHERE vote = 'wrong')
                FROM usage_votes WHERE memory_id = $1
              ON CONFLICT (memory_id) DO UPDATE SET helpful = EXCLUDED.helpful, wrong = EXCLUDED.wrong
-             RETURNING wrong",
+             RETURNING wrong, EXISTS (SELECT 1 FROM usage_votes
+                                       WHERE memory_id = $1 AND person_id = $2 AND vote = 'wrong') AS owner_wrong",
         )
         .bind(memory_id)
+        .bind(&owner)
         .fetch_one(&mut *tx)
         .await?;
         let wrong = counts.try_get::<i32, _>("wrong")?.max(0) as u32;
-        let new_status = if vote == Vote::Wrong {
-            status_after_wrong(status, wrong, owner == person_id)
-        } else {
-            status
-        };
+        let new_status =
+            status_after_votes(status, by_feedback, wrong, counts.try_get("owner_wrong")?);
         if new_status != status {
             sqlx::query(
                 "UPDATE memories SET status = $2, stale_cause = CASE WHEN $2 = 'stale' THEN 'feedback' END,

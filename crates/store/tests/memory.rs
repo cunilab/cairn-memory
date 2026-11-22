@@ -524,6 +524,47 @@ async fn a_near_identical_save_is_deduplicated_and_changed_text_is_not() {
 }
 
 #[tokio::test]
+async fn a_helpful_vote_takes_back_the_same_persons_wrong_vote() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("owner").await;
+    let id = db
+        .store
+        .save(&owner, rule("rule flipped"), &WorkContext::default())
+        .await
+        .unwrap()
+        .id;
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Wrong).await.unwrap(),
+        Status::Stale
+    );
+    // The owner changes their mind: one vote per person, so the wrong is gone and it is active.
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Helpful).await.unwrap(),
+        Status::Active
+    );
+    let memory = db.store.get(&owner, &id).await.unwrap();
+    assert_eq!(
+        (memory.status, memory.usage.helpful, memory.usage.wrong),
+        (Status::Active, 1, 0)
+    );
+    // A memory that is stale for a missing file is not revived by a vote.
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'missing' WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        db.store.feedback(&owner, &id, Vote::Helpful).await.unwrap(),
+        Status::Stale
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn feedback_moves_status_and_usage() {
     let Some(db) = TestDb::new().await else {
         return;
