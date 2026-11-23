@@ -11,6 +11,17 @@ fn in_project(project_id: &str) -> WorkContext {
     }
 }
 
+async fn current_embedding_hash(store: &cairn_store::Store, id: &str) -> String {
+    store
+        .embed_items(&[id.to_owned()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .source_hash
+}
+
 #[tokio::test]
 async fn save_get_and_dedupe_on_identity() {
     let Some(db) = TestDb::new().await else {
@@ -178,7 +189,11 @@ async fn forget_blanks_the_row_and_a_resave_is_409() {
     let work = WorkContext::default();
     let saved = db.store.save(&me, rule("Forget me"), &work).await.unwrap();
     db.store
-        .upsert_embedding(&saved.id, "h", &unit(0))
+        .upsert_embedding(
+            &saved.id,
+            &current_embedding_hash(&db.store, &saved.id).await,
+            &unit(0),
+        )
         .await
         .unwrap();
     db.store.forget(&me, &saved.id).await.unwrap();

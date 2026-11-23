@@ -16,6 +16,10 @@ export type Memory = { id: string, owner: string, project_id: string | null, sco
  */
 fields: Fields, evidence?: Array<string>, evidence_count: number, context: Context, entities?: Array<Entity>, status: Status, rank: Rank, 
 /**
+ * Whether an administrator edited this memory; the editor's identity stays private.
+ */
+edited_by: boolean, 
+/**
  * Times this knowledge was saved, including the first. At least 1.
  * Omitted the first time, same as a search card's `seen`.
  */

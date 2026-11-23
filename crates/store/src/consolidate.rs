@@ -24,6 +24,12 @@ pub struct Consolidated {
 const PROMOTE_AT: f32 = SUPERSEDE_AT;
 /// The owner of every promoted copy: no person wrote it.
 pub(crate) const SYSTEM_OWNER: &str = "system";
+
+pub(crate) async fn lock_cohort(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0)) FROM memories WHERE memory_id=$1")
+        .bind(memory_id).execute(tx).await?;
+    Ok(())
+}
 /// A lock per kind so two twins promoted at once make one copy.
 async fn lock_promotion(tx: &mut PgConnection, kind: &str) -> Result<()> {
     sqlx::query(
@@ -58,14 +64,7 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         // One consolidation per cohort at a time: two jobs on a mutual near-duplicate pair each
         // update the other's row and would deadlock.
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended(
-                        concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0))
-               FROM memories WHERE memory_id = $1",
-        )
-        .bind(memory_id)
-        .execute(&mut *tx)
-        .await?;
+        lock_cohort(&mut tx, memory_id).await?;
         let subject = sqlx::query(
             "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary,
                     embedding::text AS embedding
@@ -126,6 +125,11 @@ impl Store {
             let cosine = row.try_get::<f64, _>("cosine")? as f32;
             let Some(band) = band(cosine) else { continue };
             if declared_contradiction(&mut tx, memory_id, &neighbour).await? {
+                continue;
+            }
+            let related: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM links WHERE relation='relates' AND ((source_id=$1 AND target_id=$2) OR (source_id=$2 AND target_id=$1)))")
+                .bind(memory_id).bind(&neighbour).fetch_one(&mut *tx).await?;
+            if related {
                 continue;
             }
             let neighbour_newer: bool = row.try_get("neighbour_newer")?;

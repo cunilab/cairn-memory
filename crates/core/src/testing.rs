@@ -23,6 +23,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         status: Status::Active,
         rank: Rank::Normal,
         faded_at: None,
+        edited_by: false,
         proof_count: 1,
         stale_cause: None,
         origin: Origin::Agent,

@@ -190,7 +190,16 @@ impl Store {
         vector: &[f32],
     ) -> Result<bool> {
         validate_vector(vector)?;
+        let mut tx = self.pool.begin().await?;
         if let Some((ord, content_hash)) = parse_alias_hash(source_hash) {
+            let text: Option<String> = sqlx::query_scalar("SELECT a.text FROM memory_aliases a JOIN memories m ON m.memory_id=a.memory_id WHERE a.memory_id=$1 AND a.ord=$2 AND m.status <> 'forgotten' FOR UPDATE OF a")
+                .bind(memory_id).bind(ord).fetch_optional(&mut *tx).await?;
+            if !text
+                .as_deref()
+                .is_some_and(|text| cairn_core::process::embed::source_hash(text) == content_hash)
+            {
+                return Ok(false);
+            }
             let done = sqlx::query(
                 "UPDATE memory_aliases SET embedding = $4::vector, embedding_source = $3
                   WHERE memory_id = $1 AND ord = $2
@@ -200,11 +209,37 @@ impl Store {
             .bind(ord)
             .bind(content_hash)
             .bind(vector_text(vector))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            return Ok(done.rows_affected() == 1);
+            let written = done.rows_affected() == 1;
+            tx.commit().await?;
+            return Ok(written);
         }
-        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "{MEMORY_SELECT} WHERE m.memory_id=$1 AND m.status <> 'forgotten' FOR UPDATE OF m"
+        ))
+        .bind(memory_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else { return Ok(false) };
+        let mut memory = memory_from_row(&row)?;
+        let entities =
+            sqlx::query("SELECT kind,name FROM entities WHERE memory_id=$1 ORDER BY kind,name")
+                .bind(memory_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for entity in entities {
+            memory.entities.push(Entity {
+                kind: entity
+                    .try_get::<String, _>("kind")?
+                    .parse()
+                    .map_err(StoreError::Validation)?,
+                name: entity.try_get("name")?,
+            });
+        }
+        if cairn_core::process::embed::source_hash(&embedding_text(&memory)) != source_hash {
+            return Ok(false);
+        }
         let done = sqlx::query(
             "UPDATE memories SET embedding = $4::vector, embedding_model = $2, embedding_source = $3
               WHERE memory_id = $1 AND status <> 'forgotten'

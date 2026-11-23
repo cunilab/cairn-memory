@@ -329,6 +329,10 @@ import json, os
 assert json.load(open(os.environ["ME_BODY"], encoding="utf-8"))["is_admin"] is True, "first account must be an admin"
 PY
 
+curl -fsS -b "$owner_jar" -o "$workdir/fixes-page" "${web}/fixes"
+grep -q 'Fixes' "$workdir/fixes-page"
+curl -fsS -b "$owner_jar" "${web}/api/cairn/admin/fixes" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
+
 # An admin session creates accounts without its own cookie changing or the new token returned.
 register_headers="$workdir/register.headers"
 register_body="$workdir/register.body"

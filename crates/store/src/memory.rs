@@ -58,7 +58,7 @@ macro_rules! memory_columns {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
-    m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at,
+    m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
@@ -110,6 +110,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         status: parse(row, "status")?,
         rank: parse(row, "rank")?,
         faded_at: row.try_get("faded_at")?,
+        edited_by: row.try_get("edited_by")?,
         proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
         origin: parse(row, "origin")?,
@@ -608,7 +609,7 @@ impl Store {
 }
 
 /// Back to `active` when no remaining non-forgotten memory supersedes it.
-async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
+pub(crate) async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
     sqlx::query(
         "UPDATE memories SET status = 'active', status_changed_at = now(), updated_at = now()
           WHERE memory_id = $1 AND status = 'superseded'
@@ -853,4 +854,89 @@ async fn save_links(
         }
     }
     Ok(())
+}
+
+impl Store {
+    /// Admin edit retains the owner and provenance, and atomically audits the successor.
+    pub async fn rewrite_memory(
+        &self,
+        admin: &str,
+        id: &str,
+        title: String,
+        summary: String,
+        reason: String,
+        fields: Option<serde_json::Value>,
+    ) -> Result<String> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "{MEMORY_SELECT} WHERE m.memory_id=$1 FOR UPDATE OF m"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        let old = memory_from_row(&row)?;
+        let context = WorkContext {
+            project_id: old.project_id.clone(),
+            repository: old.context.repo.clone(),
+            branch: old.context.branch.clone(),
+            worktree: old.context.worktree.clone(),
+            commit: old.context.commit.clone(),
+            ..WorkContext::default()
+        };
+        let input = SaveInput {
+            kind: old.kind,
+            title,
+            summary,
+            reason,
+            fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
+            evidence: old.evidence.clone(),
+            supersedes: Some(id.to_owned()),
+            contradicts: None,
+            scope: Some(old.scope),
+            aliases: Vec::new(),
+        };
+        let prepared = prepare_save(
+            input,
+            &context,
+            old.project_id.is_some(),
+            old.origin,
+            now_seconds(),
+        )?;
+        if prepared.identity_hash == old.identity_hash {
+            return Err(StoreError::Conflict(
+                "nothing to rewrite: title, summary and fields are unchanged".into(),
+            ));
+        }
+        let saved = insert_memory(
+            &mut tx,
+            &old.owner,
+            old.project_id.as_deref(),
+            &prepared,
+            None,
+            None,
+        )
+        .await?;
+        if saved.deduplicated {
+            return Err(StoreError::Conflict(
+                "rewrite matches an existing memory".into(),
+            ));
+        }
+        sqlx::query("UPDATE memories SET edited_by=$2 WHERE memory_id=$1")
+            .bind(&saved.id)
+            .bind(admin)
+            .execute(&mut *tx)
+            .await?;
+        crate::account::audit_tx(
+            &mut tx,
+            admin,
+            None,
+            "memory_rewritten_by_admin",
+            Some(id),
+            serde_json::json!({"old_id":id,"new_id":saved.id}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(saved.id)
+    }
 }

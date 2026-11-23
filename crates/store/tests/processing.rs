@@ -46,6 +46,17 @@ fn tilted(weight: f32, axis: usize) -> Vec<f32> {
     v
 }
 
+async fn current_embedding_hash(store: &cairn_store::Store, id: &str) -> String {
+    store
+        .embed_items(&[id.to_owned()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .source_hash
+}
+
 #[tokio::test]
 async fn link_job_relates_shared_file_within_cohort() {
     let Some(db) = TestDb::new().await else {
@@ -332,11 +343,19 @@ async fn twin_gotchas(db: &TestDb) -> (String, String, String, String, String) {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&one, "h1", &tilted(1.0, 1))
+        .upsert_embedding(
+            &one,
+            &current_embedding_hash(&db.store, &one).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&two, "h2", &tilted(0.97, 2))
+        .upsert_embedding(
+            &two,
+            &current_embedding_hash(&db.store, &two).await,
+            &tilted(0.97, 2),
+        )
         .await
         .unwrap();
     (a, b, one, two, pa.project_id)
@@ -454,7 +473,11 @@ async fn promotion_never_takes_personal_or_other_kinds() {
             .unwrap()
             .id;
         store
-            .upsert_embedding(&id, title, &tilted(1.0, 1))
+            .upsert_embedding(
+                &id,
+                &current_embedding_hash(&db.store, &id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
         ids.push(id);
@@ -645,11 +668,11 @@ async fn consolidation_records_memory_merged_for_the_owner() {
         .await
         .unwrap()
         .id;
-    for (id, hash, vector) in [
-        (&older, "h1", tilted(1.0, 1)),
-        (&newer, "h2", tilted(0.97, 2)),
-    ] {
-        store.upsert_embedding(id, hash, &vector).await.unwrap();
+    for (id, vector) in [(&older, tilted(1.0, 1)), (&newer, tilted(0.97, 2))] {
+        store
+            .upsert_embedding(id, &current_embedding_hash(&db.store, id).await, &vector)
+            .await
+            .unwrap();
     }
     store.consolidate_memory(&older).await.unwrap();
     store.consolidate_memory(&newer).await.unwrap();
@@ -763,7 +786,11 @@ async fn a_copy_not_yet_linked_is_joined_by_cosine() {
         .await
         .unwrap();
     store
-        .upsert_embedding(&global, "hg", &tilted(1.0, 1))
+        .upsert_embedding(
+            &global,
+            &current_embedding_hash(&db.store, &global).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     let c = db.person("c").await;
@@ -784,7 +811,11 @@ async fn a_copy_not_yet_linked_is_joined_by_cosine() {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&three, "h3", &tilted(0.98, 3))
+        .upsert_embedding(
+            &three,
+            &current_embedding_hash(&db.store, &three).await,
+            &tilted(0.98, 3),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -847,7 +878,11 @@ async fn twin_search_finds_a_twin_behind_a_crowd_of_nearer_neighbours() {
         .unwrap()
         .id;
     indexed
-        .upsert_embedding(&subject, "s", &tilted(1.0, 1))
+        .upsert_embedding(
+            &subject,
+            &current_embedding_hash(&db.store, &subject).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     // 110 neighbours in the subject's own project, all nearer than the twin (which sits beside one
@@ -863,7 +898,11 @@ async fn twin_search_finds_a_twin_behind_a_crowd_of_nearer_neighbours() {
             .unwrap()
             .id;
         indexed
-            .upsert_embedding(&id, &format!("c{n}"), &tilted(0.97, 2 + n))
+            .upsert_embedding(
+                &id,
+                &current_embedding_hash(&db.store, &id).await,
+                &tilted(0.97, 2 + n),
+            )
             .await
             .unwrap();
     }
@@ -877,7 +916,11 @@ async fn twin_search_finds_a_twin_behind_a_crowd_of_nearer_neighbours() {
         .unwrap()
         .id;
     indexed
-        .upsert_embedding(&twin, "t", &tilted(0.95, 2))
+        .upsert_embedding(
+            &twin,
+            &current_embedding_hash(&db.store, &twin).await,
+            &tilted(0.95, 2),
+        )
         .await
         .unwrap();
     sqlx::raw_sql("ANALYZE memories")
@@ -1321,11 +1364,19 @@ async fn restatement_promotes_a_candidate() {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&older, "h1", &tilted(1.0, 1))
+        .upsert_embedding(
+            &older,
+            &current_embedding_hash(&db.store, &older).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&newer, "h2", &tilted(0.99, 1))
+        .upsert_embedding(
+            &newer,
+            &current_embedding_hash(&db.store, &newer).await,
+            &tilted(0.99, 1),
+        )
         .await
         .unwrap();
     sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
@@ -1412,11 +1463,19 @@ async fn rare_tokens_relate_instead_of_superseding() {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&older, "h1", &tilted(1.0, 1))
+        .upsert_embedding(
+            &older,
+            &current_embedding_hash(&db.store, &older).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&newer, "h2", &tilted(0.97, 2))
+        .upsert_embedding(
+            &newer,
+            &current_embedding_hash(&db.store, &newer).await,
+            &tilted(0.97, 2),
+        )
         .await
         .unwrap();
     let out = store.consolidate_memory(&newer).await.unwrap();

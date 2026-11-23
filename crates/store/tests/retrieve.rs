@@ -13,6 +13,17 @@ fn tilted(weight: f32, axis: usize) -> Vec<f32> {
     v
 }
 
+async fn current_embedding_hash(store: &cairn_store::Store, id: &str) -> String {
+    store
+        .embed_items(&[id.to_owned()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .source_hash
+}
+
 #[tokio::test]
 async fn embeddings_upsert_by_source_hash() {
     let Some(db) = TestDb::new().await else {
@@ -52,11 +63,25 @@ async fn embeddings_upsert_by_source_hash() {
         Some(pending[0].source_hash.as_str())
     );
     assert!(
-        store
+        !store
             .upsert_embedding(&id, "other-hash", &tilted(1.0, 2))
             .await
             .unwrap(),
-        "new hash replaces the vector"
+        "a stale hash cannot replace the vector"
+    );
+    sqlx::query(
+        "UPDATE memories SET summary='An updated summary for embedding' WHERE memory_id=$1",
+    )
+    .bind(&id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let new_hash = current_embedding_hash(&db.store, &id).await;
+    assert!(
+        store
+            .upsert_embedding(&id, &new_hash, &tilted(1.0, 2))
+            .await
+            .unwrap()
     );
     assert!(store.pending_embeddings(10).await.unwrap().is_empty());
     assert!(
@@ -106,7 +131,10 @@ async fn candidate_channels_respect_visibility_and_fuse() {
         .unwrap()
         .id;
     for (id, vector) in [(&pool, tilted(1.0, 1)), (&unrelated, tilted(0.2, 2))] {
-        store.upsert_embedding(id, "h", &vector).await.unwrap();
+        store
+            .upsert_embedding(id, &current_embedding_hash(&db.store, id).await, &vector)
+            .await
+            .unwrap();
     }
 
     let mine = store.member_projects(&me).await.unwrap();
@@ -511,11 +539,19 @@ async fn candidate_load_reports_cosine_and_skips_unsearchable() {
     let no_vector = store.save(&me, rule("none"), &work).await.unwrap().id;
     let gone = store.save(&me, rule("gone"), &work).await.unwrap().id;
     store
-        .upsert_embedding(&near, "h", &tilted(0.9, 1))
+        .upsert_embedding(
+            &near,
+            &current_embedding_hash(&db.store, &near).await,
+            &tilted(0.9, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&far, "h", &tilted(0.2, 2))
+        .upsert_embedding(
+            &far,
+            &current_embedding_hash(&db.store, &far).await,
+            &tilted(0.2, 2),
+        )
         .await
         .unwrap();
     store.forget(&me, &gone).await.unwrap();
@@ -574,7 +610,11 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
                 .id,
         );
         store
-            .upsert_embedding(ids.last().unwrap(), "h", &tilted(1.0, ids.len()))
+            .upsert_embedding(
+                ids.last().unwrap(),
+                &current_embedding_hash(&db.store, ids.last().unwrap()).await,
+                &tilted(1.0, ids.len()),
+            )
             .await
             .unwrap();
     }
@@ -674,7 +714,11 @@ async fn visibility_matrix_for_all_four_channels() {
     let seed = save("global", "link seed").await;
     for id in [&personal, &shared, &global, &seed] {
         store
-            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
     }
@@ -845,24 +889,44 @@ async fn consolidate_supersedes_in_cohort_and_relates_in_band() {
     let global = store.save(&me, global, &work).await.unwrap().id;
 
     store
-        .upsert_embedding(&alpha, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &alpha,
+            &current_embedding_hash(&db.store, &alpha).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&beta, "h", &tilted(0.95, 1))
+        .upsert_embedding(
+            &beta,
+            &current_embedding_hash(&db.store, &beta).await,
+            &tilted(0.95, 1),
+        )
         .await
         .unwrap(); // cos 0.95 to alpha: supersede
     store
-        .upsert_embedding(&gamma, "h", &tilted(0.80, 2))
+        .upsert_embedding(
+            &gamma,
+            &current_embedding_hash(&db.store, &gamma).await,
+            &tilted(0.80, 2),
+        )
         .await
         .unwrap(); // 0.80: relates only
     store
-        .upsert_embedding(&delta, "h", &tilted(0.30, 3))
+        .upsert_embedding(
+            &delta,
+            &current_embedding_hash(&db.store, &delta).await,
+            &tilted(0.30, 3),
+        )
         .await
         .unwrap(); // 0.30: left alone
     for id in [&fact, &theirs, &global] {
         store
-            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
     }
@@ -913,7 +977,11 @@ async fn consolidate_supersedes_in_cohort_and_relates_in_band() {
     disputing.contradicts = Some(beta.clone());
     let epsilon = store.save(&me, disputing, &work).await.unwrap().id;
     store
-        .upsert_embedding(&epsilon, "h", &tilted(0.97, 1))
+        .upsert_embedding(
+            &epsilon,
+            &current_embedding_hash(&db.store, &epsilon).await,
+            &tilted(0.97, 1),
+        )
         .await
         .unwrap();
     let disputed = store.consolidate_memory(&epsilon).await.unwrap();
@@ -943,11 +1011,19 @@ async fn relates_band_adds_one_auto_link() {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&a, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &a,
+            &current_embedding_hash(&db.store, &a).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&b, "h", &tilted(0.80, 2))
+        .upsert_embedding(
+            &b,
+            &current_embedding_hash(&db.store, &b).await,
+            &tilted(0.80, 2),
+        )
         .await
         .unwrap();
     let outcome = store.consolidate_memory(&b).await.unwrap();
@@ -1010,11 +1086,19 @@ async fn consolidate_finds_a_duplicate_among_many_other_peoples_vectors() {
     let a = db.store.save(&me, rule("alpha"), &work).await.unwrap().id;
     let b = db.store.save(&me, rule("beta"), &work).await.unwrap().id;
     db.store
-        .upsert_embedding(&a, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &a,
+            &current_embedding_hash(&db.store, &a).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     db.store
-        .upsert_embedding(&b, "h", &tilted(0.95, 1))
+        .upsert_embedding(
+            &b,
+            &current_embedding_hash(&db.store, &b).await,
+            &tilted(0.95, 1),
+        )
         .await
         .unwrap();
     // 200 rows of another person, all closer to beta than alpha is: more than hnsw's ef_search
@@ -1102,7 +1186,11 @@ async fn consolidate_does_not_merge_across_projects() {
         .id;
     for (id, weight) in [(&a, 1.0), (&b, 0.95), (&c, 0.96)] {
         store
-            .upsert_embedding(id, "h", &tilted(weight, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(weight, 1),
+            )
             .await
             .unwrap();
     }
@@ -1211,11 +1299,19 @@ async fn concurrent_consolidation_of_a_mutual_pair_never_fails() {
             .unwrap()
             .id;
         store
-            .upsert_embedding(&a, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                &a,
+                &current_embedding_hash(&db.store, &a).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
         store
-            .upsert_embedding(&b, "h", &tilted(0.95, 1))
+            .upsert_embedding(
+                &b,
+                &current_embedding_hash(&db.store, &b).await,
+                &tilted(0.95, 1),
+            )
             .await
             .unwrap();
         let (left, right) =
@@ -1612,7 +1708,11 @@ async fn equalize(store: &cairn_store::Store, ids: &[&str]) {
             .await
             .unwrap();
         store
-            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(store, id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
     }
@@ -1786,7 +1886,11 @@ async fn forget_keeps_content_but_hides() {
     body.supersedes = Some(other);
     let id = db.store.save(&me, body, &work).await.unwrap().id;
     db.store
-        .upsert_embedding(&id, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &id,
+            &current_embedding_hash(&db.store, &id).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     assert!(db.store.forget(&me, &id).await.unwrap());

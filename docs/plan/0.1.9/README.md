@@ -58,7 +58,7 @@ The item 08 review index uses `0014_memory_owner_project_created`.
 | 10 | [x] [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
 | 13 | [x] [Fixes: recording](13-fixes-recording.md) | 03, 08, 09, 12 | `0011_fixes` |
 | 14 | [x] [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
-| 15 | [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |
+| 15 | [x] [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |
 | 16 | [Fixes: device fixes, `cairn fixes`, audited auto-join](16-fixes-cli-autojoin.md) | 15 | — |
 
 Shared files, in this order only: `crates/client/src/hook/mod.rs` and `hook/state.rs` (02 → 12 → 05 → 03 → 06);
