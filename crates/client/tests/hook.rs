@@ -5,6 +5,7 @@
 mod common;
 
 use cairn_client::Config;
+use cairn_core::instructions::DEFAULT_SESSION_INSTRUCTION;
 use common::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 
 fn brief_and_hint() -> String {
-    format!("BRIEF\n{NO_PROJECT_HINT}")
+    format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}\n{NO_PROJECT_HINT}")
 }
 
 #[derive(Clone)]
@@ -408,7 +409,7 @@ fn session_start_reports_repo_state() {
     assert!(
         injected(&start)
             .unwrap()
-            .starts_with("BRIEF\nCairn is active")
+            .starts_with(&format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}"))
     );
     let posts = server.to("repo-state");
     assert_eq!(
@@ -583,9 +584,13 @@ fn http_401_names_config_keeps_stdout_valid() {
     let env = Env::new("hook-401", &server.url);
     let start = env.run("SessionStart", &env.payload("s1", json!({})));
     let prompt = env.prompt("s1", "hello");
+    assert_eq!(
+        injected(&start).as_deref(),
+        Some(DEFAULT_SESSION_INSTRUCTION)
+    );
+    assert!(prompt.stdout.is_empty());
     for output in [&start, &prompt] {
         let text = stderr(output);
-        assert!(output.stdout.is_empty());
         assert!(text.contains(env.config().to_str().unwrap()), "{text}");
         assert!(text.contains("cairn setup"), "{text}");
         assert!(!text.contains(TOKEN), "{text}");
@@ -667,7 +672,10 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
         "SessionStart",
         &env.payload("s1", json!({"source": "compact"})),
     );
-    assert_eq!(injected(&again).as_deref(), Some("BRIEF"));
+    assert_eq!(
+        injected(&again).as_deref(),
+        Some(format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}").as_str())
+    );
 }
 
 #[test]
@@ -1684,21 +1692,18 @@ fn start_appends_one_instruction_line_only_in_an_initialised_repo() {
     assert_eq!(
         start(&env, "s0").as_deref(),
         Some(brief_and_hint().as_str()),
-        "no project file: the hint replaces the session instruction"
+        "no project file: the instruction precedes the hint"
     );
     with_project(&env);
     let text = start(&env, "s1").unwrap();
     let (brief, line) = text.split_once('\n').unwrap();
     assert_eq!(brief, "BRIEF");
-    assert!(
-        line.starts_with("Cairn is active for this project."),
-        "{line}"
-    );
+    assert!(line == DEFAULT_SESSION_INSTRUCTION, "{line}");
     assert!(
         line.contains("memory_search") && line.contains("memory_save"),
         "{line}"
     );
-    assert!(line.len() <= 200, "{}", line.len());
+    assert!(line.len() <= 280, "{}", line.len());
 }
 
 #[test]
@@ -1712,10 +1717,7 @@ fn start_gives_the_line_even_when_the_project_has_no_brief_yet() {
     let env = Env::new("hook-nudge-empty", &server.url);
     with_project(&env);
     let text = start(&env, "s1").unwrap();
-    assert!(
-        text.starts_with("Cairn is active for this project."),
-        "{text}"
-    );
+    assert!(text == DEFAULT_SESSION_INSTRUCTION, "{text}");
 }
 
 #[test]
@@ -1867,7 +1869,11 @@ fn the_reminders_can_be_turned_off_by_config_or_environment() {
     // And on again once the key is gone.
     config.as_object_mut().unwrap().remove("nudge");
     std::fs::write(env.config(), config.to_string()).unwrap();
-    assert!(start(&env, "d").unwrap().contains("Cairn is active"));
+    assert!(
+        start(&env, "d")
+            .unwrap()
+            .contains(DEFAULT_SESSION_INSTRUCTION)
+    );
 }
 
 #[test]
@@ -1915,7 +1921,7 @@ fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text(
     assert!(
         start(&env, "s1")
             .unwrap()
-            .contains("Cairn is active for this project.")
+            .contains(DEFAULT_SESSION_INSTRUCTION)
     );
     env.edit("s1", "src/a.rs", "x");
     let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
@@ -1927,10 +1933,7 @@ fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text(
     let env = Env::new("hook-nudge-down", "http://127.0.0.1:9");
     with_project(&env);
     let text = start(&env, "d1").unwrap();
-    assert!(
-        text.starts_with("Cairn is active for this project."),
-        "{text}"
-    );
+    assert!(text == DEFAULT_SESSION_INSTRUCTION, "{text}");
     env.edit("d1", "src/a.rs", "x");
     let reason = blocked(&stop(&env, "d1", json!({}))).unwrap();
     assert!(reason.starts_with("You changed 1 file(s)"), "{reason}");
@@ -1945,7 +1948,7 @@ fn no_project_start_prints_hint_once() {
     assert!(NO_PROJECT_HINT.len() <= 90, "{}", NO_PROJECT_HINT.len());
     assert_eq!(
         start(&env, "s1").as_deref(),
-        Some("BRIEF"),
+        Some(format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}").as_str()),
         "the hint is once per session"
     );
     let off = [("CAIRN_NO_NUDGE", "1")];
@@ -1953,9 +1956,9 @@ fn no_project_start_prints_hint_once() {
     let started = quiet.run_with("SessionStart", &quiet.payload("e", json!({})), &[], &off);
     assert_eq!(injected(&started).as_deref(), Some("BRIEF"));
     let down = Env::new("hook-no-project-down", "http://127.0.0.1:9");
-    assert!(
-        start(&down, "d").is_none(),
-        "no hint when the server is unreachable"
+    assert_eq!(
+        start(&down, "d").as_deref(),
+        Some(DEFAULT_SESSION_INSTRUCTION)
     );
 }
 

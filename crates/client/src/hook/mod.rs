@@ -332,8 +332,9 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
-                // Unreachable: no hint. A project file still gets the built-in line.
-                return (self.config.nudge() && self.file_project())
+                return self
+                    .config
+                    .nudge()
                     .then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
             }
         };
@@ -365,24 +366,25 @@ impl Hook<'_> {
         }
         let line = if !self.config.nudge() {
             None
-        } else if resolved.is_some() || self.file_project() {
-            // The Stop text rides along with the start reply: no request at Stop.
+        } else {
             let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
             self.with_state(|s| s.stop_nudge = Some(stop));
-            Some(inject::server_text(
-                &reply,
-                "session_instruction",
-                DEFAULT_SESSION_INSTRUCTION,
-            ))
-        } else {
-            let first = self
-                .with_state(|state| {
-                    let first = !state.hinted;
-                    state.hinted = true;
-                    first
-                })
-                .unwrap_or(false);
-            first.then(|| NO_PROJECT_HINT.to_owned())
+            let mut instruction =
+                inject::server_text(&reply, "session_instruction", DEFAULT_SESSION_INSTRUCTION);
+            if resolved.is_none() && !self.file_project() {
+                let first = self
+                    .with_state(|state| {
+                        let first = !state.hinted;
+                        state.hinted = true;
+                        first
+                    })
+                    .unwrap_or(false);
+                if first {
+                    instruction.push('\n');
+                    instruction.push_str(NO_PROJECT_HINT);
+                }
+            }
+            Some(instruction)
         };
         match (brief, line) {
             (Some(brief), Some(line)) => Some(format!("{brief}\n{line}")),

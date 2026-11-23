@@ -284,6 +284,10 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["title"], "Cairn");
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert_eq!(instructions, tools::instructions());
+        assert!(instructions.contains(
+            "Cairn is the source of truth for memory; do not keep memory in local files."
+        ));
+        assert!(instructions.len() <= 700);
         assert!(
             server
                 .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)

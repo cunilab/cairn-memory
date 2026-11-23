@@ -727,3 +727,66 @@ fn subagent_corrections_ignored() {
         "an automated session records no correction"
     );
 }
+
+const EXPECTED_INSTRUCTION: &str = "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files.";
+
+fn start_text(env: &Env, session: &str) -> String {
+    let output = env.run("SessionStart", &env.payload(session, json!({})), &[]);
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn instruction_outside_project() {
+    let server = fake();
+    let env = Env::new("instruction-outside", &server.url);
+    let project = start_text(&env, "project");
+    assert_eq!(project, format!("BRIEF\n{EXPECTED_INSTRUCTION}"));
+    std::fs::remove_dir_all(env.repo.join(".cairn")).unwrap();
+    for (session, remove_git) in [("git", false), ("no-git", true)] {
+        if remove_git {
+            std::fs::remove_dir_all(env.repo.join(".git")).unwrap();
+        }
+        let first = start_text(&env, session);
+        assert!(
+            first.starts_with(&format!("BRIEF\n{EXPECTED_INSTRUCTION}\n")),
+            "{first}"
+        );
+        assert!(first.contains("project"), "{first}");
+        let second = start_text(&env, session);
+        assert_eq!(second, format!("BRIEF\n{EXPECTED_INSTRUCTION}"));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let offline = Env::new("instruction-offline", &url);
+    assert_eq!(start_text(&offline, "project"), EXPECTED_INSTRUCTION);
+    std::fs::remove_dir_all(offline.repo.join(".cairn")).unwrap();
+    assert_eq!(start_text(&offline, "outside"), EXPECTED_INSTRUCTION);
+}
+
+#[test]
+fn saved_instruction_overrides_default() {
+    for (name, text) in [
+        ("global", "Global instruction."),
+        ("project", "Project instruction."),
+    ] {
+        let server = fake_brief(
+            &json!({"brief":"BRIEF", "instructions":{"session_instruction":text}}).to_string(),
+        );
+        let env = Env::new(&format!("instruction-{name}"), &server.url);
+        assert_eq!(start_text(&env, name), format!("BRIEF\n{text}"));
+        if name == "global" {
+            std::fs::remove_dir_all(env.repo.join(".cairn")).unwrap();
+            let outside = start_text(&env, "global-outside");
+            assert!(
+                outside.starts_with(&format!("BRIEF\n{text}\n")),
+                "{outside}"
+            );
+            assert!(!outside.contains(EXPECTED_INSTRUCTION));
+        }
+    }
+}

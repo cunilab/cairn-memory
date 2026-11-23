@@ -23,10 +23,9 @@ async fn global_texts_default_set_cap_clear_and_audit() {
     for token in [&member, &device] {
         let start = app.get("agent-instructions", token).await;
         assert_eq!(text(&start, "session_instruction").1, "default");
-        assert!(
-            text(&start, "session_instruction")
-                .0
-                .starts_with("Cairn is active")
+        assert_eq!(
+            text(&start, "session_instruction").0,
+            cairn_core::instructions::DEFAULT_SESSION_INSTRUCTION
         );
         assert_eq!(start["session_instruction"]["own"], Value::Null);
         assert_eq!(start["max_bytes"], 600);

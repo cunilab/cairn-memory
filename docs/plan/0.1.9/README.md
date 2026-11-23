@@ -54,7 +54,7 @@ The item 08 review index uses `0014_memory_owner_project_created`.
 | 09 | [x] [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
 | 08 | [x] [Per-project web report](08-project-report.md) | 01, 04, 12 | `0010_session_outcome` |
 | 07 | [x] [Write-side bench in CI](07-write-bench.md) | 01–06, 12 | — |
-| 18 | [Cairn is the agent's memory (session-start instruction)](18-agent-memory-mirror.md) (added 2026-11-23, user) | 02, 12 | — (no schema) |
+| 18 | [x] [Cairn is the agent's memory (session-start instruction)](18-agent-memory-mirror.md) (added 2026-11-23, user) | 02, 12 | — (no schema) |
 | 10 | [x] [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
 | 13 | [Fixes: recording](13-fixes-recording.md) | 03, 08, 09, 12 | `0011_fixes` |
 | 14 | [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |

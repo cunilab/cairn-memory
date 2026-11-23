@@ -5,8 +5,8 @@
 /// The longest text the server stores for either field, in bytes.
 pub const MAX_INSTRUCTION_BYTES: usize = 600;
 
-/// Appended to the session brief in a repository with `.cairn/project.json`.
-pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is active for this project. Before deciding or debugging, memory_search; after a decision, fixed gotcha or finished task, memory_save with a reason.";
+/// Appended to the session brief.
+pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files.";
 
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
 pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop.";
@@ -47,8 +47,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_says_source_of_truth() {
+        assert_eq!(
+            DEFAULT_SESSION_INSTRUCTION,
+            "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files."
+        );
+    }
+
+    #[test]
     fn the_defaults_fit_and_the_placeholder_is_filled() {
-        assert!(DEFAULT_SESSION_INSTRUCTION.len() <= 200);
+        assert!(DEFAULT_SESSION_INSTRUCTION.len() <= 280);
         assert!(DEFAULT_STOP_NUDGE.len() <= MAX_INSTRUCTION_BYTES);
         assert!(fill_stop_nudge(DEFAULT_STOP_NUDGE, 3).starts_with("You changed 3 file(s)."));
         assert_eq!(fill_stop_nudge("no placeholder", 3), "no placeholder");
