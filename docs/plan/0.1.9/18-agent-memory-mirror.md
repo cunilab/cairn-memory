@@ -43,10 +43,11 @@ this is item 18 of 0.1.9.
     note.
   - scope: `user`/`feedback` → personal; otherwise project when the session is in a Cairn project (item 02),
     else personal. Gemini and Codex global files → personal.
-  - rank: `candidate` (D-RANK); origin `system` (Cairn copied the file; the existing save path gives system saves candidate rank). Normal redaction and validation apply;
-    a file rejected by validation (e.g. a secret) is skipped and counted, never retried in a loop.
+  - rank: `candidate` (D-RANK); origin `system` (Cairn copied the file; the existing save path gives system saves candidate rank). Normal redaction and validation apply
+    (a secret is redacted like in any save); a file rejected by validation is skipped and counted, never retried in a loop.
 - **Updates:** one new route `POST /cairn-memory/session/mirror` takes the list of parsed files. For each, the server
-  finds this owner's previous mirror of the same evidence key: same content → nothing; changed → save the new
+  finds this owner's previous mirror of the same evidence key (the newest one, forgotten included; if it is
+  forgotten, the file is skipped): same content → nothing; changed → save the new
   version with `supersedes` the old one (old kept, D-DATA); none → new memory. A forgotten previous mirror is not
   revived: the file is skipped.
 - **File deleted:** nothing happens in Cairn (D-DATA).
@@ -73,7 +74,8 @@ this is item 18 of 0.1.9.
 4. A project-type file in a Cairn project gets project scope; outside a project (no `.cairn/project.json`, with or
    without git) it is personal.
 5. Caps hold: 25 files → 20 mirrored in the first scan, 5 in the next; a 40 KiB file is clipped, not rejected.
-6. A file containing a secret is skipped by validation and does not block the other files.
+6. A file containing a secret is saved redacted (the raw secret is never stored); a file that fails validation is
+   skipped and does not block the other files.
 7. The hook prints nothing for the mirror (0 bytes added to any hook output); server down → hashes unchanged, next
    scan retries.
 8. Works for a Gemini `GEMINI.md` bullet list and a Codex `memories/*.md` file in a temp HOME.
