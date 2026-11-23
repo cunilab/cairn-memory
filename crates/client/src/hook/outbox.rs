@@ -30,6 +30,14 @@ struct Queue {
     events: Vec<Pending>,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookError {
+    pub class: String,
+    pub at: i64,
+    #[serde(default)]
+    nonce: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Pending {
     event_id: String,
@@ -150,6 +158,61 @@ impl Outbox {
         Ok(dropped)
     }
 
+    fn health_path(&self) -> PathBuf {
+        let digest = Sha256::digest(format!("{}\0{}", self.origin, self.device));
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".{digest:x}.health"));
+        self.path.with_file_name(name)
+    }
+
+    pub fn health(&self) -> Option<(usize, Option<HookError>)> {
+        let _lock = self.lock(LOCK_WAIT).ok()?;
+        let queue = self.read()?;
+        let error = fs::read(self.health_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        Some((queue.events.len(), error))
+    }
+
+    pub fn failure(&self, error: &Error) {
+        let class = match error {
+            Error::Status {
+                status: 401 | 403, ..
+            } => "auth",
+            Error::Status { status, .. } if *status >= 500 => "server",
+            Error::Request(message)
+                if message.contains("invalid JSON") || message.contains("cannot read response") =>
+            {
+                "parse"
+            }
+            Error::Request(_) => "network",
+            _ => "parse",
+        };
+        let Ok(_lock) = self.lock(LOCK_WAIT) else {
+            return;
+        };
+        let error = HookError {
+            class: class.into(),
+            at: cairn_core::id::now_seconds(),
+            nonce: cairn_core::id::new_id("err"),
+        };
+        if let Ok(body) = serde_json::to_vec(&error) {
+            let _ = write_private(&self.health_path(), &body);
+        }
+    }
+
+    pub fn clear_error(&self, sent: &Option<HookError>) {
+        let Ok(_lock) = self.lock(LOCK_WAIT) else {
+            return;
+        };
+        let stored: Option<HookError> = fs::read(self.health_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if stored == *sent && sent.is_some() {
+            let _ = fs::remove_file(self.health_path());
+        }
+    }
+
     /// Best effort after a delivered capture: oldest first, at most 20 events, at most 2 s,
     /// skipping the event just sent. Never an error. The lock covers the read and the final
     /// write only; an event queued meanwhile stays, and one delivered twice is dropped by the
@@ -179,21 +242,33 @@ impl Outbox {
                 break;
             }
             let client = Client::identified(config.clone(), left, agent, ClientKind::Hook);
-            match client.post(OBSERVE, &pending.body) {
-                Ok(_) | Err(Error::Status { status: 409, .. }) => {
+            let (depth, health) = self.health().unwrap_or_default();
+            let mut body = pending.body;
+            body["outbox_depth"] = serde_json::json!(depth);
+            if let Some(error) = &health {
+                body["hook_error_class"] = serde_json::json!(error.class);
+                body["hook_error_at"] = serde_json::json!(error.at);
+            }
+            match client.post(OBSERVE, &body) {
+                Ok(_) => {
+                    self.clear_error(&health);
                     done.insert(pending.event_id);
                 }
-                Err(Error::Status { status: 401, .. }) => break,
-                Err(error) if retryable(&error) => {
-                    failed = Some((
-                        pending.event_id,
-                        error.to_string().chars().take(200).collect(),
-                    ));
-                    break;
-                }
-                // Any other 4xx will never be accepted.
-                Err(_) => {
-                    done.insert(pending.event_id);
+                Err(error) => {
+                    self.failure(&error);
+                    match error {
+                        Error::Status { status: 401, .. } => break,
+                        error if retryable(&error) => {
+                            failed = Some((
+                                pending.event_id,
+                                error.to_string().chars().take(200).collect(),
+                            ));
+                            break;
+                        }
+                        _ => {
+                            done.insert(pending.event_id);
+                        }
+                    }
                 }
             }
         }

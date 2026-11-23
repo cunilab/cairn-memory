@@ -163,6 +163,81 @@ impl Tool<'_> {
             .filter(|text| !text.is_empty())
     }
 
+    pub fn lookup(&self) -> Option<Value> {
+        let kind = if self.name == "mcp__cairn__memory_search" {
+            "search"
+        } else if self.name == "mcp__cairn__memory_get" {
+            "get"
+        } else {
+            return None;
+        };
+        let query = (kind == "search")
+            .then(|| {
+                self.input_text("query")
+                    .map(redact_sensitive_content)
+                    .map(|q| q.chars().take(120).collect::<String>())
+            })
+            .flatten();
+        let input_ids: Vec<String> = self
+            .input
+            .and_then(|v| v.get("ids"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(20)
+            .map(str::to_owned)
+            .collect();
+        let response = self
+            .response
+            .filter(|r| r.get("isError").and_then(Value::as_bool) != Some(true));
+        let parsed = response.and_then(|r| {
+            let blocks = r
+                .as_array()
+                .or_else(|| r.get("content").and_then(Value::as_array));
+            if let Some(blocks) = blocks {
+                blocks
+                    .iter()
+                    .find(|v| v["type"] == "text")
+                    .and_then(|v| v["text"].as_str())
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            } else if r.is_object() {
+                Some(r.clone())
+            } else {
+                None
+            }
+        });
+        let records = parsed
+            .as_ref()
+            .and_then(|v| {
+                v.get(if kind == "search" {
+                    "results"
+                } else {
+                    "memories"
+                })
+            })
+            .and_then(Value::as_array);
+        let ids: Vec<String> = if kind == "get" {
+            input_ids
+        } else {
+            records
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.get("id").and_then(Value::as_str))
+                .take(20)
+                .map(str::to_owned)
+                .collect()
+        };
+        let hit = records.map(|r| {
+            if kind == "search" {
+                !ids.is_empty()
+            } else {
+                !r.is_empty()
+            }
+        });
+        Some(serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit}))
+    }
+
     fn command_text(&self) -> Option<&str> {
         self.input_text("command")
             .or_else(|| self.input_text("cmd"))

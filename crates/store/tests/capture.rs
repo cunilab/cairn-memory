@@ -726,3 +726,40 @@ async fn handoff_chain_link_has_system_origin() {
     );
     db.finish().await;
 }
+
+#[tokio::test]
+async fn lookup_log_swept_after_14_days() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("lookup-sweep").await;
+    sqlx::query("INSERT INTO lookup_log (person_id,kind,at) VALUES ($1,'search',now()-interval '15 days'),($1,'search',now()-interval '13 days')")
+        .bind(&me).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO fixes(fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at) VALUES ('fix','test','test','report','done',now()-interval '90 days',now()-interval '90 days')")
+        .execute(db.store.pool()).await.unwrap();
+    let tables: Vec<String> = sqlx::query_scalar("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename <> 'lookup_log' ORDER BY tablename")
+        .fetch_all(db.store.pool()).await.unwrap();
+    let mut before = Vec::new();
+    for table in &tables {
+        before.push(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap(),
+        );
+    }
+    db.store.sweep().await.unwrap();
+    for (table, expected) in tables.iter().zip(before) {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+        assert!(count >= expected, "{table} lost rows");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lookup_log")
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    db.finish().await;
+}

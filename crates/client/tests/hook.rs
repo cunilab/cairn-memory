@@ -900,9 +900,16 @@ fn payload_maps_to_typed_capture() {
             .collect();
         keys.sort_unstable();
         assert!(
-            keys.iter().all(
-                |k| ["content", "context", "event_id", "kind", "ok", "session_id"].contains(k)
-            ),
+            keys.iter().all(|k| [
+                "content",
+                "context",
+                "event_id",
+                "kind",
+                "ok",
+                "outbox_depth",
+                "session_id"
+            ]
+            .contains(k)),
             "{keys:?}"
         );
         assert!(body["event_id"].as_str().unwrap().starts_with("hk_"));
@@ -2039,4 +2046,138 @@ fn init_suggests_commit_and_never_commits() {
     )
     .unwrap();
     assert_eq!(commits.trim(), "1", "init does not commit");
+}
+
+#[test]
+fn lookup_recorded_silently() {
+    let server = fake();
+    let env = Env::new("lookup-recorded", &server.url);
+    let secret = format!("ghp_{}", "a".repeat(40));
+    let output = env.run(
+        "PostToolUse",
+        &env.payload(
+            "lookup",
+            json!({
+                "tool_name": "mcp__cairn__memory_search",
+                "tool_input": {"query": format!("{secret} {}", "x".repeat(160))},
+                "tool_response": {"results": [{"id": "mem_1"}]}
+            }),
+        ),
+    );
+    assert!(output.stdout.is_empty());
+    let requests = server.to("lookup");
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0].body;
+    assert_eq!(body["kind"], "search");
+    assert_eq!(body["result_ids"], json!(["mem_1"]));
+    assert_eq!(body["hit"], true);
+    let query = body["query"].as_str().unwrap();
+    assert!(query.chars().count() <= 120 && !query.contains(&secret));
+    for (response, expected) in [
+        (
+            json!({"content":[{"type":"text","text":"{\"memories\":[{\"id\":\"m\"}]}"}]}),
+            json!(true),
+        ),
+        (json!({"memories":[]}), json!(false)),
+        (json!({"isError":true}), Value::Null),
+    ] {
+        let output = env.run("PostToolUse", &env.payload("lookup", json!({
+            "tool_name":"mcp__cairn__memory_get", "tool_input":{"ids":["m"]}, "tool_response":response
+        })));
+        assert!(output.stdout.is_empty());
+        let requests = server.to("lookup");
+        let body = &requests.last().unwrap().body;
+        assert_eq!(body["query"], Value::Null);
+        assert_eq!(body["result_ids"], json!(["m"]));
+        assert_eq!(body["hit"], expected);
+    }
+}
+
+#[test]
+fn nudge_flags_sent() {
+    let server = fake();
+    let env = Env::new("nudge-flags", &server.url);
+    env.edit("normal", "src/a.rs", "x");
+    env.run("SessionEnd", &env.payload("normal", json!({})));
+    let ends = server.to("end");
+    assert_eq!(ends[0].body["nudge_asked"], false);
+    assert_eq!(ends[0].body["nudge_saved"], false);
+    env.run_with(
+        "PostToolUse",
+        &env.payload("auto", edit_call("src/b.rs", "x", "e")),
+        &[],
+        &[("CAIRN_SESSION_ORIGIN", "automation")],
+    );
+    env.run_with(
+        "SessionEnd",
+        &env.payload("auto", json!({})),
+        &[],
+        &[("CAIRN_SESSION_ORIGIN", "automation")],
+    );
+    assert!(server.to("end")[1].body.get("nudge_asked").is_none());
+}
+
+#[test]
+fn failure_health_arrives_on_next_observe() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/lookup") {
+            (401, "{}".into())
+        } else {
+            default_reply(request)
+        }
+    });
+    let env = Env::new("lookup-health", &server.url);
+    let output = env.run("PostToolUse", &env.payload("s", json!({
+        "tool_name":"mcp__cairn__memory_search", "tool_input":{"query":"test"}, "tool_response":{"results":[]}
+    })));
+    assert!(output.stdout.is_empty());
+    env.prompt("s", "a prompt");
+    let seen = server.observed();
+    assert_eq!(seen[0]["hook_error_class"], "auth");
+    assert!(seen[0]["hook_error_at"].is_i64());
+    assert_eq!(seen[0]["outbox_depth"], 0);
+    env.prompt("s", "another prompt");
+    assert!(server.observed()[1].get("hook_error_class").is_none());
+}
+
+#[test]
+fn newer_hook_failure_survives_inflight_observe() {
+    let started = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let first = Arc::new(AtomicBool::new(true));
+    let server = fake_with({
+        let (started, release, first) = (started.clone(), release.clone(), first.clone());
+        move |_, request| {
+            if request.path.ends_with("/lookup") {
+                return (401, "{}".into());
+            }
+            if request.path.ends_with("/observe") && first.swap(false, Ordering::SeqCst) {
+                *started.0.lock().unwrap() = true;
+                started.1.notify_one();
+                let ready = release.0.lock().unwrap();
+                drop(release.1.wait_while(ready, |ready| !*ready).unwrap());
+            }
+            default_reply(request)
+        }
+    });
+    let env = Env::new("health-race", &server.url);
+    let lookup = || {
+        env.run("PostToolUse", &env.payload("race", json!({
+        "tool_name":"mcp__cairn__memory_search", "tool_input":{"query":"test"}, "tool_response":{"results":[]}
+    })))
+    };
+    lookup();
+    thread::scope(|scope| {
+        let send = scope.spawn(|| env.prompt("race", "first prompt"));
+        let ready = started.0.lock().unwrap();
+        drop(started.1.wait_while(ready, |ready| !*ready).unwrap());
+        lookup();
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        send.join().unwrap();
+    });
+    env.prompt("race", "second prompt");
+    let seen = server.observed();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1]["hook_error_class"], "auth");
 }

@@ -90,6 +90,7 @@ pub fn router() -> Router<AppState> {
         )
         // capture
         .route("/cairn-memory/observe", post(capture::observe))
+        .route("/cairn-memory/session/lookup", post(capture::lookup))
         .route("/cairn-memory/session/end", post(capture::end))
         .route(
             "/cairn-memory/session/checkpoint",

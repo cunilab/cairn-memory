@@ -179,7 +179,7 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
             let mut group = json!({"hooks": [handler]});
             if event == "PostToolUse" {
                 group["matcher"] = json!(
-                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save"
+                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
                 );
             }
             Some(group)

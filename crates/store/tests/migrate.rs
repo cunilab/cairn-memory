@@ -26,6 +26,7 @@ async fn migrate_twice_is_a_no_op() {
             "0008_proof_count",
             "0009_memory_aliases",
             "0010_session_outcome",
+            "0011_fixes",
             "0012_always_active",
             "0013_link_origin_system",
             "0014_memory_owner_project_created",
@@ -37,7 +38,7 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 18);
+    assert_eq!(tables, 20);
     // Everything lives in the test schema, nothing leaks into public.
     let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs')")
         .fetch_one(db.store.pool())
@@ -862,4 +863,173 @@ async fn session_outcome_columns_nullable() {
         .await
         .unwrap();
     store.pool().close().await;
+}
+
+#[tokio::test]
+async fn fixes_migration_additive() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert_ne!(std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref(), Ok("1"));
+        return;
+    };
+    let schema = format!("t_fixes_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, sql) in [
+        (
+            "0001_foundation",
+            include_str!("../../../migrations/0001_foundation.sql"),
+        ),
+        (
+            "0002_capture",
+            include_str!("../../../migrations/0002_capture.sql"),
+        ),
+        (
+            "0003_retrieval",
+            include_str!("../../../migrations/0003_retrieval.sql"),
+        ),
+        (
+            "0004_processing",
+            include_str!("../../../migrations/0004_processing.sql"),
+        ),
+        (
+            "0005_console",
+            include_str!("../../../migrations/0005_console.sql"),
+        ),
+        (
+            "0006_agent_instructions",
+            include_str!("../../../migrations/0006_agent_instructions.sql"),
+        ),
+        (
+            "0007_memory_rank",
+            include_str!("../../../migrations/0007_memory_rank.sql"),
+        ),
+        (
+            "0008_proof_count",
+            include_str!("../../../migrations/0008_proof_count.sql"),
+        ),
+        (
+            "0009_memory_aliases",
+            include_str!("../../../migrations/0009_memory_aliases.sql"),
+        ),
+        (
+            "0010_session_outcome",
+            include_str!("../../../migrations/0010_session_outcome.sql"),
+        ),
+        (
+            "0012_always_active",
+            include_str!("../../../migrations/0012_always_active.sql"),
+        ),
+        (
+            "0013_link_origin_system",
+            include_str!("../../../migrations/0013_link_origin_system.sql"),
+        ),
+        (
+            "0014_memory_owner_project_created",
+            include_str!("../../../migrations/0014_memory_owner_project_created.sql"),
+        ),
+    ] {
+        sqlx::raw_sql(sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version(version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql("INSERT INTO accounts (person_id,email,password_hash) VALUES ('p','a@a','x');
+        INSERT INTO web_sessions (session_id,person_id,token_hash,expires_at) VALUES ('w','p','hash',now());
+        INSERT INTO devices (device_id,person_id,name,token_hash) VALUES ('d','p','device','hash');
+        INSERT INTO audit_events (audit_id,person_id,action) VALUES ('a','p','test');
+        INSERT INTO projects (project_id,owner_id,repository,name) VALUES ('pr','p','repo','project');
+        INSERT INTO project_members (project_id,person_id) VALUES ('pr','p');
+        INSERT INTO memories (memory_id,owner_id,scope,kind,title,summary,evidence_hash,identity_hash) VALUES
+            ('m1','p','personal','fact','one','one','e1','i1'),('m2','p','personal','fact','two','two','e2','i2');
+        INSERT INTO memory_aliases(memory_id,ord,source,text) VALUES ('m1',1,'agent','one');
+        INSERT INTO entities(memory_id,kind,name) VALUES ('m1','term','one');
+        INSERT INTO links(source_id,target_id,relation,origin) VALUES ('m1','m2','relates','agent');
+        INSERT INTO usage(memory_id) VALUES ('m1');
+        INSERT INTO usage_votes(memory_id,person_id,vote) VALUES ('m1','p','helpful');
+        INSERT INTO sessions(person_id,session_id) VALUES ('p','s');
+        INSERT INTO observations(person_id,event_id,session_id,role,source,content,content_hash,expires_at) VALUES ('p','e','s','user','hook','text','h',now());
+        INSERT INTO jobs(job_id,kind,job_key) VALUES ('j','embed','m1');
+        INSERT INTO retrieval_log(person_id,bucket,kind) VALUES ('p',now(),'search');
+        INSERT INTO server_state(key,value) VALUES ('test','value') ON CONFLICT DO NOTHING;")
+        .execute(store.pool()).await.unwrap();
+    let tables = [
+        "accounts",
+        "web_sessions",
+        "devices",
+        "audit_events",
+        "projects",
+        "project_members",
+        "memories",
+        "memory_aliases",
+        "entities",
+        "links",
+        "usage",
+        "usage_votes",
+        "sessions",
+        "observations",
+        "jobs",
+        "retrieval_log",
+        "server_state",
+    ];
+    let mut before = Vec::new();
+    for table in tables {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(count > 0, "empty {table}");
+        before.push(count);
+    }
+    let ids: Vec<String> = sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    let mut versions: Vec<String> =
+        sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    store.migrate().await.unwrap();
+    store.migrate().await.unwrap();
+    versions.push("0011_fixes".into());
+    versions.sort();
+    let after_versions: Vec<String> =
+        sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(versions, after_versions);
+    for (table, expected) in tables.into_iter().zip(before) {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, expected, "{table}");
+    }
+    let after: Vec<String> =
+        sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(ids, after);
+    let version: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version='0011_fixes')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(version);
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
 }

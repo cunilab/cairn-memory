@@ -161,3 +161,22 @@ bytes, key order and comments stay. Removal of the
 OpenCode entry edits `opencode.json[c]` by token span, keeping comments and other bytes.
 `cairn setup` also deletes the retired `hook/cairn_*.py` files it recorded (an edited copy stays
 with a note), the old `hook-state.sqlite3`, and leaves a version 2 Python outbox alone.
+
+### Fixes recording
+
+`POST /cairn-memory/session/lookup` accepts a device token and `{session_id, kind,
+query, result_ids, hit}` and returns 204. `kind` is `search` or `get`; the server
+redacts and clips queries to 120 characters and retains at most 20 IDs. The
+person and device come from the token. Lookup logs expire after 14 days. The
+hook silently posts lookups without queueing failures: it reads `results[].id`
+for search and input IDs for get, accepting a response object or the first MCP
+text block as JSON. Missing, invalid, or error responses have unknown (`null`)
+`hit`; get uses its input IDs, search uses an empty list. A parsed get response
+hits when `memories` contains a record. A parsed search hits when it has IDs.
+
+The session-end body may carry `nudge_asked` and `nudge_saved`; automated and
+subagent sessions omit both. Observe may include `outbox_depth`, and the last
+`hook_error_class` (`network`, `auth`, `server`, or `parse`) and
+`hook_error_at` as Unix seconds. The server ignores error times more than one
+day in the future. The hook clears the local error only after a successful
+observe; no error text is sent. These fields add no hook stdout.

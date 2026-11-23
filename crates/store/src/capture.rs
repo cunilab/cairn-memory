@@ -205,15 +205,35 @@ impl Store {
 
     /// Ends a session and queues its distill job. False when there is nothing to distill.
     pub async fn end_session(&self, person_id: &str, session_id: &str) -> Result<bool> {
-        self.queue_distill(person_id, session_id, true).await
+        self.queue_distill(person_id, session_id, true, None, None)
+            .await
+    }
+
+    pub async fn end_session_with_nudge(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        asked: Option<bool>,
+        saved: Option<bool>,
+    ) -> Result<bool> {
+        self.queue_distill(person_id, session_id, true, asked, saved)
+            .await
     }
 
     /// Queues a distill job and keeps the session open.
     pub async fn checkpoint_session(&self, person_id: &str, session_id: &str) -> Result<bool> {
-        self.queue_distill(person_id, session_id, false).await
+        self.queue_distill(person_id, session_id, false, None, None)
+            .await
     }
 
-    async fn queue_distill(&self, person_id: &str, session_id: &str, end: bool) -> Result<bool> {
+    async fn queue_distill(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        end: bool,
+        asked: Option<bool>,
+        saved: Option<bool>,
+    ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let res: Option<(bool, bool)> = sqlx::query_as(
             "WITH prev AS (
@@ -223,7 +243,8 @@ impl Store {
                     FOR UPDATE
              )
              UPDATE sessions s
-                SET ended_at = CASE WHEN $3 AND prev.ended_at IS NULL THEN now() ELSE s.ended_at END
+                SET ended_at = CASE WHEN $3 AND prev.ended_at IS NULL THEN now() ELSE s.ended_at END,
+                    nudge_asked = COALESCE($4, s.nudge_asked), nudge_saved = COALESCE($5, s.nudge_saved)
                FROM prev
               WHERE s.person_id = prev.person_id AND s.session_id = prev.session_id
              RETURNING prev.pending_since IS NOT NULL AS pending,
@@ -232,6 +253,8 @@ impl Store {
         .bind(person_id)
         .bind(session_id)
         .bind(end)
+        .bind(asked)
+        .bind(saved)
         .fetch_optional(&mut *tx)
         .await?;
         let queued = match res {
@@ -651,6 +674,9 @@ impl Store {
         ))
         .execute(&mut *tx)
         .await?;
+        sqlx::query("DELETE FROM lookup_log WHERE at < now() - interval '14 days'")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         // A failed retry must not stop the reconcile pass.
         let retried = self.retry_quarantined().await;

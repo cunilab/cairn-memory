@@ -6,6 +6,7 @@ pub mod capture;
 pub mod consolidate;
 pub mod device;
 pub mod embed;
+pub mod fixes;
 pub mod instructions;
 pub mod jobs;
 pub mod link;
@@ -65,6 +66,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0010_session_outcome",
         include_str!("../../../migrations/0010_session_outcome.sql"),
+    ),
+    (
+        "0011_fixes",
+        include_str!("../../../migrations/0011_fixes.sql"),
     ),
     (
         "0012_always_active",

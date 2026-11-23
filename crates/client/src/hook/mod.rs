@@ -277,6 +277,11 @@ impl Hook<'_> {
             ClientKind::Hook,
         )
         .post(path, body);
+        if let Err(error) = &result
+            && let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir)
+        {
+            outbox.failure(error);
+        }
         match &result {
             // Only "no answer" (timeout, refused, unreachable); a 5xx answers quickly.
             Err(Error::Request(_)) => {
@@ -531,6 +536,11 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        if let Some(mut lookup) = tool.lookup() {
+            lookup["session_id"] = json!(self.session_id);
+            let _ = self.post("/cairn-memory/session/lookup", &lookup);
+            return Ok(None);
+        }
         // The agent saved: the MCP tool of any host (`mcp__cairn__memory_save`,
         // `cairn_memory_save`). Nothing else to do for it.
         if tool.name.contains("cairn") && tool.name.ends_with("memory_save") {
@@ -698,8 +708,18 @@ impl Hook<'_> {
         if let Some(ok) = capture.ok {
             body["ok"] = json!(ok);
         }
+        let outbox = outbox::Outbox::open(&self.config, &self.config_dir);
+        let (depth, health) = outbox.as_ref().and_then(|o| o.health()).unwrap_or_default();
+        body["outbox_depth"] = json!(depth);
+        if let Some(error) = &health {
+            body["hook_error_class"] = json!(error.class);
+            body["hook_error_at"] = json!(error.at);
+        }
         let error = match self.post(OBSERVE, &body) {
             Ok(_) => {
+                if let Some(outbox) = &outbox {
+                    outbox.clear_error(&health);
+                }
                 remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
                     outbox.replay(&self.config, self.agent, &event_id);
@@ -757,6 +777,12 @@ impl Hook<'_> {
             .map_err(|message| eprintln!("cairn hook: {message}"))
             .ok()?;
         let worked = locked.state.worked;
+        let nudged = locked.state.nudged;
+        let saved = locked.state.saved;
+        let automated = locked.state.automated
+            || Self::env_automated()
+            || self.payload.text("agent_id").is_some()
+            || self.payload.text("agent_type").is_some();
         drop(locked);
         if worked {
             self.capture_changed_files();
@@ -765,7 +791,11 @@ impl Hook<'_> {
             locked.delete();
         }
         if worked {
-            let body = json!({"session_id": self.session_id});
+            let mut body = json!({"session_id": self.session_id});
+            if !automated {
+                body["nudge_asked"] = json!(nudged);
+                body["nudge_saved"] = json!(saved);
+            }
             if let Err(error) = self.post("/cairn-memory/session/end", &body) {
                 self.warn(
                     "Cairn session close unavailable; idle distillation remains pending",

@@ -1,5 +1,7 @@
 //! Automated and subagent sessions do not get the Stop ask (docs/plan/0.1.9/12).
 
+mod common;
+
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -789,4 +791,89 @@ fn saved_instruction_overrides_default() {
             assert!(!outside.contains(EXPECTED_INSTRUCTION));
         }
     }
+}
+
+#[tokio::test]
+async fn hook_error_reported() {
+    let Some(app) = common::App::new().await else {
+        return;
+    };
+    let web = app.admin("hook-error").await;
+    let token = app.device(&web, "test").await;
+    let (status, _) = app.send("POST", "observe", json!({
+        "event_id":"e", "session_id":"s", "kind":"prompt", "content":"hello",
+        "context":{}, "hook_error_class":"auth", "hook_error_at":1700000000, "outbox_depth":3
+    }), Some(&token)).await;
+    assert_eq!(status, 200);
+    let row: (Option<String>, Option<i64>, Option<i32>) = sqlx::query_as("SELECT hook_error_class, EXTRACT(EPOCH FROM hook_error_at)::bigint, outbox_depth FROM devices")
+        .fetch_one(app.db.store.pool()).await.unwrap();
+    assert_eq!(row, (Some("auth".into()), Some(1700000000), Some(3)));
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn lookup_authenticates_and_bounds_payload() {
+    let Some(app) = common::App::new().await else {
+        return;
+    };
+    let web = app.admin("lookup-boundary").await;
+    let token = app.device(&web, "lookup").await;
+    let secret = format!("ghp_{}", "a".repeat(40));
+    let body = json!({"session_id":"s", "kind":"search", "query":format!("{secret} {}", "x".repeat(200)),
+        "result_ids": (0..30).map(|i| format!("m{i}")).collect::<Vec<_>>(), "hit":true});
+    assert_eq!(
+        app.send("POST", "session/lookup", body.clone(), None)
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        app.send("POST", "session/lookup", body, Some(&token))
+            .await
+            .0,
+        204
+    );
+    let row: (String, Vec<String>, bool, String, String) =
+        sqlx::query_as("SELECT query,result_ids,hit,person_id,device_id FROM lookup_log")
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert!(row.0.chars().count() <= 120 && !row.0.contains(&secret));
+    assert_eq!(row.1.len(), 20);
+    assert!(row.2 && !row.3.is_empty() && !row.4.is_empty());
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn nudge_flags_persist_and_automation_stays_null() {
+    let Some(app) = common::App::new().await else {
+        return;
+    };
+    let web = app.admin("nudge-storage").await;
+    let token = app.device(&web, "nudge").await;
+    for (session, fields) in [
+        ("normal", json!({"nudge_asked":true,"nudge_saved":false})),
+        ("auto", json!({})),
+    ] {
+        app.post("observe", json!({"event_id":session,"session_id":session,"kind":"prompt","content":session,"context":{}}), &token).await;
+        let mut body = json!({"session_id":session});
+        body.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        app.post("session/end", body, &token).await;
+    }
+    let rows: Vec<(String, Option<bool>, Option<bool>)> = sqlx::query_as(
+        "SELECT session_id,nudge_asked,nudge_saved FROM sessions ORDER BY session_id",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("auto".into(), None, None),
+            ("normal".into(), Some(true), Some(false))
+        ]
+    );
+    app.finish().await;
 }
