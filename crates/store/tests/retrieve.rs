@@ -1555,6 +1555,7 @@ async fn digest_searchable_not_in_brief() {
         )
         .await
         .unwrap();
+    store.end_session(&person, "digest").await.unwrap();
     store.distill_session(&person, "digest").await.unwrap();
     let work = WorkContext {
         project_id: Some(pid),
@@ -1895,6 +1896,64 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
         !brief.contains("chain_thin_newest"),
         "brief skips the thin newest: {brief}"
     );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_shows_handoff_without_git() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let (project, _) = db
+        .store
+        .init_project(&me, "local:nongit-project", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+
+    // Handoff with repo_branch NULL (non-git project)
+    sqlx::query(
+        r#"INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                                 evidence_hash, identity_hash, fields, repo, repo_branch, repo_worktree, created_at)
+           VALUES ('nongit_handoff', $1, $2, 'personal', 'handoff', 'Handoff nongit', 'summary of handoff',
+                   'e_nongit', 'id_nongit', '{"files":["README.md"]}'::jsonb,
+                   'local:nongit-project', NULL, NULL, now())"#,
+    )
+    .bind(&me)
+    .bind(&pid)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+
+    // Brief for non-git context (branch: None)
+    let non_git_work = WorkContext {
+        project_id: Some(pid.clone()),
+        repository: Some("local:nongit-project".into()),
+        branch: None,
+        worktree: None,
+        ..WorkContext::default()
+    };
+    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap();
+    assert!(
+        brief.contains("nongit_handoff"),
+        "non-git brief must show the handoff: {brief}"
+    );
+
+    // Git context (branch: Some("main")) does not show the non-git handoff
+    let git_work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("local:nongit-project".into()),
+        branch: Some("main".into()),
+        worktree: None,
+        ..WorkContext::default()
+    };
+    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap();
+    assert!(
+        !git_brief.contains("nongit_handoff"),
+        "git brief must only show matching branch's handoff: {git_brief}"
+    );
+
     db.finish().await;
 }
 

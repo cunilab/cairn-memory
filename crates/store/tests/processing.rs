@@ -1,7 +1,8 @@
 //! Step 6b: the link job, global promotion and its guards, quarantine auto-retry.
 
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::Scope;
+use cairn_core::memory::{Kind, Scope};
+use cairn_store::memory::ListFilter;
 use cairn_store::testing::{TestDb, rule, save_input};
 use sqlx::Row;
 
@@ -1152,6 +1153,7 @@ async fn distill_fail_fix(
         )
         .await
         .unwrap();
+    store.end_session(person, session).await.unwrap();
     store.distill_session(person, session).await.unwrap();
 }
 
@@ -1261,21 +1263,25 @@ async fn using_a_candidate_promotes_it() {
     assert_eq!(column_rank(store, &fact).await, "normal");
     assert_eq!(column_rank(store, &decision).await, "candidate");
     store
-        .capture(
+        .save(
             &person,
-            capture(
-                "s2-a1",
-                "s2",
-                "assistant",
-                "Decision: keep the queue in Postgres\nReason: one database is enough here",
-                None,
-                Some(&pid),
-                None,
-            ),
+            save_input(serde_json::json!({
+                "kind": "decision",
+                "title": "keep the queue in Postgres",
+                "summary": "decision noted in a session: keep the queue in Postgres",
+                "reason": "one database is enough here",
+                "scope": "project",
+            })),
+            &WorkContext {
+                project_id: Some(pid.clone()),
+                repository: Some("github.com/acme/one".into()),
+                branch: Some("feat".into()),
+                worktree: Some("wt-1".into()),
+                ..WorkContext::default()
+            },
         )
         .await
         .unwrap();
-    store.distill_session(&person, "s2").await.unwrap();
     assert_eq!(column_rank(store, &decision).await, "normal");
     let decisions = store
         .list(
@@ -1537,6 +1543,7 @@ async fn distill_checkout(
         )
         .await
         .unwrap();
+    store.end_session(person, session).await.unwrap();
     let report = store.distill_session(person, session).await.unwrap();
     (report.handoff, report.notes)
 }
@@ -1688,6 +1695,7 @@ async fn chat_session_keeps_richer_handoff() {
         )
         .await
         .unwrap();
+    store.end_session(&person, "rich").await.unwrap();
     let written = store.distill_session(&person, "rich").await.unwrap();
     assert!(written.handoff, "the rich session writes the handoff");
     let id: String = sqlx::query_scalar(
@@ -1719,6 +1727,7 @@ async fn chat_session_keeps_richer_handoff() {
         )
         .await
         .unwrap();
+    store.end_session(&person, "chat").await.unwrap();
     let chat = store.distill_session(&person, "chat").await.unwrap();
     let after = handoff_row(store, &id).await;
     let kept_audit = store
@@ -1757,6 +1766,7 @@ async fn chat_session_keeps_richer_handoff() {
         )
         .await
         .unwrap();
+    store.end_session(&person, "edits").await.unwrap();
     let edited = store.distill_session(&person, "edits").await.unwrap();
     assert!(
         edited.handoff && !edited.handoff_kept,
@@ -1861,6 +1871,7 @@ async fn digest_is_project_candidate_with_note_ttl() {
         )
         .await
         .unwrap();
+    store.end_session(&person, session).await.unwrap();
     store.distill_session(&person, session).await.unwrap();
     let notes: Vec<_> = store
         .list(&person, &ListFilter::default())
@@ -1886,8 +1897,9 @@ async fn digest_is_project_candidate_with_note_ttl() {
         "Changed src/ui/LedControls.tsx, src/panel/removed.tsx. Tests: cargo test pass."
     );
     assert!(!note.summary.contains("zephyr-quilt"));
-    // A retry confirms the candidate, so rank is read before the second distill.
+    // Finding 1: System re-distill must not confirm its own notes, so rank stays candidate.
     store.distill_session(&person, session).await.unwrap();
+    assert_eq!(column_rank(store, &note.id).await, "candidate");
     let again = store
         .list(
             &person,
@@ -1936,6 +1948,7 @@ async fn handoffs_form_a_chain_and_brief_shows_latest() {
     session("c1", "c1-p", "prompt", "TODO: first open item", None)
         .await
         .unwrap();
+    store.end_session(&person, "c1").await.unwrap();
     store.distill_session(&person, "c1").await.unwrap();
     session(
         "c2",
@@ -1946,10 +1959,12 @@ async fn handoffs_form_a_chain_and_brief_shows_latest() {
     )
     .await
     .unwrap();
+    store.end_session(&person, "c2").await.unwrap();
     store.distill_session(&person, "c2").await.unwrap();
     session("c3", "c3-p", "prompt", "next: thin handoff later", None)
         .await
         .unwrap();
+    store.end_session(&person, "c3").await.unwrap();
     let third = store.distill_session(&person, "c3").await.unwrap();
     assert!(third.handoff && third.handoff_kept);
     let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
@@ -2020,5 +2035,380 @@ async fn handoffs_form_a_chain_and_brief_shows_latest() {
         .unwrap();
     assert_eq!(cards.results.len(), 1, "{cards:?}");
     assert_eq!(cards.results[0].id, rows[1].0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn system_redistill_does_not_confirm_candidate_or_increment_proof_count() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+    let session = "s-gotcha";
+    store
+        .capture(
+            &person,
+            capture(
+                "g1",
+                session,
+                "prompt",
+                "Gotcha: lock timeouts under load\nFix: retry\nReason: one database",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+
+    // Distill 3 times
+    store.distill_session(&person, session).await.unwrap();
+    store.distill_session(&person, session).await.unwrap();
+    store.distill_session(&person, session).await.unwrap();
+
+    let memories = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let gotcha = memories
+        .iter()
+        .find(|m| m.kind == Kind::Gotcha)
+        .expect("gotcha memory exists");
+
+    assert_eq!(column_rank(store, &gotcha.id).await, "candidate");
+    assert_eq!(gotcha.proof_count, 1, "proof_count stays 1");
+
+    let work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("github.com/acme/one".into()),
+        branch: Some("feat".into()),
+        worktree: Some("wt-1".into()),
+        ..WorkContext::default()
+    };
+    let brief = store.brief(&person, &work, &[]).await.unwrap();
+    assert!(
+        !brief.contains(&gotcha.id),
+        "candidate gotcha must not be in the team brief: {brief}"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn checkpoints_write_only_notes_handoff_and_digest_written_on_end_or_sweep() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+
+    // Part 1: 3 checkpoints then end -> exactly 1 handoff and 1 digest for that session
+    let s1 = "s1";
+    for i in 1..=3 {
+        store
+            .capture(
+                &person,
+                capture(
+                    &format!("c{i}-e"),
+                    s1,
+                    "edit",
+                    &format!("Edit src/file{i}.rs\nx"),
+                    None,
+                    Some(&pid),
+                    Some(&format!("src/file{i}.rs")),
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .capture(
+                &person,
+                capture(
+                    &format!("c{i}-p"),
+                    s1,
+                    "prompt",
+                    &format!("Decision: decision {i}\nReason: reason {i}\nTODO: todo {i}"),
+                    None,
+                    Some(&pid),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(store.checkpoint_session(&person, s1).await.unwrap());
+        let rep = store.distill_session(&person, s1).await.unwrap();
+        assert!(!rep.handoff, "checkpoint must not write handoff");
+    }
+
+    let mid_memories = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let mid_handoffs = mid_memories
+        .iter()
+        .filter(|m| m.kind == Kind::Handoff)
+        .count();
+    let mid_digests = mid_memories
+        .iter()
+        .filter(|m| m.kind == Kind::Note && m.title.starts_with("Session "))
+        .count();
+    assert_eq!(mid_handoffs, 0, "0 handoffs during checkpoints");
+    assert_eq!(mid_digests, 0, "0 digests during checkpoints");
+
+    // First end_session queues the final distill
+    assert!(
+        store.end_session(&person, s1).await.unwrap(),
+        "first end queues"
+    );
+    let end_rep = store.distill_session(&person, s1).await.unwrap();
+    assert!(end_rep.handoff, "end distill writes handoff");
+
+    // Repeat end_session on already-ended session queues nothing
+    assert!(
+        !store.end_session(&person, s1).await.unwrap(),
+        "repeat end queues nothing"
+    );
+
+    let post_memories = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let post_handoffs = post_memories
+        .iter()
+        .filter(|m| m.kind == Kind::Handoff)
+        .count();
+    let post_digests = post_memories
+        .iter()
+        .filter(|m| m.kind == Kind::Note && m.title.starts_with("Session "))
+        .count();
+    assert_eq!(post_handoffs, 1, "exactly 1 handoff after end");
+    assert_eq!(post_digests, 1, "exactly 1 digest after end");
+
+    // Part 2: checkpoints then idle -> 1 handoff + 1 digest via sweep
+    let s2 = "s2";
+    store
+        .capture(
+            &person,
+            capture(
+                "s2-e",
+                s2,
+                "edit",
+                "Edit src/foo.rs\nx",
+                None,
+                Some(&pid),
+                Some("src/foo.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            capture(
+                "s2-p",
+                s2,
+                "prompt",
+                "next: check this",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(store.checkpoint_session(&person, s2).await.unwrap());
+    store.distill_session(&person, s2).await.unwrap();
+
+    // Age observations past idle window (make them 1 hour old, well within 48h)
+    sqlx::query(
+        "UPDATE observations SET captured_at = now() - interval '1 hour' WHERE session_id = $1",
+    )
+    .bind(s2)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let sweep_rep = store.sweep().await.unwrap();
+    assert_eq!(sweep_rep.sessions_closed, 1, "sweep closed idle session s2");
+    let sweep_distill = store.distill_session(&person, s2).await.unwrap();
+    assert!(sweep_distill.handoff, "sweep distill writes handoff");
+
+    // Part 3: session idle for more than 48h is NOT picked by sweep (upgrade guard)
+    let s3 = "s3";
+    store
+        .capture(
+            &person,
+            capture(
+                "s3-e",
+                s3,
+                "edit",
+                "Edit src/bar.rs\nx",
+                None,
+                Some(&pid),
+                Some("src/bar.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE observations SET captured_at = now() - interval '50 hours' WHERE session_id = $1",
+    )
+    .bind(s3)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let old_sweep = store.sweep().await.unwrap();
+    assert_eq!(
+        old_sweep.sessions_closed, 0,
+        "session older than 48h not closed by sweep"
+    );
+
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn thin_handoff_repeat_does_not_supersede_rich_handoff() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+
+    // 1. Thin H1: prompt with "TODO: one item", no edits.
+    let s1 = "s1";
+    store
+        .capture(
+            &person,
+            capture(
+                "h1-p",
+                s1,
+                "prompt",
+                "TODO: one item",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.end_session(&person, s1).await.unwrap();
+    let rep1 = store.distill_session(&person, s1).await.unwrap();
+    assert!(rep1.handoff);
+
+    let h1_id = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories
+        .into_iter()
+        .find(|m| m.kind == Kind::Handoff)
+        .unwrap()
+        .id;
+
+    // 2. Rich H2: edit file + prompt
+    let s2 = "s2";
+    store
+        .capture(
+            &person,
+            capture(
+                "h2-e",
+                s2,
+                "edit",
+                "Edit src/rich.rs\nx",
+                None,
+                Some(&pid),
+                Some("src/rich.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            capture(
+                "h2-p",
+                s2,
+                "prompt",
+                "TODO: next rich item",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.end_session(&person, s2).await.unwrap();
+    let rep2 = store.distill_session(&person, s2).await.unwrap();
+    assert!(rep2.handoff);
+
+    let memories_after_h2 = store
+        .list(&person, &ListFilter::default())
+        .await
+        .unwrap()
+        .memories;
+    let h2 = memories_after_h2
+        .iter()
+        .find(|m| m.kind == Kind::Handoff && m.id != h1_id)
+        .unwrap();
+    let h2_id = h2.id.clone();
+    assert_eq!(h2.status, cairn_core::memory::Status::Active);
+
+    // 3. Thin repeat same day: identical prompt content as H1, dedupes onto H1
+    let s3 = "s3";
+    store
+        .capture(
+            &person,
+            capture(
+                "h3-p",
+                s3,
+                "prompt",
+                "TODO: one item",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.end_session(&person, s3).await.unwrap();
+    let rep3 = store.distill_session(&person, s3).await.unwrap();
+    // Since it deduped onto H1, report.handoff should be false
+    assert!(!rep3.handoff, "deduped handoff is not written as new");
+
+    // H2 must STILL be active, NOT superseded by H1!
+    let h2_after = store.get(&person, &h2_id).await.unwrap();
+    assert_eq!(
+        h2_after.status,
+        cairn_core::memory::Status::Active,
+        "H2 must stay active and not be superseded by deduplicated H1"
+    );
+
+    // Check links: no link where H1 supersedes H2
+    let all_links = links(&db).await;
+    assert!(
+        !all_links
+            .iter()
+            .any(|(src, tgt, rel, _)| src == &h1_id && tgt == &h2_id && rel == "supersedes"),
+        "H1 must not supersede H2 in links: {all_links:?}"
+    );
+
     db.finish().await;
 }

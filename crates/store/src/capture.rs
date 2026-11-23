@@ -216,25 +216,41 @@ impl Store {
 
     async fn queue_distill(&self, person_id: &str, session_id: &str, end: bool) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let pending: Option<bool> = sqlx::query_scalar(
-            "UPDATE sessions SET ended_at = CASE WHEN $3 THEN now() ELSE ended_at END
-              WHERE person_id = $1 AND session_id = $2 RETURNING pending_since IS NOT NULL",
+        let res: Option<(bool, bool)> = sqlx::query_as(
+            "WITH prev AS (
+                 SELECT person_id, session_id, ended_at, pending_since
+                   FROM sessions
+                  WHERE person_id = $1 AND session_id = $2
+                    FOR UPDATE
+             )
+             UPDATE sessions s
+                SET ended_at = CASE WHEN $3 AND prev.ended_at IS NULL THEN now() ELSE s.ended_at END
+               FROM prev
+              WHERE s.person_id = prev.person_id AND s.session_id = prev.session_id
+             RETURNING prev.pending_since IS NOT NULL AS pending,
+                       prev.ended_at IS NULL AS was_open",
         )
         .bind(person_id)
         .bind(session_id)
         .bind(end)
         .fetch_optional(&mut *tx)
         .await?;
-        let queued = if pending == Some(true) {
-            enqueue_tx(
-                &mut tx,
-                JobKind::Distill,
-                &distill_key(person_id, session_id),
-            )
-            .await?;
-            true
-        } else {
-            false
+        let queued = match res {
+            Some((pending, was_open)) => {
+                let should_queue = if end { was_open } else { pending };
+                if should_queue {
+                    enqueue_tx(
+                        &mut tx,
+                        JobKind::Distill,
+                        &distill_key(person_id, session_id),
+                    )
+                    .await?;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
         };
         tx.commit().await?;
         Ok(queued)
@@ -297,12 +313,13 @@ impl Store {
                 "session has no retained observations: {session_id}"
             )));
         };
-        let (session_project, session_device, session_context): (
+        let (session_project, session_device, session_context, session_ended): (
             Option<String>,
             Option<String>,
             serde_json::Value,
+            bool,
         ) = sqlx::query_as(
-            "SELECT project_id, device_id, context FROM sessions WHERE person_id = $1 AND session_id = $2",
+            "SELECT project_id, device_id, context, ended_at IS NOT NULL FROM sessions WHERE person_id = $1 AND session_id = $2",
         )
         .bind(person_id)
         .bind(session_id)
@@ -350,7 +367,7 @@ impl Store {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(mut digest) = output.digest {
+        if let Some(mut digest) = output.digest.filter(|_| session_ended) {
             digest.scope = Some(note_scope);
             let mut files = Vec::new();
             for observation in &observations {
@@ -379,7 +396,7 @@ impl Store {
         let mut handoff_written = None;
         let mut kept_id = None;
         // An automated session keeps its notes and leaves the checkout's handoff alone.
-        if let Some(handoff) = output.handoff.filter(|_| !automated) {
+        if let Some(handoff) = output.handoff.filter(|_| session_ended && !automated) {
             let new = prepare_save(
                 handoff,
                 &work,
@@ -428,29 +445,29 @@ impl Store {
             .await
             {
                 Ok(saved) => {
-                    if let Some(row) = &previous {
-                        let old: String = row.try_get("memory_id")?;
-                        if old != saved.id {
-                            sqlx::query(&format!(
-                                "INSERT INTO links (source_id, target_id, relation, origin)
-                                 VALUES ($1, $2, 'supersedes', '{HANDOFF_CHAIN_ORIGIN}')
-                                 ON CONFLICT (source_id, target_id, relation) DO NOTHING"
-                            ))
-                            .bind(&saved.id)
-                            .bind(&old)
-                            .execute(&mut *tx)
-                            .await?;
-                            sqlx::query(
-                                "UPDATE memories SET status = 'superseded', stale_cause = NULL,
-                                        status_changed_at = now(), updated_at = now()
-                                  WHERE memory_id = $1 AND status IN ('active','stale')",
-                            )
-                            .bind(&old)
-                            .execute(&mut *tx)
-                            .await?;
-                        }
-                    }
                     if !saved.deduplicated {
+                        if let Some(row) = &previous {
+                            let old: String = row.try_get("memory_id")?;
+                            if old != saved.id {
+                                sqlx::query(&format!(
+                                    "INSERT INTO links (source_id, target_id, relation, origin)
+                                     VALUES ($1, $2, 'supersedes', '{HANDOFF_CHAIN_ORIGIN}')
+                                     ON CONFLICT (source_id, target_id, relation) DO NOTHING"
+                                ))
+                                .bind(&saved.id)
+                                .bind(&old)
+                                .execute(&mut *tx)
+                                .await?;
+                                sqlx::query(
+                                    "UPDATE memories SET status = 'superseded', stale_cause = NULL,
+                                            status_changed_at = now(), updated_at = now()
+                                      WHERE memory_id = $1 AND status IN ('active','stale')",
+                                )
+                                .bind(&old)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                        }
                         report.handoff = true;
                         handoff_written = Some(saved.id);
                     }
@@ -507,7 +524,10 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let idle = sqlx::query(&format!(
             "UPDATE sessions s SET ended_at = now()
-              WHERE s.ended_at IS NULL AND s.pending_since IS NOT NULL
+              WHERE s.ended_at IS NULL
+                AND EXISTS (SELECT 1 FROM observations o
+                             WHERE o.person_id = s.person_id AND o.session_id = s.session_id
+                               AND o.captured_at > now() - interval '48 hours')
                 AND (SELECT max(o.captured_at) FROM observations o
                       WHERE o.person_id = s.person_id AND o.session_id = s.session_id)
                     < now() - make_interval(secs => {IDLE_SESSION_SECONDS})

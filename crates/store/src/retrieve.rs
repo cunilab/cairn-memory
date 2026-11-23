@@ -626,7 +626,7 @@ impl Store {
         let handoff = sqlx::query(&format!(
             "{MEMORY_SELECT}
               WHERE {} AND m.status <> 'forgotten' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
-                AND m.repo = $3 AND m.repo_branch = $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
+                AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
               {newest} LIMIT 50",
             visible("m", "$1")

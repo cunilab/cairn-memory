@@ -758,12 +758,14 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
-        // Saving the same note again confirms it and counts as another sighting.
-        promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
-        sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
+        if new.origin != Origin::System {
+            // Saving the same note again confirms it and counts as another sighting.
+            promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
+            sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+        }
         // Identity ignores the reason, so a correction that only changes it dedupes onto its own
         // target: keep the new reason and skip the self-link.
         if new.supersedes.as_deref() == Some(id.as_str()) {

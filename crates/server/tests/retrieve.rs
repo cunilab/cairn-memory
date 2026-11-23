@@ -82,9 +82,10 @@ async fn session_distills_into_notes_and_a_handoff() {
         .post("session/end", json!({"sessionId": "s1"}), &device)
         .await;
     assert_eq!(
-        ended["status"], "empty",
-        "the checkpoint already distilled everything"
+        ended["status"], "queued",
+        "the first end queues final distill for handoff and digest"
     );
+    app.settle().await;
 
     // The handoff is found by kind, and `memory_get` shows its next steps. Another kind finds none.
     let handoff = app

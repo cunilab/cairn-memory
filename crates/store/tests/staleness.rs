@@ -286,6 +286,7 @@ async fn merge_promotes_branch_and_expires_handoff() {
         .await
         .unwrap();
     for session in ["s1", "s2"] {
+        store.end_session(&a, session).await.unwrap();
         assert!(store.distill_session(&a, session).await.unwrap().handoff);
     }
     let notes = store
@@ -411,6 +412,7 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
             .await
             .unwrap();
     }
+    store.end_session(&a, "s1").await.unwrap();
     let first = store.distill_session(&a, "s1").await.unwrap();
     assert_eq!((first.notes, first.handoff), (2, true), "gotcha + fact");
     let written = store
@@ -434,6 +436,7 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
     );
     let digest_id = written[0].id.clone();
     // another session of the same checkout: the same notes and the same handoff dedupe
+    store.end_session(&a, "s2").await.unwrap();
     let second = store.distill_session(&a, "s2").await.unwrap();
     assert!(!second.handoff);
     let all = store
@@ -486,6 +489,7 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
         .capture(&a, edit_capture("o1", "s3", "other", "src/x.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s3").await.unwrap();
     store.distill_session(&a, "s3").await.unwrap();
     let handoffs = store
         .list(&a, &ListFilter::default())
@@ -918,7 +922,9 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
         .capture(&b, edit_capture("e2", "sb", "dev", "src/b.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "sa").await.unwrap();
     assert!(store.distill_session(&a, "sa").await.unwrap().handoff);
+    store.end_session(&b, "sb").await.unwrap();
     assert!(store.distill_session(&b, "sb").await.unwrap().handoff);
     let notes = store
         .list(
@@ -998,6 +1004,7 @@ async fn a_forgotten_handoff_does_not_block_the_checkout() {
         .capture(&a, edit_capture("e1", "s1", "feat", "src/a.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s1").await.unwrap();
     assert!(store.distill_session(&a, "s1").await.unwrap().handoff);
     let handoff: String =
         sqlx::query_scalar("SELECT memory_id FROM memories WHERE kind = 'handoff'")
@@ -1009,6 +1016,7 @@ async fn a_forgotten_handoff_does_not_block_the_checkout() {
         .capture(&a, edit_capture("e2", "s2", "feat", "src/b.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s2").await.unwrap();
     assert!(
         store.distill_session(&a, "s2").await.unwrap().handoff,
         "forgetting one handoff is not forgetting the checkout"
