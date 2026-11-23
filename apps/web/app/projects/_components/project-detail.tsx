@@ -27,7 +27,9 @@ import type { BranchSummary } from "@/lib/generated/BranchSummary";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectMember } from "@/lib/generated/ProjectMember";
 import type { ProjectView } from "@/lib/generated/ProjectView";
+import type { SessionReport } from "@/lib/generated/SessionReport";
 import { ProjectBranches } from "./project-branches";
+import { ProjectSessions } from "./project-sessions";
 
 const TABS = ["branches", "stale", "members", "instructions"] as const;
 
@@ -36,6 +38,7 @@ type Loaded = {
   branches: BranchSummary[];
   stale: MemoryView[];
   members: ProjectMember[];
+  sessions: SessionReport[];
 };
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
@@ -56,12 +59,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     const listed = await cairn<ProjectView[]>("projects");
     const project = listed.find((p) => p.project_id === projectId);
     if (!project) throw new ApiError("Project not found or you are not a member.", 404);
-    const [branches, members, stale] = await Promise.all([
+    const [branches, members, stale, sessions] = await Promise.all([
       cairn<BranchSummary[]>(`${path}/branches`),
       cairn<ProjectMember[]>(`${path}/members`),
       cairn<MemoryView[]>(`memories?projectId=${encodeURIComponent(projectId)}&status=stale&limit=100`),
+      cairn<SessionReport[]>(`${path}/sessions?days=30`),
     ]);
-    return { project, branches, members, stale };
+    return { project, branches, members, stale, sessions };
   }, [projectId, path]);
 
   useResetOnHide(() => {
@@ -240,8 +244,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             <TabsTrigger value="members">Members</TabsTrigger>
             <TabsTrigger value="instructions">Agent instructions</TabsTrigger>
           </TabsList>
-          <TabsContent value="branches">
+          <TabsContent value="branches" className="space-y-6">
             <ProjectBranches branches={data.branches} />
+            <ProjectSessions sessions={data.sessions} />
           </TabsContent>
           <TabsContent value="stale">
             <DataTable

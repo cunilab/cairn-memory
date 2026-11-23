@@ -2392,6 +2392,21 @@ async fn thin_handoff_repeat_does_not_supersede_rich_handoff() {
     let rep3 = store.distill_session(&person, s3).await.unwrap();
     // Since it deduped onto H1, report.handoff should be false
     assert!(!rep3.handoff, "deduped handoff is not written as new");
+    let outcome: String = sqlx::query_scalar(
+        "SELECT handoff_outcome FROM sessions WHERE person_id = $1 AND session_id = $2",
+    )
+    .bind(&person)
+    .bind(s3)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(outcome, "kept");
+    let status: String = sqlx::query_scalar("SELECT status FROM memories WHERE memory_id = $1")
+        .bind(&h1_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, "superseded");
 
     // H2 must STILL be active, NOT superseded by H1!
     let h2_after = store.get(&person, &h2_id).await.unwrap();
@@ -2410,5 +2425,207 @@ async fn thin_handoff_repeat_does_not_supersede_rich_handoff() {
         "H1 must not supersede H2 in links: {all_links:?}"
     );
 
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn distill_records_session_outcome() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/outcome", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+
+    // 1. Chat only session: no edits, only chat
+    let s1 = "s1";
+    store
+        .capture(
+            &person,
+            capture(
+                "e1",
+                s1,
+                "prompt",
+                "hello can you help me explore this repository?",
+                None,
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store.end_session(&person, s1).await.unwrap();
+    let rep1 = store.distill_session(&person, s1).await.unwrap();
+    assert_eq!(rep1.notes, 0);
+
+    let row1 = sqlx::query(
+        "SELECT notes_written, why_none, files_changed, digest_written, handoff_outcome, distilled_at IS NOT NULL as is_distilled
+           FROM sessions WHERE person_id = $1 AND session_id = $2",
+    )
+    .bind(&person)
+    .bind(s1)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let notes_written: i32 = row1.try_get("notes_written").unwrap();
+    let why_none: Vec<String> = row1.try_get("why_none").unwrap();
+    let files_changed: i32 = row1.try_get("files_changed").unwrap();
+    let is_distilled: bool = row1.try_get("is_distilled").unwrap();
+    assert!(is_distilled);
+    assert_eq!(notes_written, 0);
+    assert!(why_none.iter().any(|c| c == "no_edits"));
+    assert_eq!(files_changed, 0);
+
+    // 2. Session with edits and passing cargo test
+    let s2 = "s2";
+    store
+        .capture(
+            &person,
+            capture(
+                "e2-edit",
+                s2,
+                "edit",
+                "edited src/lib.rs",
+                None,
+                Some(&pid),
+                Some("src/lib.rs"),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            capture(
+                "e2-cmd",
+                s2,
+                "command",
+                "cargo test",
+                Some(true),
+                Some(&pid),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    let checkpoint = store.distill_session(&person, s2).await.unwrap();
+    assert!(checkpoint.notes >= 1);
+    let open: (i32, Option<bool>, Option<String>) = sqlx::query_as(
+        "SELECT notes_written, digest_written, handoff_outcome FROM sessions WHERE person_id = $1 AND session_id = $2",
+    )
+    .bind(&person)
+    .bind(s2)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(open, (checkpoint.notes as i32, None, None));
+    store.end_session(&person, s2).await.unwrap();
+    store.distill_session(&person, s2).await.unwrap();
+
+    let row2 = sqlx::query(
+        "SELECT notes_written, why_none, files_changed, digest_written
+           FROM sessions WHERE person_id = $1 AND session_id = $2",
+    )
+    .bind(&person)
+    .bind(s2)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let notes2: i32 = row2.try_get("notes_written").unwrap();
+    let files2: i32 = row2.try_get("files_changed").unwrap();
+    let digest2: bool = row2.try_get("digest_written").unwrap();
+    assert_eq!(notes2, checkpoint.notes as i32);
+    assert!(files2 >= 1);
+    assert!(digest2);
+
+    let mut automated = capture(
+        "auto-e",
+        "auto-empty",
+        "prompt",
+        "hello",
+        None,
+        Some(&pid),
+        None,
+    );
+    automated.context.origin = Some("automation".into());
+    store.capture(&person, automated).await.unwrap();
+    store.end_session(&person, "auto-empty").await.unwrap();
+    store.distill_session(&person, "auto-empty").await.unwrap();
+    let outcome: String = sqlx::query_scalar(
+        "SELECT handoff_outcome FROM sessions WHERE person_id = $1 AND session_id = 'auto-empty'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(outcome, "skipped");
+
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn forgotten_matching_handoff_records_none() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/outcome", None)
+        .await
+        .unwrap();
+    for session in ["first", "second"] {
+        store
+            .capture(
+                &person,
+                capture(
+                    session,
+                    session,
+                    "prompt",
+                    "TODO: one item",
+                    None,
+                    Some(&project.project_id),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        store.end_session(&person, session).await.unwrap();
+        let report = store.distill_session(&person, session).await.unwrap();
+        if session == "first" {
+            assert!(report.handoff);
+            let id: String = sqlx::query_scalar(
+                "SELECT memory_id FROM memories WHERE owner_id = $1 AND kind = 'handoff'",
+            )
+            .bind(&person)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            store.forget(&person, &id).await.unwrap();
+        } else {
+            assert!(!report.handoff);
+        }
+    }
+    let outcome: String = sqlx::query_scalar(
+        "SELECT handoff_outcome FROM sessions WHERE person_id = $1 AND session_id = 'second'",
+    )
+    .bind(&person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(outcome, "none");
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM memories WHERE owner_id = $1 AND kind = 'handoff'")
+            .bind(&person)
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(statuses, ["forgotten"]);
     db.finish().await;
 }

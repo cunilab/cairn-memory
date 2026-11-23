@@ -81,6 +81,10 @@ pub fn router() -> Router<AppState> {
             get(project::branches),
         )
         .route(
+            "/cairn-memory/projects/{project_id}/sessions",
+            get(project::sessions),
+        )
+        .route(
             "/cairn-memory/projects/{project_id}/conflicts",
             get(project::conflicts),
         )

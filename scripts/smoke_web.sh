@@ -549,6 +549,45 @@ rows = json.load(open(os.environ["BRANCHES"]))
 assert [row["branch"] for row in rows] == ["feature-merge"], rows
 assert rows[0]["memories"] == 1, rows
 PY
+sessions_body="$workdir/sessions.body"
+curl -fsS -o "$sessions_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/sessions?days=30"
+SESSIONS="$sessions_body" python3 - <<'PY'
+import json, os
+rows = json.load(open(os.environ["SESSIONS"]))
+assert isinstance(rows, list), rows
+PY
+(
+  cd apps/web
+  node <<'JS'
+const ts = require("typescript");
+const fs = require("fs");
+const path = require("path");
+const Module = require("module");
+const resolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, ...args) {
+  return resolve.call(this, request.startsWith("@/") ? path.join(process.cwd(), request.slice(2)) : request, parent, ...args);
+};
+for (const ext of [".ts", ".tsx"]) {
+  require.extensions[ext] = (mod, file) => mod._compile(ts.transpileModule(fs.readFileSync(file, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true },
+  }).outputText, file);
+}
+const React = require("react");
+const { renderToStaticMarkup } = require("react-dom/server");
+const { ProjectSessions } = require("./app/projects/_components/project-sessions.tsx");
+const session = { session_id: "s1", started_at: 1720000000, ended_at: null, branch: "main", automated: false,
+  distilled_at: null, notes_written: null, digest_written: null, handoff_outcome: null, why_none: null,
+  files_changed: null, captures: 1, agent_saves: 2 };
+const html = renderToStaticMarkup(React.createElement(ProjectSessions, { sessions: [session] }));
+for (const expected of ["project sessions", "1 sessions, 1 with saves", "main", "before 0.1.9"]) {
+  if (!html.includes(expected)) throw new Error(`project sessions table missing ${expected}`);
+}
+if (!fs.readFileSync("app/projects/_components/project-detail.tsx", "utf8").includes("<ProjectSessions sessions={data.sessions}")) {
+  throw new Error("project detail does not render the sessions table");
+}
+console.log("project sessions table rendered");
+JS
+)
 for removed in "POST projects/verify" "POST projects/${project_id}/branches" "POST correct" "POST import"; do
   removed_code="$(curl -sS -o /dev/null -w '%{http_code}' -X "${removed%% *}" -b "$owner_jar" \
     -H 'content-type: application/json' -d '{}' "${web}/api/cairn/${removed#* }")"

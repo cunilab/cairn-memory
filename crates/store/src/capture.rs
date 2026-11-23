@@ -347,6 +347,9 @@ impl Store {
         } else {
             Scope::Personal
         };
+        let note_count = output.notes.len();
+        let mut notes_created = 0;
+        let mut notes_deduplicated = 0;
         for mut note in output.notes {
             note.input.scope = Some(note_scope);
             let note_work = WorkContext {
@@ -359,6 +362,11 @@ impl Store {
             {
                 Ok(saved) => {
                     report.notes += 1;
+                    if saved.deduplicated {
+                        notes_deduplicated += 1;
+                    } else {
+                        notes_created += 1;
+                    }
                     written.push(saved.id);
                 }
                 // A note the person forgot stays forgotten.
@@ -366,6 +374,7 @@ impl Store {
                 Err(error) => return Err(error),
             }
         }
+        let mut digest_written_flag = false;
         if let Some(mut digest) = output.digest.filter(|_| session_ended) {
             digest.scope = Some(note_scope);
             let mut files = Vec::new();
@@ -387,13 +396,19 @@ impl Store {
                 .save_as(person_id, digest, &digest_work, Origin::System, device)
                 .await
             {
-                Ok(saved) => written.push(saved.id),
+                Ok(saved) => {
+                    written.push(saved.id);
+                    digest_written_flag = !saved.deduplicated;
+                }
                 Err(StoreError::Conflict(_)) => {}
                 Err(error) => return Err(error),
             }
         }
+        let digest_written = session_ended.then_some(digest_written_flag);
         let mut handoff_written = None;
         let mut kept_id = None;
+        let mut handoff_outcome_val = None;
+        let had_handoff = output.handoff.is_some();
         // An automated session keeps its notes and leaves the checkout's handoff alone.
         if let Some(handoff) = output.handoff.filter(|_| session_ended && !automated) {
             let new = prepare_save(
@@ -469,6 +484,9 @@ impl Store {
                         }
                         report.handoff = true;
                         handoff_written = Some(saved.id);
+                        handoff_outcome_val = Some("written");
+                    } else {
+                        handoff_outcome_val = Some("kept");
                     }
                     if kept && !saved.deduplicated {
                         report.handoff_kept = true;
@@ -477,11 +495,73 @@ impl Store {
                     Ok(())
                 }
                 // The same content was forgotten; it stays forgotten.
-                Err(StoreError::Conflict(_)) => Ok(()),
+                Err(StoreError::Conflict(_)) => {
+                    handoff_outcome_val = Some("none");
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }?;
             tx.commit().await?;
         }
+        let handoff_outcome: Option<&str> = if session_ended {
+            if automated {
+                Some("skipped")
+            } else if !had_handoff {
+                Some("none")
+            } else {
+                handoff_outcome_val.or(Some("none"))
+            }
+        } else {
+            None
+        };
+        let mut changed_files = Vec::new();
+        let mut outside_count = 0;
+        for o in &observations {
+            if o.kind == CaptureKind::Edit {
+                for f in &o.context.files {
+                    let trimmed = f.trim();
+                    if !trimmed.is_empty() && !changed_files.iter().any(|c| c == trimmed) {
+                        changed_files.push(trimmed.to_owned());
+                    }
+                }
+                if o.context.outside_files > outside_count {
+                    outside_count = o.context.outside_files;
+                }
+            }
+        }
+        let files_changed = (changed_files.len() + outside_count as usize) as i32;
+        let why_none: Option<Vec<String>> = if notes_created == 0 {
+            let mut reasons: Vec<String> = output.why_none.iter().map(|&s| s.to_owned()).collect();
+            if note_count > 0 && notes_deduplicated == note_count {
+                reasons.push("all_duplicates".to_owned());
+            }
+            if automated && !reasons.iter().any(|r| r == "automated") {
+                reasons.push("automated".to_owned());
+            }
+            Some(reasons)
+        } else {
+            None
+        };
+        sqlx::query(
+            "UPDATE sessions
+                SET distilled_at = now(),
+                    files_changed = $3,
+                    notes_written = COALESCE(notes_written, 0) + $4,
+                    digest_written = CASE WHEN $5 THEN $6 ELSE digest_written END,
+                    handoff_outcome = CASE WHEN $5 THEN $7 ELSE handoff_outcome END,
+                    why_none = CASE WHEN COALESCE(notes_written, 0) + $4 > 0 THEN NULL ELSE $8 END
+              WHERE person_id = $1 AND session_id = $2",
+        )
+        .bind(person_id)
+        .bind(session_id)
+        .bind(files_changed)
+        .bind(notes_created)
+        .bind(session_ended)
+        .bind(digest_written)
+        .bind(handoff_outcome)
+        .bind(why_none.as_deref())
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "UPDATE sessions SET pending_since = NULL WHERE person_id = $1 AND session_id = $2
                 AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.person_id = $1 AND o.session_id = $2

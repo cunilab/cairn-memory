@@ -63,6 +63,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../migrations/0009_memory_aliases.sql"),
     ),
     (
+        "0010_session_outcome",
+        include_str!("../../../migrations/0010_session_outcome.sql"),
+    ),
+    (
         "0012_always_active",
         include_str!("../../../migrations/0012_always_active.sql"),
     ),

@@ -1,5 +1,6 @@
 use cairn_store::testing::TestDb;
 use cairn_store::{Store, StoreError};
+use sqlx::Row;
 
 #[tokio::test]
 async fn migrate_twice_is_a_no_op() {
@@ -24,6 +25,7 @@ async fn migrate_twice_is_a_no_op() {
             "0007_memory_rank",
             "0008_proof_count",
             "0009_memory_aliases",
+            "0010_session_outcome",
             "0012_always_active",
             "0013_link_origin_system",
         ]
@@ -776,6 +778,85 @@ async fn test_0013_relabels_handoff_chain_links_to_system_and_is_idempotent() {
     .expect("origin='system' allowed by check constraint");
 
     sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+}
+
+#[tokio::test]
+async fn session_outcome_columns_nullable() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert_ne!(std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref(), Ok("1"));
+        return;
+    };
+    let schema = format!("t_outcome_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for version in [
+        "0001_foundation",
+        "0002_capture",
+        "0003_retrieval",
+        "0004_processing",
+        "0005_console",
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../migrations")
+            .join(format!("{version}.sql"));
+        sqlx::raw_sql(&std::fs::read_to_string(path).unwrap())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO accounts (person_id, email, password_hash, is_admin) VALUES ('per_old', 'old@example.test', 'x', true)")
+        .execute(store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO sessions (person_id, session_id, started_at) VALUES ('per_old', 's-prev', now())")
+        .execute(store.pool()).await.unwrap();
+    store.migrate().await.unwrap();
+    store.migrate().await.unwrap();
+    let person = "per_old";
+
+    let row = sqlx::query(
+        "SELECT EXTRACT(EPOCH FROM distilled_at)::bigint AS distilled_at, notes_written, digest_written, handoff_outcome, why_none, files_changed
+           FROM sessions WHERE person_id = $1 AND session_id = 's-prev'",
+    )
+    .bind(person)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+
+    let distilled_at: Option<i64> = row.try_get("distilled_at").unwrap();
+    let notes_written: Option<i32> = row.try_get("notes_written").unwrap();
+    let digest_written: Option<bool> = row.try_get("digest_written").unwrap();
+    let handoff_outcome: Option<String> = row.try_get("handoff_outcome").unwrap();
+    let why_none: Option<Vec<String>> = row.try_get("why_none").unwrap();
+    let files_changed: Option<i32> = row.try_get("files_changed").unwrap();
+
+    assert!(distilled_at.is_none());
+    assert!(notes_written.is_none());
+    assert!(digest_written.is_none());
+    assert!(handoff_outcome.is_none());
+    assert!(why_none.is_none());
+    assert!(files_changed.is_none());
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(store.pool())
         .await
         .unwrap();

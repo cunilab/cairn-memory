@@ -9,7 +9,7 @@ use cairn_core::memory::{Scope, Status};
 use cairn_core::project::Project;
 use cairn_store::StoreError;
 use cairn_store::memory::ListFilter;
-use cairn_store::project::{BranchSummary, Conflict};
+use cairn_store::project::{BranchSummary, Conflict, SessionReport};
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "ProjectView"))]
@@ -307,6 +307,29 @@ pub async fn conflicts(
         state
             .store
             .project_conflicts(&account.person_id, &project_id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SessionsQuery {
+    pub days: Option<i32>,
+}
+
+pub async fn sessions(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Path(project_id): Path<String>,
+    Query(query): Query<SessionsQuery>,
+) -> ApiResult<Vec<SessionReport>> {
+    let days = query.days.unwrap_or(30);
+    if ![7, 30, 90].contains(&days) {
+        return Err(ApiError::invalid("days must be 7, 30 or 90"));
+    }
+    Ok(Json(
+        state
+            .store
+            .project_sessions(&account.person_id, &project_id, days)
             .await?,
     ))
 }

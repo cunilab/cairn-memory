@@ -69,6 +69,30 @@ pub struct Conflict {
     pub contradicts_id: String,
 }
 
+/// Report of a recent session of a project.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SessionReport {
+    pub session_id: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub started_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub ended_at: Option<i64>,
+    pub branch: Option<String>,
+    pub automated: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub distilled_at: Option<i64>,
+    pub notes_written: Option<i32>,
+    pub digest_written: Option<bool>,
+    pub handoff_outcome: Option<String>,
+    pub why_none: Option<Vec<String>>,
+    pub files_changed: Option<i32>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub captures: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub agent_saves: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Member {
     pub person_id: String,
@@ -490,6 +514,71 @@ impl Store {
                 Ok(Conflict {
                     memory_id: r.try_get("source_id")?,
                     contradicts_id: r.try_get("target_id")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Recent sessions of the project (newest first, up to 50) within `days`.
+    pub async fn project_sessions(
+        &self,
+        person_id: &str,
+        project_id: &str,
+        days: i32,
+    ) -> Result<Vec<SessionReport>> {
+        self.require_member(person_id, project_id).await?;
+        let rows = sqlx::query(
+            "SELECT s.session_id,
+                    EXTRACT(EPOCH FROM s.started_at)::bigint AS started_at,
+                    EXTRACT(EPOCH FROM s.ended_at)::bigint AS ended_at,
+                    (s.context->>'branch') AS branch,
+                    (COALESCE(s.context->>'origin', '') = 'automation') AS automated,
+                    EXTRACT(EPOCH FROM s.distilled_at)::bigint AS distilled_at,
+                    s.notes_written,
+                    s.digest_written,
+                    s.handoff_outcome,
+                    s.why_none,
+                    s.files_changed,
+                    (SELECT count(*) FROM observations o
+                      WHERE o.person_id = s.person_id AND o.session_id = s.session_id
+                        AND o.expires_at > now()) AS captures,
+                    (SELECT count(*) FROM memories m
+                      WHERE m.owner_id = s.person_id
+                        AND m.project_id = s.project_id
+                        AND m.origin = 'agent'
+                        AND m.created_at >= s.started_at
+                        AND m.created_at <= COALESCE(
+                            s.ended_at,
+                            (SELECT max(o.captured_at) FROM observations o WHERE o.person_id = s.person_id AND o.session_id = s.session_id),
+                            s.started_at
+                        )) AS agent_saves
+               FROM sessions s
+              WHERE s.project_id = $1
+                AND s.started_at >= now() - make_interval(days => $2)
+              ORDER BY s.started_at DESC, s.session_id DESC
+              LIMIT 50",
+        )
+        .bind(project_id)
+        .bind(days)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(|r| {
+                Ok(SessionReport {
+                    session_id: r.try_get("session_id")?,
+                    started_at: r.try_get("started_at")?,
+                    ended_at: r.try_get("ended_at")?,
+                    branch: r.try_get("branch")?,
+                    automated: r.try_get("automated")?,
+                    distilled_at: r.try_get("distilled_at")?,
+                    notes_written: r.try_get("notes_written")?,
+                    digest_written: r.try_get("digest_written")?,
+                    handoff_outcome: r.try_get("handoff_outcome")?,
+                    why_none: r.try_get("why_none")?,
+                    files_changed: r.try_get("files_changed")?,
+                    captures: r.try_get("captures")?,
+                    agent_saves: r.try_get("agent_saves")?,
                 })
             })
             .collect()

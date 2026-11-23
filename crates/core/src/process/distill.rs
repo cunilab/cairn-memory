@@ -44,6 +44,7 @@ pub struct Distilled {
     pub handoff: Option<SaveInput>,
     /// One note for the session when it changed files. `None` when it did not.
     pub digest: Option<SaveInput>,
+    pub why_none: Vec<&'static str>,
 }
 
 /// One handoff per (owner, project-or-repository, branch, worktree): the id is derived, so a
@@ -77,10 +78,38 @@ pub fn distill(observations: &[Observation]) -> Distilled {
     notes.extend(test_fact(observations));
     // System saves skip the agent quality check, so what would fail it is not worth keeping.
     notes.retain(|n| passes_quality(&n.input));
+    let why_none = if notes.is_empty() {
+        let mut reasons = Vec::new();
+        if !observations.iter().any(|o| o.kind == CaptureKind::Edit) {
+            reasons.push("no_edits");
+        }
+        if !text.iter().any(|o| has_typed_line(&o.content)) {
+            reasons.push("no_typed_lines");
+        }
+        if !observations
+            .iter()
+            .any(|o| o.kind == CaptureKind::Command && is_test_command(command_text(o)))
+        {
+            reasons.push("no_test_runs");
+        }
+        if gotchas(observations, &failures).is_empty() {
+            reasons.push("no_fixed_failures");
+        }
+        if observations
+            .iter()
+            .any(|o| o.context.origin.as_deref() == Some("automation"))
+        {
+            reasons.push("automated");
+        }
+        reasons
+    } else {
+        Vec::new()
+    };
     Distilled {
         notes,
         handoff: handoff(observations, &failures),
         digest: digest(observations),
+        why_none,
     }
 }
 
@@ -1268,5 +1297,25 @@ mod tests {
                 .digest
                 .is_none()
         );
+    }
+
+    #[test]
+    fn why_none_codes() {
+        let chat_only = distill(&[prompt("p1", "hello"), prompt("p2", "what should we do?")]);
+        assert_eq!(chat_only.notes.len(), 0);
+        assert!(chat_only.why_none.contains(&"no_edits"));
+        assert!(chat_only.why_none.contains(&"no_typed_lines"));
+        assert!(chat_only.why_none.contains(&"no_test_runs"));
+        assert!(chat_only.why_none.contains(&"no_fixed_failures"));
+
+        // If edits are present, no_edits is absent
+        let with_edit = distill(&[edit("e1", "src/lib.rs")]);
+        assert!(!with_edit.why_none.contains(&"no_edits"));
+
+        // If an automated session has no notes, it reports automated
+        let mut auto = prompt("p3", "hello from subagent");
+        auto.context.origin = Some("automation".into());
+        let automated = distill(&[auto]);
+        assert!(automated.why_none.contains(&"automated"));
     }
 }

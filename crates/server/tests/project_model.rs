@@ -516,3 +516,114 @@ async fn repository_fallback_status_is_attached_by_repository() {
     assert!(quiet.get("project_id").is_none());
     app.finish().await;
 }
+
+#[tokio::test]
+async fn project_sessions_member_only() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let author = app.member(&admin, "author").await;
+    let stranger = app.member(&admin, "stranger").await;
+    let author_device = app.device(&author, "author-laptop").await;
+    let stranger_device = app.device(&stranger, "stranger-laptop").await;
+
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/sessions-test", "name": "SessionsTest"}),
+            &author_device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+
+    // 3. Non-member GET .../sessions returns 404
+    let (status, body) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=30"),
+            json!(null),
+            Some(&stranger_device),
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+
+    // Create a session for author:
+    let sess = "sess-1";
+    app.post(
+        "observe",
+        json!({
+            "event_id": "ev-1",
+            "session_id": sess,
+            "kind": "prompt",
+            "content": "working on something",
+            "context": {"project_id": pid, "repository": "github.com/acme/sessions-test", "branch": "main"}
+        }),
+        &author_device,
+    )
+    .await;
+
+    // 4. An agent memory_save during a session is counted in agent_saves:
+    let save_res = app
+        .post(
+            "remember",
+            json!({
+                "kind": "fact",
+                "title": "Agent save test",
+                "summary": "Agent saved this during session",
+                "reason": "Test agent saves during session",
+                "context": {"project_id": pid, "repository": "github.com/acme/sessions-test", "branch": "main"}
+            }),
+            &author_device,
+        )
+        .await;
+    assert!(save_res.get("id").is_some());
+
+    app.post("session/end", json!({"session_id": sess}), &author_device)
+        .await;
+
+    // Member GET .../sessions returns rows newest first, <= 50
+    let (status, body) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=30"),
+            json!(null),
+            Some(&author_device),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body.as_array().expect("array of sessions");
+    assert!(!rows.is_empty());
+    assert!(rows.len() <= 50);
+    let s = &rows[0];
+    assert_eq!(s["session_id"], sess);
+    assert_eq!(s["agent_saves"], 1);
+
+    sqlx::query(
+        "INSERT INTO sessions (person_id, session_id, project_id, started_at)
+         SELECT person_id, 'older-' || n, project_id, now() - make_interval(secs => n)
+           FROM sessions CROSS JOIN generate_series(1, 55) AS n WHERE session_id = $1",
+    )
+    .bind(sess)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+    let rows = app
+        .get(&format!("projects/{pid}/sessions?days=7"), &author_device)
+        .await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 50);
+    assert!(
+        rows.windows(2)
+            .all(|pair| pair[0]["started_at"].as_i64() >= pair[1]["started_at"].as_i64())
+    );
+    let (invalid, _) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=8"),
+            json!(null),
+            Some(&author_device),
+        )
+        .await;
+    assert_eq!(invalid, 400);
+
+    app.finish().await;
+}
