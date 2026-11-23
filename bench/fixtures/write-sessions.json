@@ -1,0 +1,238 @@
+{
+  "work": [
+    {
+      "event": "SessionStart",
+      "source": "startup"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "Decision: use bun for tests because it runs the suite quickly."
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "No, never edit migrations by hand"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "we should maybe tidy the roadmap"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "next: wire the web report"
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "src/a.ts",
+        "old_string": "a",
+        "new_string": "b"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "bun test"
+      },
+      "tool_response": {
+        "exit_code": 1,
+        "stderr": "error: test failed in src/a.ts"
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "src/a.ts",
+        "old_string": "b",
+        "new_string": "fixed"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "bun test"
+      },
+      "tool_response": {
+        "exit_code": 0,
+        "stdout": "test result: ok"
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rm src/old.ts"
+      },
+      "tool_response": {
+        "exit_code": 0
+      }
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "SessionEnd",
+      "reason": "other"
+    }
+  ],
+  "chat": [
+    {
+      "event": "SessionStart",
+      "source": "startup"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "what does this function do?"
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "SessionEnd",
+      "reason": "other"
+    }
+  ],
+  "no-git": [
+    {
+      "event": "SessionStart",
+      "source": "startup"
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "inside.txt",
+        "old_string": "a",
+        "new_string": "b"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "/tmp/cairn-outside.txt",
+        "old_string": "a",
+        "new_string": "b"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "SessionEnd",
+      "reason": "other"
+    }
+  ],
+  "subagent": [
+    {
+      "event": "SessionStart",
+      "source": "startup"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "Decision: use pnpm for lint because it makes checks reproducible."
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "No, never edit migrations by hand"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "we should maybe tidy the roadmap"
+    },
+    {
+      "event": "UserPromptSubmit",
+      "prompt": "next: wire the web report"
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "src/sub.ts",
+        "old_string": "a",
+        "new_string": "b"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "bun test"
+      },
+      "tool_response": {
+        "exit_code": 1,
+        "stderr": "error: subagent test failed in src/sub.ts"
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "src/sub.ts",
+        "old_string": "b",
+        "new_string": "fixed"
+      },
+      "tool_response": {
+        "success": true
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "bun test"
+      },
+      "tool_response": {
+        "exit_code": 0,
+        "stdout": "test result: ok"
+      }
+    },
+    {
+      "event": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "rm src/old.ts"
+      },
+      "tool_response": {
+        "exit_code": 0
+      }
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "Stop",
+      "stop_hook_active": false
+    },
+    {
+      "event": "SessionEnd",
+      "reason": "other"
+    }
+  ]
+}
