@@ -350,6 +350,7 @@ impl Store {
         let note_count = output.notes.len();
         let mut notes_created = 0;
         let mut notes_deduplicated = 0;
+        let mut notes_forgotten = 0;
         for mut note in output.notes {
             note.input.scope = Some(note_scope);
             let note_work = WorkContext {
@@ -370,7 +371,7 @@ impl Store {
                     written.push(saved.id);
                 }
                 // A note the person forgot stays forgotten.
-                Err(StoreError::Conflict(_)) => {}
+                Err(StoreError::Conflict(_)) => notes_forgotten += 1,
                 Err(error) => return Err(error),
             }
         }
@@ -535,10 +536,13 @@ impl Store {
             if note_count > 0 && notes_deduplicated == note_count {
                 reasons.push("all_duplicates".to_owned());
             }
+            if note_count > 0 && notes_forgotten == note_count {
+                reasons.push("all_forgotten".to_owned());
+            }
             if automated && !reasons.iter().any(|r| r == "automated") {
                 reasons.push("automated".to_owned());
             }
-            Some(reasons)
+            (!reasons.is_empty()).then_some(reasons)
         } else {
             None
         };

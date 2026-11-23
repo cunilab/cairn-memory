@@ -32,6 +32,7 @@ const WHY_NONE_LABELS: Record<string, string> = {
   no_test_runs: "no test runs",
   no_fixed_failures: "no fixed failures",
   all_duplicates: "all duplicates",
+  all_forgotten: "all matched forgotten notes",
   automated: "automated",
 };
 

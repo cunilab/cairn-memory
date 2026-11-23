@@ -31,4 +31,5 @@ test("formatWhyNone formats fixed why-none codes", () => {
   assert.equal(formatWhyNone(["no_edits", "no_typed_lines"]), "no edits, no decision lines");
   assert.equal(formatWhyNone(["no_test_runs", "no_fixed_failures"]), "no test runs, no fixed failures");
   assert.equal(formatWhyNone(["all_duplicates", "automated"]), "all duplicates, automated");
+  assert.equal(formatWhyNone(["all_forgotten"]), "all matched forgotten notes");
 });

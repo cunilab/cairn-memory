@@ -2570,6 +2570,56 @@ async fn distill_records_session_outcome() {
 }
 
 #[tokio::test]
+async fn distill_records_all_forgotten_notes() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("p").await;
+    for session in ["first-note", "second-note"] {
+        store
+            .capture(
+                &person,
+                capture(
+                    session,
+                    session,
+                    "assistant",
+                    "Decision: keep the queue in Postgres\nReason: one database is enough here",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        let report = store.distill_session(&person, session).await.unwrap();
+        if session == "first-note" {
+            assert_eq!(report.notes, 1);
+            let id: String = sqlx::query_scalar(
+                "SELECT memory_id FROM memories WHERE owner_id = $1 AND kind = 'decision'",
+            )
+            .bind(&person)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            store.forget(&person, &id).await.unwrap();
+        } else {
+            assert_eq!(report.notes, 0);
+            let reasons: Option<Vec<String>> = sqlx::query_scalar(
+                "SELECT why_none FROM sessions WHERE person_id = $1 AND session_id = $2",
+            )
+            .bind(&person)
+            .bind(session)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(reasons, Some(vec!["all_forgotten".to_owned()]));
+        }
+    }
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn forgotten_matching_handoff_records_none() {
     let Some(db) = TestDb::new().await else {
         return;

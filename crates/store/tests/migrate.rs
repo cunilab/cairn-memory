@@ -28,6 +28,7 @@ async fn migrate_twice_is_a_no_op() {
             "0010_session_outcome",
             "0012_always_active",
             "0013_link_origin_system",
+            "0014_memory_owner_project_created",
         ]
     );
     let tables: i64 = sqlx::query_scalar(

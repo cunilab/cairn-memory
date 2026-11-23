@@ -38,7 +38,6 @@ type Loaded = {
   branches: BranchSummary[];
   stale: MemoryView[];
   members: ProjectMember[];
-  sessions: SessionReport[];
 };
 
 export function ProjectDetail({ projectId }: { projectId: string }) {
@@ -47,7 +46,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const openMemory = useOpenMemory();
   const [tab, setTab] = useTabParam(TABS);
   const generation = useRef(0);
-  const [data, setData] = useState<Loaded | null>(null);
+  const [projectData, setData] = useState<Loaded | null>(null);
+  const [sessions, setSessions] = useState<SessionReport[] | null>(null);
+  const [sessionsError, setSessionsError] = useState(false);
+  const data = projectData ? { ...projectData, sessions } : null;
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -59,18 +61,19 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     const listed = await cairn<ProjectView[]>("projects");
     const project = listed.find((p) => p.project_id === projectId);
     if (!project) throw new ApiError("Project not found or you are not a member.", 404);
-    const [branches, members, stale, sessions] = await Promise.all([
+    const [branches, members, stale] = await Promise.all([
       cairn<BranchSummary[]>(`${path}/branches`),
       cairn<ProjectMember[]>(`${path}/members`),
       cairn<MemoryView[]>(`memories?projectId=${encodeURIComponent(projectId)}&status=stale&limit=100`),
-      cairn<SessionReport[]>(`${path}/sessions?days=30`),
     ]);
-    return { project, branches, members, stale, sessions };
+    return { project, branches, members, stale };
   }, [projectId, path]);
 
   useResetOnHide(() => {
     generation.current += 1;
     setData(null);
+    setSessions(null);
+    setSessionsError(false);
     setError(null);
     setNotFound(false);
     setRenaming(false);
@@ -99,6 +102,21 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       cancelled = true;
     };
   }, [fetchProject, router, attempt]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const expected = generation.current;
+    cairn<SessionReport[]>(`${path}/sessions?days=30`)
+      .then((result) => {
+        if (!cancelled && generation.current === expected) { setSessions(result); setSessionsError(false); }
+      })
+      .catch((cause: unknown) => {
+        if (cancelled || generation.current !== expected) return;
+        if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+        else setSessionsError(true);
+      });
+    return () => { cancelled = true; };
+  }, [path, router, attempt]);
 
   const submit = useCallback(
     async (write: () => Promise<unknown>, success: string) => {
@@ -246,7 +264,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           </TabsList>
           <TabsContent value="branches" className="space-y-6">
             <ProjectBranches branches={data.branches} />
-            <ProjectSessions sessions={data.sessions} />
+            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
           <TabsContent value="stale">
             <DataTable

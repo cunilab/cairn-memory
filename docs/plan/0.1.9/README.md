@@ -36,6 +36,7 @@ Seventeen items plus one guard, all shipping in 0.1.9 (branch `0.1.9`, PR #17). 
 ## Ordered checklist
 
 Migration numbers are fixed here so parallel work does not collide.
+The item 08 review index uses `0014_memory_owner_project_created`.
 
 | # | Item | Depends on | Migration |
 |---|---|---|---|
