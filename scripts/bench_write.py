@@ -152,7 +152,10 @@ def main():
     finally:
         if server:
             server.terminate()
-            server.wait(timeout=10)
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()  # still clean up the container and temp dir below
         if container:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shutil.rmtree(work)
