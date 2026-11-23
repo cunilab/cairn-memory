@@ -176,6 +176,7 @@ impl Outbox {
 
     pub fn failure(&self, error: &Error) {
         let class = match error {
+            Error::Status { status: 409, .. } => return,
             Error::Status {
                 status: 401 | 403, ..
             } => "auth",

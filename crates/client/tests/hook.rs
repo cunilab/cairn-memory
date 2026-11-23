@@ -2181,3 +2181,31 @@ fn newer_hook_failure_survives_inflight_observe() {
     assert_eq!(seen.len(), 2);
     assert_eq!(seen[1]["hook_error_class"], "auth");
 }
+
+#[test]
+fn replay_409_does_not_record_hook_error() {
+    let server = fake_with(|_, request| {
+        if request.body["event_id"] == "hk_duplicate" {
+            (409, "{}".to_owned())
+        } else {
+            default_reply(request)
+        }
+    });
+    let env = Env::new("hook-replay-409-health", &server.url);
+    write_outbox(
+        &env.outbox(),
+        &server.url,
+        TOKEN,
+        &["hk_duplicate".to_owned()],
+    );
+    env.prompt("s1", "trigger replay");
+    assert!(queued_ids(&env.outbox()).is_empty());
+    env.prompt("s1", "next capture");
+    let observed = server.observed();
+    assert_eq!(observed.len(), 3);
+    assert!(
+        observed[2].get("hook_error_class").is_none(),
+        "{}",
+        observed[2]
+    );
+}
