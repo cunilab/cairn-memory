@@ -52,7 +52,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 09 | [x] [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
 | 08 | [Per-project web report](08-project-report.md) | 01, 04, 12 | `0010_session_outcome` |
 | 07 | [Write-side bench in CI](07-write-bench.md) | 01–06, 12 | — |
-| 10 | [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
+| 10 | [x] [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
 | 13 | [Fixes: recording](13-fixes-recording.md) | 03, 08, 09, 12 | `0011_fixes` |
 | 14 | [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
 | 15 | [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |

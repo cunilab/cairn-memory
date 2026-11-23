@@ -19,6 +19,7 @@ deterministic: fixed corpus, fixed query order, no clocks or random ids in the o
 """
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -526,6 +527,9 @@ def main():
         calls = {"memory_search": stats(search_wire)}
         calls["memory_search"]["note"] = "limit 5, mean over the gold questions"
         calls["memory_search"]["mean_ms"] = round(sum(search_ms) / len(search_ms), 1)
+        ranked_ms = sorted(search_ms)  # nearest-rank percentiles of the same limit-5 calls
+        calls["memory_search"]["p50_ms"] = round(ranked_ms[math.ceil(0.50 * len(ranked_ms)) - 1], 1)
+        calls["memory_search"]["p95_ms"] = round(ranked_ms[math.ceil(0.95 * len(ranked_ms)) - 1], 1)
         decisions = []
         for query in ("migration lock deploy", "money cents", "payment webhook duplicate"):
             shaped, wire, text = mcp.tool("memory_search", query=query, kind="decision", limit=3)
