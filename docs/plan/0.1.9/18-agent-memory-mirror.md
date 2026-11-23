@@ -43,7 +43,7 @@ this is item 18 of 0.1.9.
     note.
   - scope: `user`/`feedback` → personal; otherwise project when the session is in a Cairn project (item 02),
     else personal. Gemini and Codex global files → personal.
-  - rank: `candidate` (D-RANK); origin `agent` (an agent wrote the file). Normal redaction and validation apply;
+  - rank: `candidate` (D-RANK); origin `system` (Cairn copied the file; the existing save path gives system saves candidate rank). Normal redaction and validation apply;
     a file rejected by validation (e.g. a secret) is skipped and counted, never retried in a loop.
 - **Updates:** one new route `POST /cairn-memory/session/mirror` takes the list of parsed files. For each, the server
   finds this owner's previous mirror of the same evidence key: same content → nothing; changed → save the new
