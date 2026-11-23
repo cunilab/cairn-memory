@@ -47,6 +47,7 @@ Migration numbers are fixed here so parallel work does not collide.
 | 04 | [x] [Session digest note](04-session-digest.md) | 01, 05 | — |
 | 03 | [x] [Ask once to save 0–3 notes](03-save-ask.md) | 12 | — |
 | 17 | [x] [Always-active memory: no expiry, relations and ranking](17-expiry-keeps-data.md) (high priority: live data loss) | 00, 04, 05 | `0012_always_active` (index only) |
+| 17b | [x] Handoff-chain links labelled system (follow-up, user-approved) | 17 | `0013_link_origin_system` |
 | 06 | [x] [User corrections become rules](06-corrections.md) | 03 | — |
 | 11 | [x] [Proof count and rare-token veto](11-proof-and-veto.md) | 01 | `0008_proof_count` |
 | 09 | [x] [Aliases, backfill, regenerated bench](09-aliases.md) | 03, 11 | `0009_memory_aliases` |
@@ -61,7 +62,7 @@ Migration numbers are fixed here so parallel work does not collide.
 Shared files, in this order only: `crates/client/src/hook/mod.rs` and `hook/state.rs` (02 → 12 → 05 → 03 → 06);
 `crates/core/src/process/distill.rs` (01 → 05 → 04 → 17 → 08); `crates/store/src/capture.rs` (01 → 05 → 04 → 12 → 17 → 08);
 `crates/client/src/tools.rs` and `crates/server/src/routes/memory.rs` (03 → 09); `crates/core/src/retrieve/rank.rs` (01 → 17 → 11 → 14);
-`crates/store/src/lib.rs` migration list (01 → 17 → 11 → 09 → 08 → 13; 17 appends `0012` last, numbers 0008–0011 slot in before it);
+`crates/store/src/lib.rs` migration list (01 → 17 → 11 → 09 → 08 → 13; 17 appends `0012` last, 17b appends `0013`, numbers 0008–0011 slot in before it);
 `crates/store/src/fixes.rs` (13 → 14 → 15 → 16); `crates/store/src/memory.rs` (17 → 09 → 15 → 16); hook files after 06 (→ 13).
 
 ## Global acceptance (before the PR merges)

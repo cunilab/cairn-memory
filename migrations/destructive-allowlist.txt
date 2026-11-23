@@ -3,3 +3,4 @@
 0003_retrieval.sql|DROP TABLE memory_embeddings|0.1.6 vectors moved to memories.embedding; embed jobs refill
 0004_processing.sql|ALTER TABLE entities DROP CONSTRAINT entities_kind_check|widened CHECK, re-added in same migration
 0004_processing.sql|ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check|widened CHECK, re-added in same migration
+0013_link_origin_system.sql|ALTER TABLE links DROP CONSTRAINT links_origin_check|widened CHECK, re-added in same migration

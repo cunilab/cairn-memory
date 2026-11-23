@@ -24,7 +24,8 @@ async fn migrate_twice_is_a_no_op() {
             "0007_memory_rank",
             "0008_proof_count",
             "0009_memory_aliases",
-            "0012_always_active"
+            "0012_always_active",
+            "0013_link_origin_system",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -605,6 +606,175 @@ async fn alias_backfill_idempotent() {
     .execute(store.pool())
     .await
     .expect("learned is an allowed source");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
+}
+
+/// Migration 0013: on a DB with an agent-origin chain link between two system handoffs
+/// plus an agent link between two agent handoffs, after 0013 the first is 'system',
+/// the second still 'agent', link count unchanged, running the migration logic twice changes nothing.
+#[tokio::test]
+async fn test_0013_relabels_handoff_chain_links_to_system_and_is_idempotent() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_origin_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql(&format!("CREATE SCHEMA {schema}"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    for (version, file) in [
+        ("0001_foundation", "0001_foundation.sql"),
+        ("0002_capture", "0002_capture.sql"),
+        ("0003_retrieval", "0003_retrieval.sql"),
+        ("0004_processing", "0004_processing.sql"),
+        ("0005_console", "0005_console.sql"),
+        ("0006_agent_instructions", "0006_agent_instructions.sql"),
+        ("0007_memory_rank", "0007_memory_rank.sql"),
+        ("0008_proof_count", "0008_proof_count.sql"),
+        ("0009_memory_aliases", "0009_memory_aliases.sql"),
+        ("0012_always_active", "0012_always_active.sql"),
+    ] {
+        let sql = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../migrations")
+                .join(file),
+        )
+        .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(version)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_mig', 'mig@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash, identity_hash, origin, status)
+         VALUES
+           ('mem_sh1', 'per_mig', 'personal', 'handoff', 'Sys handoff 1', 'summary 1', 'e1', 'i1', 'system', 'superseded'),
+           ('mem_sh2', 'per_mig', 'personal', 'handoff', 'Sys handoff 2', 'summary 2', 'e2', 'i2', 'system', 'active'),
+           ('mem_ah1', 'per_mig', 'personal', 'handoff', 'Agent handoff 1', 'summary 3', 'e3', 'i3', 'agent', 'superseded'),
+           ('mem_ah2', 'per_mig', 'personal', 'handoff', 'Agent handoff 2', 'summary 4', 'e4', 'i4', 'agent', 'active')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO links (source_id, target_id, relation, origin)
+         VALUES
+           ('mem_sh2', 'mem_sh1', 'supersedes', 'agent'),
+           ('mem_ah2', 'mem_ah1', 'supersedes', 'agent')",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let before_links: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id, relation, origin FROM links ORDER BY source_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(before_links.len(), 2);
+    assert_eq!(before_links[0].3, "agent");
+    assert_eq!(before_links[1].3, "agent");
+
+    // Apply 0013 migration via store.migrate()
+    store.migrate().await.expect("apply 0013");
+
+    let after_links: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id, relation, origin FROM links ORDER BY source_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(after_links.len(), 2, "link count unchanged");
+    assert_eq!(
+        after_links,
+        vec![
+            (
+                "mem_ah2".into(),
+                "mem_ah1".into(),
+                "supersedes".into(),
+                "agent".into()
+            ),
+            (
+                "mem_sh2".into(),
+                "mem_sh1".into(),
+                "supersedes".into(),
+                "system".into()
+            ),
+        ],
+        "system handoff chain link relabeled to system; agent handoff link stays agent"
+    );
+
+    // Running migration logic twice changes nothing
+    store.migrate().await.expect("second migrate");
+    let again_links: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id, relation, origin FROM links ORDER BY source_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        again_links, after_links,
+        "running migrate twice changes nothing"
+    );
+
+    // Also running the 0013 SQL file directly changes nothing
+    let sql_0013 = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../migrations/0013_link_origin_system.sql"),
+    )
+    .unwrap();
+    sqlx::raw_sql(&sql_0013)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let direct_links: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id, relation, origin FROM links ORDER BY source_id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        direct_links, after_links,
+        "running 0013 SQL again changes nothing"
+    );
+
+    // A new link with origin 'system' can now be inserted
+    sqlx::query(
+        "INSERT INTO links (source_id, target_id, relation, origin)
+         VALUES ('mem_sh1', 'mem_ah1', 'relates', 'system')",
+    )
+    .execute(store.pool())
+    .await
+    .expect("origin='system' allowed by check constraint");
+
     sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .execute(store.pool())
         .await

@@ -689,3 +689,40 @@ async fn repository_fallback_needs_exactly_one_membership() {
     );
     db.finish().await;
 }
+
+#[tokio::test]
+async fn handoff_chain_link_has_system_origin() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    db.store
+        .capture(&me, prompt("e1", "s1", "TODO: step 1 in chain"))
+        .await
+        .unwrap();
+    assert!(db.store.checkpoint_session(&me, "s1").await.unwrap());
+    assert!(db.store.end_session(&me, "s1").await.unwrap());
+    let r1 = db.store.distill_session(&me, "s1").await.unwrap();
+    assert!(r1.handoff, "first handoff written");
+
+    db.store
+        .capture(&me, prompt("e2", "s2", "TODO: step 2 in chain"))
+        .await
+        .unwrap();
+    assert!(db.store.checkpoint_session(&me, "s2").await.unwrap());
+    assert!(db.store.end_session(&me, "s2").await.unwrap());
+    let r2 = db.store.distill_session(&me, "s2").await.unwrap();
+    assert!(r2.handoff, "second handoff written");
+
+    let (relation, origin): (String, String) =
+        sqlx::query_as("SELECT relation, origin FROM links WHERE relation = 'supersedes'")
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(relation, "supersedes");
+    assert_eq!(
+        origin, "system",
+        "new chain link written with origin 'system'"
+    );
+    db.finish().await;
+}

@@ -66,6 +66,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0012_always_active",
         include_str!("../../../migrations/0012_always_active.sql"),
     ),
+    (
+        "0013_link_origin_system",
+        include_str!("../../../migrations/0013_link_origin_system.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

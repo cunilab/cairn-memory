@@ -11,8 +11,7 @@ use cairn_core::id::now_seconds;
 use cairn_core::memory::{Fields, Scope};
 use cairn_core::process::distill::distill;
 
-/// shortcut: links.origin CHECK lacks system; widen when the user approves an allowlist line
-const HANDOFF_CHAIN_ORIGIN: &str = "agent";
+const HANDOFF_CHAIN_ORIGIN: &str = "system";
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
 use cairn_core::process::{Origin, prepare_save};
 use sqlx::Row;

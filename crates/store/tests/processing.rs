@@ -1989,8 +1989,8 @@ async fn handoffs_form_a_chain_and_brief_shows_latest() {
     assert_eq!(
         links,
         vec![
-            (rows[1].0.clone(), rows[0].0.clone(), "agent".to_owned()),
-            (rows[2].0.clone(), rows[1].0.clone(), "agent".to_owned()),
+            (rows[1].0.clone(), rows[0].0.clone(), "system".to_owned()),
+            (rows[2].0.clone(), rows[1].0.clone(), "system".to_owned()),
         ]
     );
     let auto: i64 = sqlx::query_scalar(

@@ -29,7 +29,9 @@ class CheckMigrationTests(unittest.TestCase):
         code, out = run(ROOT)
         self.assertEqual(code, 0, out)
         n = len(list((ROOT / "migrations").glob("*.sql")))
-        self.assertIn(f"migrations: {n} files, 3 allowlisted", out)
+        allowlist = (ROOT / "migrations" / "destructive-allowlist.txt").read_text(encoding="utf-8").splitlines()
+        a = sum(1 for line in allowlist if line.strip() and not line.strip().startswith("#"))
+        self.assertIn(f"migrations: {n} files, {a} allowlisted", out)
 
     def test_drop_table_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
