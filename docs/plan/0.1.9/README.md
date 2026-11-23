@@ -57,7 +57,7 @@ The item 08 review index uses `0014_memory_owner_project_created`.
 | 18 | [x] [Cairn is the agent's memory (session-start instruction)](18-agent-memory-mirror.md) (added 2026-11-23, user) | 02, 12 | — (no schema) |
 | 10 | [x] [Cross-encoder experiment](10-cross-encoder.md) | 09 | — (no schema) |
 | 13 | [x] [Fixes: recording](13-fixes-recording.md) | 03, 08, 09, 12 | `0011_fixes` |
-| 14 | [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
+| 14 | [x] [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
 | 15 | [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |
 | 16 | [Fixes: device fixes, `cairn fixes`, audited auto-join](16-fixes-cli-autojoin.md) | 15 | — |
 

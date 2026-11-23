@@ -152,6 +152,43 @@ pub fn spawn(state: &AppState) {
             if let Err(error) = sweeper.store.sweep().await {
                 eprintln!("sweep failed: {error}");
             }
+            match sweeper.store.fixes_due().await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    eprintln!("fix schedule check failed: {error}");
+                    continue;
+                }
+            }
+            let phrases = match sweeper.store.fixes_alias_queries().await {
+                Ok(phrases) => phrases,
+                Err(error) => {
+                    eprintln!("fix query poll failed: {error}");
+                    continue;
+                }
+            };
+            let mut vectors = Vec::new();
+            let mut failed = false;
+            if let Some(model) = &sweeper.embeddings {
+                for phrase in phrases {
+                    let Some(vector) = model.query(&phrase).await else {
+                        eprintln!("fix query embedding failed");
+                        failed = true;
+                        break;
+                    };
+                    vectors.push((phrase, vector));
+                }
+            }
+            if failed {
+                continue;
+            }
+            if let Err(error) = sweeper
+                .store
+                .fixes_nightly_with_queries(sweeper.embeddings.is_some(), crate::VERSION, &vectors)
+                .await
+            {
+                eprintln!("fix detector pass failed: {error}");
+            }
         }
     });
 }

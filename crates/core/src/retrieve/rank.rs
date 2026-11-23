@@ -5,6 +5,7 @@ use crate::memory::{Kind, Memory, Scope, Status};
 /// Total of every adjustment, as a share of the fused score.
 pub const ADJUST_CAP: f32 = 0.30;
 const FRESH_SECONDS: i64 = 30 * 86_400;
+const FADED_PENALTY: f32 = -0.10;
 
 /// The score multiplier is `1 + adjust`: scope closeness, status, freshness, explicit feedback,
 /// kind, a lower rank for a candidate, and repeated proof, capped at ±30 %. Reading a memory
@@ -48,7 +49,13 @@ pub fn adjust(m: &Memory, ctx: &WorkContext, now: i64) -> f32 {
     };
     // 0.02 for each save after the first, and no more than +0.06.
     let proof = 0.02 * (m.proof_count.min(4) as f32 - 1.0);
-    (scope + status + fresh + used + kind + candidate + proof).clamp(-ADJUST_CAP, ADJUST_CAP)
+    let faded = if m.faded_at.is_some() {
+        FADED_PENALTY
+    } else {
+        0.0
+    };
+    (scope + status + fresh + used + kind + candidate + proof + faded)
+        .clamp(-ADJUST_CAP, ADJUST_CAP)
 }
 
 /// The status after the votes changed. `wrong >= 2`, or `wrong >= 1` with the owner among them,

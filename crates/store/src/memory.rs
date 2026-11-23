@@ -58,7 +58,7 @@ macro_rules! memory_columns {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
-    m.proof_count,
+    m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
@@ -109,6 +109,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         links: Vec::new(),
         status: parse(row, "status")?,
         rank: parse(row, "rank")?,
+        faded_at: row.try_get("faded_at")?,
         proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
         origin: parse(row, "origin")?,
@@ -323,15 +324,21 @@ impl Store {
 
     /// Counts an explicit fetch by an agent (`get` or search). Internal usage; never shown.
     pub async fn mark_fetched(&self, memory_ids: &[String]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE memories SET faded_at = NULL WHERE memory_id = ANY($1) AND faded_at IS NOT NULL")
+            .bind(memory_ids)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "INSERT INTO usage (memory_id, fetched, last_used_at)
              SELECT id, 1, now() FROM unnest($1::text[]) AS id WHERE EXISTS (SELECT 1 FROM memories WHERE memory_id = id)
              ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now()",
         )
         .bind(memory_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        promote_candidates(&self.pool, memory_ids).await?;
+        promote_candidates(&mut *tx, memory_ids).await?;
+        tx.commit().await?;
         Ok(())
     }
 

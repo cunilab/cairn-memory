@@ -53,7 +53,7 @@ pub fn guard(band: Band, newer: Side, older: Side, newer_text: &str, older_text:
 
 /// Words from a title and summary that carry a version, number, path, file name, or backticks.
 /// True when those sets are not the same, so near-copies that name different things stay linked.
-fn rare_tokens_differ(a: &str, b: &str) -> bool {
+pub(crate) fn rare_tokens_differ(a: &str, b: &str) -> bool {
     rare_tokens(a) != rare_tokens(b)
 }
 

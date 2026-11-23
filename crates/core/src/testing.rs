@@ -22,6 +22,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         links: Vec::new(),
         status: Status::Active,
         rank: Rank::Normal,
+        faded_at: None,
         proof_count: 1,
         stale_cause: None,
         origin: Origin::Agent,

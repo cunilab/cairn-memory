@@ -112,6 +112,8 @@ pub struct Memory {
     pub links: Vec<Link>,
     pub status: Status,
     pub rank: Rank,
+    #[serde(skip)]
+    pub faded_at: Option<i64>,
     /// Times this knowledge was saved, including the first. At least 1.
     /// Omitted the first time, same as a search card's `seen`.
     #[serde(default, skip_serializing_if = "proof_once")]
