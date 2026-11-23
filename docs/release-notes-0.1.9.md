@@ -12,11 +12,13 @@ migration, no new tools.
 
 ## What changed for users
 
-- **Agent nudges.** In a repository with `.cairn/project.json`, the hook now tells the agent to use Cairn (Kivori ran 9
-  sessions and saved nothing, because agents ignore the MCP instructions):
-  - *Session start line.* One instruction line is added after the brief: "Cairn is active for this project. Before
-    deciding or debugging, memory_search; after a decision, fixed gotcha or finished task, memory_save with a reason."
-    It is given even when the project has no brief yet or the server cannot be reached.
+- **Agent nudges.** The hook now tells the agent to use Cairn (Kivori ran 9 sessions and saved nothing, because agents
+  ignore the MCP instructions):
+  - *Session start line.* Every session, in a project or not, gets one instruction line after the brief: "Cairn is your
+    memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or
+    debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write
+    memory to local files." Built-in agent memory stays on; nothing is blocked or copied. The line is given even when
+    the project has no brief yet or the server cannot be reached, and a saved instruction from the web replaces it.
   - *Stop reminder.* The first `Stop` of a session that edited files, ran a recognised test command or wrote a
     `Decision:` line, and made no Cairn save, answers `{"decision":"block","reason":...}`, so Claude Code (and Codex,
     which follows the same Stop contract; untested against a live Codex) continues for one turn. Once per session,
