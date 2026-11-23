@@ -63,7 +63,10 @@ fn rare_tokens(text: &str) -> BTreeSet<&str> {
 
 fn rare_word(word: &str) -> Option<&str> {
     // Backticks stay: a wrapped word is rare even with no digit, slash, or file suffix.
-    let word = word.trim_matches(|c: char| c.is_ascii_punctuation() && c != '`');
+    // Only wrapping punctuation goes: a leading `/`, `.` or `~` is part of a path.
+    let word = word
+        .trim_start_matches(['(', '[', '{', '"', '\''])
+        .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'']);
     if word.is_empty() {
         return None;
     }
@@ -72,6 +75,9 @@ fn rare_word(word: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_suffix('`'))
         .unwrap_or(word);
     let wrapped = inner.len() != word.len();
+    if inner.is_empty() {
+        return None;
+    }
     if wrapped
         || inner.chars().any(|c| c.is_ascii_digit())
         || inner.contains('/')
@@ -167,6 +173,24 @@ mod tests {
             ),
             Band::Relate
         );
+        // Leading `/`, `.` and `~` belong to the token; only wrapping punctuation is trimmed.
+        for (a, b) in [
+            ("Use /tmp", "Use /var"),
+            ("Use ./src", "Use ./lib"),
+            ("Use src/", "Use lib/"),
+        ] {
+            assert_eq!(
+                guard(Band::Supersede, side, side, a, b),
+                Band::Relate,
+                "{a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_backticks_are_not_a_rare_token() {
+        assert!(rare_tokens("see `` here").is_empty());
+        assert!(rare_tokens("see ``. here").is_empty());
     }
 
     #[test]
