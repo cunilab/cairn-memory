@@ -307,7 +307,7 @@ async fn ignore_reappears() {
 }
 
 #[tokio::test]
-async fn completed_failed_and_expired_wait_for_quiet_and_cooldown() {
+async fn terminal_fixes_reopen_after_cooldown_with_quiet_required_for_done_and_failed() {
     for status in ["done", "failed", "expired"] {
         let Some(db) = TestDb::new().await else {
             return;
@@ -339,19 +339,21 @@ async fn completed_failed_and_expired_wait_for_quiet_and_cooldown() {
                 .await
                 .unwrap();
         assert_eq!(count, 1, "{status} must not immediately reopen");
-        sqlx::query("UPDATE memories SET status='active' WHERE memory_id=$1")
-            .bind(&id)
-            .execute(db.store.pool())
-            .await
-            .unwrap();
-        next_night(&db).await;
-        db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+        if status != "expired" {
+            sqlx::query("UPDATE memories SET status='active' WHERE memory_id=$1")
+                .bind(&id)
+                .execute(db.store.pool())
+                .await
+                .unwrap();
+            next_night(&db).await;
+            db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+            sqlx::query("UPDATE memories SET status='stale' WHERE memory_id=$1")
+                .bind(&id)
+                .execute(db.store.pool())
+                .await
+                .unwrap();
+        }
         sqlx::query("UPDATE fixes SET done_at=now()-interval '15 days',applied_at=now()-interval '15 days',last_seen_at=now()-interval '15 days' WHERE fix_id=$1").bind(&fix).execute(db.store.pool()).await.unwrap();
-        sqlx::query("UPDATE memories SET status='stale' WHERE memory_id=$1")
-            .bind(&id)
-            .execute(db.store.pool())
-            .await
-            .unwrap();
         next_night(&db).await;
         db.store.fixes_nightly(true, "0.1.9").await.unwrap();
         let pending: Vec<String> = sqlx::query_scalar(
@@ -361,7 +363,7 @@ async fn completed_failed_and_expired_wait_for_quiet_and_cooldown() {
         .fetch_all(db.store.pool())
         .await
         .unwrap();
-        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.len(), 1, "{status} must reopen after cooldown");
         assert_eq!(pending[0] == fix, status == "failed");
         db.finish().await;
     }
@@ -397,6 +399,95 @@ async fn expired_waiting_fix_cooldown_starts_at_expiry() {
     .await
     .unwrap();
     assert_eq!(pending, 0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn quiet_nights_preserve_the_first_quiet_timestamp() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at,quiet_seen_at) VALUES ('quiet','F2','quiet','agent','done',now(),now(),'2000-01-01 00:00:00+00')")
+        .execute(db.store.pool()).await.unwrap();
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let preserved: bool = sqlx::query_scalar(
+        "SELECT quiet_seen_at = '2000-01-01 00:00:00+00' FROM fixes WHERE fix_id='quiet'",
+    )
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert!(preserved);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn completing_fixes_clears_prior_quiet() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (owner, memory) = stale_fixture(&db).await;
+    let device = db
+        .store
+        .register_device(&owner, None, "agent")
+        .await
+        .unwrap();
+    let device = device.device.device_id;
+    sqlx::query("UPDATE devices SET last_hook_at=now()-interval '8 days' WHERE device_id=$1")
+        .bind(&device)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET summary='password=bad-secret-value' WHERE memory_id=$1")
+        .bind(&memory)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let [
+        (agent, _),
+        (computer, computer_fingerprint),
+        (server, server_fingerprint),
+    ] = sqlx::query_as::<_, (String, String)>(
+        "SELECT fix_id,fingerprint FROM fixes WHERE detector IN ('F2','F4','F9') ORDER BY detector",
+    )
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap()
+    .try_into()
+    .unwrap();
+    db.store
+        .transition_fix(&agent, &owner, "copied")
+        .await
+        .unwrap();
+    db.store
+        .apply_fix(&computer, &computer_fingerprint, &owner, true, "0.1.9")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fixes SET quiet_seen_at=now()-interval '1 day',status=CASE WHEN detector='F9' THEN 'failed' ELSE status END WHERE detector IN ('F2','F4','F9')")
+        .execute(db.store.pool()).await.unwrap();
+
+    db.store
+        .transition_fix(&agent, &owner, "done")
+        .await
+        .unwrap();
+    db.store
+        .finish_device_fix(&owner, &device, &computer, "applied", None)
+        .await
+        .unwrap();
+    db.store
+        .apply_fix(&server, &server_fingerprint, &owner, true, "0.1.9")
+        .await
+        .unwrap();
+    let completed: Vec<(String, String, bool)> = sqlx::query_as(
+        "SELECT detector,status,quiet_seen_at IS NULL FROM fixes WHERE detector IN ('F2','F4','F9') ORDER BY detector",
+    )
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        completed,
+        ["F2", "F4", "F9"].map(|detector| (detector.to_owned(), "done".to_owned(), true))
+    );
     db.finish().await;
 }
 
@@ -685,15 +776,16 @@ async fn agent_proof_requires_one_new_successor() {
     let old = db.store.save(&person, save_input(serde_json::json!({"kind":"fact","title":"Old proof record","summary":"The original test fact","reason":"Old evidence"})), &context).await.unwrap().id;
     let new = db.store.save(&person, save_input(serde_json::json!({"kind":"fact","title":"New proof record","summary":"A corrected test fact","reason":"New evidence"})), &context).await.unwrap().id;
     sqlx::query("INSERT INTO links (source_id,target_id,relation,origin) VALUES ($1,$2,'supersedes','agent')").bind(&new).bind(&old).execute(db.store.pool()).await.unwrap();
-    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,subject_kind,subject_id,person_id,fix_type,status,first_seen_at,last_seen_at,waiting_since) VALUES ('proof','F2','proof','memory',$1,$2,'agent','waiting',now(),now(),now()-interval '1 minute')")
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,subject_kind,subject_id,person_id,fix_type,status,first_seen_at,last_seen_at,waiting_since,quiet_seen_at) VALUES ('proof','F2','proof','memory',$1,$2,'agent','waiting',now(),now(),now()-interval '1 minute',now()-interval '1 day')")
         .bind(&old).bind(&person).execute(db.store.pool()).await.unwrap();
     db.store.fixes_nightly(true, "0.1.9").await.unwrap();
-    let row = sqlx::query("SELECT status,proof_id FROM fixes WHERE fix_id='proof'")
+    let row = sqlx::query("SELECT status,proof_id,quiet_seen_at = done_at AS quiet_at_completion FROM fixes WHERE fix_id='proof'")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
     assert_eq!(row.get::<String, _>("status"), "done");
     assert_eq!(row.get::<String, _>("proof_id"), new);
+    assert!(row.get::<bool, _>("quiet_at_completion"));
     let other = db.store.save(&person, save_input(serde_json::json!({"kind":"fact","title":"Second proof record","summary":"Another corrected test fact","reason":"Other evidence"})), &context).await.unwrap().id;
     sqlx::query("INSERT INTO links (source_id,target_id,relation,origin) VALUES ($1,$2,'supersedes','agent')").bind(&other).bind(&old).execute(db.store.pool()).await.unwrap();
     sqlx::query(

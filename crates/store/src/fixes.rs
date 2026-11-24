@@ -461,7 +461,7 @@ async fn persist_candidates(
     semantic: bool,
 ) -> Result<()> {
     let fingerprints: Vec<String> = candidates.iter().map(|c| c.data.0.clone()).collect();
-    sqlx::query("UPDATE fixes SET quiet_seen_at=now(), status=CASE WHEN status='pending' THEN 'resolved' ELSE status END WHERE status IN ('pending','ignored','applying','queued','waiting','done','failed','expired') AND NOT (fingerprint=ANY($1)) AND (detector <> 'F11' OR $2 OR NOT $3)")
+    sqlx::query("UPDATE fixes SET quiet_seen_at=now(), status=CASE WHEN status='pending' THEN 'resolved' ELSE status END WHERE status IN ('pending','ignored','applying','queued','waiting','done','failed','expired') AND quiet_seen_at IS NULL AND NOT (fingerprint=ANY($1)) AND (detector <> 'F11' OR $2 OR NOT $3)")
         .bind(&fingerprints).bind(semantic).bind(crate::retrieve::ALIASES_IN_SEARCH).execute(&mut **tx).await?;
     for c in candidates {
         let existing = sqlx::query("SELECT fix_id,status,quiet_seen_at,ignored_until FROM fixes WHERE detector=$1 AND fingerprint=$2 ORDER BY first_seen_at DESC LIMIT 1 FOR UPDATE")
@@ -480,7 +480,7 @@ async fn persist_candidates(
                     insert = false;
                 }
             } else if ["done", "failed", "expired"].contains(&status.as_str()) {
-                let may_reopen: bool = sqlx::query_scalar("SELECT quiet_seen_at IS NOT NULL AND detector <> 'F5' AND coalesce(done_at,applied_at,last_seen_at) + CASE detector WHEN 'F10' THEN interval '30 days' WHEN 'F12' THEN interval '90 days' ELSE interval '14 days' END <= now() FROM fixes WHERE fix_id=$1").bind(&id).fetch_one(&mut **tx).await?;
+                let may_reopen: bool = sqlx::query_scalar("SELECT (quiet_seen_at IS NOT NULL OR status='expired') AND detector <> 'F5' AND coalesce(done_at,applied_at,last_seen_at) + CASE detector WHEN 'F10' THEN interval '30 days' WHEN 'F12' THEN interval '90 days' ELSE interval '14 days' END <= now() FROM fixes WHERE fix_id=$1").bind(&id).fetch_one(&mut **tx).await?;
                 if !may_reopen {
                     insert = false;
                 } else if status == "failed" {
@@ -521,7 +521,7 @@ async fn settle_proof(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
             None
         };
         if let Some(proof) = proof {
-            sqlx::query("UPDATE fixes SET status='done',done_at=now(),proof_id=$2 WHERE fix_id=$1")
+            sqlx::query("UPDATE fixes SET status='done',done_at=now(),proof_id=$2,quiet_seen_at=NULL WHERE fix_id=$1")
                 .bind(fix_id)
                 .bind(proof)
                 .execute(&mut **tx)
@@ -619,7 +619,7 @@ impl Store {
                     return Ok(());
                 }
             };
-            sqlx::query("UPDATE fixes SET status='done',before=$2,applied_by=$3,applied_at=now(),done_at=now(),error=NULL WHERE fix_id=$1")
+            sqlx::query("UPDATE fixes SET status='done',before=$2,applied_by=$3,applied_at=now(),done_at=now(),error=NULL,quiet_seen_at=NULL WHERE fix_id=$1")
                 .bind(id).bind(before).bind(admin).execute(&mut *tx).await?;
         }
         crate::account::audit_tx(
@@ -1038,7 +1038,7 @@ impl Store {
                 .await?;
             }
             "done" if kind == "agent" && matches!(status.as_str(), "pending" | "waiting") => {
-                sqlx::query("UPDATE fixes SET status='done',done_at=now() WHERE fix_id=$1")
+                sqlx::query("UPDATE fixes SET status='done',done_at=now(),quiet_seen_at=NULL WHERE fix_id=$1")
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
@@ -1095,7 +1095,7 @@ impl Store {
             ) => ("failed", Some(reason)),
             _ => return Err(crate::StoreError::Validation("invalid fix result".into())),
         };
-        let updated = sqlx::query("UPDATE fixes SET status=$4,error=$5,done_at=now() WHERE fix_id=$1 AND device_id=$2 AND status='queued' AND EXISTS (SELECT 1 FROM devices WHERE device_id=$2 AND person_id=$3)")
+        let updated = sqlx::query("UPDATE fixes SET status=$4,error=$5,done_at=now(),quiet_seen_at=CASE WHEN $4='done' THEN NULL ELSE quiet_seen_at END WHERE fix_id=$1 AND device_id=$2 AND status='queued' AND EXISTS (SELECT 1 FROM devices WHERE device_id=$2 AND person_id=$3)")
             .bind(id).bind(device).bind(person).bind(status).bind(error).execute(&mut *tx).await?;
         if updated.rows_affected() == 0 {
             return Err(crate::StoreError::NotFound("fix".into()));
