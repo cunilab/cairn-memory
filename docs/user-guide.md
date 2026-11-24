@@ -6,14 +6,41 @@ status: draft
 
 # Cairn Memory user guide
 
-Set `CAIRN_SESSION_ORIGIN=automation` in the environment of a scheduled run, worker, or subagent. Cairn still captures that session and saves its distilled notes, and it does not ask to save at Stop and does not replace the handoff for that checkout. A person's own session in the same checkout is unchanged.
+Cairn helps agents resume work after a break or compaction, hand off between machines, share project decisions and avoid repeating gotchas. People inspect and correct memory through the web console.
 
-## Fixes
+## Concepts
 
-Use `cairn fixes` to list this device's queued fixes, or `cairn fixes apply [fx_id]` to apply all of them or one by id. The `init` and `doctor` commands also try queued fixes first; agent commands, hooks, and MCP do not. A committed `.cairn/project.json` joins the person using it to that project, and the join is recorded in the audit log.
+Memories can be decisions, rules, gotchas, procedures, facts, preferences, notes or system handoffs. Personal memories are private to their owner; project memories are visible to project members; global memories are visible to server users. Automatic notes start as lower-ranked candidates and can become normal through use or confirmation. Links describe relationships such as `supersedes` and `contradicts`. Stale and replaced records remain searchable with a label; memories do not expire by age.
 
-Admins can review Fixes in the web console. Pending lists fixes awaiting a decision, queued computer work, and prompts awaiting proof; History shows completed and ignored items. Searches shows the last 14 days of search phrases with secrets redacted. Server fixes change data only after Apply; computer fixes are queued for the device; agent fixes provide a prompt to copy. Secret removal is permanent: rotate the exposed secret immediately. There is no undo.
+## Set up
 
-An admin may rewrite a memory from its detail sheet. Cairn preserves the owner, scope and project, retains the superseded version, and shows the owner that an admin changed it.
+[Deploy the server and console](deploy.md), then create the first account in the web. It is the only administrator and can create additional accounts. Create a device token in the web, then run:
 
-The admin web-session API is under `/cairn-memory/admin/`. `GET fixes` accepts optional `status` and `detector`; `GET fixes/{id}` returns a fix and its fingerprint. `POST fixes/{id}/apply` takes `{"fingerprint":"..."}` and returns the updated fix; a stale fingerprint or incompatible status returns 409. `POST fixes/{id}/ignore`, `/copied`, and `/done` take an empty object and return the updated fix. `GET searches` returns recent redacted search phrases. `POST memories/{id}/rewrite` takes `title`, `summary`, `reason`, and optional `fields`, and returns `memory_id` and `superseded`. Device tokens are rejected with 401; non-admin web sessions receive 403.
+```sh
+cairn setup https://your-server.example --agent claude
+cairn doctor
+```
+
+Setup reads the token from stdin; choose `claude`, `codex` or `opencode`. Codex and OpenCode need their native CLI installed. See [hook setup](reference/hook.md#setup).
+
+## Projects
+
+Run `cairn init "Project name"` in a project folder and commit `.cairn/project.json`. The file connects checkouts even without Git. Use `cairn init --rename "Name"` to rename as owner. An unknown ID requires `cairn init --yes` to register it. **Anyone with an account on the same server and the project ID can join and read project memory.** See [projects](reference/projects.md#init-and-membership).
+
+## Day-to-day use
+
+Hooks capture prompts, edits and non-read-only commands. On an eligible Stop, the agent is asked once to save useful notes. Use `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`, or their five MCP equivalents. To correct a memory, save the replacement with `supersedes` set to its ID. Add `.cairnignore` to disable capture in a folder. Assistant messages are captured only if `CAIRN_CAPTURE_ASSISTANT=1`.
+
+The hook provides a session-start instruction and a Stop reminder. Edit them in Settings or on a project page. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable them. Set `CAIRN_SESSION_ORIGIN=automation` for scheduled or automated work: capture and distillation continue, while the Stop ask and personal handoff replacement are suppressed.
+
+## Web console and Fixes
+
+Dashboard summarizes health and activity; Memories lists records; Activity shows sessions, jobs and audit; Projects shows members and session reports; Graph shows links; Settings manages account, devices and instructions. Fixes gives the admin evidence and actions for detected issues. The admin can apply or ignore a fix, or copy a prompt for the agent. A computer fix is queued to its device; run `cairn fixes` to list it or `cairn fixes apply [id]` to apply queued fixes. Removing an exposed secret is permanent; rotate it immediately.
+
+## Privacy and data
+
+Capture and saves are redacted before storage using best-effort patterns; check sensitive data before sharing it. Raw observations are retained for processing, not returned by memory search, and are subject to retention limits. Forget hides a retained record from normal retrieval. Export is available in the console. Administrators can inspect redacted recent search phrases and rewrite memories; rewrites preserve the original and show that an admin changed it. Scope and membership determine who can see project or global memory.
+
+## Updates and troubleshooting
+
+Upgrade server and clients together and read the release notes. Run `cairn update`, refresh each integration with `cairn setup`, and run `cairn doctor`. Check hook stderr and the outbox when delivery fails, server health for `semantic_search`, and Activity for quarantined jobs. See [recall](reference/recall.md) and [hook details](reference/hook.md).

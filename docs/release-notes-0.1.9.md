@@ -31,7 +31,7 @@ This release improves project capture, handoffs, retrieval and the web console. 
 | 17 | Age no longer hides memories. Stale and replaced memories remain searchable with labels and lower ranking; forgotten memories remain hidden. | No added bytes on active cards; up to 16 bytes on stale and 40 on replaced cards. |
 | 18 | The session-start instruction tells agents to use Cairn as their memory. Built-in agent memory remains enabled; nothing is copied or blocked. | About 130 additional bytes per session start and 70 bytes once in MCP instructions; outside a project the start line is about 260 bytes. |
 
-Agent instructions and the Stop reminder are editable in the web. Set `nudge` to `false` in the client config or set `CAIRN_NO_NUDGE=1` to disable nudges. Search ranking now includes proof and status; the release does change retrieval. See [the benchmark analysis](../bench/analysis-0.1.9.md) for the gate and benchmark limits.
+Agent instructions and the Stop reminder are editable in the web. Set `nudge` to `false` in the client config or set `CAIRN_NO_NUDGE=1` to disable nudges. Search ranking now includes proof and status; the release does change retrieval. See [the benchmark analysis](../bench/README.md) for the gate and benchmark limits.
 
 ## Database migrations
 
