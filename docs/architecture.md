@@ -56,7 +56,7 @@ flowchart TD
     Gate --> Results[Compact cards or brief]
 ```
 
-Capture stays personal when project attachment fails; recognized projects can receive distilled notes. The hook uses a bounded outbox during outages. Explicit saves are validated and deduplicated; corrections name the old memory in `supersedes`. Forget removes content and prevents normal recall. Feedback can mark a memory stale. A project file identifies membership, so protect it as shared access to the project's memories.
+Capture stays personal when project attachment fails; recognized projects can receive distilled notes. The hook uses a bounded outbox during outages. Explicit saves are validated and deduplicated; corrections name the old memory in `supersedes`. Forget hides the retained record from normal recall. Feedback can mark a memory stale. A project file identifies membership, so protect it as shared access to the project's memories.
 
 ## Decisions and why
 
