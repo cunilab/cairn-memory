@@ -885,6 +885,9 @@ impl Store {
                 "forgotten memories cannot be rewritten".into(),
             ));
         }
+        if old.status == Status::Superseded {
+            return Err(StoreError::Conflict("rewrite the current version".into()));
+        }
         let context = WorkContext {
             project_id: old.project_id.clone(),
             repository: old.context.repo.clone(),

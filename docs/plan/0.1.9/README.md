@@ -60,6 +60,7 @@ The item 08 review index uses `0014_memory_owner_project_created`.
 | 14 | [x] [Fixes: detectors](14-fixes-detectors.md) | 11, 13 | — |
 | 15 | [x] [Fixes: admin web page and Apply](15-fixes-web.md) | 14 | — |
 | 16 | [x] [Fixes: device fixes, `cairn fixes`, audited auto-join](16-fixes-cli-autojoin.md) | 15 | — |
+| 13–16 review | [x] Fixes review round | 13–16 | — |
 
 Shared files, in this order only: `crates/client/src/hook/mod.rs` and `hook/state.rs` (02 → 12 → 05 → 03 → 06);
 `crates/core/src/process/distill.rs` (01 → 05 → 04 → 17 → 08); `crates/store/src/capture.rs` (01 → 05 → 04 → 12 → 17 → 08);

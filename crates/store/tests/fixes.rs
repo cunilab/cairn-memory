@@ -40,6 +40,119 @@ async fn young_store_quiet() {
 }
 
 #[tokio::test]
+async fn f12_searches_are_counted_once_per_project() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let person = db.person("owner").await;
+    let (project, _) = db
+        .store
+        .init_project(&person, "github.com/example/counts", None)
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    for i in 0..12 {
+        db.store.save(&person, save_input(serde_json::json!({"kind":"fact", "title":format!("Old test memory {i}"), "summary":format!("A distinct factual summary {i}"), "reason":"Test project search counting"})), &context).await.unwrap();
+    }
+    sqlx::query("UPDATE memories SET created_at=now()-interval '91 days'")
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (person_id,session_id,project_id,started_at) VALUES ($1,'searches',$2,now())").bind(&person).bind(&project.project_id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO lookup_log (person_id,session_id,kind,query,hit) SELECT $1,'searches','search','ordinary',false FROM generate_series(1,30)").bind(&person).execute(db.store.pool()).await.unwrap();
+    let mut lock = db.store.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE lookup_log IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let store = db.store.clone();
+    let nightly = tokio::spawn(async move { store.fixes_nightly(true, "0.1.9").await });
+    let query = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let query: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%lookup_log%' LIMIT 1").bind(pid).fetch_optional(db.store.pool()).await.unwrap();
+            if let Some(query) = query { break query; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("nightly F12 query did not reach lookup_log");
+    lock.rollback().await.unwrap();
+    nightly.await.unwrap().unwrap();
+    let explain = format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}");
+    let mut statement = sqlx::query_scalar::<_, serde_json::Value>(&explain);
+    if query.contains("$1") {
+        statement = statement.bind(None::<&str>);
+    }
+    let plan = statement.fetch_one(db.store.pool()).await.unwrap();
+    fn max_rows(node: &serde_json::Value) -> u64 {
+        let rows =
+            node["Actual Rows"].as_u64().unwrap_or(0) * node["Actual Loops"].as_u64().unwrap_or(0);
+        node["Plans"].as_array().map_or(rows, |plans| {
+            plans.iter().map(max_rows).fold(rows, u64::max)
+        })
+    }
+    assert!(
+        max_rows(&plan[0]["Plan"]) < 100,
+        "search rows were multiplied by memories: {plan}"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn list_fixes_loads_all_details_in_one_query() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let admin = db.person("owner").await;
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at) VALUES ('fx_a','F8','a','report','pending',now(),now()),('fx_b','F8','b','report','pending',now(),now())").execute(db.store.pool()).await.unwrap();
+    let mut lock = db.store.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE memories IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let store = db.store.clone();
+    let listing = tokio::spawn(async move { store.list_fixes(&admin, None, None).await });
+    let query = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let query: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%memories%' LIMIT 1").bind(pid).fetch_optional(db.store.pool()).await.unwrap();
+            if let Some(query) = query { break query; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("fix list did not query memory details");
+    lock.rollback().await.unwrap();
+    assert_eq!(listing.await.unwrap().unwrap().len(), 2);
+    let rows = if query.contains("$2") {
+        sqlx::query(&query)
+            .bind(None::<&str>)
+            .bind(None::<&str>)
+            .fetch_all(db.store.pool())
+            .await
+            .unwrap()
+    } else {
+        sqlx::query(&query)
+            .bind("fx_a")
+            .fetch_all(db.store.pool())
+            .await
+            .unwrap()
+    };
+    assert_eq!(
+        rows.len(),
+        2,
+        "the details query must load the whole fix list"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn semantic_off_reports_once() {
     let Some(db) = TestDb::new().await else {
         return;
@@ -190,6 +303,100 @@ async fn ignore_reappears() {
     assert_eq!(statuses.len(), 2);
     assert!(statuses.contains(&"ignored".to_owned()));
     assert!(statuses.contains(&"pending".to_owned()));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn completed_failed_and_expired_wait_for_quiet_and_cooldown() {
+    for status in ["done", "failed", "expired"] {
+        let Some(db) = TestDb::new().await else {
+            return;
+        };
+        let (_, id) = stale_fixture(&db).await;
+        next_night(&db).await;
+        db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+        let fix: String = sqlx::query_scalar(
+            "SELECT fix_id FROM fixes WHERE detector='F2' AND subject_id=$1 AND status='pending'",
+        )
+        .bind(&id)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE fixes SET status=$2,done_at=now(),applied_at=now() WHERE fix_id=$1")
+            .bind(&fix)
+            .bind(status)
+            .execute(db.store.pool())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            next_night(&db).await;
+            db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fixes WHERE detector='F2' AND subject_id=$1")
+                .bind(&id)
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "{status} must not immediately reopen");
+        sqlx::query("UPDATE memories SET status='active' WHERE memory_id=$1")
+            .bind(&id)
+            .execute(db.store.pool())
+            .await
+            .unwrap();
+        next_night(&db).await;
+        db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+        sqlx::query("UPDATE fixes SET done_at=now()-interval '15 days',applied_at=now()-interval '15 days',last_seen_at=now()-interval '15 days' WHERE fix_id=$1").bind(&fix).execute(db.store.pool()).await.unwrap();
+        sqlx::query("UPDATE memories SET status='stale' WHERE memory_id=$1")
+            .bind(&id)
+            .execute(db.store.pool())
+            .await
+            .unwrap();
+        next_night(&db).await;
+        db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+        let pending: Vec<String> = sqlx::query_scalar(
+            "SELECT fix_id FROM fixes WHERE detector='F2' AND subject_id=$1 AND status='pending'",
+        )
+        .bind(&id)
+        .fetch_all(db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0] == fix, status == "failed");
+        db.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn expired_waiting_fix_cooldown_starts_at_expiry() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (_, id) = stale_fixture(&db).await;
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    sqlx::query("UPDATE fixes SET status='waiting',waiting_since=now()-interval '15 days',last_seen_at=now()-interval '15 days' WHERE subject_id=$1 AND detector='F2'").bind(&id).execute(db.store.pool()).await.unwrap();
+    sqlx::query("UPDATE memories SET status='active' WHERE memory_id=$1")
+        .bind(&id)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    next_night(&db).await;
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    sqlx::query("UPDATE memories SET status='stale' WHERE memory_id=$1")
+        .bind(&id)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    next_night(&db).await;
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fixes WHERE subject_id=$1 AND detector='F2' AND status='pending'",
+    )
+    .bind(&id)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
     db.finish().await;
 }
 

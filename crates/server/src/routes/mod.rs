@@ -59,6 +59,7 @@ pub fn router() -> Router<AppState> {
         // admin
         .route("/cairn-memory/admin/jobs", get(admin::jobs))
         .route("/cairn-memory/admin/fixes", get(fixes::list))
+        .route("/cairn-memory/admin/fixes/count", get(fixes::count))
         .route("/cairn-memory/admin/fixes/{id}", get(fixes::detail))
         .route("/cairn-memory/admin/fixes/{id}/apply", post(fixes::apply))
         .route("/cairn-memory/admin/fixes/{id}/ignore", post(fixes::ignore))

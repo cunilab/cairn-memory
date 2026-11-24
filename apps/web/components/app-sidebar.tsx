@@ -178,7 +178,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   useEffect(() => {
     if (!account?.is_admin) return;
     let cancelled = false;
-    const refresh = () => void cairn<unknown[]>("admin/fixes?status=pending").then((rows) => { if (!cancelled) setFixCount(rows.length); }).catch(() => {});
+    const refresh = () => void cairn<{ count: number }>("admin/fixes/count").then((result) => { if (!cancelled) setFixCount(result.count); }).catch(() => {});
     refresh();
     const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60_000);
     window.addEventListener("cairn-fixes-changed", refresh);

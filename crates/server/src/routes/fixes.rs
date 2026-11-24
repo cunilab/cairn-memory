@@ -41,6 +41,11 @@ pub async fn list(
             .await?,
     ))
 }
+pub async fn count(State(state): State<AppState>, Admin(_): Admin) -> ApiResult<Value> {
+    Ok(Json(
+        json!({"count": state.store.pending_fix_count().await?}),
+    ))
+}
 pub async fn detail(
     State(state): State<AppState>,
     Admin(admin): Admin,

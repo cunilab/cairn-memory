@@ -121,11 +121,15 @@ pub fn f8(semantic: bool, unembedded: u64, foreign: u64) -> Option<Fix> {
 }
 pub fn f9(subject: &str, field: &str, text: &str) -> Option<Fix> {
     let redacted = redact_sensitive_content(text);
+    f9_redacted(subject, field, text, &redacted)
+}
+
+pub fn f9_redacted(subject: &str, field: &str, text: &str, redacted: &str) -> Option<Fix> {
     (redacted != text).then(|| {
         fix(
             "F9",
             subject,
-            &sha256_hex(&[field, &redacted]),
+            &sha256_hex(&[field, redacted]),
             json!({"class":"secret","field":field}),
             json!({"type":"redact_secret","memory_id":subject,"fields":[field]}),
         )

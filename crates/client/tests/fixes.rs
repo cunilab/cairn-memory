@@ -166,7 +166,7 @@ fn project_file_guards() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, checkout.join(".cairn")).unwrap();
-        let out = agent.run_in(&checkout, &["fixes", "apply"]);
+        let out = agent.run_in(&checkout, &["fixes", "apply", "fx_test"]);
         assert!(
             out.status.success(),
             "stderr: {}; stdout: {}; requests: {:?}",
@@ -188,7 +188,7 @@ fn project_file_guards() {
         json!({"type":"write_project_file","project_id":"proj_test","repository":"other/repo","name":"Repo"}),
     );
     let second = Agent::setup("fix-other-home", &other.url, "cdt_test");
-    let out = second.run_in(&checkout, &["fixes", "apply"]);
+    let out = second.run_in(&checkout, &["fixes", "apply", "fx_test"]);
     assert!(
         out.status.success(),
         "{}; requests: {:?}",
@@ -224,6 +224,33 @@ fn apply_before_command() {
     );
     assert_eq!(applied(&fake)[0]["reason"], "already_current");
     assert!(String::from_utf8_lossy(&out.stdout).contains("fx_test"));
+}
+
+#[test]
+fn automatic_project_fix_from_another_checkout_stays_queued() {
+    let fake = Fake::new(
+        json!({"type":"write_project_file","project_id":"proj_test","repository":"another/repo","name":"Repo"}),
+    );
+    let agent = Agent::setup("fix-auto-other", &fake.url, "cdt_test");
+    let checkout = checkout("fix-auto-other-checkout");
+    let _ = agent.run_in(&checkout, &["doctor"]);
+    assert!(
+        fake.requests()
+            .iter()
+            .any(|r| r.starts_with("GET /cairn-memory/device/fixes "))
+    );
+    assert!(applied(&fake).is_empty());
+    let outside = temp_dir("fix-auto-no-git");
+    let _ = agent.run_in(&outside, &["doctor"]);
+    assert!(applied(&fake).is_empty());
+}
+
+#[test]
+fn setup_without_configured_agent_is_not_applied() {
+    let fake = Fake::new(json!({"type":"suggest_setup","device_id":"dev_test"}));
+    let agent = Agent::setup("fix-setup-empty", &fake.url, "cdt_test");
+    let _ = agent.run(&["fixes", "apply"]);
+    assert_eq!(applied(&fake)[0]["reason"], "failed");
 }
 #[test]
 fn closed_actions() {

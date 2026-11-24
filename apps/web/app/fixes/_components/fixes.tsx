@@ -5,6 +5,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { DataTable } from "@/components/data-table";
 import { Button } from "@/components/ui/button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAccount } from "@/hooks/use-account";
@@ -27,6 +28,7 @@ export function Fixes() {
   const [detector, setDetector] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     try {
@@ -74,6 +76,7 @@ export function Fixes() {
       {selected ? <div className="space-y-4 px-4 pb-6 text-sm">
         <p>{selected.owner_email ? `Personal memory of ${selected.owner_email}` : selected.project_name ?? selected.device_name ?? selected.subject_id}</p>
         {selected.fix_type === "computer" ? <p>Device: {selected.device_name ?? selected.device_id}</p> : null}
+        {selected.fix_type === "computer" ? <p>Runs on {selected.device_name ?? selected.device_id} the next time someone there runs cairn doctor, cairn init or cairn fixes apply.</p> : null}
         {selected.action.memory_id || selected.action.source_id ? <Button variant="outline" onClick={() => { const memory = selected.action.memory_id ?? selected.action.source_id; setSelected(null); setParams({memory}); }}>Open memory</Button> : null}
         {selected.owner_email && selected.prompt ? <p>Only {selected.owner_email} can run this prompt.</p> : null}
         {selected.status === "queued" ? <p>Queued for {selected.device_name}</p> : null}
@@ -84,7 +87,8 @@ export function Fixes() {
         <pre className="whitespace-pre-wrap break-words">{JSON.stringify(selected.evidence, null, 2)}</pre>
         {selected.prompt ? <p className="whitespace-pre-wrap">{selected.prompt}</p> : null}
         {selected.error ? <p role="alert">{selected.error}</p> : null}
-        <div className="flex flex-wrap gap-2">{buttonsFor(selected).map((button) => <Button key={button} disabled={busy} onClick={() => void action(button)}>{button}</Button>)}</div>
+        <div className="flex flex-wrap gap-2">{buttonsFor(selected).map((button) => <Button key={button} disabled={busy} onClick={() => button === "Apply" && selected.detector === "F9" ? setConfirming(true) : void action(button)}>{button}</Button>)}</div>
       </div> : null}</SheetContent></Sheet>
+    <AlertDialog open={confirming} onOpenChange={setConfirming}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Apply secret redaction?</AlertDialogTitle><AlertDialogDescription className="font-bold">This removes the text for good. Rotate the secret now.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => void action("Apply")}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </>;
 }

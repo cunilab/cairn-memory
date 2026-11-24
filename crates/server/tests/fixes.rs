@@ -143,8 +143,97 @@ async fn admin_rewrite() {
         .await
         .unwrap();
     assert_eq!(origin, "agent");
-    let earlier = app.post(&format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), &admin).await;
-    assert_eq!(earlier["superseded"], old);
+    let (status, earlier) = app.send("POST", &format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), Some(&admin)).await;
+    assert_eq!(status, 409);
+    assert_eq!(earlier["error"], "rewrite the current version");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn copied_fix_is_audited() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let id = fact(&app, &device, "Copied fix fixture").await;
+    let owner: String = sqlx::query_scalar("SELECT person_id FROM accounts WHERE is_admin")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    agent_fix(&app, &id, &owner).await;
+    app.post("admin/fixes/fx_test/copied", json!({}), &admin)
+        .await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action='fix_copied' AND subject_id='fx_test'",
+    )
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn pending_fix_count_is_admin_only() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let member = app.member(&admin, "member").await;
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at) VALUES ('fx_pending','F8','pending','report','pending',now(),now()),('fx_done','F8','done','report','done',now(),now())").execute(app.db.store.pool()).await.unwrap();
+    let (status, body) = app
+        .send("GET", "admin/fixes/count", json!(null), Some(&admin))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["count"], 1);
+    let (status, _) = app
+        .send("GET", "admin/fixes/count", json!(null), Some(&member))
+        .await;
+    assert_eq!(status, 403);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn failed_fix_with_newer_active_fix_returns_conflict() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at,action) VALUES ('fx_old','F5','same','computer','failed',now()-interval '1 day',now(),'{}'),('fx_new','F5','same','computer','pending',now(),now(),'{}')").execute(app.db.store.pool()).await.unwrap();
+    let (status, body) = app
+        .send(
+            "POST",
+            "admin/fixes/fx_old/apply",
+            json!({"fingerprint":"same"}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"], "a newer fix exists");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn f9_apply_does_not_scan_lookup_log() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let (_, fix, fingerprint) = secret_fix(&app, &device).await;
+    let admin_id: String = sqlx::query_scalar("SELECT person_id FROM accounts WHERE is_admin")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let mut lock = app.db.store.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE lookup_log IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.db
+            .store
+            .apply_fix(&fix, &fingerprint, &admin_id, true, "0.1.9"),
+    )
+    .await;
+    lock.rollback().await.unwrap();
+    result
+        .expect("F9 recheck waited on an unrelated detector's lookup log")
+        .unwrap();
     app.finish().await;
 }
 
@@ -765,7 +854,7 @@ async fn f9_many_markers_fit_as_one() {
 }
 
 #[tokio::test]
-async fn f9_oversized_json_fails_without_writes() {
+async fn f9_oversized_json_replaces_whole_field() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
@@ -786,18 +875,61 @@ async fn f9_oversized_json_fails_without_writes() {
             &admin,
         )
         .await;
-    assert_eq!(response["status"], "failed");
-    assert_eq!(
-        response["error"],
-        "fields too long after redaction; use admin rewrite"
-    );
+    assert_eq!(response["status"], "done");
     let stored: serde_json::Value =
         sqlx::query_scalar("SELECT fields FROM memories WHERE memory_id=$1")
             .bind(id)
             .fetch_one(app.db.store.pool())
             .await
             .unwrap();
-    assert_eq!(stored, original);
+    assert_eq!(stored, json!({"redacted": true}));
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn f9_old_secret_in_fork_opens_one_fix_and_redacts_json_keys() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let old = fact(&app, &device, "Fork old version").await;
+    let first = fact(&app, &device, "Fork head one").await;
+    let second = fact(&app, &device, "Fork head two").await;
+    sqlx::query("UPDATE memories SET status='superseded',fields=$2 WHERE memory_id=$1")
+        .bind(&old)
+        .bind(json!({"password=bad-secret-value":"first", "password=other-secret-value":"second"}))
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    for head in [&first, &second] {
+        sqlx::query("INSERT INTO links (source_id,target_id,relation,origin) VALUES ($1,$2,'supersedes','agent')").bind(head).bind(&old).execute(app.db.store.pool()).await.unwrap();
+    }
+    app.db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT fix_id,fingerprint,subject_id FROM fixes WHERE detector='F9' AND status='pending'",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].2, std::cmp::min(first, second));
+    let response = app
+        .post(
+            &format!("admin/fixes/{}/apply", rows[0].0),
+            json!({"fingerprint":rows[0].1}),
+            &admin,
+        )
+        .await;
+    assert_eq!(response["status"], "done");
+    let fields: serde_json::Value =
+        sqlx::query_scalar("SELECT fields FROM memories WHERE memory_id=$1")
+            .bind(old)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert!(!fields.to_string().contains("bad-secret-value"));
+    assert!(!fields.to_string().contains("other-secret-value"));
+    assert_eq!(fields["password=[REDACTED]"], "first");
+    assert_eq!(fields["password=[REDACTED]#2"], "second");
     app.finish().await;
 }
 
@@ -819,7 +951,8 @@ async fn f9_redacts_all_reachable_versions_in_both_directions() {
     }
     sqlx::query("UPDATE memories SET summary='A password=bad-secret-value is present' WHERE memory_id=ANY($1)").bind(vec![old.clone(),first.clone(),second.clone()]).execute(app.db.store.pool()).await.unwrap();
     app.db.store.fixes_nightly(true, "0.1.9").await.unwrap();
-    let (fix, fingerprint): (String,String) = sqlx::query_as("SELECT fix_id,fingerprint FROM fixes WHERE detector='F9' AND subject_id=$1 AND status='pending'").bind(&first).fetch_one(app.db.store.pool()).await.unwrap();
+    let head = std::cmp::min(&first, &second);
+    let (fix, fingerprint): (String,String) = sqlx::query_as("SELECT fix_id,fingerprint FROM fixes WHERE detector='F9' AND subject_id=$1 AND status='pending'").bind(head).fetch_one(app.db.store.pool()).await.unwrap();
     let result = app
         .post(
             &format!("admin/fixes/{fix}/apply"),

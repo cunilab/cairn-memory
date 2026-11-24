@@ -67,11 +67,16 @@ pub fn execute_action(
             let home = std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .ok_or("failed")?;
+            let mut configured = false;
             for (agent, path) in setup::hook_files(Path::new(&home)) {
                 if std::fs::read_to_string(path).is_ok_and(|text| text.contains("--cairn-managed"))
                 {
                     setup::configure(agent, false).map_err(|_| "failed")?;
+                    configured = true;
                 }
+            }
+            if !configured {
+                return Err("failed");
             }
             Ok("refreshed agent setup")
         }
@@ -126,6 +131,9 @@ fn apply_with_timeout(id: Option<&str>, timeout: Option<std::time::Duration>) ->
             &cwd,
             || update::update(false),
         );
+        if id.is_none() && matches!(result, Err("not_this_repo" | "outside_checkout")) {
+            continue;
+        }
         let body = match result {
             Ok(_) => json!({"result":"applied"}),
             Err(reason) => json!({"result":"skipped", "reason":reason}),
