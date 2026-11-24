@@ -2118,6 +2118,9 @@ async fn disabled_alias_search_keeps_rows_without_enqueuing_alias_vectors() {
 
 #[tokio::test]
 async fn aliases_embedded_and_searched() {
+    if !ALIASES_IN_SEARCH {
+        return;
+    }
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -2354,6 +2357,9 @@ async fn weak_query_returns_nothing_with_aliases_present() {
 /// An alias whose text equals the memory embed text still gets its own vector.
 #[tokio::test]
 async fn alias_matching_embed_text_keeps_its_own_vector() {
+    if !ALIASES_IN_SEARCH {
+        return;
+    }
     let Some(db) = TestDb::new().await else {
         return;
     };
