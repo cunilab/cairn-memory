@@ -634,14 +634,17 @@ async fn observe_is_typed_and_deduped() {
     let command = json!({"event_id": "c1", "session_id": "s", "kind": "command", "ok": false, "content": "cargo test\nexit 101: boom"});
     let first = app.post("observe", command.clone(), &device).await;
     assert_eq!(first["duplicate"], false);
-    let mut again = command;
+    let mut again = command.clone();
     again["event_id"] = "c2".into();
     let again = app.post("observe", again, &device).await;
+    // A later execution of the same command is kept, so the digest can report it.
     assert_eq!(
         (again["accepted"].as_bool(), again["duplicate"].as_bool()),
-        (Some(true), Some(true))
+        (Some(true), Some(false))
     );
     assert_eq!(again["event_id"], "c2");
+    let replay = app.post("observe", command, &device).await;
+    assert_eq!(replay["duplicate"], true);
 
     let ok: Option<bool> = sqlx::query_scalar("SELECT ok FROM observations WHERE event_id = 'c1'")
         .fetch_one(app.db.store.pool())
