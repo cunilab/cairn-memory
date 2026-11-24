@@ -262,3 +262,7 @@ under the Compose project `cairn-dev`, bound to 127.0.0.1 only:
 Images are rebuilt from the working tree on each `dev_up.sh`; there is no hot
 reload. The web image uses Next.js standalone output on a slim Node runtime
 (about 330 MB) and reads `CAIRN_API_URL` at runtime.
+
+## Licence
+
+Cairn Memory is licensed under the [Apache License 2.0](LICENSE).
