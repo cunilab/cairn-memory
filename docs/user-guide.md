@@ -25,17 +25,17 @@ Setup reads the token from stdin; choose `claude`, `codex` or `opencode`. Codex 
 
 ## Projects
 
-Run `cairn init "Project name"` in a project folder and commit `.cairn/project.json`. The file connects checkouts even without Git. Use `cairn init --rename "Name"` to rename as owner. An unknown ID requires `cairn init --yes` to register it. **Anyone with an account on the same server and the project ID can join and read project memory.** See [projects](reference/projects.md#init-and-membership).
+Run `cairn init "Project name"` in a project folder and commit `.cairn/project.json`. The file connects checkouts even without Git. To rename a project, the owner uses its page in the web console. Teammates see a session-start notice; run `cairn init` to update the project file and commit it. An unknown ID requires `cairn init --yes` to register it. **Anyone with an account on the same server and the project ID can join and read project memory.** See [projects](reference/projects.md#init-and-membership).
 
 ## Day-to-day use
 
-Hooks capture prompts, edits and non-read-only commands. On an eligible Stop, the agent is asked once to save useful notes. Use `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`, or their five MCP equivalents. To correct a memory, save the replacement with `supersedes` set to its ID. Add `.cairnignore` to disable capture in a folder. Assistant messages are captured only if `CAIRN_CAPTURE_ASSISTANT=1`.
+Hooks capture prompts, edits and non-read-only commands. In a recognized project, the Stop hook can ask once to save useful notes after edits or a correction (not on OpenCode). Use `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`, or their five MCP equivalents. To correct a memory, save the replacement with `supersedes` set to its ID. Add `.cairnignore` to disable capture in a folder. Assistant messages are captured only if `CAIRN_CAPTURE_ASSISTANT=1`.
 
-The hook provides a session-start instruction and a Stop reminder. Edit them in Settings or on a project page. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable them. Set `CAIRN_SESSION_ORIGIN=automation` for scheduled or automated work: capture and distillation continue, while the Stop ask and personal handoff replacement are suppressed.
+The hook provides a session-start instruction and a Stop reminder. The admin edits the global texts in Settings; a project owner or admin edits a project's texts on its page. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable them. Set `CAIRN_SESSION_ORIGIN=automation` for scheduled or automated work: capture and distillation continue, while the Stop ask and personal handoff replacement are suppressed.
 
 ## Web console and Fixes
 
-Dashboard summarizes health and activity; Memories lists records; Activity shows sessions, jobs and audit; Projects shows members and session reports; Graph shows links; Settings manages account, devices and instructions. Fixes gives the admin evidence and actions for detected issues. The admin can apply or ignore a fix, or copy a prompt for the agent. A computer fix is queued to its device; run `cairn fixes` to list it or `cairn fixes apply [id]` to apply queued fixes. Removing an exposed secret is permanent; rotate it immediately.
+Dashboard summarizes health and activity; Memories lists records; Activity shows sessions, jobs and audit; Projects shows members and session reports; Graph shows links; Settings manages account, devices and instructions. Fixes gives the admin evidence and actions for detected issues. The admin can apply or ignore a fix, or copy a prompt for the agent. A computer fix is queued for its device. It runs the next time someone there runs `cairn doctor`, `cairn init` or `cairn fixes apply [id]`; `cairn fixes` lists it. Applying a fix can also turn off a project’s Stop ask, lower a long-unused memory’s rank, or undo a wrong automatic merge. Removing an exposed secret is permanent; rotate it immediately.
 
 ## Privacy and data
 

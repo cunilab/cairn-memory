@@ -23,11 +23,11 @@ Assistant messages are captured only with `CAIRN_CAPTURE_ASSISTANT=1`. Set `CAIR
 
 ## Reminders (agent nudges)
 
-The start instruction tells agents when to search and save with Cairn. The Stop reminder can ask the host to save up to three useful notes after work. It runs at most once per eligible session. OpenCode does not support continuing the turn from the Stop reminder. Project instructions override global instructions, which override built-in text; edit them in the web console. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable nudges.
+The start instruction tells agents when to search and save with Cairn. The Stop reminder can ask the host to save up to three useful notes after work. It runs at most once per eligible session. OpenCode does not support continuing the turn from the Stop reminder. Project instructions override global instructions, which override built-in text; edit them in the web console. Setting the Stop text to `off` disables the ask for that scope; an empty text falls back to the next level. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable nudges.
 
 ## Injection budget
 
-The server brief is limited to 1,200 bytes. Up to four topic injections of at most 300 bytes each are allowed, with at most 16 topic lookups per session. Project and global instruction texts are limited to 600 bytes each; the Stop ask has a separate limit.
+The server brief is limited to 1,200 bytes. Up to four topic injections of at most 300 bytes each are allowed, with at most 16 topic lookups per session. The session instruction and the Stop text are each limited to 600 bytes, globally and per project.
 
 ## Redaction
 
@@ -35,7 +35,7 @@ The hook and server use the same ordered patterns, replacing secrets with `[REDA
 
 | # | Pattern | Replacement |
 |---|---|---|
-| 1 | PEM blocks: existing `redact_private_key_blocks` logic (labels list unchanged) | whole block |
+| 1 | PEM private-key blocks (`redact_private_key_blocks`) | whole block |
 | 2 | `(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+` | `$1 [REDACTED]` |
 | 3 | `(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+(?::[^\s/@]+)?@` (user alone or user:password) | `$1[REDACTED]@` |
 | 4 | `(?i)(--(?:password|passwd|pass|token|secret|api-key|apikey|access-key|client-secret))(=|\s+)(\[REDACTED\]|"[^"]*"|'[^']*'|\S+)` | `$1$2[REDACTED]` |

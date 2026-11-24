@@ -14,7 +14,7 @@ A save contains kind, title, summary, reason (except for notes), optional kind-s
 
 ## Init and membership
 
-Run `cairn init "Project name"` in a folder and commit `.cairn/project.json`; the file contains a project ID, repository and name, not a server URL or credential. This works without Git. An existing file joins a known project. An unknown ID requires explicit confirmation with `cairn init --yes` before registration; `cairn init --rename "Name"` lets the owner rename the project and update the file.
+Run `cairn init "Project name"` in a folder and commit `.cairn/project.json`; the file contains a project ID, repository and name, not a server URL or credential. This works without Git. An existing file joins a known project. An unknown ID requires explicit confirmation with `cairn init --yes` before registration. To rename a project, the owner uses its page in the web console. Teammates see a session-start notice; run `cairn init` to update the project file and commit it.
 
 **An ID grants membership:** anyone with an account on the server and the project ID can join and read project memories and member emails. A Git remote alone does not grant membership. Joins made using the project file are audited. Protect the file accordingly; deleting it does not remove an existing membership.
 
