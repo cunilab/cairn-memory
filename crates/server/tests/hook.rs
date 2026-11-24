@@ -554,7 +554,7 @@ fn ask_once_only_after_file_changes() {
     let save = json!({
         "tool_name": "mcp__cairn__memory_save",
         "tool_input": {"kind": "fact"},
-        "tool_response": {"status": "active"},
+        "tool_response": {"id": "mem_saved", "status": "active", "deduplicated": false},
         "tool_use_id": "saved"
     });
     env.run("PostToolUse", &env.payload("saved", save), &[]);
