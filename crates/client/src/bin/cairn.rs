@@ -3,7 +3,7 @@
 
 use cairn_client::tools::{self, Tool};
 use cairn_client::{
-    Client, Config, Error, doctor, hook, mcp, project, selected_config_path, setup, update,
+    Client, Config, Error, doctor, fixes, hook, mcp, project, selected_config_path, setup, update,
     warn_ignored_legacy_config,
 };
 use serde_json::{Map, Value, json};
@@ -16,6 +16,7 @@ const USAGE: &str = "Usage:
   cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
   cairn init --rename <name>    (owner only; update server and project file)
+  cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
   cairn update [--check]        (install the latest release; --check only reports)
@@ -42,7 +43,15 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     let known = |name: &str| {
         matches!(
             name,
-            "init" | "setup" | "mcp" | "update" | "version" | "--version" | "doctor" | "hook"
+            "init"
+                | "setup"
+                | "mcp"
+                | "update"
+                | "version"
+                | "--version"
+                | "doctor"
+                | "hook"
+                | "fixes"
         ) || tools::find(name).is_some()
     };
     if matches!(args, [flag] if flag == "--help" || flag == "-h")
@@ -86,7 +95,16 @@ fn main() {
         }
     }
     update::remove_old_exe();
+    if matches!(args.first().map(String::as_str), Some("init" | "doctor")) {
+        let _ = fixes::apply_automatically();
+    }
     let result = match args.first().map(String::as_str) {
+        Some("fixes") => match &args[1..] {
+            [] => fixes::list(),
+            [apply] if apply == "apply" => fixes::apply(None),
+            [apply, id] if apply == "apply" => fixes::apply(Some(id)),
+            _ => usage(),
+        },
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
         Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),

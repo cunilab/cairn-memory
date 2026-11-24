@@ -6,6 +6,7 @@ use crate::Error;
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -170,15 +171,44 @@ pub fn write(top: &Path, project_id: &str, repository: &str, name: &str) -> Resu
     let io =
         |error: std::io::Error| Error::Input(format!("cannot write {}: {error}", path.display()));
     fs::create_dir_all(path.parent().expect("the file sits in .cairn")).map_err(io)?;
-    let body = serde_json::to_string_pretty(&json!({
-        "project_id": project_id,
-        "repository": repository,
-        "name": name,
-    }))
-    .expect("JSON value serializes");
-    crate::write_private(&path, format!("{body}\n").as_bytes()).map_err(io)?;
+    let body = project_body(project_id, repository, name);
+    crate::write_private(&path, body.as_bytes()).map_err(io)?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests;
+
+fn project_body(project_id: &str, repository: &str, name: &str) -> String {
+    let body = serde_json::to_string_pretty(
+        &json!({"project_id":project_id,"repository":repository,"name":name}),
+    )
+    .expect("JSON value serializes");
+    format!("{body}\n")
+}
+
+/// Create the project file once, without replacing an existing file or symlink.
+pub fn write_new(
+    top: &Path,
+    project_id: &str,
+    repository: &str,
+    name: &str,
+) -> std::io::Result<()> {
+    let top = top.canonicalize()?;
+    let dir = top.join(".cairn");
+    fs::create_dir_all(&dir)?;
+    let dir = dir.canonicalize()?;
+    if !dir.starts_with(&top) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "outside checkout",
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(dir.join("project.json"))?;
+    file.write_all(project_body(project_id, repository, name).as_bytes())?;
+    file.sync_all()
+}

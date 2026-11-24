@@ -122,7 +122,12 @@ pub async fn init(
     let (project, created) = match body.project_id.as_deref() {
         Some(id) => match state
             .store
-            .join_project(&account.person_id, id, body.name.as_deref())
+            .join_project_from(
+                &account.person_id,
+                id,
+                body.name.as_deref(),
+                caller.device_id.as_deref(),
+            )
             .await
         {
             Ok(project) => (project, false),

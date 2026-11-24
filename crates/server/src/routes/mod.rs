@@ -41,6 +41,8 @@ pub fn router() -> Router<AppState> {
             post(account::change_password),
         )
         // device
+        .route("/cairn-memory/device/fixes", get(device::fixes))
+        .route("/cairn-memory/device/fixes/{id}", post(device::finish_fix))
         .route("/cairn-memory/devices", get(device::list))
         .route("/cairn-memory/devices/register", post(device::register))
         .route("/cairn-memory/devices/revoke", post(device::revoke))

@@ -3,6 +3,7 @@
 //! session and never touches a store file.
 
 pub mod doctor;
+pub mod fixes;
 pub mod hook;
 pub mod mcp;
 pub mod present;

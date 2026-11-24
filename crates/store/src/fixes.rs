@@ -954,3 +954,56 @@ impl Store {
         rows.into_iter().map(|r| Ok(serde_json::json!({"query":r.try_get::<Option<String>,_>("query")?.map(|q| cairn_core::capture::redact_sensitive_content(&q)),"email":r.try_get::<String,_>("email")?,"at":r.try_get::<i64,_>("at")?}))).collect()
     }
 }
+
+impl Store {
+    pub async fn device_fixes(&self, person: &str, device: &str) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query("SELECT f.fix_id,f.action FROM fixes f JOIN devices d ON d.device_id=f.device_id WHERE f.device_id=$1 AND d.person_id=$2 AND f.status='queued' ORDER BY f.fix_id")
+            .bind(device).bind(person).fetch_all(&self.pool).await?;
+        rows.iter().map(|row| Ok(serde_json::json!({"fix_id":row.try_get::<String,_>("fix_id")?,"action":row.try_get::<serde_json::Value,_>("action")?}))).collect()
+    }
+
+    pub async fn finish_device_fix(
+        &self,
+        person: &str,
+        device: &str,
+        id: &str,
+        result: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let exists: Option<String> = sqlx::query_scalar("SELECT f.fix_id FROM fixes f JOIN devices d ON d.device_id=f.device_id WHERE f.fix_id=$1 AND f.device_id=$2 AND d.person_id=$3 AND f.status='queued' FOR UPDATE OF f")
+            .bind(id).bind(device).bind(person).fetch_optional(&mut *tx).await?;
+        if exists.is_none() {
+            return Err(crate::StoreError::NotFound("fix".into()));
+        }
+        let (status, error) = match (result, reason) {
+            ("applied", None) => ("done", None),
+            ("skipped", Some("already_current")) => ("resolved", None),
+            (
+                "skipped",
+                Some(reason @ ("file_exists" | "outside_checkout" | "not_this_repo" | "failed")),
+            ) => ("failed", Some(reason)),
+            _ => return Err(crate::StoreError::Validation("invalid fix result".into())),
+        };
+        let updated = sqlx::query("UPDATE fixes SET status=$4,error=$5,done_at=now() WHERE fix_id=$1 AND device_id=$2 AND status='queued' AND EXISTS (SELECT 1 FROM devices WHERE device_id=$2 AND person_id=$3)")
+            .bind(id).bind(device).bind(person).bind(status).bind(error).execute(&mut *tx).await?;
+        if updated.rows_affected() == 0 {
+            return Err(crate::StoreError::NotFound("fix".into()));
+        }
+        crate::account::audit_tx(
+            &mut tx,
+            person,
+            Some(device),
+            if status == "failed" {
+                "fix_failed"
+            } else {
+                "fix_done"
+            },
+            Some(id),
+            serde_json::json!({"fix_id":id}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}

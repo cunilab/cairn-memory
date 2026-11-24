@@ -137,3 +137,41 @@ pub async fn rotate(
         .await?;
     Ok(Json(registration))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixResult {
+    result: String,
+    reason: Option<String>,
+}
+
+pub async fn fixes(
+    State(state): State<AppState>,
+    caller: crate::auth::DeviceCaller,
+) -> ApiResult<Vec<serde_json::Value>> {
+    Ok(Json(
+        state
+            .store
+            .device_fixes(&caller.account.person_id, &caller.device_id)
+            .await?,
+    ))
+}
+
+pub async fn finish_fix(
+    State(state): State<AppState>,
+    caller: crate::auth::DeviceCaller,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<FixResult>,
+) -> ApiResult<serde_json::Value> {
+    state
+        .store
+        .finish_device_fix(
+            &caller.account.person_id,
+            &caller.device_id,
+            &id,
+            &body.result,
+            body.reason.as_deref(),
+        )
+        .await?;
+    Ok(Json(serde_json::json!({})))
+}

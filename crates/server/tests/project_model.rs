@@ -627,3 +627,86 @@ async fn project_sessions_member_only() {
 
     app.finish().await;
 }
+
+#[tokio::test]
+async fn device_fixes_scoped() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let a = app.device(&admin, "a").await;
+    let b = app.device(&admin, "b").await;
+    let (device, _) = app.db.store.authenticate_device(&a).await.unwrap();
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,device_id,fix_type,status,first_seen_at,last_seen_at,action) VALUES ('fx_scoped','F5','fp',$1,'computer','queued',now(),now(),$2)")
+        .bind(&device.device_id).bind(json!({"type":"run_update","target":"0.0.1"})).execute(app.db.store.pool()).await.unwrap();
+    let (status, fixes) = app.send("GET", "device/fixes", json!(null), Some(&a)).await;
+    assert_eq!(status, 200, "{fixes}");
+    assert_eq!(fixes.as_array().unwrap().len(), 1);
+    let (status, fixes) = app.send("GET", "device/fixes", json!(null), Some(&b)).await;
+    assert_eq!((status, fixes), (200, json!([])));
+    let (status, _) = app
+        .send(
+            "POST",
+            "device/fixes/fx_scoped",
+            json!({"result":"applied"}),
+            Some(&b),
+        )
+        .await;
+    assert_eq!(status, 404);
+    let state: String = sqlx::query_scalar("SELECT status FROM fixes WHERE fix_id='fx_scoped'")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+    for (id, result, reason, expected, audit) in [
+        ("fx_scoped", "applied", None, "done", "fix_done"),
+        (
+            "fx_current",
+            "skipped",
+            Some("already_current"),
+            "resolved",
+            "fix_done",
+        ),
+        (
+            "fx_failed",
+            "skipped",
+            Some("file_exists"),
+            "failed",
+            "fix_failed",
+        ),
+    ] {
+        if id != "fx_scoped" {
+            sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,device_id,fix_type,status,first_seen_at,last_seen_at,action) VALUES ($1,'F5',$1,$2,'computer','queued',now(),now(),'{}')")
+                .bind(id).bind(&device.device_id).execute(app.db.store.pool()).await.unwrap();
+        }
+        let body = if let Some(reason) = reason {
+            json!({"result":result,"reason":reason})
+        } else {
+            json!({"result":result})
+        };
+        let (status, _) = app
+            .send("POST", &format!("device/fixes/{id}"), body, Some(&a))
+            .await;
+        assert_eq!(status, 200);
+        let (state, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status,error FROM fixes WHERE fix_id=$1")
+                .bind(id)
+                .fetch_one(app.db.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(state, expected);
+        assert_eq!(
+            error.as_deref(),
+            if expected == "failed" { reason } else { None }
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_events WHERE action=$1 AND subject_id=$2 AND metadata=$3",
+        )
+        .bind(audit)
+        .bind(id)
+        .bind(json!({"fix_id":id}))
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+    app.finish().await;
+}

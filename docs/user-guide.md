@@ -10,6 +10,8 @@ Set `CAIRN_SESSION_ORIGIN=automation` in the environment of a scheduled run, wor
 
 ## Fixes
 
+Use `cairn fixes` to list this device's queued fixes, or `cairn fixes apply [fx_id]` to apply all of them or one by id. The `init` and `doctor` commands also try queued fixes first; agent commands, hooks, and MCP do not. A committed `.cairn/project.json` joins the person using it to that project, and the join is recorded in the audit log.
+
 Admins can review Fixes in the web console. Pending lists fixes awaiting a decision, queued computer work, and prompts awaiting proof; History shows completed and ignored items. Searches shows the last 14 days of search phrases with secrets redacted. Server fixes change data only after Apply; computer fixes are queued for the device; agent fixes provide a prompt to copy. Secret removal is permanent: rotate the exposed secret immediately. There is no undo.
 
 An admin may rewrite a memory from its detail sheet. Cairn preserves the owner, scope and project, retains the superseded version, and shows the owner that an admin changed it.

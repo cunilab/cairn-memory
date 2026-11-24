@@ -215,7 +215,7 @@ impl Store {
         origin: Origin,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        let project_id = self.context_project(person_id, work).await?;
+        let project_id = self.context_project(person_id, work, device_id).await?;
         let mut input = input;
         input.aliases = input
             .aliases
@@ -247,6 +247,7 @@ impl Store {
         &self,
         person_id: &str,
         work: &WorkContext,
+        device_id: Option<&str>,
     ) -> Result<Option<String>> {
         if let Some(project_id) = work
             .project_id
@@ -255,7 +256,10 @@ impl Store {
             .filter(|id| !id.is_empty())
         {
             let mut tx = self.pool.begin().await?;
-            let exists = join_member(&mut tx, person_id, project_id).await?;
+            let (exists, inserted) = join_member(&mut tx, person_id, project_id).await?;
+            if inserted {
+                crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"project_file"})).await?;
+            }
             tx.commit().await?;
             return Ok(exists.then(|| project_id.to_owned()));
         }

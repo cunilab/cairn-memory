@@ -108,20 +108,23 @@ pub(crate) async fn join_member(
     tx: &mut PgConnection,
     person_id: &str,
     project_id: &str,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE project_id = $1)")
             .bind(project_id)
             .fetch_one(&mut *tx)
             .await?;
-    if exists {
+    let inserted = if exists {
         sqlx::query("INSERT INTO project_members (project_id, person_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
             .bind(project_id)
             .bind(person_id)
             .execute(tx)
-            .await?;
-    }
-    Ok(exists)
+            .await?
+            .rows_affected() == 1
+    } else {
+        false
+    };
+    Ok((exists, inserted))
 }
 
 impl Store {
@@ -246,6 +249,17 @@ impl Store {
         project_id: &str,
         name: Option<&str>,
     ) -> Result<Project> {
+        self.join_project_from(person_id, project_id, name, None)
+            .await
+    }
+
+    pub async fn join_project_from(
+        &self,
+        person_id: &str,
+        project_id: &str,
+        name: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<Project> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects WHERE project_id = $1 FOR SHARE"
@@ -260,7 +274,10 @@ impl Store {
                 "project name differs from the server; use `cairn init --rename <name>` as the owner".into(),
             ));
         }
-        join_member(&mut tx, person_id, project_id).await?;
+        let (_, inserted) = join_member(&mut tx, person_id, project_id).await?;
+        if inserted {
+            crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"init"})).await?;
+        }
         tx.commit().await?;
         Ok(project)
     }

@@ -78,7 +78,7 @@ impl Store {
             return duplicate.map(|()| result(true));
         }
         let project_id = self
-            .context_project(person_id, &observation.context)
+            .context_project(person_id, &observation.context, device_id)
             .await?;
         upsert_session(
             &self.pool,
