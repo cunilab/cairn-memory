@@ -120,11 +120,12 @@ pub fn f8(semantic: bool, unembedded: u64, foreign: u64) -> Option<Fix> {
     (!semantic || unembedded > 0 || foreign > 0).then(|| fix("F8", "server", &stable, json!({"semantic_off":!semantic,"unembedded_over_1h":unembedded,"foreign_model":foreign}), Value::Null))
 }
 pub fn f9(subject: &str, field: &str, text: &str) -> Option<Fix> {
-    (redact_sensitive_content(text) != text).then(|| {
+    let redacted = redact_sensitive_content(text);
+    (redacted != text).then(|| {
         fix(
             "F9",
             subject,
-            &sha256_hex(&[field, text]),
+            &sha256_hex(&[field, &redacted]),
             json!({"class":"secret","field":field}),
             json!({"type":"redact_secret","memory_id":subject,"fields":[field]}),
         )

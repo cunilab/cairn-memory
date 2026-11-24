@@ -876,6 +876,11 @@ impl Store {
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
         let old = memory_from_row(&row)?;
+        if old.status == Status::Forgotten {
+            return Err(StoreError::Conflict(
+                "forgotten memories cannot be rewritten".into(),
+            ));
+        }
         let context = WorkContext {
             project_id: old.project_id.clone(),
             repository: old.context.repo.clone(),

@@ -81,6 +81,21 @@ fn f9_threshold() {
 }
 
 #[test]
+fn f9_fingerprint_uses_only_redacted_text() {
+    let raw = "password=short";
+    let redacted = redact_sensitive_content(raw);
+    let fingerprint = f9("mem", "summary", raw).unwrap().0;
+    let expected = sha256_hex(&["F9", "mem", &sha256_hex(&["summary", &redacted])]);
+    let raw_derived = sha256_hex(&["F9", "mem", &sha256_hex(&["summary", raw])]);
+    assert_eq!(fingerprint, expected);
+    assert_ne!(fingerprint, raw_derived);
+    assert_eq!(
+        fingerprint,
+        f9("mem", "summary", "password=other").unwrap().0
+    );
+}
+
+#[test]
 fn f10_threshold() {
     assert!(f10("project", 14, 10, 1).is_some());
     assert!(f10("project", 13, 10, 1).is_none());

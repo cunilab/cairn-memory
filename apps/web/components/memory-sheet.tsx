@@ -364,7 +364,7 @@ export function MemorySheet() {
           {current === null ? <div className="px-4"><LoadingBlock label="Loading memory…" rows={5} /></div> : null}
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
-              <p className="text-sm text-muted-foreground">This memory is unavailable.</p>
+              <p className="text-sm text-muted-foreground">This memory was forgotten.</p>
               {account?.is_admin && !editing ? <Button variant="outline" onClick={() => { setTitle(""); setSummary(""); setReason(""); setFields(""); setEditingId(id); }}>Rewrite by ID…</Button> : null}
               <Button type="button" variant="outline" onClick={close}>
                 Close

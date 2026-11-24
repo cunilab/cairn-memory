@@ -64,6 +64,45 @@ async fn admin_only() {
 }
 
 #[tokio::test]
+async fn unedited_memory_omits_editor_flag_from_agent_responses() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let id = fact(&app, &device, "Unedited test memory").await;
+    let record = app.post("get", json!({"ids":[id]}), &device).await;
+    assert!(record["memories"][0].get("edited_by").is_none());
+    let view = app.get(&format!("memories/{id}"), &device).await;
+    assert!(view.get("edited_by").is_none());
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn forgotten_memory_rewrite_is_rejected_without_writes() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let id = fact(&app, &device, "Forgotten test memory").await;
+    app.post("forget", json!({"id":id}), &device).await;
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM audit_events)",
+    )
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    let (status, body) = app.send("POST", &format!("admin/memories/{id}/rewrite"), json!({"title":"Corrected forgotten memory","summary":"A replacement for the forgotten memory","reason":"Verified correction"}), Some(&admin)).await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"], "forgotten memories cannot be rewritten");
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM memories), (SELECT count(*) FROM audit_events)",
+    )
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn admin_rewrite() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;

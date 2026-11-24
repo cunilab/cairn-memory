@@ -30,7 +30,7 @@ fields: Fields, evidence?: Array<string>, evidence_count: number, context: Conte
 /**
  * Whether an administrator edited this memory; the editor's identity stays private.
  */
-edited_by: boolean, 
+edited_by?: boolean, 
 /**
  * Times this knowledge was saved, including the first. At least 1.
  * Omitted the first time, same as a search card's `seen`.
