@@ -304,7 +304,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         onSubmit={async (form) => {
           const name = String(form.get("name")).trim();
           if (name.length < 1 || name.length > 80) throw new Error("Use a name of 1 to 80 characters.");
-          await submit(() => cairn(`${path}/rename`, { method: "POST", body: JSON.stringify({ name }) }), "Project renamed");
+          await submit(() => cairn(`${path}/rename`, { method: "POST", body: JSON.stringify({ name }) }), "Update name in .cairn/project.json (or run `cairn init`) and commit it, so teammates see the new name.");
         }}
       >
         <Field>

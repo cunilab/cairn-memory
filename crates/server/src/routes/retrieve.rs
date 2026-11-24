@@ -175,6 +175,13 @@ pub async fn brief(
         reply["check"] = json!(check);
     }
     if let Some(project_id) = resolved.project_id {
+        if let Some(name) = state
+            .store
+            .project_name(&account.person_id, &project_id)
+            .await?
+        {
+            reply["project_name"] = json!(name);
+        }
         reply["project_id"] = json!(project_id);
     }
     record(

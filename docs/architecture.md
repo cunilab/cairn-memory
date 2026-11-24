@@ -60,6 +60,8 @@ Capture stays personal when project attachment fails; recognized projects can re
 
 ## Decisions and why
 
+- Project owners rename in the web console. Joining uses the project ID even if the file has an old name; `cairn init` updates that name, and session-start notices remind teammates to update and commit the file.
+
 - **Server-authoritative PostgreSQL:** one store and one authorization boundary keep shared state consistent; pgvector supports local semantic retrieval.
 - **Self-hosted accounts:** the first account is the administrator; password and device credentials are stored as hashes. Humans manage devices in the web console.
 - **Linked corrections:** a replacement links to the previous record, preserving provenance and making both searchable.

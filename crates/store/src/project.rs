@@ -176,7 +176,7 @@ impl Store {
         };
         if name.is_some_and(|n| n != project.name) {
             return Err(StoreError::Validation(
-                "project name differs from the server; use `cairn init --rename <name>` as the owner".into(),
+                "project name differs from the server; rename it in the web console".into(),
             ));
         }
         tx.commit().await?;
@@ -242,7 +242,7 @@ impl Store {
         Ok((project_from_row(&row)?, created))
     }
 
-    /// Membership through the committed project file. Name, when given, must match the server's.
+    /// Membership through the committed project file; the server name is authoritative.
     pub async fn join_project(
         &self,
         person_id: &str,
@@ -257,7 +257,7 @@ impl Store {
         &self,
         person_id: &str,
         project_id: &str,
-        name: Option<&str>,
+        _name: Option<&str>,
         device_id: Option<&str>,
     ) -> Result<Project> {
         let mut tx = self.pool.begin().await?;
@@ -269,11 +269,6 @@ impl Store {
         .await?
         .ok_or_else(|| StoreError::NotFound("project".into()))?;
         let project = project_from_row(&row)?;
-        if name.is_some_and(|n| n.trim() != project.name) {
-            return Err(StoreError::Validation(
-                "project name differs from the server; use `cairn init --rename <name>` as the owner".into(),
-            ));
-        }
         let (_, inserted) = join_member(&mut tx, person_id, project_id).await?;
         if inserted {
             crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"init"})).await?;
@@ -359,6 +354,17 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(project_from_row).collect()
+    }
+
+    /// The current name, visible only to a project member.
+    pub async fn project_name(&self, person_id: &str, project_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT p.name FROM projects p JOIN project_members m ON m.project_id = p.project_id WHERE p.project_id = $1 AND m.person_id = $2",
+        )
+        .bind(project_id)
+        .bind(person_id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub async fn is_member(&self, person_id: &str, project_id: &str) -> Result<bool> {

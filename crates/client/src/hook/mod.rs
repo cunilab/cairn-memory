@@ -391,6 +391,32 @@ impl Hook<'_> {
             }
             Some(instruction)
         };
+        let notice = self.top.as_deref()
+            .and_then(|top| crate::project::read_at(top).ok().flatten())
+            .and_then(|file| {
+                let server_name = reply.get("project_name")?.as_str()?;
+                if resolved.as_deref() != Some(file.project_id.as_str()) || file.name.as_deref().is_none_or(|name| name == server_name) {
+                    return None;
+                }
+                let first = self.with_state(|state| {
+                    let first = !state.rename_noticed;
+                    state.rename_noticed = true;
+                    first
+                }).unwrap_or(false);
+                if !first { return None; }
+                // Leave room for the instruction while keeping the notice short.
+                let mut name: String = server_name.chars().filter(|c| !c.is_control()).scan(0, |len, c| {
+                    *len += c.len_utf8();
+                    (*len <= 24).then_some(c)
+                }).collect();
+                if name.len() < server_name.len() { name.push('…'); }
+                Some(format!("Cairn: this project was renamed to {name:?}; run `cairn init` and commit .cairn/project.json."))
+            });
+        let line = match (line, notice) {
+            (Some(line), Some(notice)) => Some(format!("{line}\n{notice}")),
+            (None, Some(notice)) => Some(notice),
+            (line, None) => line,
+        };
         match (brief, line) {
             (Some(brief), Some(line)) => Some(format!("{brief}\n{line}")),
             (Some(brief), None) => Some(brief.to_owned()),

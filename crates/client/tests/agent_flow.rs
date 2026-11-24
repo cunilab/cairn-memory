@@ -414,7 +414,7 @@ fn help_and_flag_errors_never_make_a_request() {
     std::fs::write(&file, original).unwrap();
     let output = invoke(&["init", "Different"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--rename"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("web console"));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
     assert_eq!(
         listener.accept().unwrap_err().kind(),

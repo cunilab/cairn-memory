@@ -15,7 +15,6 @@ use std::process;
 const USAGE: &str = "Usage:
   cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
-  cairn init --rename <name>    (owner only; update server and project file)
   cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
@@ -68,7 +67,6 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     for (index, value) in args.iter().enumerate() {
         let allowed = (index == 0 && value == "--version")
             || (index == 1 && args[0] == "update" && value == "--check")
-            || (index == 1 && args[0] == "init" && value == "--rename")
             || (args[0] == "init" && value == "--yes")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
@@ -186,10 +184,9 @@ fn setup(args: &[String]) -> Result<(), Error> {
 fn init(args: &[String]) -> Result<(), Error> {
     let yes = args.iter().any(|arg| arg == "--yes");
     let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
-    let (rename, name) = match args.as_slice() {
-        [] => (false, None),
-        [name] if name != "--rename" => (false, Some(name.trim())),
-        [flag, name] if flag == "--rename" => (true, Some(name.trim())),
+    let name = match args.as_slice() {
+        [] => None,
+        [name] => Some(name.trim()),
         _ => usage(),
     };
     if name.is_some_and(str::is_empty) {
@@ -201,45 +198,24 @@ fn init(args: &[String]) -> Result<(), Error> {
     let top = git_top.clone().unwrap_or(cwd);
     let repository = project::repository_name(&top);
     let existing = project::read_at(&top)?;
-    if !rename
-        && let (Some(requested), Some(recorded)) = (
-            name,
-            existing.as_ref().and_then(|file| file.name.as_deref()),
-        )
-        && requested != recorded
+    if let (Some(requested), Some(recorded)) = (
+        name,
+        existing.as_ref().and_then(|file| file.name.as_deref()),
+    ) && requested != recorded
     {
         return Err(Error::Input(format!(
-            "project file names {recorded:?}; use `cairn init --rename <name>` as the owner to rename it"
+            "project file names {recorded:?}; rename it in the web console"
         )));
     }
     let client = Client::new(Config::load()?);
-    let created = if rename {
-        let file = existing.as_ref().ok_or_else(|| {
-            Error::Input("no .cairn/project.json; run `cairn init [name]` first".to_owned())
-        })?;
-        // `.` and `..` survive percent-encoding and would climb out of the route.
-        if !file
-            .project_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            return Err(Error::Input(
-                "project id in .cairn/project.json is invalid".to_owned(),
-            ));
-        }
-        let path = format!("/cairn-memory/projects/{}/rename", file.project_id);
-        client.post(&path, &json!({"name": name}))?
-    } else {
-        let mut body = json!({ "repository": repository, "confirm_register": yes });
-        if let Some(file) = &existing {
-            body["project_id"] = json!(file.project_id);
-        }
-        if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref()))
-        {
-            body["name"] = json!(name);
-        }
-        client.post("/cairn-memory/projects/init", &body)?
-    };
+    let mut body = json!({ "repository": repository, "confirm_register": yes });
+    if let Some(file) = &existing {
+        body["project_id"] = json!(file.project_id);
+    }
+    if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref())) {
+        body["name"] = json!(name);
+    }
+    let created = client.post("/cairn-memory/projects/init", &body)?;
     let project_id = created["project_id"]
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
@@ -247,7 +223,16 @@ fn init(args: &[String]) -> Result<(), Error> {
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project name".to_owned()))?;
     let written = project::write(&top, project_id, &repository, name)?;
-    if created["created"] == true && existing.is_some() && !rename {
+    if existing
+        .as_ref()
+        .and_then(|file| file.name.as_deref())
+        .is_some_and(|old| old != name)
+    {
+        println!(
+            "Project renamed to {name:?} in the web; updated .cairn/project.json — commit it."
+        );
+    }
+    if created["created"] == true && existing.is_some() {
         println!(
             "Warning: the server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are now its owner. Tell your team if you did not expect this."
         );

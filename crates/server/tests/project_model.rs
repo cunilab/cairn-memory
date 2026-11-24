@@ -26,7 +26,7 @@ async fn shared_project_model() {
         .await;
     assert_eq!(status, 403);
 
-    // init creates, then joins by the committed id; a differing name is refused for a member.
+    // Init joins by committed id and returns the authoritative name even when the file is stale.
     let project = app
         .post(
             "projects/init",
@@ -44,15 +44,15 @@ async fn shared_project_model() {
         )
         .await;
     assert_eq!(joined["created"], false);
-    let (status, _) = app
-        .send(
-            "POST",
+    let joined_with_old_name = app
+        .post(
             "projects/init",
             json!({"project_id": id, "repository": "x", "name": "Other"}),
-            Some(&stranger_device),
+            &stranger_device,
         )
         .await;
-    assert_eq!(status, 400);
+    assert_eq!(joined_with_old_name["name"], "Widgets");
+    assert_eq!(joined_with_old_name["created"], false);
 
     // Both are members; saving into the project uses the request context.
     let context =

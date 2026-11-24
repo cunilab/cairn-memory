@@ -2209,3 +2209,85 @@ fn replay_409_does_not_record_hook_error() {
         observed[2]
     );
 }
+
+#[test]
+fn renamed_project_notice_appears_once_per_session() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (
+                200,
+                json!({"brief":"BRIEF", "project_id":"proj_test", "project_name":"New"})
+                    .to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("renamed-notice", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    let path = env.repo.join(".cairn/project.json");
+    let original = r#"{"project_id":"proj_test","name":"Old"}"#;
+    std::fs::write(&path, original).unwrap();
+    let first = injected(&env.run("SessionStart", &env.payload("rename", json!({})))).unwrap();
+    assert!(first.contains("Cairn: this project was renamed to \"New\"; run `cairn init` and commit .cairn/project.json."));
+    let second = injected(&env.run("SessionStart", &env.payload("rename", json!({})))).unwrap();
+    assert!(!second.contains("was renamed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    std::fs::write(&path, r#"{"project_id":"proj_test","name":"New"}"#).unwrap();
+    let matching = injected(&env.run("SessionStart", &env.payload("matching", json!({})))).unwrap();
+    assert!(!matching.contains("was renamed"));
+}
+
+#[test]
+fn init_updates_only_the_renamed_project_name() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/init") {
+            return (
+                200,
+                json!({"project_id":"proj_test", "name":"New", "created":false}).to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("init-rename", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    let path = env.repo.join(".cairn/project.json");
+    let original = "{\n \"name\":\"Old\", \"extra\": 3, \"project_id\": \"proj_test\"\n}\n";
+    std::fs::write(&path, original).unwrap();
+    let output = command(&env.home)
+        .current_dir(&env.repo)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "Project renamed to \"New\" in the web; updated .cairn/project.json — commit it."
+    ));
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        original.replace("\"Old\"", "\"New\"")
+    );
+}
+
+#[test]
+fn rename_notice_marks_a_long_name_as_truncated() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"project_id":"proj_test", "project_name":"A very long project name beyond the limit"}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("rename-long", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    std::fs::write(
+        env.repo.join(".cairn/project.json"),
+        r#"{"project_id":"proj_test","name":"Old"}"#,
+    )
+    .unwrap();
+    let text = injected(&env.run("SessionStart", &env.payload("s", json!({})))).unwrap();
+    let notice = text
+        .lines()
+        .find(|line| line.contains("was renamed"))
+        .unwrap();
+    assert!(notice.contains('…'));
+    assert!(notice.len() <= 120, "{notice}");
+}

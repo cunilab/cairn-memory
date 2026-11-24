@@ -156,7 +156,10 @@ pub fn project_id_at(top: &Path) -> Option<String> {
 /// Writes the server-confirmed identity and name. A different project or broken file is
 /// refused; an unchanged file is left untouched. Returns true when the file was written.
 pub fn write(top: &Path, project_id: &str, repository: &str, name: &str) -> Result<bool, Error> {
-    if let Some(existing) = read_at(top)? {
+    let path = top.join(FILE);
+    let io =
+        |error: std::io::Error| Error::Input(format!("cannot write {}: {error}", path.display()));
+    let body = if let Some(existing) = read_at(top)? {
         if existing.project_id != project_id {
             return Err(Error::Input(format!(
                 "{FILE} already names project {}; not overwriting it with {project_id}",
@@ -166,12 +169,29 @@ pub fn write(top: &Path, project_id: &str, repository: &str, name: &str) -> Resu
         if existing.name.as_deref() == Some(name) {
             return Ok(false);
         }
-    }
-    let path = top.join(FILE);
-    let io =
-        |error: std::io::Error| Error::Input(format!("cannot write {}: {error}", path.display()));
-    fs::create_dir_all(path.parent().expect("the file sits in .cairn")).map_err(io)?;
-    let body = project_body(project_id, repository, name);
+        let raw = fs::read_to_string(&path).map_err(io)?;
+        let fields: std::collections::HashMap<String, &serde_json::value::RawValue> =
+            serde_json::from_str(&raw)
+                .map_err(|_| Error::Input("invalid .cairn/project.json".into()))?;
+        let encoded = serde_json::to_string(name).expect("name serializes");
+        if let Some(value) = fields.get("name") {
+            let start = value.get().as_ptr() as usize - raw.as_ptr() as usize;
+            format!(
+                "{}{}{}",
+                &raw[..start],
+                encoded,
+                &raw[start + value.get().len()..]
+            )
+        } else {
+            let end = raw
+                .rfind('}')
+                .ok_or_else(|| Error::Input("invalid .cairn/project.json".into()))?;
+            format!("{},\"name\":{}{}", &raw[..end], encoded, &raw[end..])
+        }
+    } else {
+        fs::create_dir_all(path.parent().expect("the file sits in .cairn")).map_err(io)?;
+        project_body(project_id, repository, name)
+    };
     crate::write_private(&path, body.as_bytes()).map_err(io)?;
     Ok(true)
 }

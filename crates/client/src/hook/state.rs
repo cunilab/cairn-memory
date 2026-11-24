@@ -62,6 +62,9 @@ pub struct SessionState {
     /// The no-project hint was injected; it is once per session.
     #[serde(default)]
     pub hinted: bool,
+    /// The project rename notice was injected.
+    #[serde(default)]
+    pub rename_noticed: bool,
     /// Set when `CAIRN_SESSION_ORIGIN=automation`. A subagent payload does not set this.
     #[serde(default)]
     pub automated: bool,

@@ -30,11 +30,13 @@ async fn init_join_rename_transfer_and_members() {
             .is_err()
     );
 
-    assert!(
+    assert_eq!(
         store
-            .join_project(&member, &project.project_id, Some("wrong"))
+            .join_project(&member, &project.project_id, Some("old name"))
             .await
-            .is_err()
+            .unwrap()
+            .name,
+        "cairn"
     );
     store
         .join_project(&member, &project.project_id, Some("cairn"))

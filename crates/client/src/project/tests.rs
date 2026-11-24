@@ -138,3 +138,17 @@ fn find_root_walks_up_without_git() {
         std::env::temp_dir().join(format!("cairn-find-root-{}", std::process::id())),
     );
 }
+
+#[test]
+fn rename_preserves_all_other_bytes() {
+    let top = checkout("rename-bytes", None);
+    fs::create_dir_all(top.join(".cairn")).unwrap();
+    let before = "{\n  \"name\" : \"Old\", \"extra\": {\"name\": \"nested\"},\n  \"project_id\": \"project-a\"\n}\n";
+    fs::write(top.join(FILE), before).unwrap();
+    assert!(write(&top, "project-a", "different", "New \"name\"").unwrap());
+    assert_eq!(
+        fs::read_to_string(top.join(FILE)).unwrap(),
+        before.replacen("\"Old\"", "\"New \\\"name\\\"\"", 1)
+    );
+    fs::remove_dir_all(top).unwrap();
+}
