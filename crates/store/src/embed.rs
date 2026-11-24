@@ -1,5 +1,6 @@
 use crate::jobs::enqueue_tx;
 use crate::memory::{MEMORY_SELECT, memory_from_row};
+use crate::retrieve::ALIASES_IN_SEARCH;
 use crate::{Result, Store, StoreError};
 use cairn_core::memory::{Entity, EntityKind};
 use cairn_core::process::embed::{embedding_text, model_label, source_hash, validate_vector};
@@ -77,13 +78,14 @@ impl Store {
                 "SELECT m.memory_id FROM memories m
                   WHERE m.status <> 'forgotten'
                     AND (m.embedding IS NULL
-                         OR EXISTS (SELECT 1 FROM memory_aliases a
-                                     WHERE a.memory_id = m.memory_id AND a.embedding IS NULL))
+                         OR ($2 AND EXISTS (SELECT 1 FROM memory_aliases a
+                                     WHERE a.memory_id = m.memory_id AND a.embedding IS NULL)))
                     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'embed' AND j.job_key = m.memory_id
                                        AND j.status IN ('pending', 'running'))
                   ORDER BY m.created_at, m.memory_id LIMIT $1",
             )
             .bind(batch)
+            .bind(ALIASES_IN_SEARCH)
             .fetch_all(&self.pool)
             .await?;
             let mut added = 0;
@@ -148,6 +150,9 @@ impl Store {
         ids: Option<&[String]>,
         limit: i64,
     ) -> Result<Vec<EmbedItem>> {
+        if !ALIASES_IN_SEARCH {
+            return Ok(Vec::new());
+        }
         let rows = match ids {
             Some(ids) => {
                 sqlx::query(

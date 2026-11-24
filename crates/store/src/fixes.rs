@@ -384,7 +384,8 @@ async fn detect_candidates(
         }
     }
     if scope.is_none_or(|(detector, _, _, _)| detector == "F12") {
-        let rows = sqlx::query("WITH ps AS MATERIALIZED (SELECT s.project_id,count(*)::bigint AS searches FROM lookup_log l JOIN sessions s ON l.person_id=s.person_id AND l.session_id=s.session_id WHERE l.kind='search' AND l.at >= now()-interval '90 days' AND ($1::text IS NULL OR s.project_id=(SELECT project_id FROM memories WHERE memory_id=$1)) GROUP BY s.project_id HAVING count(*) >= 20) SELECT m.memory_id,m.owner_id,m.project_id,ps.searches FROM memories m LEFT JOIN usage u USING(memory_id) JOIN ps ON ps.project_id=m.project_id WHERE m.status IN ('active','stale') AND m.scope <> 'global' AND m.origin <> 'system' AND m.kind NOT IN ('decision','rule','procedure','gotcha','preference','handoff') AND m.faded_at IS NULL AND m.created_at < now()-interval '90 days' AND (u.last_used_at IS NULL OR u.last_used_at <= now()-interval '90 days') AND ($1::text IS NULL OR m.memory_id=$1)")
+        // Oldest 100 that are still proposable. A closed row stays out of the cap until it may reopen.
+        let rows = sqlx::query("WITH ps AS MATERIALIZED (SELECT s.project_id,count(*)::bigint AS searches FROM lookup_log l JOIN sessions s ON l.person_id=s.person_id AND l.session_id=s.session_id WHERE l.kind='search' AND l.at >= now()-interval '90 days' AND ($1::text IS NULL OR s.project_id=(SELECT project_id FROM memories WHERE memory_id=$1)) GROUP BY s.project_id HAVING count(*) >= 20) SELECT m.memory_id,m.owner_id,m.project_id,ps.searches FROM memories m LEFT JOIN usage u USING(memory_id) JOIN ps ON ps.project_id=m.project_id WHERE m.status IN ('active','stale') AND m.scope <> 'global' AND m.origin <> 'system' AND m.kind NOT IN ('decision','rule','procedure','gotcha','preference','handoff') AND m.faded_at IS NULL AND m.created_at < now()-interval '90 days' AND (u.last_used_at IS NULL OR u.last_used_at <= now()-interval '90 days') AND ($1::text IS NULL OR m.memory_id=$1) AND NOT EXISTS (SELECT 1 FROM fixes f WHERE f.detector='F12' AND f.subject_id=m.memory_id AND NOT (f.status IN ('pending','applying','queued','waiting') OR (f.status='ignored' AND f.quiet_seen_at IS NOT NULL AND f.ignored_until <= now()) OR (f.status IN ('done','failed','expired') AND (f.quiet_seen_at IS NOT NULL OR f.status='expired') AND coalesce(f.done_at,f.applied_at,f.last_seen_at) + interval '90 days' <= now()))) ORDER BY m.created_at, m.memory_id LIMIT 100")
             .bind(scope.map(|(_, subject, _, _)| subject)).fetch_all(&mut **tx).await?;
         for row in rows {
             let id: String = row.try_get("memory_id")?;
@@ -903,6 +904,14 @@ fn redact_json(value: &mut serde_json::Value, key: &str, compact: bool) {
     }
 }
 
+const FIX_DETAIL_SELECT: &str = "SELECT f.fix_id,f.detector,f.fingerprint,f.fix_type,f.status,f.subject_id,f.project_id,f.device_id,f.person_id,f.evidence,f.action,f.error,p.name AS project_name,d.name AS device_name,a.email,m.scope,m.owner_id FROM fixes f LEFT JOIN projects p ON p.project_id=f.project_id LEFT JOIN devices d ON d.device_id=f.device_id LEFT JOIN accounts a ON a.person_id=f.person_id LEFT JOIN memories m ON m.memory_id=f.subject_id";
+const FIX_HISTORY_PAGE: usize = 100;
+
+pub struct FixHistory {
+    pub rows: Vec<serde_json::Value>,
+    pub next: Option<String>,
+}
+
 impl Store {
     pub async fn list_fixes(
         &self,
@@ -913,6 +922,53 @@ impl Store {
         let rows = sqlx::query("SELECT f.fix_id,f.detector,f.fingerprint,f.fix_type,f.status,f.subject_id,f.project_id,f.device_id,f.person_id,f.evidence,f.action,f.error,p.name AS project_name,d.name AS device_name,a.email,m.scope,m.owner_id FROM fixes f LEFT JOIN projects p ON p.project_id=f.project_id LEFT JOIN devices d ON d.device_id=f.device_id LEFT JOIN accounts a ON a.person_id=f.person_id LEFT JOIN memories m ON m.memory_id=f.subject_id WHERE ($1::text IS NULL OR f.status=$1) AND ($2::text IS NULL OR f.detector=$2) ORDER BY f.last_seen_at DESC,f.fix_id")
             .bind(status).bind(detector).fetch_all(&self.pool).await?;
         rows.iter().map(|row| fix_detail_row(admin, row)).collect()
+    }
+
+    /// Active rows only, so the pending tab does not download terminal history.
+    pub async fn list_open_fixes(
+        &self,
+        admin: &str,
+        detector: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = sqlx::query(&format!(
+            "{FIX_DETAIL_SELECT} WHERE f.status IN ('pending','applying','queued','waiting') AND ($1::text IS NULL OR f.detector=$1) ORDER BY f.last_seen_at DESC, f.fix_id"
+        ))
+        .bind(detector)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(|row| fix_detail_row(admin, row)).collect()
+    }
+
+    /// One page of terminal fixes, newest first, in `fix_id` order when the time matches.
+    pub async fn list_fix_history(
+        &self,
+        admin: &str,
+        detector: Option<&str>,
+        status: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Result<FixHistory> {
+        let rows = sqlx::query(&format!(
+            "{FIX_DETAIL_SELECT} WHERE f.status NOT IN ('pending','queued','waiting') AND ($1::text IS NULL OR f.detector=$1) AND ($2::text IS NULL OR f.status=$2) AND ($3::text IS NULL OR f.last_seen_at < (SELECT c.last_seen_at FROM fixes c WHERE c.fix_id=$3) OR (f.last_seen_at = (SELECT c.last_seen_at FROM fixes c WHERE c.fix_id=$3) AND f.fix_id > $3)) ORDER BY f.last_seen_at DESC, f.fix_id LIMIT {}",
+            FIX_HISTORY_PAGE + 1
+        ))
+        .bind(detector)
+        .bind(status)
+        .bind(cursor)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut mapped = rows
+            .iter()
+            .map(|row| fix_detail_row(admin, row))
+            .collect::<Result<Vec<_>>>()?;
+        let next = (mapped.len() > FIX_HISTORY_PAGE).then(|| {
+            mapped.truncate(FIX_HISTORY_PAGE);
+            mapped
+                .last()
+                .and_then(|row| row["fix_id"].as_str())
+                .unwrap_or_default()
+                .to_owned()
+        });
+        Ok(FixHistory { rows: mapped, next })
     }
 
     pub async fn pending_fix_count(&self) -> Result<i64> {

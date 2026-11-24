@@ -141,7 +141,7 @@ def main():
                    and {m["id"] for m in sub_rows if m["id"] in {n["id"] for n in notes} and m["rank"] == "candidate"}
                    == {n["id"] for n in notes}),
             "W7": any(r["session_id"] == "write-no-git" and r["captures"] >= 2 for r in reports) and any(m["kind"] == "handoff" and "(1 outside the project)" in m["summary"] for m in plain_rows),
-            "W8": injected_bytes <= 1621 + 250,
+            "W8": injected_bytes <= 645 + 55,  # measured work-session output plus 55 bytes
         }
         result = {"checks": checks, "counts": {"work_notes": len(notes), "work_digest": len(digest), "injected_bytes": injected_bytes, "subagent_notes_written": sub_report.get("notes_written", 0)}, "runtime_seconds": round(time.monotonic() - started, 2)}
         Path(args.out).write_text(json.dumps(result, indent=2) + "\n")

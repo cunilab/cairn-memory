@@ -2064,6 +2064,59 @@ async fn brief_shows_handoff_without_git() {
 /// Alias rows are embedded by the same path as the memory, and a query whose only close vector
 /// is an alias returns that memory.
 #[tokio::test]
+async fn disabled_alias_search_keeps_rows_without_enqueuing_alias_vectors() {
+    if ALIASES_IN_SEARCH {
+        return;
+    }
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("alias-gate").await;
+    let store = &db.store;
+    let id = store.save(&me, save_input(serde_json::json!({
+        "kind":"fact", "title":"Alias pause fixture", "summary":"The search gate stops alias inference", "reason":"Vectors are unnecessary while disabled",
+        "aliases":["existing alias vector", "new alias without vector"]
+    })), &WorkContext::default()).await.unwrap().id;
+    let hash = current_embedding_hash(store, &id).await;
+    store
+        .upsert_embedding(&id, &hash, &tilted(1.0, 1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memory_aliases a SET embedding=m.embedding,embedding_source='fixture' FROM memories m WHERE m.memory_id=a.memory_id AND a.memory_id=$1 AND a.ord=0")
+        .bind(&id).execute(store.pool()).await.unwrap();
+    sqlx::query("DELETE FROM jobs WHERE kind='embed' AND job_key=$1")
+        .bind(&id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.enqueue_missing_embeddings(10).await.unwrap(), 0);
+    assert!(store.pending_embeddings(10).await.unwrap().is_empty());
+    assert!(
+        store
+            .embed_items(std::slice::from_ref(&id))
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.alias_ord.is_none())
+    );
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT text,embedding IS NOT NULL FROM memory_aliases WHERE memory_id=$1 ORDER BY ord",
+    )
+    .bind(id)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("existing alias vector".to_owned(), true),
+            ("new alias without vector".to_owned(), false)
+        ]
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn aliases_embedded_and_searched() {
     let Some(db) = TestDb::new().await else {
         return;

@@ -233,7 +233,7 @@ export function Dashboard() {
               ))}
             </ul>
             <p className="text-sm text-muted-foreground tabular-nums">
-              {Math.round(stats.memory_health.linked_ratio * 100)}% of durable memories linked · stale: {stats.memory_health.stale_missing} file gone, {stats.memory_health.stale_feedback} reported wrong · {stats.memory_health.expiring} expiring
+              {Math.round(stats.memory_health.linked_ratio * 100)}% of durable memories linked · stale: {stats.memory_health.stale_missing} file gone, {stats.memory_health.stale_feedback} reported wrong
             </p>
             <p className="text-sm text-muted-foreground">
               <Link href="/projects" className="underline-offset-4 hover:underline">

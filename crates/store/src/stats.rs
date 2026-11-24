@@ -128,8 +128,6 @@ pub struct StaleReport {
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: i64,
     pub by_cause: StaleCauses,
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub expiring_30d: i64,
 }
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -147,8 +145,6 @@ pub struct LinkReport {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, Serialize)]
 pub struct MemoryHealth {
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub expiring: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub stale_missing: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
@@ -445,8 +441,7 @@ impl Store {
         let stale_row = sqlx::query(&format!(
             "SELECT count(*) FILTER (WHERE m.status = 'stale') AS total,
                     count(*) FILTER (WHERE m.status = 'stale' AND m.stale_cause = 'missing') AS missing,
-                    count(*) FILTER (WHERE m.status = 'stale' AND m.stale_cause = 'feedback') AS feedback,
-                    count(*) FILTER (WHERE m.expires_at > now() AND m.expires_at <= now() + interval '30 days') AS expiring
+                    count(*) FILTER (WHERE m.status = 'stale' AND m.stale_cause = 'feedback') AS feedback
                FROM memories m WHERE {vis}"
         ))
         .bind(me)
@@ -458,7 +453,6 @@ impl Store {
                 missing: stale_row.try_get("missing")?,
                 feedback: stale_row.try_get("feedback")?,
             },
-            expiring_30d: stale_row.try_get("expiring")?,
         };
 
         let link_row = sqlx::query(&format!(
@@ -490,7 +484,6 @@ impl Store {
             durable_with_link_ratio: linked_ratio,
         };
         let memory_health = MemoryHealth {
-            expiring: stale.expiring_30d,
             stale_missing: stale.by_cause.missing,
             stale_feedback: stale.by_cause.feedback,
             linked_ratio,

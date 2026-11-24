@@ -13,7 +13,7 @@ mod state;
 use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
-use cairn_core::id::{now_seconds, sha256_hex};
+use cairn_core::id::{new_id, now_seconds, sha256_hex};
 use cairn_core::instructions::{
     DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
 };
@@ -567,10 +567,13 @@ impl Hook<'_> {
             let _ = self.post("/cairn-memory/session/lookup", &lookup);
             return Ok(None);
         }
-        // The agent saved: the MCP tool of any host (`mcp__cairn__memory_save`,
-        // `cairn_memory_save`). Nothing else to do for it.
-        if tool.name.contains("cairn") && tool.name.ends_with("memory_save") {
-            self.with_state(|s| s.saved = true);
+        if matches!(
+            tool.name.as_str(),
+            "mcp__cairn__memory_save" | "cairn_memory_save"
+        ) {
+            if tool.mcp_save_succeeded() {
+                self.with_state(|s| s.saved = true);
+            }
             return Ok(None);
         }
         // A read is neither captured nor work, but it shares the edit's once-per-path topic note
@@ -585,7 +588,7 @@ impl Hook<'_> {
         if tool.is_work() {
             let command = tool.shell_command();
             let tested = command.is_some_and(is_test_command);
-            let saved = command.is_some_and(is_cairn_save);
+            let saved = command.is_some_and(is_cairn_save) && tool.ok() == Some(true);
             self.with_state(|s| {
                 s.dirty = true;
                 s.worked = true;
@@ -709,14 +712,28 @@ impl Hook<'_> {
         let Some(capture) = capture else {
             return Ok(());
         };
-        let hash = capture.content_hash();
+        let (event_id, hash) = if capture.kind == CaptureKind::Command {
+            // A repeat execution has a new tool id. The outbox retains the id assigned here.
+            let event_id = self.payload.text("tool_use_id").map_or_else(
+                || new_id("hk"),
+                |id| {
+                    format!(
+                        "hk_{}",
+                        &sha256_hex(&[&self.session_id, "command", id])[..24]
+                    )
+                },
+            );
+            let hash = sha256_hex(&[&event_id, &capture.content_hash()])[..16].to_owned();
+            (event_id, hash)
+        } else {
+            (capture.event_id(&self.session_id), capture.content_hash())
+        };
         if self.with_state(|s| s.capture_hashes.contains(&hash)) == Some(true) {
             return Ok(());
         }
         let remember = || {
             self.with_state(|s| s.remember_capture(&hash));
         };
-        let event_id = capture.event_id(&self.session_id);
         let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
         context.outside_files = outside_files;

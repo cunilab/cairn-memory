@@ -24,7 +24,7 @@ enum Action {
 pub fn execute_action(
     action: Value,
     cwd: &Path,
-    updater: impl FnOnce() -> Result<(), Error>,
+    updater: impl FnOnce() -> Result<String, Error>,
 ) -> Result<&'static str, &'static str> {
     let action: Action = serde_json::from_value(action).map_err(|_| "failed")?;
     match action {
@@ -32,7 +32,10 @@ pub fn execute_action(
             if !cairn_core::account::version_older(update::VERSION, &target) {
                 return Err("already_current");
             }
-            updater().map_err(|_| "failed")?;
+            let installed = updater().map_err(|_| "failed")?;
+            if cairn_core::account::version_older(&installed, &target) {
+                return Err("target_unavailable");
+            }
             Ok("updated Cairn")
         }
         Action::WriteProjectFile {
@@ -131,6 +134,10 @@ fn apply_with_timeout(id: Option<&str>, timeout: Option<std::time::Duration>) ->
             &cwd,
             || update::update(false),
         );
+        if result == Err("target_unavailable") {
+            println!("Skipped {fix_id}: target release is not available yet");
+            continue;
+        }
         if id.is_none() && matches!(result, Err("not_this_repo" | "outside_checkout")) {
             continue;
         }

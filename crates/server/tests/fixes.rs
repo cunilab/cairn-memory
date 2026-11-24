@@ -617,6 +617,99 @@ async fn status_transitions_and_ignore_cooldowns() {
 }
 
 #[tokio::test]
+async fn f12_caps_nightly_proposals_in_oldest_order_and_leaves_rank_for_apply() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("f12-cap").await;
+    let device = app.device(&admin, "agent").await;
+    let project = app.project(&device, "example.test/f12-cap").await;
+    let store = &app.db.store;
+    sqlx::query("INSERT INTO sessions (person_id,session_id,project_id) SELECT person_id,'cap',$1 FROM accounts")
+        .bind(&project).execute(store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO lookup_log (person_id,session_id,kind) SELECT person_id,'cap','search' FROM accounts CROSS JOIN generate_series(1,20)")
+        .execute(store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, identity_hash, evidence_hash, created_at)
+        SELECT 'mem_cap_'||lpad(i::text,3,'0'), person_id, $1, 'project', 'fact', 'Old fixture', 'A fact for the fixes cap', 'Fixture evidence', i::text, '', now()-interval '100 days'
+        FROM accounts CROSS JOIN generate_series(1,120) AS i")
+        .bind(&project).execute(store.pool()).await.unwrap();
+    store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let proposed: Vec<String> = sqlx::query_scalar("SELECT subject_id FROM fixes WHERE detector='F12' AND status='pending' ORDER BY subject_id")
+        .fetch_all(store.pool()).await.unwrap();
+    assert_eq!(
+        proposed,
+        (1..=100)
+            .map(|i| format!("mem_cap_{i:03}"))
+            .collect::<Vec<_>>()
+    );
+    let untouched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE faded_at IS NULL AND rank='normal'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(untouched, 120);
+    let (fix,): (String,) =
+        sqlx::query_as("SELECT fix_id FROM fixes WHERE subject_id = 'mem_cap_001'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    app.post(&format!("admin/fixes/{fix}/ignore"), json!({}), &admin)
+        .await;
+    sqlx::query("UPDATE server_state SET value='2000-01-01' WHERE key='fixes_last_run'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let next: Vec<String> = sqlx::query_scalar("SELECT subject_id FROM fixes WHERE detector='F12' AND status='pending' ORDER BY subject_id")
+        .fetch_all(store.pool()).await.unwrap();
+    assert_eq!(
+        next,
+        (2..=101)
+            .map(|i| format!("mem_cap_{i:03}"))
+            .collect::<Vec<_>>()
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn fix_history_cursor_pages_terminal_rows_without_repetition() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("fix-history").await;
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,subject_kind,fix_type,status,first_seen_at,last_seen_at,evidence)
+        SELECT 'fx_'||lpad(i::text,3,'0'),'F8',i::text,'server','report',CASE WHEN i=106 THEN 'pending' ELSE 'resolved' END,now(),now(),'{}' FROM generate_series(1,106) AS i")
+        .execute(app.db.store.pool()).await.unwrap();
+    let path = "admin/fixes?group=history&detector=F8";
+    let (status, headers, first) = app
+        .send_raw("GET", path, json!(null), Some(&admin), &[])
+        .await;
+    assert_eq!(status, 200);
+    let first: Vec<serde_json::Value> = serde_json::from_slice(&first).unwrap();
+    assert_eq!(first.len(), 100);
+    let cursor = headers["x-next-cursor"].to_str().unwrap();
+    let (status, headers, second) = app
+        .send_raw(
+            "GET",
+            &format!("{path}&cursor={cursor}"),
+            json!(null),
+            Some(&admin),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert!(!headers.contains_key("x-next-cursor"));
+    let second: Vec<serde_json::Value> = serde_json::from_slice(&second).unwrap();
+    let ids: Vec<_> = first
+        .iter()
+        .chain(&second)
+        .map(|row| row["fix_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        (1..=105).map(|i| format!("fx_{i:03}")).collect::<Vec<_>>()
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn f10_and_f12_apply_once_and_do_not_reappear() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;

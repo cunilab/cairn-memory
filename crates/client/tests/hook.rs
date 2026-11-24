@@ -1653,7 +1653,7 @@ fn real_hook_switches_context_within_one_session_without_sharing_notes() {
             run(dir, "UserPromptSubmit", session, extra);
         }
         run(last, "SessionEnd", session, json!({}));
-        server.distill(&team.owner_id, session);
+        assert_eq!(server.distill(&team.owner_id, session), 2);
     }
     let list = team
         .owner_web
@@ -1666,6 +1666,45 @@ fn real_hook_switches_context_within_one_session_without_sharing_notes() {
             .iter()
             .all(|row| row["scope"] == "personal" && row["project_id"].is_null())
     );
+}
+
+#[test]
+fn digest_uses_last_command_execution_even_when_its_failure_is_identical() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-test-order");
+    let dir = checkout("hook-test-order");
+    let run = |event, extra: Value| {
+        let mut payload = json!({"session_id":"test-order","cwd":dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+    };
+    run("PostToolUse", edit_call("src/a.rs", "fn foo() {}", "edit"));
+    for (id, code) in [("first", 1), ("second", 0), ("third", 1), ("third", 1)] {
+        run(
+            "PostToolUse",
+            json!({"tool_name":"Bash", "tool_input":{"command":"cargo test"},
+             "tool_use_id":id, "tool_response":{"exit_code":code}}),
+        );
+    }
+    run("SessionEnd", json!({}));
+    server.distill(&team.owner_id, "test-order");
+    let list = team
+        .owner_web
+        .get("/cairn-memory/memories?kind=note")
+        .unwrap();
+    let digest = &list[0]["summary"].as_str().unwrap();
+    assert!(digest.contains("cargo test fail"), "{digest}");
 }
 
 #[test]
@@ -1833,7 +1872,7 @@ fn a_save_by_tool_or_cli_means_no_reminder() {
         &env.payload(
             "mcp",
             json!({"tool_name": "mcp__cairn__memory_save", "tool_input": {"kind": "gotcha"},
-                   "tool_response": {"status": "active"}}),
+                   "tool_response": {"id":"mem_example", "status": "active", "deduplicated":false}}),
         ),
     );
     assert!(blocked(&stop(&env, "mcp", json!({}))).is_none());
@@ -1854,6 +1893,43 @@ fn a_save_by_tool_or_cli_means_no_reminder() {
         ),
     );
     assert!(blocked(&stop(&env, "other", json!({}))).is_some());
+}
+
+#[test]
+fn failed_saves_still_ask_on_stop_and_are_not_reported_as_saves() {
+    let server = fake();
+    let env = Env::new("hook-nudge-failed", &server.url);
+    with_project(&env);
+    for (session, response) in [
+        (
+            "mcp-error",
+            json!({"isError":true,"content":[{"type":"text","text":"rejected"}]}),
+        ),
+        (
+            "batch-error",
+            json!({"content":[{"type":"text","text":"{\"results\":[{\"status\":\"error\"}]}"}]}),
+        ),
+        ("mcp-empty", json!({"results":[]})),
+        (
+            "shell-error",
+            json!({"exit_code":1,"stderr":"save rejected"}),
+        ),
+    ] {
+        env.edit(session, "src/a.rs", "x");
+        if session == "shell-error" {
+            env.bash(session, "cairn save -", response);
+        } else {
+            env.run("PostToolUse", &env.payload(session, json!({"tool_name":"mcp__cairn__memory_save","tool_input":{},"tool_response":response})));
+        }
+        assert!(
+            blocked(&stop(&env, session, json!({}))).is_some(),
+            "{session}"
+        );
+        env.run("SessionEnd", &env.payload(session, json!({})));
+        let ends = server.to("end");
+        assert_eq!(ends.last().unwrap().body["nudge_asked"], true);
+        assert_eq!(ends.last().unwrap().body["nudge_saved"], false);
+    }
 }
 
 #[test]

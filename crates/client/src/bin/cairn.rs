@@ -116,8 +116,8 @@ fn main() {
             Ok(())
         }
         Some("update") => match &args[1..] {
-            [] => update::update(false),
-            [flag] if flag == "--check" => update::update(true),
+            [] => update::update(false).map(|_| ()),
+            [flag] if flag == "--check" => update::update(true).map(|_| ()),
             _ => usage(),
         },
         Some(name) => match tools::find(name).filter(|tool| tool.cli == name) {

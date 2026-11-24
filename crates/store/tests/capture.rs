@@ -486,6 +486,29 @@ async fn withdrawn_promoted_copy_stays_active() {
 }
 
 #[tokio::test]
+async fn repeated_command_results_stay_in_order() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    for (event, ok) in [("e1", Some(false)), ("e2", Some(true)), ("e3", Some(false))] {
+        let mut input = observation(event, "s1", "cargo test");
+        input.kind = cairn_core::capture::CaptureKind::Command;
+        input.ok = ok;
+        let stored = db.store.capture(&me, input).await.unwrap();
+        assert!(!stored.duplicate, "{event}");
+    }
+    let mut replay = observation("e3", "s1", "cargo test");
+    replay.kind = cairn_core::capture::CaptureKind::Command;
+    replay.ok = Some(false);
+    assert!(db.store.capture(&me, replay).await.unwrap().duplicate);
+    let rows = db.store.session_observations(&me, "s1").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.last().unwrap().ok, Some(false));
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn same_session_same_content_is_duplicate() {
     let Some(db) = TestDb::new().await else {
         return;

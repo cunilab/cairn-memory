@@ -284,7 +284,7 @@ pub fn lexical_sql(narrow: &Narrow) -> String {
 }
 
 /// Aliases are searched only when the 0.1.9 bench clears the ship rule. It did not (v2 weak 9/14,
-/// not 14/14), so alias rows are stored and embedded but ignored by search. See `bench/aliases-0.1.9.md`.
+/// not 14/14), so alias rows are stored while their embedding and search are paused. See `bench/aliases-0.1.9.md`.
 pub const ALIASES_IN_SEARCH: bool = false;
 
 /// The vector channel's statement; the plan test explains the same text.

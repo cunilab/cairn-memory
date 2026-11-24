@@ -10,34 +10,60 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAccount } from "@/hooks/use-account";
 import { useQueryParams, useTabParam } from "@/hooks/use-query-params";
-import { cairn } from "@/lib/cairn";
+import { cairn, cairnPage } from "@/lib/cairn";
 import { buttonsFor } from "../_lib/fixes-buttons";
 
 type Fix = Parameters<typeof buttonsFor>[0] & { fix_id: string; detector: string; fingerprint: string; subject_id: string | null; project_name: string | null; device_id: string | null; device_name: string | null; owner_email: string | null; action: { type?: string; memory_id?: string; source_id?: string }; evidence: Record<string, unknown>; error: string | null; prompt: string | null };
 type Search = { query: string | null; email: string; at: number };
 const TABS = ["pending", "history", "searches"] as const;
 const ACTIVE = ["pending", "queued", "waiting"];
+const DETECTORS = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"];
+const HISTORY_STATUS = ["applying", "done", "failed", "resolved", "ignored", "expired"];
+
+function historyPath(detector: string, status: string, cursor: string | null) {
+  const params = new URLSearchParams({ group: "history" });
+  if (detector) params.set("detector", detector);
+  if (status) params.set("status", status);
+  if (cursor) params.set("cursor", cursor);
+  return `admin/fixes?${params.toString()}`;
+}
 
 export function Fixes() {
   const account = useAccount();
   const [tab, setTab] = useTabParam(TABS);
   const [, setParams] = useQueryParams();
   const [fixes, setFixes] = useState<Fix[]>([]);
-  const [searches, setSearches] = useState<Search[]>([]);
+  const [history, setHistory] = useState<Fix[]>([]);
+  const [historyNext, setHistoryNext] = useState<string | null>(null);
+  const [searches, setSearches] = useState<Search[] | null>(null);
   const [selected, setSelected] = useState<Fix | null>(null);
   const [detector, setDetector] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
   const refresh = useCallback(async () => {
     try {
-      const [rows, queries] = await Promise.all([cairn<Fix[]>("admin/fixes"), cairn<Search[]>("admin/searches")]);
-      setFixes(rows); setSearches(queries); setError(null);
+      const rows = await cairn<Fix[]>("admin/fixes?group=open");
+      setFixes(rows); setError(null); setRevision((n) => n + 1);
       window.dispatchEvent(new Event("cairn-fixes-changed"));
     } catch (e) { setError(e instanceof Error ? e.message : "Could not load fixes."); }
   }, []);
   useEffect(() => { if (account?.is_admin) void Promise.resolve().then(refresh); }, [account, refresh]);
+  useEffect(() => {
+    if (!account?.is_admin || tab !== "searches" || searches !== null) return;
+    void cairn<Search[]>("admin/searches").then(setSearches).catch((e) => setError(e instanceof Error ? e.message : "Could not load searches."));
+  }, [account, tab, searches]);
+  useEffect(() => {
+    if (!account?.is_admin || tab !== "history") return;
+    let cancelled = false;
+    void cairnPage<Fix>(historyPath(detector, status, null)).then((page) => {
+      if (cancelled) return;
+      setHistory(page.items); setHistoryNext(page.next);
+    }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "Could not load history."); });
+    return () => { cancelled = true; };
+  }, [account, tab, detector, status, revision]);
   async function action(button: string) {
     if (!selected) return;
     setBusy(true);
@@ -67,10 +93,11 @@ export function Fixes() {
       <TabsList><TabsTrigger value="pending">Pending</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="searches">Searches</TabsTrigger></TabsList>
       <TabsContent value="pending">{table(fixes.filter((fix) => ACTIVE.includes(fix.status)))}</TabsContent>
       <TabsContent value="history">
-        <div className="flex gap-2 py-2"><label>Detector <select value={detector} onChange={(e) => setDetector(e.target.value)}><option value="">All</option>{Array.from(new Set(fixes.map((f) => f.detector))).sort().map((v) => <option key={v}>{v}</option>)}</select></label><label>Status <select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All</option>{Array.from(new Set(fixes.map((f) => f.status))).sort().map((v) => <option key={v}>{v}</option>)}</select></label></div>
-        {table(fixes.filter((f) => !ACTIVE.includes(f.status) && (!detector || f.detector === detector) && (!status || f.status === status)))}
+        <div className="flex gap-2 py-2"><label>Detector <select value={detector} onChange={(e) => setDetector(e.target.value)}><option value="">All</option>{DETECTORS.map((v) => <option key={v}>{v}</option>)}</select></label><label>Status <select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All</option>{HISTORY_STATUS.map((v) => <option key={v}>{v}</option>)}</select></label></div>
+        {table(history)}
+        {historyNext ? <Button variant="outline" className="mt-2" onClick={() => void cairnPage<Fix>(historyPath(detector, status, historyNext)).then((page) => { setHistory((rows) => [...rows, ...page.items]); setHistoryNext(page.next); }).catch((e) => setError(e instanceof Error ? e.message : "Could not load history."))}>More</Button> : null}
       </TabsContent>
-      <TabsContent value="searches"><DataTable<Search> columns={[{accessorKey:"query",header:"Search phrase"},{accessorKey:"email",header:"Account"},{id:"at",header:"Time",cell:({row}) => new Date(row.original.at * 1000).toLocaleString()}]} data={searches} label="Searches" filterPlaceholder="Filter searches" empty={<p className="p-4">No recent searches.</p>} /></TabsContent>
+      <TabsContent value="searches"><DataTable<Search> columns={[{accessorKey:"query",header:"Search phrase"},{accessorKey:"email",header:"Account"},{id:"at",header:"Time",cell:({row}) => new Date(row.original.at * 1000).toLocaleString()}]} data={searches ?? []} label="Searches" filterPlaceholder="Filter searches" empty={<p className="p-4">{searches === null ? "Loading…" : "No recent searches."}</p>} /></TabsContent>
     </Tabs>
     <Sheet open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null); }}><SheetContent className="overflow-y-auto"><SheetHeader><SheetTitle>{selected?.detector} fix</SheetTitle><SheetDescription>{selected?.status}</SheetDescription></SheetHeader>
       {selected ? <div className="space-y-4 px-4 pb-6 text-sm">

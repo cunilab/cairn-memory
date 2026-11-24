@@ -65,6 +65,8 @@ impl Fake {
                 let request = String::from_utf8_lossy(&data).to_string();
                 let body = if request.starts_with("GET /cairn-memory/device/fixes ") {
                     json!([{ "fix_id":"fx_test", "action":action }]).to_string()
+                } else if request.starts_with("GET /releases/latest ") {
+                    json!({"tag_name":"v0.0.1","assets":[]}).to_string()
                 } else {
                     "{}".to_owned()
                 };
@@ -109,7 +111,7 @@ fn update_guarded() {
         std::path::Path::new("."),
         || {
             called.set(true);
-            Ok(())
+            Ok("9999.0.0".to_owned())
         },
     );
     assert!(status.is_ok());
@@ -141,6 +143,24 @@ fn update_guarded() {
             .any(|r| r.contains("/device/fixes"))
     );
 }
+#[test]
+fn unpublished_update_target_never_posts_a_completion_receipt() {
+    let fake = Fake::new(json!({"type":"run_update","target":"9999.0.0"}));
+    let agent = Agent::setup("fix-update-unpublished", &fake.url, "cdt_test");
+    let output = command(&agent.home)
+        .args(["fixes", "apply", "fx_test"])
+        .env("CAIRN_UPDATE_URL", format!("{}/releases/latest", fake.url))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        fake.requests()
+            .iter()
+            .any(|r| r.starts_with("GET /releases/latest "))
+    );
+    assert!(applied(&fake).is_empty());
+}
+
 #[test]
 fn project_file_guards() {
     let checkout = checkout("fix-guards");

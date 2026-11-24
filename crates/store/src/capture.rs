@@ -7,7 +7,7 @@ use cairn_core::capture::{
     CaptureKind, CaptureResult, Observation, ObservationInput, WorkContext, normalize_observation,
 };
 use cairn_core::capture::{redact_sensitive_content, redact_work_context};
-use cairn_core::id::now_seconds;
+use cairn_core::id::{now_seconds, sha256_hex};
 use cairn_core::memory::{Fields, Scope};
 use cairn_core::process::distill::distill;
 
@@ -54,12 +54,24 @@ impl Store {
         device_id: Option<&str>,
     ) -> Result<CaptureResult> {
         let mut observation = normalize_observation(&input)?;
+        let command_hash = (observation.kind == CaptureKind::Command).then(|| {
+            sha256_hex(&[
+                &observation.content_hash,
+                &observation.event_id,
+                match observation.ok {
+                    Some(true) => "ok",
+                    Some(false) => "failed",
+                    None => "unknown",
+                },
+            ])
+        });
+        let hash = command_hash.as_deref().unwrap_or(&observation.content_hash);
         let result = |duplicate| CaptureResult {
             accepted: true,
             duplicate,
             event_id: observation.event_id.clone(),
         };
-        if let Some(duplicate) = self.known(person_id, &observation).await? {
+        if let Some(duplicate) = self.known(person_id, &observation, hash).await? {
             return duplicate.map(|()| result(true));
         }
         // Git context inherited for the report must never grant a project attachment.
@@ -112,7 +124,7 @@ impl Store {
         .bind(observation.kind.as_str())
         .bind(observation.ok)
         .bind(&observation.content)
-        .bind(&observation.content_hash)
+        .bind(hash)
         .bind(serde_json::to_value(&observation.context).unwrap_or_default())
         .bind((observation.expires_at - observation.captured_at) as f64)
         .execute(&mut *tx)
@@ -120,7 +132,7 @@ impl Store {
         if done.rows_affected() == 0 {
             tx.rollback().await?;
             // Lost a race with the same event id or the same content.
-            if let Some(duplicate) = self.known(person_id, &observation).await? {
+            if let Some(duplicate) = self.known(person_id, &observation, hash).await? {
                 return duplicate.map(|()| result(true));
             }
         } else {
@@ -136,6 +148,7 @@ impl Store {
         &self,
         person_id: &str,
         observation: &Observation,
+        hash: &str,
     ) -> Result<Option<Result<()>>> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT event_id, content_hash FROM observations
@@ -145,13 +158,14 @@ impl Store {
         .bind(person_id)
         .bind(&observation.event_id)
         .bind(&observation.session_id)
-        .bind(&observation.content_hash)
+        .bind(hash)
         .fetch_all(&self.pool)
         .await?;
         let same_event = rows.iter().find(|(id, _)| *id == observation.event_id);
         Ok(match (same_event, rows.is_empty()) {
-            (Some((_, hash)), _) => Some(replay(
-                *hash == observation.content_hash,
+            // A queued event sent by 0.1.8 can refer to a row with the previous hash.
+            (Some((_, stored)), _) => Some(replay(
+                stored == hash || *stored == observation.content_hash,
                 &observation.event_id,
             )),
             (None, false) => Some(Ok(())),

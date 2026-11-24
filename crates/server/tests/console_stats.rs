@@ -259,8 +259,8 @@ async fn stats_usage_stale_expiry_and_jobs() {
         stats["stale"]["by_cause"],
         json!({"missing": 1, "feedback": 1})
     );
-    assert_eq!(stats["stale"]["expiring_30d"], 1);
-    assert_eq!(stats["memory_health"]["expiring"], 1);
+    assert!(stats["stale"].get("expiring_30d").is_none());
+    assert!(stats["memory_health"].get("expiring").is_none());
     assert_eq!(stats["memory_health"]["stale_missing"], 1);
     assert_eq!(stats["memory_health"]["stale_feedback"], 1);
     // Six saves queued embed and link jobs; none is quarantined.

@@ -350,9 +350,7 @@ def main():
             # Measure only once every memory has its vector and the embed and consolidate jobs are done:
             # consolidation supersedes and links near-duplicates, which changes what search returns, so a
             # search that races it makes two runs differ.
-            missing = ("(select count(*) from cairn.memories where embedding is null)"
-                       " + (select count(*) from cairn.memory_aliases a join cairn.memories m"
-                       " on m.memory_id = a.memory_id where a.embedding is null and m.status <> 'forgotten')") if model_dir else "0"
+            missing = "(select count(*) from cairn.memories where embedding is null)" if model_dir else "0"
             busy = "(select count(*) from cairn.jobs where kind in ('embed','consolidate','link') and status in ('pending','running'))"
             for _ in range(240 + 4 * len(distractors)):
                 if int(sql(f"select {missing} + {busy}") or 0) == 0:
@@ -361,12 +359,9 @@ def main():
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
-        # Aliases are searched by their own vectors: before any query, every alias row must have one (checked
-        # again here, outside settle, so an A/B that silently ran without alias vectors fails loudly).
+        # Count stored aliases and their vectors separately because alias inference follows the search gate.
         alias_rows = int(sql("select count(*) from cairn.memory_aliases") or 0)
         alias_unembedded = int(sql("select count(*) from cairn.memory_aliases where embedding is null") or 0)
-        if model_dir:
-            assert alias_unembedded == 0, f"{alias_unembedded} alias rows have no embedding before queries"
         key_of = {v: k for k, v in ids.items()}
 
         # Links per durable memory (step 6 §13): the fixture corpus alone, then everything incl. distractors.

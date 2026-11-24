@@ -163,6 +163,46 @@ impl Tool<'_> {
             .filter(|text| !text.is_empty())
     }
 
+    fn mcp_response(&self) -> Option<Value> {
+        let response = self.response?;
+        if ["isError", "is_error"]
+            .iter()
+            .any(|key| response.get(key).and_then(Value::as_bool) == Some(true))
+        {
+            return None;
+        }
+        if let Some(structured) = response.get("structuredContent") {
+            return Some(structured.clone());
+        }
+        if let Some(blocks) = response
+            .as_array()
+            .or_else(|| response.get("content").and_then(Value::as_array))
+        {
+            return blocks
+                .iter()
+                .find(|v| v["type"] == "text")
+                .and_then(|v| v["text"].as_str())
+                .and_then(|text| serde_json::from_str(text).ok());
+        }
+        if let Some(text) = response.as_str() {
+            return serde_json::from_str(text).ok();
+        }
+        response.is_object().then(|| response.clone())
+    }
+
+    pub fn mcp_save_succeeded(&self) -> bool {
+        let Some(result) = self.mcp_response() else {
+            return false;
+        };
+        let has_id = |item: &Value| item["id"].as_str().is_some_and(|id| !id.is_empty());
+        if let Some(items) = result["results"].as_array() {
+            return items.iter().any(|item| {
+                has_id(item) && matches!(item["status"].as_str(), Some("saved" | "duplicate"))
+            });
+        }
+        has_id(&result) && result["deduplicated"].is_boolean()
+    }
+
     pub fn lookup(&self) -> Option<Value> {
         let kind = if self.name == "mcp__cairn__memory_search" {
             "search"
@@ -188,25 +228,7 @@ impl Tool<'_> {
             .take(20)
             .map(str::to_owned)
             .collect();
-        let response = self
-            .response
-            .filter(|r| r.get("isError").and_then(Value::as_bool) != Some(true));
-        let parsed = response.and_then(|r| {
-            let blocks = r
-                .as_array()
-                .or_else(|| r.get("content").and_then(Value::as_array));
-            if let Some(blocks) = blocks {
-                blocks
-                    .iter()
-                    .find(|v| v["type"] == "text")
-                    .and_then(|v| v["text"].as_str())
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            } else if r.is_object() {
-                Some(r.clone())
-            } else {
-                None
-            }
-        });
+        let parsed = self.mcp_response();
         let records = parsed
             .as_ref()
             .and_then(|v| {
@@ -358,7 +380,7 @@ impl Tool<'_> {
     }
 
     /// `exit_code == 0` when present, else neither `is_error` nor `interrupted` set; else unknown.
-    fn ok(&self) -> Option<bool> {
+    pub fn ok(&self) -> Option<bool> {
         if let Some(code) = self.exit_code() {
             return Some(code == 0);
         }

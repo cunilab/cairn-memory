@@ -23,6 +23,14 @@ test("computer guidance names the device and commands", () => {
   assert.match(sheet, /Runs on .* the next time someone there runs cairn doctor, cairn init or cairn fixes apply\./);
 });
 
+test("searches load with the searches tab and history is paged", () => {
+  const sheet = readFileSync(new URL("../_components/fixes.tsx", import.meta.url), "utf8");
+  assert.match(sheet, /admin\/fixes\?group=open/);
+  assert.match(sheet, /group: "history"/);
+  assert.match(sheet, /tab !== "searches"/);
+  assert.doesNotMatch(sheet, /Promise\.all\(\[cairn<Fix\[\]>\("admin\/fixes"\), cairn<Search\[\]>\("admin\/searches"\)\]\)/);
+});
+
 test("F9 Apply requires confirmation", () => {
   const sheet = readFileSync(new URL("../_components/fixes.tsx", import.meta.url), "utf8");
   assert.match(sheet, /<AlertDialog/);
