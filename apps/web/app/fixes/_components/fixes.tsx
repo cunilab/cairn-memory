@@ -86,7 +86,7 @@ export function Fixes() {
   ];
   const table = (rows: Fix[]) => <DataTable columns={columns} data={rows} label="Fixes" filterPlaceholder="Filter fixes" empty={<p className="p-4 text-sm">No fixes here.</p>} />;
   if (account === undefined) return <p>Loading…</p>;
-  if (!account?.is_admin) return <p>Admin access required.</p>;
+  if (!account?.is_admin) return <p className="text-sm text-muted-foreground">Only the admin can review and apply fixes.</p>;
   return <>
     {error ? <p role="alert">{error}</p> : null}
     <Tabs value={tab} onValueChange={(value) => setTab(value as typeof TABS[number])}>
