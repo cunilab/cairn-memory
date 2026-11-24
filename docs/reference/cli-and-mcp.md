@@ -16,7 +16,7 @@ token. Neither opens a store file. The credential model is in
 - Command `cairn mcp`; newline-delimited JSON-RPC 2.0 on stdin/stdout, diagnostics on stderr only.
   Methods: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`. Protocol
   version returned: `2025-06-18`.
-- `cairn setup <server-url>` reads the device token from stdin (hidden on a terminal) and writes the
+- `cairn setup <server-url>` reads the device token from stdin (hidden on supported Unix terminals; setup warns when it cannot hide input) and writes the
   selected config file with mode `0600` through a temporary file and a rename. The selected file is
   `CAIRN_CONFIG` when non-empty, else `$XDG_CONFIG_HOME/cairn/config.json`, else
   `~/.config/cairn/config.json`, else `%APPDATA%`. `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are not

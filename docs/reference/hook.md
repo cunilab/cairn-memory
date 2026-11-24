@@ -27,7 +27,7 @@ The start instruction tells agents when to search and save with Cairn. The Stop 
 
 ## Injection budget
 
-The server brief is limited to 1,200 bytes. Topic injection is bounded per session and individual topic cards are limited to 300 bytes. Instructions and the Stop ask have separate limits.
+The server brief is limited to 1,200 bytes. Up to four topic injections of at most 300 bytes each are allowed, with at most 16 topic lookups per session. Project and global instruction texts are limited to 600 bytes each; the Stop ask has a separate limit.
 
 ## Redaction
 
@@ -55,7 +55,7 @@ The hook and server use the same ordered patterns, replacing secrets with `[REDA
 
 ## Outbox
 
-The bounded outbox in the configuration directory (or `CAIRN_OUTBOX`) is bound to the server origin and a fingerprint of the device credential. Retryable delivery failures are queued; successful requests replay queued events. Authentication and permanent client errors are not queued. A queue bound to another origin or credential is not reused. A busy lock or full queue can prevent retention; inspect hook stderr and run `cairn doctor` when capture is unhealthy.
+The bounded outbox in the configuration directory (or `CAIRN_OUTBOX`) is bound to the server origin and a fingerprint of the device credential. Retryable delivery failures are queued; successful requests replay queued events. Authentication and permanent client errors are not queued. A queue bound to another origin or credential is not reused. The queue holds up to 256 events; when full, the oldest event is dropped. Each event has at most 10 attempts. A busy lock or write error can prevent retention; inspect hook stderr and run `cairn doctor` when capture is unhealthy.
 
 ## Setup
 

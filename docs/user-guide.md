@@ -39,7 +39,7 @@ Dashboard summarizes health and activity; Memories lists records; Activity shows
 
 ## Privacy and data
 
-Capture and saves are redacted before storage using best-effort patterns; check sensitive data before sharing it. Raw observations are retained for processing, not returned by memory search, and are subject to retention limits. Forget hides a retained record from normal retrieval. Export is available in the console. Administrators can inspect redacted recent search phrases and rewrite memories; rewrites preserve the original and show that an admin changed it. Scope and membership determine who can see project or global memory.
+Capture and saves are redacted before storage using best-effort patterns; check sensitive data before sharing it. Raw observations are retained for processing, not returned by memory search, and expire after 30 days; captures from a completed, distilled session can be removed after seven days. Forget hides a retained record from normal retrieval. Export is available in the console. Administrators can inspect redacted recent search phrases and rewrite memories; rewrites preserve the original and show that an admin changed it. Scope and membership determine who can see project or global memory.
 
 ## Updates and troubleshooting
 
