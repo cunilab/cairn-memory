@@ -164,11 +164,15 @@ jobs:
           python-version: "3.12"
       - run: npm ci
         working-directory: apps/web
-      # The smokes do not pass --embedding-model-dir. Server startup then keeps
-      # lexical, entity, and link recall and leaves semantic search disabled
-      # (crates/server/src/main.rs). The pinned model stays on the Rust tests job.
+      # The smokes run with the pinned model so semantic search is on, as in production.
+      # cairn-server reads CAIRN_EMBEDDING_MODEL_DIR (crates/server/src/main.rs).
+      - run: python3 scripts/download_embedding_model.py "$RUNNER_TEMP/cairn-minilm"
       - run: ./scripts/smoke_mcp.sh
+        env:
+          CAIRN_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/cairn-minilm
       - run: ./scripts/smoke_web.sh
+        env:
+          CAIRN_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/cairn-minilm
 
   bench:
     name: Bench
