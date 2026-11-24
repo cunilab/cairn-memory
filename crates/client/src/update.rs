@@ -408,24 +408,28 @@ fn replace_exe(exe: &Path, body: &[u8], expected: &str) -> Result<(), Error> {
     replaced
 }
 
-/// Checks (and, unless `check_only`, installs) the latest release; returns what to print.
-fn run(api: &str, target: &str, exe: &Path, check_only: bool) -> Result<String, Error> {
+/// Checks or installs the latest release, returning the message and the installed version.
+fn run(api: &str, target: &str, exe: &Path, check_only: bool) -> Result<(String, Version), Error> {
     let release = fetch_release(&agent(api, API_TIMEOUT), api)?;
     let newer = release.version > current();
     if check_only {
-        return Ok(if newer {
+        let message = if newer {
             format!(
                 "cairn {} is available (you have {VERSION}); run `cairn update`",
                 show(release.version)
             )
         } else {
             format!("cairn {VERSION} is up to date")
-        });
+        };
+        return Ok((message, current()));
     }
     if !newer && release.version != current() {
-        return Ok(format!(
-            "cairn {VERSION} is newer than the latest release ({}); nothing to update",
-            show(release.version)
+        return Ok((
+            format!(
+                "cairn {VERSION} is newer than the latest release ({}); nothing to update",
+                show(release.version)
+            ),
+            current(),
         ));
     }
     let agent = agent(api, DOWNLOAD_TIMEOUT);
@@ -444,15 +448,16 @@ fn run(api: &str, target: &str, exe: &Path, check_only: bool) -> Result<String, 
     if let Some(binary) = binary {
         replace_exe(exe, &binary, &show(release.version))?;
     }
-    Ok(if newer {
+    let message = if newer {
         format!("Updated cairn {VERSION} -> {}", show(release.version))
     } else {
         format!("cairn {VERSION} is already the latest release")
-    })
+    };
+    Ok((message, release.version))
 }
 
 /// `cairn update [--check]`.
-pub fn update(check_only: bool) -> Result<(), Error> {
+pub fn update(check_only: bool) -> Result<String, Error> {
     let exe = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
         .map_err(|error| Error::Config(format!("cannot locate the cairn executable: {error}")))?;
@@ -460,14 +465,15 @@ pub fn update(check_only: bool) -> Result<(), Error> {
         .ok()
         .filter(|_| cfg!(debug_assertions))
         .unwrap_or_else(|| TARGET.to_owned());
-    println!("{}", run(&api_url()?, &target, &exe, check_only)?);
+    let (message, installed) = run(&api_url()?, &target, &exe, check_only)?;
+    println!("{message}");
     if !check_only {
         // The hook commands name the executable; keep them pointing at it.
         for line in crate::setup::refresh(&exe) {
             println!("{line}");
         }
     }
-    Ok(())
+    Ok(show(installed))
 }
 
 fn now() -> u64 {
@@ -737,11 +743,13 @@ mod tests {
         let base = release("v99.0.0", binary.clone(), sha_hex(&binary));
         let api = format!("{base}/latest");
 
-        let report = run(&api, LINUX, &exe, true).unwrap();
+        let (report, installed) = run(&api, LINUX, &exe, true).unwrap();
+        assert_eq!(installed, current());
         assert!(report.contains("cairn 99.0.0 is available"), "{report}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
 
-        let report = run(&api, LINUX, &exe, false).unwrap();
+        let (report, installed) = run(&api, LINUX, &exe, false).unwrap();
+        assert_eq!(show(installed), "99.0.0");
         assert!(
             report.starts_with(&format!("Updated cairn {VERSION} -> 99.0.0")),
             "{report}"
@@ -805,9 +813,9 @@ mod tests {
             sha_hex(&fake_binary(VERSION)),
         );
         let api = format!("{base}/latest");
-        let report = run(&api, LINUX, &exe, true).unwrap();
+        let (report, _) = run(&api, LINUX, &exe, true).unwrap();
         assert_eq!(report, format!("cairn {VERSION} is up to date"));
-        let report = run(&api, LINUX, &exe, false).unwrap();
+        let (report, _) = run(&api, LINUX, &exe, false).unwrap();
         assert!(report.contains("already the latest release"), "{report}");
         assert_eq!(fs::read(&exe).unwrap(), b"old");
 
@@ -817,7 +825,8 @@ mod tests {
             fake_binary("0.0.1"),
             sha_hex(&fake_binary("0.0.1")),
         );
-        let report = run(&format!("{base}/latest"), LINUX, &exe, false).unwrap();
+        let (report, installed) = run(&format!("{base}/latest"), LINUX, &exe, false).unwrap();
+        assert_eq!(installed, current());
         assert!(report.contains("newer than the latest release"), "{report}");
         let _ = fs::remove_dir_all(&dir);
     }

@@ -49,15 +49,19 @@ export function FirstRun({ checkedIn, captured, total, gaveUp }: Props) {
           </li>
           <li className="flex flex-col gap-2">
             <Status done={checkedIn}>Create a device token and run the setup command</Status>
-            <div className="flex flex-wrap items-center gap-2 pl-6">
-              <Button nativeButton={false} render={<Link href="/settings?tab=devices&create=1" />}>
-                Create device token
-              </Button>
-              <span className="text-sm text-muted-foreground">Then run this on the machine where your agent runs.</span>
-            </div>
-            <div className="pl-6">
-              <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
-            </div>
+            {!checkedIn && (
+              <>
+                <div className="flex flex-wrap items-center gap-2 pl-6">
+                  <Button nativeButton={false} render={<Link href="/settings?tab=devices&create=1" />}>
+                    Create device token
+                  </Button>
+                  <span className="text-sm text-muted-foreground">Then run this on the machine where your agent runs.</span>
+                </div>
+                <div className="pl-6">
+                  <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
+                </div>
+              </>
+            )}
           </li>
           <li className="flex flex-col gap-2">
             <Status done={captured}>Start an agent session</Status>

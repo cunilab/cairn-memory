@@ -11,6 +11,17 @@ fn in_project(project_id: &str) -> WorkContext {
     }
 }
 
+async fn current_embedding_hash(store: &cairn_store::Store, id: &str) -> String {
+    store
+        .embed_items(&[id.to_owned()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .source_hash
+}
+
 #[tokio::test]
 async fn save_get_and_dedupe_on_identity() {
     let Some(db) = TestDb::new().await else {
@@ -100,8 +111,8 @@ async fn save_get_and_dedupe_on_identity() {
             .await
             .unwrap()
             .expires_at
-            .is_some(),
-        "notes expire"
+            .is_none(),
+        "notes do not expire"
     );
     assert!(
         db.store
@@ -178,7 +189,11 @@ async fn forget_blanks_the_row_and_a_resave_is_409() {
     let work = WorkContext::default();
     let saved = db.store.save(&me, rule("Forget me"), &work).await.unwrap();
     db.store
-        .upsert_embedding(&saved.id, "h", &unit(0))
+        .upsert_embedding(
+            &saved.id,
+            &current_embedding_hash(&db.store, &saved.id).await,
+            &unit(0),
+        )
         .await
         .unwrap();
     db.store.forget(&me, &saved.id).await.unwrap();
@@ -194,10 +209,10 @@ async fn forget_blanks_the_row_and_a_resave_is_409() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(
-        (title.as_str(), status.as_str(), embeddings, entities),
-        ("", "forgotten", 0, 0)
-    );
+    assert_eq!(status.as_str(), "forgotten");
+    assert!(!title.is_empty(), "forget keeps the title");
+    assert_eq!(embeddings, 1, "forget keeps the embedding");
+    assert_eq!(entities, 0);
 
     let error = db
         .store
@@ -375,10 +390,15 @@ async fn visibility_matrix() {
     .unwrap();
     assert_eq!(
         visible_titles(store, &owner).await,
-        ["global rule", "private rule", "project rule"],
-        "expired rows are hidden"
+        [
+            "expiring note",
+            "global rule",
+            "private rule",
+            "project rule"
+        ],
+        "an old expires_at does not hide the row"
     );
-    assert!(store.get(&owner, &expiring.id).await.is_err());
+    assert!(store.get(&owner, &expiring.id).await.is_ok());
 
     // Links never reveal a memory the reader cannot see.
     let mut pointer = rule("member note");
@@ -677,14 +697,11 @@ async fn saving_an_expired_note_again_makes_it_live() {
         .execute(db.store.pool())
         .await
         .unwrap();
-    assert!(matches!(
-        db.store.get(&me, &first.id).await,
-        Err(StoreError::NotFound(_))
-    ));
+    assert!(db.store.get(&me, &first.id).await.is_ok());
     let again = db.store.save(&me, note, &work).await.unwrap();
-    assert!(!again.deduplicated, "a new life, not a hidden duplicate");
-    let memory = db.store.get(&me, &again.id).await.expect("live again");
-    assert!(memory.expires_at.unwrap() > cairn_core::id::now_seconds());
+    assert!(again.deduplicated, "the same note stays one row");
+    let memory = db.store.get(&me, &again.id).await.expect("still readable");
+    assert!(memory.expires_at.unwrap() < cairn_core::id::now_seconds());
     assert_eq!(
         db.store
             .list(&me, &ListFilter::default())
@@ -822,5 +839,106 @@ async fn a_malformed_cursor_is_a_validation_error() {
             "{cursor}: {result:?}"
         );
     }
+    db.finish().await;
+}
+
+fn alias_input(title: &str, aliases: serde_json::Value) -> cairn_core::memory::SaveInput {
+    serde_json::from_value(serde_json::json!({
+        "kind": "fact",
+        "title": title,
+        "summary": "A summary long enough to pass the quality rule.",
+        "reason": "because the test needs one",
+        "aliases": aliases,
+    }))
+    .expect("aliases field")
+}
+
+/// Six aliases, or one of 121 characters, is rejected. Five valid ones are stored as agent rows.
+/// A supersede does not copy the old memory's aliases.
+#[tokio::test]
+async fn alias_limits() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let six = alias_input(
+        "Six aliases rejected",
+        serde_json::json!(["a", "b", "c", "d", "e", "f"]),
+    );
+    let err = db.store.save(&me, six, &work).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Validation(ref m) if m.contains("aliases")),
+        "{err}"
+    );
+    let long = alias_input("Long alias rejected", serde_json::json!(["x".repeat(121)]));
+    let err = db.store.save(&me, long, &work).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Validation(ref m) if m.contains("alias")),
+        "{err}"
+    );
+    let empty = alias_input("Empty alias rejected", serde_json::json!([""]));
+    let err = db.store.save(&me, empty, &work).await.unwrap_err();
+    assert!(matches!(err, StoreError::Validation(_)), "{err}");
+
+    let aliases = vec![
+        "one way to ask".to_owned(),
+        "two way to ask".to_owned(),
+        "three way to ask".to_owned(),
+        "four way to ask".to_owned(),
+        "y".repeat(120),
+    ];
+    let saved = db
+        .store
+        .save(
+            &me,
+            alias_input("Five aliases stored", serde_json::json!(aliases)),
+            &work,
+        )
+        .await
+        .unwrap();
+    let rows: Vec<(i16, String, String)> = sqlx::query_as(
+        "SELECT ord, source, text FROM memory_aliases WHERE memory_id = $1 ORDER BY ord",
+    )
+    .bind(&saved.id)
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 5);
+    assert!(rows.iter().all(|(_, source, _)| source == "agent"));
+    assert_eq!(
+        rows.iter().map(|(ord, _, _)| *ord).collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4]
+    );
+    assert_eq!(rows[4].2.chars().count(), 120);
+
+    let newer = db
+        .store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Replacement without aliases",
+                "summary": "A new memory that does not copy the old aliases.",
+                "reason": "because the test needs one",
+                "supersedes": saved.id,
+            })),
+            &work,
+        )
+        .await
+        .unwrap();
+    let copied: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+            .bind(&newer.id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(copied, 0, "a supersede copies nothing");
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+        .bind(&saved.id)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 5);
     db.finish().await;
 }

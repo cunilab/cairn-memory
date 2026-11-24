@@ -4,7 +4,9 @@ mod account;
 mod admin;
 mod capture;
 mod device;
+mod fixes;
 mod health;
+mod instructions;
 mod memory;
 mod project;
 mod retrieve;
@@ -39,12 +41,35 @@ pub fn router() -> Router<AppState> {
             post(account::change_password),
         )
         // device
+        .route("/cairn-memory/device/fixes", get(device::fixes))
+        .route("/cairn-memory/device/fixes/{id}", post(device::finish_fix))
         .route("/cairn-memory/devices", get(device::list))
         .route("/cairn-memory/devices/register", post(device::register))
         .route("/cairn-memory/devices/revoke", post(device::revoke))
         .route("/cairn-memory/devices/rotate", post(device::rotate))
+        // agent instructions
+        .route(
+            "/cairn-memory/agent-instructions",
+            get(instructions::global).post(instructions::set_global),
+        )
+        .route(
+            "/cairn-memory/projects/{project_id}/agent-instructions",
+            get(instructions::project).post(instructions::set_project),
+        )
         // admin
         .route("/cairn-memory/admin/jobs", get(admin::jobs))
+        .route("/cairn-memory/admin/fixes", get(fixes::list))
+        .route("/cairn-memory/admin/fixes/count", get(fixes::count))
+        .route("/cairn-memory/admin/fixes/{id}", get(fixes::detail))
+        .route("/cairn-memory/admin/fixes/{id}/apply", post(fixes::apply))
+        .route("/cairn-memory/admin/fixes/{id}/ignore", post(fixes::ignore))
+        .route("/cairn-memory/admin/fixes/{id}/copied", post(fixes::copied))
+        .route("/cairn-memory/admin/fixes/{id}/done", post(fixes::done))
+        .route("/cairn-memory/admin/searches", get(fixes::searches))
+        .route(
+            "/cairn-memory/admin/memories/{id}/rewrite",
+            post(fixes::rewrite),
+        )
         .route("/cairn-memory/stats", get(stats::stats))
         .route("/cairn-memory/stats/attention", get(stats::attention))
         // project
@@ -71,11 +96,16 @@ pub fn router() -> Router<AppState> {
             get(project::branches),
         )
         .route(
+            "/cairn-memory/projects/{project_id}/sessions",
+            get(project::sessions),
+        )
+        .route(
             "/cairn-memory/projects/{project_id}/conflicts",
             get(project::conflicts),
         )
         // capture
         .route("/cairn-memory/observe", post(capture::observe))
+        .route("/cairn-memory/session/lookup", post(capture::lookup))
         .route("/cairn-memory/session/end", post(capture::end))
         .route(
             "/cairn-memory/session/checkpoint",

@@ -6,6 +6,8 @@ pub mod capture;
 pub mod consolidate;
 pub mod device;
 pub mod embed;
+pub mod fixes;
+pub mod instructions;
 pub mod jobs;
 pub mod link;
 pub mod memory;
@@ -44,6 +46,42 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0005_console",
         include_str!("../../../migrations/0005_console.sql"),
+    ),
+    (
+        "0006_agent_instructions",
+        include_str!("../../../migrations/0006_agent_instructions.sql"),
+    ),
+    (
+        "0007_memory_rank",
+        include_str!("../../../migrations/0007_memory_rank.sql"),
+    ),
+    (
+        "0008_proof_count",
+        include_str!("../../../migrations/0008_proof_count.sql"),
+    ),
+    (
+        "0009_memory_aliases",
+        include_str!("../../../migrations/0009_memory_aliases.sql"),
+    ),
+    (
+        "0010_session_outcome",
+        include_str!("../../../migrations/0010_session_outcome.sql"),
+    ),
+    (
+        "0011_fixes",
+        include_str!("../../../migrations/0011_fixes.sql"),
+    ),
+    (
+        "0012_always_active",
+        include_str!("../../../migrations/0012_always_active.sql"),
+    ),
+    (
+        "0013_link_origin_system",
+        include_str!("../../../migrations/0013_link_origin_system.sql"),
+    ),
+    (
+        "0014_memory_owner_project_created",
+        include_str!("../../../migrations/0014_memory_owner_project_created.sql"),
     ),
 ];
 

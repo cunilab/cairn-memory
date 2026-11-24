@@ -13,7 +13,7 @@ path = "src/bin/cairn.rs"
 cairn-core = { path = "../core" }
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 

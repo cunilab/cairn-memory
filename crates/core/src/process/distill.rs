@@ -10,15 +10,17 @@ use serde_json::{Map, Value, json};
 
 const MAX_TYPED_NOTES: usize = 64;
 const MAX_GOTCHAS: usize = 3;
-const HANDOFF_FILES_MAX: usize = 20;
+pub const HANDOFF_FILES_MAX: usize = 20;
 /// Normalised commands starting with one of these are "the test command" (D3).
-const TEST_COMMANDS: [&str; 11] = [
+const TEST_COMMANDS: [&str; 13] = [
     "cargo test",
     "cargo nextest",
     "npm test",
     "npm run test",
     "pnpm test",
     "yarn test",
+    "bun test",
+    "bunx vitest",
     "pytest",
     "python -m pytest",
     "go test",
@@ -34,12 +36,15 @@ pub struct Note {
 }
 
 /// Rule-based output of one session: typed notes from `Decision:`-style lines, a fail-then-fix
-/// gotcha, a test-command fact, and a handoff. All are plain `SaveInput`s built to pass the same
-/// validation and quality rules as an agent's save.
+/// gotcha, a test-command fact, a handoff, and one session digest when files changed. All are
+/// plain `SaveInput`s built to pass the same validation and quality rules as an agent's save.
 #[derive(Clone, Debug, Default)]
 pub struct Distilled {
     pub notes: Vec<Note>,
     pub handoff: Option<SaveInput>,
+    /// One note for the session when it changed files. `None` when it did not.
+    pub digest: Option<SaveInput>,
+    pub why_none: Vec<&'static str>,
 }
 
 /// One handoff per (owner, project-or-repository, branch, worktree): the id is derived, so a
@@ -73,9 +78,38 @@ pub fn distill(observations: &[Observation]) -> Distilled {
     notes.extend(test_fact(observations));
     // System saves skip the agent quality check, so what would fail it is not worth keeping.
     notes.retain(|n| passes_quality(&n.input));
+    let why_none = if notes.is_empty() {
+        let mut reasons = Vec::new();
+        if !observations.iter().any(|o| o.kind == CaptureKind::Edit) {
+            reasons.push("no_edits");
+        }
+        if !text.iter().any(|o| has_typed_line(&o.content)) {
+            reasons.push("no_typed_lines");
+        }
+        if !observations
+            .iter()
+            .any(|o| o.kind == CaptureKind::Command && is_test_command(command_text(o)))
+        {
+            reasons.push("no_test_runs");
+        }
+        if gotchas(observations, &failures).is_empty() {
+            reasons.push("no_fixed_failures");
+        }
+        if observations
+            .iter()
+            .any(|o| o.context.origin.as_deref() == Some("automation"))
+        {
+            reasons.push("automated");
+        }
+        reasons
+    } else {
+        Vec::new()
+    };
     Distilled {
         notes,
         handoff: handoff(observations, &failures),
+        digest: digest(observations),
+        why_none,
     }
 }
 
@@ -207,7 +241,8 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                 evidence,
                 supersedes: None,
                 contradicts: None,
-                scope: Some(Scope::Personal),
+                scope: None,
+                aliases: Vec::new(),
             },
             files,
         });
@@ -215,15 +250,105 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
     notes
 }
 
+/// Whether a shell command is a recognised test command (D3).
+pub fn is_test_command(command: &str) -> bool {
+    let command = normalize_command(command);
+    TEST_COMMANDS
+        .iter()
+        .any(|t| command == *t || command.strip_prefix(t).is_some_and(|r| r.starts_with(' ')))
+}
+
+/// Whether a text has a `Decision:`-style line (any typed label with a value), the lines the
+/// distiller turns into notes.
+pub fn has_typed_line(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim().split_once(':').is_some_and(|(label, value)| {
+            typed_kind(&label.trim().to_ascii_lowercase()).is_some() && !value.trim().is_empty()
+        })
+    })
+}
+
+const CORRECTION_PREFIXES: &[&str] = &[
+    "no,",
+    "no ",
+    "don't ",
+    "do not ",
+    "never ",
+    "always ",
+    "stop ",
+    "please don't ",
+    "please never ",
+    "please always ",
+    "wrong",
+    "that's wrong",
+    "i told you",
+];
+
+/// Ordinary replies that share a correction prefix. Matched at the start of the line only.
+const ORDINARY_PHRASES: &[&str] = &[
+    "no problem",
+    "no worries",
+    "don't worry",
+    "never mind",
+    "nevermind",
+    "stop here",
+];
+
+/// A correction starts with one of [`CORRECTION_PREFIXES`] (lower-case, start of the line).
+/// `wrong` must end the word, so `wrongly` does not count. An ordinary reply does not either.
+pub fn is_correction(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    if ordinary_phrase(&lower) {
+        return false;
+    }
+    CORRECTION_PREFIXES
+        .iter()
+        .any(|prefix| prefix_matches(&lower, prefix))
+}
+
+fn ordinary_phrase(lower: &str) -> bool {
+    ORDINARY_PHRASES.iter().any(|phrase| {
+        let Some(rest) = lower.strip_prefix(phrase) else {
+            return false;
+        };
+        rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphanumeric())
+    })
+}
+
+/// `wrong` / `that's wrong` match only when `wrong` is the whole word.
+fn prefix_matches(lower: &str, prefix: &str) -> bool {
+    let Some(rest) = lower.strip_prefix(prefix) else {
+        return false;
+    };
+    if prefix.ends_with("wrong") {
+        return rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphabetic());
+    }
+    true
+}
+
+/// The first correction line in a prompt. Fenced code and boilerplate lines are skipped.
+pub fn first_correction(text: &str) -> Option<String> {
+    let mut fenced = false;
+    for raw in text.lines() {
+        let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || line.is_empty() || is_boilerplate(&line) {
+            continue;
+        }
+        if is_correction(&line) {
+            return Some(line);
+        }
+    }
+    None
+}
+
 /// D3: the first passing test command of the session.
 fn test_fact(observations: &[Observation]) -> Option<Note> {
     let passed = observations.iter().find(|o| {
-        o.kind == CaptureKind::Command && o.ok == Some(true) && {
-            let command = normalize_command(command_text(o));
-            TEST_COMMANDS.iter().any(|t| {
-                command == *t || command.strip_prefix(t).is_some_and(|r| r.starts_with(' '))
-            })
-        }
+        o.kind == CaptureKind::Command && o.ok == Some(true) && is_test_command(command_text(o))
     })?;
     let command = normalize_command(command_text(passed));
     Some(Note {
@@ -242,9 +367,111 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
             evidence: vec![passed.event_id.clone()],
             supersedes: None,
             contradicts: None,
-            scope: Some(Scope::Personal),
+            scope: None,
+            aliases: Vec::new(),
         },
         files: Vec::new(),
+    })
+}
+
+/// One searchable note for a session that changed files: the paths, and the last result of each
+/// recognised test command. Prompt text stays out.
+fn digest(observations: &[Observation]) -> Option<SaveInput> {
+    let mut files = Vec::new();
+    for observation in observations {
+        if observation.kind != CaptureKind::Edit {
+            continue;
+        }
+        for file in &observation.context.files {
+            let file = file.trim();
+            if !file.is_empty() && !files.iter().any(|seen| seen == file) {
+                files.push(file.to_owned());
+            }
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut results: Vec<(String, bool)> = Vec::new();
+    for observation in observations {
+        if observation.kind != CaptureKind::Command {
+            continue;
+        }
+        let Some(ok) = observation.ok else {
+            continue;
+        };
+        if !is_test_command(command_text(observation)) {
+            continue;
+        }
+        let key = key_of(observation);
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(slot) = results.iter_mut().find(|(name, _)| name == &key) {
+            slot.1 = ok;
+        } else {
+            results.push((key, ok));
+        }
+    }
+    let listed = if files.len() > 6 {
+        format!(
+            "{}, +{} more",
+            files
+                .iter()
+                .take(6)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            files.len() - 6
+        )
+    } else {
+        files.join(", ")
+    };
+    let tests = results
+        .iter()
+        .take(3)
+        .map(|(command, ok)| format!("{command} {}", if *ok { "pass" } else { "fail" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last = observations.last()?;
+    let place = last
+        .context
+        .branch
+        .clone()
+        .or_else(|| {
+            last.context.repository.as_deref().map(|repository| {
+                basename(repository.strip_prefix("local:").unwrap_or(repository)).to_owned()
+            })
+        })
+        .unwrap_or_else(|| "workspace".to_owned());
+    let mut evidence = Vec::new();
+    for file in &files {
+        push_unique(&mut evidence, file);
+    }
+    for (command, _) in results.iter().take(3) {
+        push_unique(&mut evidence, command);
+    }
+    Some(SaveInput {
+        kind: Kind::Note,
+        title: clip(
+            &format!("Session {} on {place}", date(last.captured_at)),
+            TITLE_MAX,
+        ),
+        summary: clip(
+            &if tests.is_empty() {
+                format!("Changed {listed}.")
+            } else {
+                format!("Changed {listed}. Tests: {tests}.")
+            },
+            SUMMARY_MAX,
+        ),
+        reason: "Derived from the captures of one session.".to_owned(),
+        fields: None,
+        evidence,
+        supersedes: None,
+        contradicts: None,
+        scope: None,
+        aliases: Vec::new(),
     })
 }
 
@@ -277,19 +504,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
             }
             let lower = line.to_ascii_lowercase();
             let mut used = false;
-            if has_marker(
-                &lower,
-                &[
-                    "next step",
-                    "next:",
-                    "follow up",
-                    "follow-up",
-                    "should ",
-                    "need to ",
-                    "todo",
-                    "remaining",
-                ],
-            ) {
+            if is_next_step(&line) {
                 used |= push_unique(&mut next_steps, &line);
             }
             if has_marker(
@@ -334,6 +549,12 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
     if !edited && next_steps.is_empty() && open.is_empty() {
         return None;
     }
+    let outside = observations
+        .iter()
+        .filter(|observation| observation.kind == CaptureKind::Edit)
+        .map(|observation| observation.context.outside_files)
+        .max()
+        .unwrap_or(0);
     let place = last
         .context
         .branch
@@ -349,12 +570,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         kind: Kind::Handoff,
         title: clip(&format!("Handoff: {place}"), TITLE_MAX),
         summary: clip(
-            &format!(
-                "{} files edited; {} open items; last activity {}.",
-                files.len(),
-                open.len(),
-                date(last.captured_at)
-            ),
+            &handoff_summary(files.len(), outside, open.len(), &date(last.captured_at)),
             SUMMARY_MAX,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
@@ -363,6 +579,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         supersedes: None,
         contradicts: None,
         scope: Some(Scope::Personal),
+        aliases: Vec::new(),
     })
 }
 
@@ -505,7 +722,8 @@ impl Draft {
             evidence: vec![self.event_id],
             supersedes: None,
             contradicts: None,
-            scope: Some(Scope::Personal),
+            scope: None,
+            aliases: Vec::new(),
         };
         (input, self.files)
     }
@@ -526,6 +744,25 @@ fn is_boilerplate(line: &str) -> bool {
 
 fn has_marker(lower: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| lower.contains(marker))
+}
+
+/// `next:` or `todo:` at the start of the line, after an optional `- ` or `* `.
+fn is_next_step(line: &str) -> bool {
+    let line = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line);
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("next:") || lower.starts_with("todo:")
+}
+
+fn handoff_summary(files: usize, outside: u32, open: usize, when: &str) -> String {
+    let edited = if outside > 0 {
+        format!("{files} files edited ({outside} outside the project)")
+    } else {
+        format!("{files} files edited")
+    };
+    format!("{edited}; {open} open items; last activity {when}.")
 }
 
 fn push_unique(list: &mut Vec<String>, value: &str) -> bool {
@@ -627,8 +864,82 @@ mod tests {
             "qdrant"
         );
         assert_eq!(decision.evidence, vec!["e1".to_owned()]);
-        assert_eq!(decision.scope, Some(Scope::Personal));
+        assert_eq!(decision.scope, None);
         assert!(d.notes[1].input.reason.starts_with("Distilled"));
+    }
+
+    #[test]
+    fn test_commands_and_typed_lines_are_recognised() {
+        for yes in [
+            "cargo test --workspace",
+            "bun test",
+            "bunx vitest run",
+            "pnpm test",
+            "npm test",
+            "yarn test",
+        ] {
+            assert!(is_test_command(yes), "{yes}");
+        }
+        for no in [
+            "bun install",
+            "bunx prettier .",
+            "npm install",
+            "cargo build",
+            "testing",
+        ] {
+            assert!(!is_test_command(no), "{no}");
+        }
+        assert!(has_typed_line("some prose\n  Decision: use pgvector"));
+        assert!(has_typed_line("gotcha: lock timeouts"));
+        assert!(!has_typed_line("Decision:\nprose, no value"));
+        assert!(!has_typed_line("Note: not a typed label"));
+    }
+
+    #[test]
+    fn correction_patterns() {
+        for yes in [
+            "No, never use npm here",
+            "always run bun test first",
+            "don't touch the migrations",
+        ] {
+            assert!(is_correction(yes), "{yes}");
+        }
+        for no in [
+            "can you always-on the logs?",
+            "I never saw this error before?",
+            "Decision: use bun",
+            "no problem",
+            "no worries",
+            "don't worry",
+            "never mind",
+            "nevermind",
+            "stop here",
+            "wrongly blamed the database",
+        ] {
+            assert!(!is_correction(no), "{no}");
+        }
+        let fenced = "```\nnever use npm\n```\n# never do this\n";
+        assert_eq!(
+            first_correction(fenced),
+            None,
+            "fences and headings are not corrections"
+        );
+        let after = "```sh\ndon't touch the migrations\n```\nalways run bun test first\n";
+        assert_eq!(
+            first_correction(after).as_deref(),
+            Some("always run bun test first")
+        );
+        let tilde = "~~~\nno, never use npm\n~~~\n";
+        assert_eq!(
+            first_correction(tilde),
+            None,
+            "tilde fences are not corrections"
+        );
+        let tilde_after = "~~~sh\ndon't touch the migrations\n~~~\nalways run bun test first\n";
+        assert_eq!(
+            first_correction(tilde_after).as_deref(),
+            Some("always run bun test first")
+        );
     }
 
     #[test]
@@ -768,6 +1079,31 @@ mod tests {
     }
 
     #[test]
+    fn next_steps_need_explicit_marker() {
+        let vague = distill(&[prompt(
+            "p1",
+            "we should maybe adjust the roadmap, need to think",
+        )]);
+        let steps = vague
+            .handoff
+            .and_then(|handoff| handoff.fields)
+            .map(|fields| fields["next_steps"].clone())
+            .unwrap_or(json!([]));
+        assert_eq!(steps, json!([]));
+
+        let marked = distill(&[prompt("p2", "next: wire the web report")]);
+        assert_eq!(
+            marked.handoff.expect("next").fields.unwrap()["next_steps"],
+            json!(["next: wire the web report"])
+        );
+        let todo = distill(&[prompt("p3", "TODO: fix flaky test")]);
+        assert_eq!(
+            todo.handoff.expect("todo").fields.unwrap()["next_steps"],
+            json!(["TODO: fix flaky test"])
+        );
+    }
+
+    #[test]
     fn handoff_ignores_pasted_commands_headings_and_code() {
         let brief = "# Blocked, and the coordinator must act before you can continue:\n\
             orca orchestration send --from term_1 --subject \"Blocked: x\" --task-id t\n\
@@ -890,5 +1226,96 @@ mod tests {
         for input in inputs {
             quality(input);
         }
+    }
+
+    #[test]
+    fn digest_lists_files_and_test_results() {
+        let prompt_text = "zephyr-quilt: do not copy this prompt into the digest";
+        let d = distill(&[
+            prompt("p1", prompt_text),
+            fail(
+                "c1",
+                "cargo test --workspace",
+                "error[E0308]: mismatched types in billing",
+            ),
+            edit("e1", "src/ui/LedControls.tsx"),
+            edit("e2", "src/panel/removed.tsx"),
+            pass("c2", "cargo test"),
+            pass("c3", "cargo build"),
+        ]);
+        let digest = d.digest.expect("digest");
+        assert_eq!(digest.kind, Kind::Note);
+        assert_eq!(digest.title, "Session 2026-09-21 on feat/x");
+        assert_eq!(
+            digest.summary,
+            "Changed src/ui/LedControls.tsx, src/panel/removed.tsx. Tests: cargo test pass."
+        );
+        assert!(!digest.summary.contains("zephyr-quilt"), "{digest:?}");
+        assert!(!digest.summary.contains("mismatched"), "{digest:?}");
+        assert!(!digest.summary.contains("cargo build"), "{digest:?}");
+        assert!(!digest.summary.contains("fail"), "{digest:?}");
+        assert_eq!(digest.reason, "Derived from the captures of one session.");
+        assert_eq!(
+            digest.evidence,
+            [
+                "src/ui/LedControls.tsx",
+                "src/panel/removed.tsx",
+                "cargo test",
+            ]
+        );
+        let mut many = vec![pass("t1", "cargo test")];
+        for index in 0..8 {
+            many.push(edit(&format!("m{index}"), &format!("f{index}.rs")));
+        }
+        let summary = distill(&many).digest.expect("long digest").summary;
+        assert_eq!(
+            summary,
+            "Changed f0.rs, f1.rs, f2.rs, f3.rs, f4.rs, f5.rs, +2 more. Tests: cargo test pass."
+        );
+        assert!(!summary.contains("zephyr-quilt"));
+    }
+
+    #[test]
+    fn digest_omits_tests_when_there_are_none() {
+        let summary = distill(&[edit("e1", "src/a.rs")])
+            .digest
+            .expect("digest")
+            .summary;
+        assert_eq!(summary, "Changed src/a.rs.");
+        assert!(!summary.contains("Tests:"), "{summary}");
+    }
+
+    #[test]
+    fn no_digest_without_changed_files() {
+        assert!(
+            distill(&[prompt("p1", "TODO: later"), pass("c1", "cargo test")])
+                .digest
+                .is_none()
+        );
+        assert!(
+            distill(&[fail("c1", "cargo test", "boom boom boom boom")])
+                .digest
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn why_none_codes() {
+        let chat_only = distill(&[prompt("p1", "hello"), prompt("p2", "what should we do?")]);
+        assert_eq!(chat_only.notes.len(), 0);
+        assert!(chat_only.why_none.contains(&"no_edits"));
+        assert!(chat_only.why_none.contains(&"no_typed_lines"));
+        assert!(chat_only.why_none.contains(&"no_test_runs"));
+        assert!(chat_only.why_none.contains(&"no_fixed_failures"));
+
+        // If edits are present, no_edits is absent
+        let with_edit = distill(&[edit("e1", "src/lib.rs")]);
+        assert!(!with_edit.why_none.contains(&"no_edits"));
+
+        // If an automated session has no notes, it reports automated
+        let mut auto = prompt("p3", "hello from subagent");
+        auto.context.origin = Some("automation".into());
+        let automated = distill(&[auto]);
+        assert!(automated.why_none.contains(&"automated"));
     }
 }

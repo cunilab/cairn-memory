@@ -1,13 +1,31 @@
 //! What a hook may put into the model's context, and the budget that bounds it (C5).
 
 use super::event::truncate;
+use cairn_core::instructions::MAX_INSTRUCTION_BYTES;
 use serde_json::{Value, json};
 
 /// The server caps the brief at the same number; a longer one is dropped, never cut.
 pub const BRIEF_MAX_BYTES: usize = 1200;
 pub const TOPIC_MAX_BYTES: usize = 300;
-/// With the brief this is at most 1,200 + 4 x 300 bytes in one context, under the 2,500 B budget.
+/// With the brief and its 200-byte nudge this is at most 1,200 + 200 + 4 x 300 bytes in one context.
 pub const TOPICS_PER_SESSION: u8 = 4;
+/// Server lookups one session may make for topic notes, found or not. A path is asked once, but a
+/// session that opens hundreds of files with no notes would otherwise make one request each.
+pub const TOPIC_LOOKUPS_PER_SESSION: u8 = 16;
+
+/// The server's text for a field (`reply["instructions"][key]`) when it is usable: not empty, and
+/// cut to the stored limit on a character boundary; else the built-in default. A stop text of
+/// exactly `off` is no text, which disables the ask; an empty text still means the default.
+pub fn server_text(reply: &Value, key: &str, default: &str) -> String {
+    let text = reply["instructions"][key].as_str().map(str::trim);
+    if key == "stop_nudge" && text == Some("off") {
+        return String::new();
+    }
+    text.filter(|text| !text.is_empty()).map_or_else(
+        || default.to_owned(),
+        |text| truncate(text, MAX_INSTRUCTION_BYTES).to_owned(),
+    )
+}
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -44,8 +62,11 @@ pub fn card(card: &str) -> String {
     truncate(&one_line(card), TOPIC_MAX_BYTES).to_owned()
 }
 
-/// The host's context-injection reply.
+/// The host's reply: context to inject, or for `Stop` a block whose reason is the next turn.
 pub fn output(event: &str, text: &str) -> Value {
+    if event == "Stop" {
+        return json!({"decision": "block", "reason": text});
+    }
     json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
 }
 
@@ -68,6 +89,39 @@ mod tests {
         assert!(text.len() <= TOPIC_MAX_BYTES, "{}", text.len());
         assert_eq!(topic("a.rs", &[]), "");
         assert_eq!(topic(&"p".repeat(400), &[note("t", "s")]), "");
+    }
+
+    #[test]
+    fn server_text_is_used_when_present_else_the_default() {
+        let reply =
+            json!({"instructions": {"a": "  Use Cairn.  ", "b": "   ", "c": "é".repeat(400)}});
+        assert_eq!(server_text(&reply, "a", "dflt"), "Use Cairn.");
+        assert_eq!(server_text(&reply, "b", "dflt"), "dflt");
+        assert_eq!(server_text(&reply, "missing", "dflt"), "dflt");
+        assert_eq!(server_text(&json!({}), "a", "dflt"), "dflt");
+        assert_eq!(server_text(&reply, "c", "dflt").len(), 600);
+        assert_eq!(
+            server_text(
+                &json!({"instructions": {"stop_nudge": "  off  "}}),
+                "stop_nudge",
+                "dflt"
+            ),
+            ""
+        );
+        assert_eq!(
+            server_text(&json!({"instructions": {"a": "off"}}), "a", "dflt"),
+            "off"
+        );
+    }
+
+    #[test]
+    fn stop_replies_block_with_the_reason() {
+        let reply = output("Stop", "why");
+        assert_eq!(reply, json!({"decision": "block", "reason": "why"}));
+        assert_eq!(
+            output("SessionStart", "t")["hookSpecificOutput"]["additionalContext"],
+            "t"
+        );
     }
 
     #[test]

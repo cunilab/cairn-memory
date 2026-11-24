@@ -51,8 +51,10 @@ pub struct BranchSummary {
 /// What the project list shows next to each project.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProjectCounts {
-    /// Live project memories (active or stale).
+    /// Live project memories (active or stale), including candidates.
     pub memories: i64,
+    /// Of `memories`, how many are still rank `candidate`.
+    pub candidates: i64,
     pub stale: i64,
     pub members: i64,
     /// The latest memory change or session in the project.
@@ -65,6 +67,30 @@ pub struct ProjectCounts {
 pub struct Conflict {
     pub memory_id: String,
     pub contradicts_id: String,
+}
+
+/// Report of a recent session of a project.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SessionReport {
+    pub session_id: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub started_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub ended_at: Option<i64>,
+    pub branch: Option<String>,
+    pub automated: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub distilled_at: Option<i64>,
+    pub notes_written: Option<i32>,
+    pub digest_written: Option<bool>,
+    pub handoff_outcome: Option<String>,
+    pub why_none: Option<Vec<String>>,
+    pub files_changed: Option<i32>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub captures: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub agent_saves: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -82,20 +108,23 @@ pub(crate) async fn join_member(
     tx: &mut PgConnection,
     person_id: &str,
     project_id: &str,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE project_id = $1)")
             .bind(project_id)
             .fetch_one(&mut *tx)
             .await?;
-    if exists {
+    let inserted = if exists {
         sqlx::query("INSERT INTO project_members (project_id, person_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
             .bind(project_id)
             .bind(person_id)
             .execute(tx)
-            .await?;
-    }
-    Ok(exists)
+            .await?
+            .rows_affected() == 1
+    } else {
+        false
+    };
+    Ok((exists, inserted))
 }
 
 impl Store {
@@ -147,7 +176,7 @@ impl Store {
         };
         if name.is_some_and(|n| n != project.name) {
             return Err(StoreError::Validation(
-                "project name differs from the server; use `cairn init --rename <name>` as the owner".into(),
+                "project name differs from the server; rename it in the web console".into(),
             ));
         }
         tx.commit().await?;
@@ -157,13 +186,14 @@ impl Store {
     /// A committed project id the server does not know (a wiped or rebuilt server): creates the
     /// project with that same id, owned by the caller, so the committed file keeps working for
     /// everyone. An id another caller restored first is simply joined. True when this call created
-    /// it.
+    /// it. Without `confirmed` it is a conflict: the first caller owns the id.
     pub async fn restore_project(
         &self,
         person_id: &str,
         project_id: &str,
         repository: &str,
         name: Option<&str>,
+        confirmed: bool,
     ) -> Result<(Project, bool)> {
         let repository = repository.trim();
         validate_project_text(repository, "repository")?;
@@ -180,6 +210,12 @@ impl Store {
         });
         if !shaped {
             return Err(StoreError::Validation("invalid project id".into()));
+        }
+        // Whoever registers an unknown id first owns it, so the caller must say they know that.
+        if !confirmed {
+            return Err(StoreError::Conflict(format!(
+                "this server does not know project {project_id} (wiped or new server?). Registering it again makes you its owner; if that is intended, run `cairn init --yes`"
+            )));
         }
         let mut tx = self.pool.begin().await?;
         let default_name = default_project_name(repository);
@@ -206,12 +242,23 @@ impl Store {
         Ok((project_from_row(&row)?, created))
     }
 
-    /// Membership through the committed project file. Name, when given, must match the server's.
+    /// Membership through the committed project file; the server name is authoritative.
     pub async fn join_project(
         &self,
         person_id: &str,
         project_id: &str,
         name: Option<&str>,
+    ) -> Result<Project> {
+        self.join_project_from(person_id, project_id, name, None)
+            .await
+    }
+
+    pub async fn join_project_from(
+        &self,
+        person_id: &str,
+        project_id: &str,
+        _name: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<Project> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
@@ -222,12 +269,10 @@ impl Store {
         .await?
         .ok_or_else(|| StoreError::NotFound("project".into()))?;
         let project = project_from_row(&row)?;
-        if name.is_some_and(|n| n.trim() != project.name) {
-            return Err(StoreError::Validation(
-                "project name differs from the server; use `cairn init --rename <name>` as the owner".into(),
-            ));
+        let (_, inserted) = join_member(&mut tx, person_id, project_id).await?;
+        if inserted {
+            crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"init"})).await?;
         }
-        join_member(&mut tx, person_id, project_id).await?;
         tx.commit().await?;
         Ok(project)
     }
@@ -311,6 +356,17 @@ impl Store {
         rows.iter().map(project_from_row).collect()
     }
 
+    /// The current name, visible only to a project member.
+    pub async fn project_name(&self, person_id: &str, project_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT p.name FROM projects p JOIN project_members m ON m.project_id = p.project_id WHERE p.project_id = $1 AND m.person_id = $2",
+        )
+        .bind(project_id)
+        .bind(person_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn is_member(&self, person_id: &str, project_id: &str) -> Result<bool> {
         Ok(sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND person_id = $2)",
@@ -367,7 +423,7 @@ impl Store {
                FROM memories m
               WHERE m.project_id = $1 AND m.repo_branch IS NOT NULL
                 AND (m.scope = 'project' OR (m.kind = 'handoff' AND m.owner_id = $2))
-                AND m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+                AND m.status <> 'forgotten'
               GROUP BY m.repo_branch ORDER BY max(m.updated_at) DESC, m.repo_branch",
             epoch!("m.updated_at")
         ))
@@ -423,9 +479,12 @@ impl Store {
         let rows = sqlx::query(
             "SELECT p.project_id,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
-                        AND m.status IN ('active','stale') AND (m.expires_at IS NULL OR m.expires_at > now())) AS memories,
+                        AND m.status IN ('active','stale')) AS memories,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
-                        AND m.status = 'stale' AND (m.expires_at IS NULL OR m.expires_at > now())) AS stale,
+                        AND m.rank = 'candidate'
+                        AND m.status IN ('active','stale')) AS candidates,
+                    (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
+                        AND m.status = 'stale') AS stale,
                     (SELECT count(*) FROM project_members pm WHERE pm.project_id = p.project_id) AS members,
                     EXTRACT(EPOCH FROM greatest(
                         (SELECT max(m.updated_at) FROM memories m
@@ -442,6 +501,7 @@ impl Store {
                     r.try_get("project_id")?,
                     ProjectCounts {
                         memories: r.try_get("memories")?,
+                        candidates: r.try_get("candidates")?,
                         stale: r.try_get("stale")?,
                         members: r.try_get("members")?,
                         last_activity_at: r.try_get("last_activity_at")?,
@@ -467,8 +527,6 @@ impl Store {
                 AND s.project_id = $1 AND t.project_id = $1
                 AND s.scope = 'project' AND t.scope = 'project'
                 AND s.status IN ('active','stale') AND t.status IN ('active','stale')
-                AND (s.expires_at IS NULL OR s.expires_at > now())
-                AND (t.expires_at IS NULL OR t.expires_at > now())
               ORDER BY l.created_at, l.source_id",
         )
         .bind(project_id)
@@ -479,6 +537,71 @@ impl Store {
                 Ok(Conflict {
                     memory_id: r.try_get("source_id")?,
                     contradicts_id: r.try_get("target_id")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Recent sessions of the project (newest first, up to 50) within `days`.
+    pub async fn project_sessions(
+        &self,
+        person_id: &str,
+        project_id: &str,
+        days: i32,
+    ) -> Result<Vec<SessionReport>> {
+        self.require_member(person_id, project_id).await?;
+        let rows = sqlx::query(
+            "SELECT s.session_id,
+                    EXTRACT(EPOCH FROM s.started_at)::bigint AS started_at,
+                    EXTRACT(EPOCH FROM s.ended_at)::bigint AS ended_at,
+                    (s.context->>'branch') AS branch,
+                    (COALESCE(s.context->>'origin', '') = 'automation') AS automated,
+                    EXTRACT(EPOCH FROM s.distilled_at)::bigint AS distilled_at,
+                    s.notes_written,
+                    s.digest_written,
+                    s.handoff_outcome,
+                    s.why_none,
+                    s.files_changed,
+                    (SELECT count(*) FROM observations o
+                      WHERE o.person_id = s.person_id AND o.session_id = s.session_id
+                        AND o.expires_at > now()) AS captures,
+                    (SELECT count(*) FROM memories m
+                      WHERE m.owner_id = s.person_id
+                        AND m.project_id = s.project_id
+                        AND m.origin = 'agent'
+                        AND m.created_at >= s.started_at
+                        AND m.created_at <= COALESCE(
+                            s.ended_at,
+                            (SELECT max(o.captured_at) FROM observations o WHERE o.person_id = s.person_id AND o.session_id = s.session_id),
+                            s.started_at
+                        )) AS agent_saves
+               FROM sessions s
+              WHERE s.project_id = $1
+                AND s.started_at >= now() - make_interval(days => $2)
+              ORDER BY s.started_at DESC, s.session_id DESC
+              LIMIT 50",
+        )
+        .bind(project_id)
+        .bind(days)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter()
+            .map(|r| {
+                Ok(SessionReport {
+                    session_id: r.try_get("session_id")?,
+                    started_at: r.try_get("started_at")?,
+                    ended_at: r.try_get("ended_at")?,
+                    branch: r.try_get("branch")?,
+                    automated: r.try_get("automated")?,
+                    distilled_at: r.try_get("distilled_at")?,
+                    notes_written: r.try_get("notes_written")?,
+                    digest_written: r.try_get("digest_written")?,
+                    handoff_outcome: r.try_get("handoff_outcome")?,
+                    why_none: r.try_get("why_none")?,
+                    files_changed: r.try_get("files_changed")?,
+                    captures: r.try_get("captures")?,
+                    agent_saves: r.try_get("agent_saves")?,
                 })
             })
             .collect()

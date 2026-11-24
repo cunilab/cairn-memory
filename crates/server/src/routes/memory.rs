@@ -62,7 +62,7 @@ pub struct ListQuery {
     kind: Option<Kind>,
     #[serde(rename = "projectId", alias = "project_id")]
     project_id: Option<String>,
-    /// A status, or `expired` for memories past `expires_at` that are not yet swept away.
+    /// A memory status. `forgotten` is listed only for an admin.
     status: Option<String>,
     branch: Option<String>,
     /// A web search over title, summary, reason and fields.
@@ -75,20 +75,49 @@ pub struct ImportQuery {
     dry_run: Option<String>,
 }
 
-/// The body is a `SaveInput`, plus an optional `context` (the client's git and project state).
-/// Unknown keys are a 400, so an agent learns about a misnamed field instead of losing it.
+/// One note in a batch save. `id` is absent when the note was not stored.
+#[derive(Serialize)]
+struct ItemResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ItemResults {
+    results: Vec<ItemResult>,
+}
+
+/// The body is a `SaveInput`, plus an optional `context` (the client's git and project state),
+/// or `items` (at most 3 of those notes and no top-level note fields). Unknown keys are a 400,
+/// so an agent learns about a misnamed field instead of losing it.
 pub async fn remember(
     State(state): State<AppState>,
     caller: Caller,
     Json(mut body): Json<Value>,
-) -> ApiResult<Receipt> {
+) -> Result<Response, ApiError> {
     let account = caller.account;
-    let context = match body.as_object_mut().and_then(|o| o.remove("context")) {
+    let context = match body
+        .as_object_mut()
+        .and_then(|object| object.remove("context"))
+    {
         None | Some(Value::Null) => WorkContext::default(),
         Some(value) => {
             serde_json::from_value(value).map_err(|e| ApiError::invalid(format!("context: {e}")))?
         }
     };
+    if body.get("items").is_some() {
+        return save_items(
+            &state,
+            &account.person_id,
+            caller.device_id.as_deref(),
+            &context,
+            body,
+        )
+        .await;
+    }
     let input: SaveInput =
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let saved = state
@@ -104,7 +133,81 @@ pub async fn remember(
         id: saved.id,
         status: saved.status,
         deduplicated: saved.deduplicated,
-    }))
+    })
+    .into_response())
+}
+
+/// Each item is saved on its own. A bad item is one `error` result; the others still save.
+async fn save_items(
+    state: &AppState,
+    person_id: &str,
+    device_id: Option<&str>,
+    context: &WorkContext,
+    body: Value,
+) -> Result<Response, ApiError> {
+    let mut object = match body {
+        Value::Object(object) => object,
+        _ => return Err(ApiError::invalid("body must be an object")),
+    };
+    let items = object
+        .remove("items")
+        .ok_or_else(|| ApiError::invalid("items must be a list of at most 3 notes"))?;
+    if !object.is_empty() {
+        let names = object.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(ApiError::invalid(format!(
+            "items cannot be combined with {names}"
+        )));
+    }
+    let Some(items) = items.as_array() else {
+        return Err(ApiError::invalid("items must be a list of at most 3 notes"));
+    };
+    if items.len() > 3 {
+        return Err(ApiError::invalid("items: at most 3 notes"));
+    }
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        results.push(save_item(state, person_id, device_id, context, item).await);
+    }
+    Ok(Json(ItemResults { results }).into_response())
+}
+
+async fn save_item(
+    state: &AppState,
+    person_id: &str,
+    device_id: Option<&str>,
+    context: &WorkContext,
+    item: &Value,
+) -> ItemResult {
+    let input = match serde_json::from_value::<SaveInput>(item.clone()) {
+        Ok(input) => input,
+        Err(error) => {
+            return ItemResult {
+                id: None,
+                status: "error",
+                error: Some(error.to_string()),
+            };
+        }
+    };
+    match state
+        .store
+        .save_from(person_id, input, context, device_id)
+        .await
+    {
+        Ok(saved) => ItemResult {
+            id: Some(saved.id),
+            status: if saved.deduplicated {
+                "duplicate"
+            } else {
+                "saved"
+            },
+            error: None,
+        },
+        Err(error) => ItemResult {
+            id: None,
+            status: "error",
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 /// Newest update first. The next cursor, when there is one, is in the `x-next-cursor` header.
@@ -113,13 +216,10 @@ pub async fn list(
     Agent(account): Agent,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    let (expired, statuses) = match query.status.as_deref() {
-        None | Some("") => (false, Vec::new()),
-        Some("expired") => (true, Vec::new()),
-        Some(other) => (
-            false,
-            vec![other.parse::<Status>().map_err(ApiError::invalid)?],
-        ),
+    let status = query.status.as_deref().filter(|status| !status.is_empty());
+    let statuses = match status {
+        None => Vec::new(),
+        Some(status) => vec![status.parse::<Status>().map_err(ApiError::invalid)?],
     };
     let page = state
         .store
@@ -134,7 +234,7 @@ pub async fn list(
                 cursor: query.cursor,
                 branch: query.branch.filter(|b| !b.is_empty()),
                 q: query.q,
-                expired,
+                see_forgotten: account.is_admin && status == Some("forgotten"),
             },
         )
         .await?;
@@ -236,7 +336,7 @@ pub async fn feedback(
     Ok(Json(reply))
 }
 
-/// Forget: the owner's memory is blanked and stays forgotten.
+/// Forget: the owner's memory stays, hidden from search, with its text kept.
 pub async fn forget(
     State(state): State<AppState>,
     caller: Caller,

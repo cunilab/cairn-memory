@@ -5,6 +5,7 @@
 mod common;
 
 use cairn_client::Config;
+use cairn_core::instructions::DEFAULT_SESSION_INSTRUCTION;
 use common::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -18,6 +19,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const TOKEN: &str = "cdt_testtoken1234567890";
+const NO_PROJECT_HINT: &str =
+    "Cairn: no project here (personal memory). Run cairn init to share with a project.";
+
+fn brief_and_hint() -> String {
+    format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}\n{NO_PROJECT_HINT}")
+}
 
 #[derive(Clone)]
 struct Req {
@@ -329,7 +336,7 @@ fn start_injects_brief_only_and_end_after_work() {
         "SessionStart",
         &env.payload("s1", json!({"source": "startup"})),
     );
-    assert_eq!(injected(&start).as_deref(), Some("BRIEF"));
+    assert_eq!(injected(&start).as_deref(), Some(brief_and_hint().as_str()));
     let value: Value = serde_json::from_slice(&start.stdout).unwrap();
     assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
     let brief = &server.to("brief")[0];
@@ -398,7 +405,12 @@ fn session_start_reports_repo_state() {
         "SessionStart",
         &env.payload("s1", json!({"source": "startup"})),
     );
-    assert_eq!(injected(&start).as_deref(), Some("BRIEF"));
+    // A project file is there, so the brief carries the instruction line.
+    assert!(
+        injected(&start)
+            .unwrap()
+            .starts_with(&format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}"))
+    );
     let posts = server.to("repo-state");
     assert_eq!(
         posts.len(),
@@ -572,9 +584,13 @@ fn http_401_names_config_keeps_stdout_valid() {
     let env = Env::new("hook-401", &server.url);
     let start = env.run("SessionStart", &env.payload("s1", json!({})));
     let prompt = env.prompt("s1", "hello");
+    assert_eq!(
+        injected(&start).as_deref(),
+        Some(DEFAULT_SESSION_INSTRUCTION)
+    );
+    assert!(prompt.stdout.is_empty());
     for output in [&start, &prompt] {
         let text = stderr(output);
-        assert!(output.stdout.is_empty());
         assert!(text.contains(env.config().to_str().unwrap()), "{text}");
         assert!(text.contains("cairn setup"), "{text}");
         assert!(!text.contains(TOKEN), "{text}");
@@ -642,7 +658,10 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
         "SessionStart",
         &env.payload("s1", json!({"source": "compact"})),
     );
-    assert_eq!(injected(&compact).as_deref(), Some("BRIEF"));
+    assert_eq!(
+        injected(&compact).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
     env.run("PreCompact", &env.payload("s1", json!({})));
     assert!(server.to("checkpoint").is_empty(), "no work yet");
     env.bash("s1", "make build", json!({"exit_code": 0}));
@@ -653,7 +672,10 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
         "SessionStart",
         &env.payload("s1", json!({"source": "compact"})),
     );
-    assert_eq!(injected(&again).as_deref(), Some("BRIEF"));
+    assert_eq!(
+        injected(&again).as_deref(),
+        Some(format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}").as_str())
+    );
 }
 
 #[test]
@@ -691,6 +713,24 @@ fn topic_note_once_per_path_within_caps() {
         server.to("topic")[0].body["context"]["repository"],
         "local:repo"
     );
+}
+
+#[test]
+fn topic_lookups_per_session_are_capped_even_when_no_path_has_notes() {
+    let server = fake();
+    let env = Env::new("hook-topic-lookups", &server.url);
+    for i in 0..24 {
+        env.edit("s1", &format!("src/quiet{i}.rs"), "x");
+    }
+    assert_eq!(
+        server.to("topic").len(),
+        16,
+        "no request past the lookup cap"
+    );
+    // Known paths never ask again, and another session has its own budget.
+    env.edit("s1", "src/quiet0.rs", "y");
+    env.edit("s2", "src/quiet0.rs", "y");
+    assert_eq!(server.to("topic").len(), 17);
 }
 
 #[test]
@@ -860,9 +900,16 @@ fn payload_maps_to_typed_capture() {
             .collect();
         keys.sort_unstable();
         assert!(
-            keys.iter().all(
-                |k| ["content", "context", "event_id", "kind", "ok", "session_id"].contains(k)
-            ),
+            keys.iter().all(|k| [
+                "content",
+                "context",
+                "event_id",
+                "kind",
+                "ok",
+                "outbox_depth",
+                "session_id"
+            ]
+            .contains(k)),
             "{keys:?}"
         );
         assert!(body["event_id"].as_str().unwrap().starts_with("hk_"));
@@ -1543,7 +1590,7 @@ fn a_hanging_git_does_not_hold_the_hook() {
     );
     assert_eq!(
         injected(&output).as_deref(),
-        Some("BRIEF"),
+        Some(brief_and_hint().as_str()),
         "{}",
         stderr(&output)
     );
@@ -1555,6 +1602,110 @@ fn a_hanging_git_does_not_hold_the_hook() {
 }
 
 // ---- real server ------------------------------------------------------------------------
+
+#[test]
+fn real_hook_switches_context_within_one_session_without_sharing_notes() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-scopes");
+    let personal = temp_dir("hook-scopes-personal");
+    let a = checkout("hook-scopes-project-a");
+    let b = checkout("hook-scopes-project-b");
+    for (dir, remote) in [
+        (&a, "https://example.test/a.git"),
+        (&b, "https://example.test/b.git"),
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["remote", "add", "origin", remote])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    for dir in [&a, &b] {
+        assert!(team.owner.run_in(dir, &["init"]).status.success());
+    }
+    let run = |dir: &std::path::Path, event, session, extra: Value| {
+        let mut payload = json!({"session_id":session,"cwd":dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+    };
+    for (session, first, last) in [
+        ("personal-to-a", &personal, &a),
+        ("a-to-b", &a, &b),
+        ("b-to-personal", &b, &personal),
+    ] {
+        for (i, dir) in [first, last].into_iter().enumerate() {
+            let extra = json!({"prompt":format!("Decision: keep {session} turn {i} isolated\nReason: capture scope follows checkout")});
+            run(dir, "UserPromptSubmit", session, extra.clone());
+            run(dir, "UserPromptSubmit", session, extra);
+        }
+        run(last, "SessionEnd", session, json!({}));
+        assert_eq!(server.distill(&team.owner_id, session), 2);
+    }
+    let list = team
+        .owner_web
+        .get("/cairn-memory/memories?kind=decision")
+        .unwrap();
+    let decisions = list.as_array().unwrap();
+    assert_eq!(decisions.len(), 6);
+    assert!(
+        decisions
+            .iter()
+            .all(|row| row["scope"] == "personal" && row["project_id"].is_null())
+    );
+}
+
+#[test]
+fn digest_uses_last_command_execution_even_when_its_failure_is_identical() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-test-order");
+    let dir = checkout("hook-test-order");
+    let run = |event, extra: Value| {
+        let mut payload = json!({"session_id":"test-order","cwd":dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+    };
+    run("PostToolUse", edit_call("src/a.rs", "fn foo() {}", "edit"));
+    for (id, code) in [("first", 1), ("second", 0), ("third", 1), ("third", 1)] {
+        run(
+            "PostToolUse",
+            json!({"tool_name":"Bash", "tool_input":{"command":"cargo test"},
+             "tool_use_id":id, "tool_response":{"exit_code":code}}),
+        );
+    }
+    run("SessionEnd", json!({}));
+    server.distill(&team.owner_id, "test-order");
+    let list = team
+        .owner_web
+        .get("/cairn-memory/memories?kind=note")
+        .unwrap();
+    let digest = &list[0]["summary"].as_str().unwrap();
+    assert!(digest.contains("cargo test fail"), "{digest}");
+}
 
 #[test]
 fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
@@ -1610,4 +1761,674 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     );
     run("Stop", base(json!({})));
     run("SessionEnd", base(json!({})));
+}
+
+// ---- Agent nudges: the start line and the one-time Stop reminder ----
+
+fn with_project(env: &Env) {
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    std::fs::write(
+        env.repo.join(".cairn/project.json"),
+        r#"{"project_id":"prj_demo"}"#,
+    )
+    .unwrap();
+}
+
+/// The reason of a Stop reply that makes the agent continue; `None` for no output.
+fn blocked(output: &Output) -> Option<String> {
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&text).expect("stdout is one JSON object");
+    assert_eq!(value["decision"], "block", "{text}");
+    Some(value["reason"].as_str().unwrap().to_owned())
+}
+
+fn start(env: &Env, session: &str) -> Option<String> {
+    injected(&env.run(
+        "SessionStart",
+        &env.payload(session, json!({"source": "startup"})),
+    ))
+}
+
+fn stop(env: &Env, session: &str, extra: Value) -> Output {
+    env.run("Stop", &env.payload(session, extra))
+}
+
+#[test]
+fn start_appends_one_instruction_line_only_in_an_initialised_repo() {
+    let server = fake();
+    let env = Env::new("hook-nudge-start", &server.url);
+    assert_eq!(
+        start(&env, "s0").as_deref(),
+        Some(brief_and_hint().as_str()),
+        "no project file: the instruction precedes the hint"
+    );
+    with_project(&env);
+    let text = start(&env, "s1").unwrap();
+    let (brief, line) = text.split_once('\n').unwrap();
+    assert_eq!(brief, "BRIEF");
+    assert!(line == DEFAULT_SESSION_INSTRUCTION, "{line}");
+    assert!(
+        line.contains("memory_search") && line.contains("memory_save"),
+        "{line}"
+    );
+    assert!(line.len() <= 280, "{}", line.len());
+}
+
+#[test]
+fn start_gives_the_line_even_when_the_project_has_no_brief_yet() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"brief": ""}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-empty", &server.url);
+    with_project(&env);
+    let text = start(&env, "s1").unwrap();
+    assert!(text == DEFAULT_SESSION_INSTRUCTION, "{text}");
+}
+
+#[test]
+fn work_without_a_save_blocks_the_first_stop_once() {
+    let server = fake();
+    let env = Env::new("hook-nudge-block", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    env.edit("s1", "src/b.rs", "y");
+    env.edit("s1", "src/a.rs", "z");
+    let reason = blocked(&stop(&env, "s1", json!({}))).expect("a reminder");
+    assert!(
+        reason.starts_with("You changed 2 file(s). If you learned something reusable"),
+        "{reason}"
+    );
+    assert!(reason.contains("memory_save"), "{reason}");
+    assert!(
+        blocked(&stop(&env, "s1", json!({}))).is_none(),
+        "once per session"
+    );
+    assert!(blocked(&stop(&env, "s1", json!({"stop_hook_active": true}))).is_none());
+}
+
+#[test]
+fn no_reminder_while_the_host_is_already_continuing() {
+    let server = fake();
+    let env = Env::new("hook-nudge-active", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "s1", json!({"stop_hook_active": true}))).is_none());
+}
+
+#[test]
+fn a_save_by_tool_or_cli_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("hook-nudge-saved", &server.url);
+    with_project(&env);
+    env.edit("mcp", "src/a.rs", "x");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "mcp",
+            json!({"tool_name": "mcp__cairn__memory_save", "tool_input": {"kind": "gotcha"},
+                   "tool_response": {"id":"mem_example", "status": "active", "deduplicated":false}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "mcp", json!({}))).is_none());
+    env.edit("cli", "src/a.rs", "x");
+    env.bash(
+        "cli",
+        "/usr/local/bin/cairn save -",
+        json!({"exit_code": 0}),
+    );
+    assert!(blocked(&stop(&env, "cli", json!({}))).is_none());
+    // Another server's `memory_save` is not a Cairn save.
+    env.edit("other", "src/a.rs", "x");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "other",
+            json!({"tool_name": "mcp__agentmemory__memory_save", "tool_input": {}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "other", json!({}))).is_some());
+}
+
+#[test]
+fn failed_saves_still_ask_on_stop_and_are_not_reported_as_saves() {
+    let server = fake();
+    let env = Env::new("hook-nudge-failed", &server.url);
+    with_project(&env);
+    for (session, response) in [
+        (
+            "mcp-error",
+            json!({"isError":true,"content":[{"type":"text","text":"rejected"}]}),
+        ),
+        (
+            "batch-error",
+            json!({"content":[{"type":"text","text":"{\"results\":[{\"status\":\"error\"}]}"}]}),
+        ),
+        ("mcp-empty", json!({"results":[]})),
+        (
+            "shell-error",
+            json!({"exit_code":1,"stderr":"save rejected"}),
+        ),
+    ] {
+        env.edit(session, "src/a.rs", "x");
+        if session == "shell-error" {
+            env.bash(session, "cairn save -", response);
+        } else {
+            env.run("PostToolUse", &env.payload(session, json!({"tool_name":"mcp__cairn__memory_save","tool_input":{},"tool_response":response})));
+        }
+        assert!(
+            blocked(&stop(&env, session, json!({}))).is_some(),
+            "{session}"
+        );
+        env.run("SessionEnd", &env.payload(session, json!({})));
+        let ends = server.to("end");
+        assert_eq!(ends.last().unwrap().body["nudge_asked"], true);
+        assert_eq!(ends.last().unwrap().body["nudge_saved"], false);
+    }
+}
+
+#[test]
+fn only_real_work_is_reminded() {
+    let server = fake();
+    let env = Env::new("hook-nudge-work", &server.url);
+    with_project(&env);
+    // Questions and reading: nothing.
+    env.prompt("qa", "how does the queue work?");
+    env.run(
+        "PostToolUse",
+        &env.payload(
+            "qa",
+            json!({"tool_name": "Read", "tool_input": {"file_path": "src/a.rs"}}),
+        ),
+    );
+    assert!(blocked(&stop(&env, "qa", json!({}))).is_none());
+    // A recognised test command with no edit does not ask, and a plain install does not.
+    env.bash("inst", "bun install", json!({"exit_code": 0}));
+    assert!(blocked(&stop(&env, "inst", json!({}))).is_none());
+    env.bash("test", "bun test", json!({"exit_code": 0}));
+    assert!(
+        blocked(&stop(&env, "test", json!({}))).is_none(),
+        "a test command with no edits does not ask"
+    );
+    // A Decision-style line without an edit does not ask.
+    let said =
+        json!({"last_assistant_message": "Done.\nDecision: use pgvector\nReason: one database"});
+    assert!(blocked(&stop(&env, "decide", said)).is_none());
+    assert!(
+        blocked(&stop(
+            &env,
+            "plain",
+            json!({"last_assistant_message": "All done."})
+        ))
+        .is_none()
+    );
+}
+
+#[test]
+fn no_project_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("hook-nudge-noproject", &server.url);
+    env.edit("s1", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "s1", json!({}))).is_none());
+}
+
+#[test]
+fn opencode_is_never_blocked() {
+    let server = fake();
+    let env = Env::new("hook-nudge-opencode", &server.url);
+    with_project(&env);
+    env.edit("s1", "src/a.rs", "x");
+    let out = env.run_with(
+        "Stop",
+        &env.payload("s1", json!({})),
+        &["--agent", "opencode"],
+        &[],
+    );
+    assert!(blocked(&out).is_none());
+    // The flag was not spent: a host that can continue still gets its reminder.
+    assert!(blocked(&stop(&env, "s1", json!({}))).is_some());
+}
+
+#[test]
+fn the_reminders_can_be_turned_off_by_config_or_environment() {
+    let server = fake();
+    let env = Env::new("hook-nudge-off", &server.url);
+    with_project(&env);
+    // Environment.
+    env.edit("e", "src/a.rs", "x");
+    let off = [("CAIRN_NO_NUDGE", "1")];
+    let started = env.run_with("SessionStart", &env.payload("e", json!({})), &[], &off);
+    assert_eq!(injected(&started).as_deref(), Some("BRIEF"));
+    let stopped = env.run_with("Stop", &env.payload("e", json!({})), &[], &off);
+    assert!(blocked(&stopped).is_none());
+    // Config file.
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(env.config()).unwrap()).unwrap();
+    config["nudge"] = json!(false);
+    std::fs::write(env.config(), config.to_string()).unwrap();
+    assert_eq!(start(&env, "c").as_deref(), Some("BRIEF"));
+    env.edit("c", "src/a.rs", "x");
+    assert!(blocked(&stop(&env, "c", json!({}))).is_none());
+    // And on again once the key is gone.
+    config.as_object_mut().unwrap().remove("nudge");
+    std::fs::write(env.config(), config.to_string()).unwrap();
+    assert!(
+        start(&env, "d")
+            .unwrap()
+            .contains(DEFAULT_SESSION_INSTRUCTION)
+    );
+}
+
+#[test]
+fn server_instruction_texts_are_used_and_the_stop_text_needs_no_request() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            let reply = json!({"brief": "BRIEF", "instructions": {
+                "session_instruction": "  Project rule: search Cairn first.  ",
+                "stop_nudge": "Save to Cairn! Files: {files}. {files} again."}});
+            return (200, reply.to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-server", &server.url);
+    with_project(&env);
+    assert_eq!(
+        start(&env, "s1").as_deref(),
+        Some("BRIEF\nProject rule: search Cairn first.")
+    );
+    env.edit("s1", "src/a.rs", "x");
+    env.edit("s1", "src/b.rs", "y");
+    let before = server.requests().len();
+    let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
+    assert_eq!(reason, "Save to Cairn! Files: 2. 2 again.");
+    let asked: Vec<String> = server.requests()[before..]
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    assert!(
+        asked.iter().all(|p| !p.ends_with("/brief")),
+        "no request for the text at Stop: {asked:?}"
+    );
+}
+
+#[test]
+fn empty_or_missing_server_text_and_an_unreachable_server_use_the_built_in_text() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"brief": "BRIEF", "instructions": {"session_instruction": "", "stop_nudge": "  "}}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("hook-nudge-empty-text", &server.url);
+    with_project(&env);
+    assert!(
+        start(&env, "s1")
+            .unwrap()
+            .contains(DEFAULT_SESSION_INSTRUCTION)
+    );
+    env.edit("s1", "src/a.rs", "x");
+    let reason = blocked(&stop(&env, "s1", json!({}))).unwrap();
+    assert!(
+        reason.starts_with("You changed 1 file(s). If you learned something reusable"),
+        "{reason}"
+    );
+    // The server is not there at session start: the built-in line goes in alone.
+    let env = Env::new("hook-nudge-down", "http://127.0.0.1:9");
+    with_project(&env);
+    let text = start(&env, "d1").unwrap();
+    assert!(text == DEFAULT_SESSION_INSTRUCTION, "{text}");
+    env.edit("d1", "src/a.rs", "x");
+    let reason = blocked(&stop(&env, "d1", json!({}))).unwrap();
+    assert!(reason.starts_with("You changed 1 file(s)"), "{reason}");
+}
+
+#[test]
+fn no_project_start_prints_hint_once() {
+    let server = fake();
+    let env = Env::new("hook-no-project-hint", &server.url);
+    let first = start(&env, "s1").unwrap();
+    assert_eq!(first, brief_and_hint());
+    assert!(NO_PROJECT_HINT.len() <= 90, "{}", NO_PROJECT_HINT.len());
+    assert_eq!(
+        start(&env, "s1").as_deref(),
+        Some(format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}").as_str()),
+        "the hint is once per session"
+    );
+    let off = [("CAIRN_NO_NUDGE", "1")];
+    let quiet = Env::new("hook-no-project-off", &server.url);
+    let started = quiet.run_with("SessionStart", &quiet.payload("e", json!({})), &[], &off);
+    assert_eq!(injected(&started).as_deref(), Some("BRIEF"));
+    let down = Env::new("hook-no-project-down", "http://127.0.0.1:9");
+    assert_eq!(
+        start(&down, "d").as_deref(),
+        Some(DEFAULT_SESSION_INSTRUCTION)
+    );
+}
+
+#[test]
+fn init_without_git_writes_local_repository() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "init-nogit");
+    let dir = temp_dir("init-nogit").join("widget");
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = team.owner.run_in(&dir, &["init", "Widget"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(".cairn/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["repository"], "local:widget");
+    assert!(file["project_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        said.contains(
+            "Keep .cairn/project.json with this folder; copies of the folder attach to the same project."
+        ),
+        "{said}"
+    );
+}
+
+#[test]
+fn init_suggests_commit_and_never_commits() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "init-git");
+    let dir = checkout("init-suggest");
+    let output = team.owner.run_in(&dir, &["init", "Demo"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(
+        said.contains(
+            "Commit .cairn/project.json so clones and worktrees attach: git add .cairn/project.json && git commit"
+        ),
+        "{said}"
+    );
+    let porcelain = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        porcelain.contains("?? .cairn/"),
+        "the file is untracked, not staged: {porcelain}"
+    );
+    assert!(
+        porcelain.lines().all(|line| line.starts_with("??")),
+        "nothing is staged: {porcelain}"
+    );
+    let commits = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-list", "--count", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(commits.trim(), "1", "init does not commit");
+}
+
+#[test]
+fn lookup_recorded_silently() {
+    let server = fake();
+    let env = Env::new("lookup-recorded", &server.url);
+    let secret = format!("ghp_{}", "a".repeat(40));
+    let output = env.run(
+        "PostToolUse",
+        &env.payload(
+            "lookup",
+            json!({
+                "tool_name": "mcp__cairn__memory_search",
+                "tool_input": {"query": format!("{secret} {}", "x".repeat(160))},
+                "tool_response": {"results": [{"id": "mem_1"}]}
+            }),
+        ),
+    );
+    assert!(output.stdout.is_empty());
+    let requests = server.to("lookup");
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0].body;
+    assert_eq!(body["kind"], "search");
+    assert_eq!(body["result_ids"], json!(["mem_1"]));
+    assert_eq!(body["hit"], true);
+    let query = body["query"].as_str().unwrap();
+    assert!(query.chars().count() <= 120 && !query.contains(&secret));
+    for (response, expected) in [
+        (
+            json!({"content":[{"type":"text","text":"{\"memories\":[{\"id\":\"m\"}]}"}]}),
+            json!(true),
+        ),
+        (json!({"memories":[]}), json!(false)),
+        (json!({"isError":true}), Value::Null),
+    ] {
+        let output = env.run("PostToolUse", &env.payload("lookup", json!({
+            "tool_name":"mcp__cairn__memory_get", "tool_input":{"ids":["m"]}, "tool_response":response
+        })));
+        assert!(output.stdout.is_empty());
+        let requests = server.to("lookup");
+        let body = &requests.last().unwrap().body;
+        assert_eq!(body["query"], Value::Null);
+        assert_eq!(body["result_ids"], json!(["m"]));
+        assert_eq!(body["hit"], expected);
+    }
+}
+
+#[test]
+fn nudge_flags_sent() {
+    let server = fake();
+    let env = Env::new("nudge-flags", &server.url);
+    env.edit("normal", "src/a.rs", "x");
+    env.run("SessionEnd", &env.payload("normal", json!({})));
+    let ends = server.to("end");
+    assert_eq!(ends[0].body["nudge_asked"], false);
+    assert_eq!(ends[0].body["nudge_saved"], false);
+    env.run_with(
+        "PostToolUse",
+        &env.payload("auto", edit_call("src/b.rs", "x", "e")),
+        &[],
+        &[("CAIRN_SESSION_ORIGIN", "automation")],
+    );
+    env.run_with(
+        "SessionEnd",
+        &env.payload("auto", json!({})),
+        &[],
+        &[("CAIRN_SESSION_ORIGIN", "automation")],
+    );
+    assert!(server.to("end")[1].body.get("nudge_asked").is_none());
+}
+
+#[test]
+fn failure_health_arrives_on_next_observe() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/lookup") {
+            (401, "{}".into())
+        } else {
+            default_reply(request)
+        }
+    });
+    let env = Env::new("lookup-health", &server.url);
+    let output = env.run("PostToolUse", &env.payload("s", json!({
+        "tool_name":"mcp__cairn__memory_search", "tool_input":{"query":"test"}, "tool_response":{"results":[]}
+    })));
+    assert!(output.stdout.is_empty());
+    env.prompt("s", "a prompt");
+    let seen = server.observed();
+    assert_eq!(seen[0]["hook_error_class"], "auth");
+    assert!(seen[0]["hook_error_at"].is_i64());
+    assert_eq!(seen[0]["outbox_depth"], 0);
+    env.prompt("s", "another prompt");
+    assert!(server.observed()[1].get("hook_error_class").is_none());
+}
+
+#[test]
+fn newer_hook_failure_survives_inflight_observe() {
+    let started = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let first = Arc::new(AtomicBool::new(true));
+    let server = fake_with({
+        let (started, release, first) = (started.clone(), release.clone(), first.clone());
+        move |_, request| {
+            if request.path.ends_with("/lookup") {
+                return (401, "{}".into());
+            }
+            if request.path.ends_with("/observe") && first.swap(false, Ordering::SeqCst) {
+                *started.0.lock().unwrap() = true;
+                started.1.notify_one();
+                let ready = release.0.lock().unwrap();
+                drop(release.1.wait_while(ready, |ready| !*ready).unwrap());
+            }
+            default_reply(request)
+        }
+    });
+    let env = Env::new("health-race", &server.url);
+    let lookup = || {
+        env.run("PostToolUse", &env.payload("race", json!({
+        "tool_name":"mcp__cairn__memory_search", "tool_input":{"query":"test"}, "tool_response":{"results":[]}
+    })))
+    };
+    lookup();
+    thread::scope(|scope| {
+        let send = scope.spawn(|| env.prompt("race", "first prompt"));
+        let ready = started.0.lock().unwrap();
+        drop(started.1.wait_while(ready, |ready| !*ready).unwrap());
+        lookup();
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        send.join().unwrap();
+    });
+    env.prompt("race", "second prompt");
+    let seen = server.observed();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1]["hook_error_class"], "auth");
+}
+
+#[test]
+fn replay_409_does_not_record_hook_error() {
+    let server = fake_with(|_, request| {
+        if request.body["event_id"] == "hk_duplicate" {
+            (409, "{}".to_owned())
+        } else {
+            default_reply(request)
+        }
+    });
+    let env = Env::new("hook-replay-409-health", &server.url);
+    write_outbox(
+        &env.outbox(),
+        &server.url,
+        TOKEN,
+        &["hk_duplicate".to_owned()],
+    );
+    env.prompt("s1", "trigger replay");
+    assert!(queued_ids(&env.outbox()).is_empty());
+    env.prompt("s1", "next capture");
+    let observed = server.observed();
+    assert_eq!(observed.len(), 3);
+    assert!(
+        observed[2].get("hook_error_class").is_none(),
+        "{}",
+        observed[2]
+    );
+}
+
+#[test]
+fn renamed_project_notice_appears_once_per_session() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (
+                200,
+                json!({"brief":"BRIEF", "project_id":"proj_test", "project_name":"New"})
+                    .to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("renamed-notice", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    let path = env.repo.join(".cairn/project.json");
+    let original = r#"{"project_id":"proj_test","name":"Old"}"#;
+    std::fs::write(&path, original).unwrap();
+    let first = injected(&env.run("SessionStart", &env.payload("rename", json!({})))).unwrap();
+    assert!(first.contains("Cairn: this project was renamed to \"New\"; run `cairn init` and commit .cairn/project.json."));
+    let second = injected(&env.run("SessionStart", &env.payload("rename", json!({})))).unwrap();
+    assert!(!second.contains("was renamed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    std::fs::write(&path, r#"{"project_id":"proj_test","name":"New"}"#).unwrap();
+    let matching = injected(&env.run("SessionStart", &env.payload("matching", json!({})))).unwrap();
+    assert!(!matching.contains("was renamed"));
+}
+
+#[test]
+fn init_updates_only_the_renamed_project_name() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/init") {
+            return (
+                200,
+                json!({"project_id":"proj_test", "name":"New", "created":false}).to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("init-rename", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    let path = env.repo.join(".cairn/project.json");
+    let original = "{\n \"name\":\"Old\", \"extra\": 3, \"project_id\": \"proj_test\"\n}\n";
+    std::fs::write(&path, original).unwrap();
+    let output = command(&env.home)
+        .current_dir(&env.repo)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(
+        "Project renamed to \"New\" in the web; updated .cairn/project.json — commit it."
+    ));
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        original.replace("\"Old\"", "\"New\"")
+    );
+}
+
+#[test]
+fn rename_notice_marks_a_long_name_as_truncated() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            return (200, json!({"project_id":"proj_test", "project_name":"A very long project name beyond the limit"}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("rename-long", &server.url);
+    std::fs::create_dir_all(env.repo.join(".cairn")).unwrap();
+    std::fs::write(
+        env.repo.join(".cairn/project.json"),
+        r#"{"project_id":"proj_test","name":"Old"}"#,
+    )
+    .unwrap();
+    let text = injected(&env.run("SessionStart", &env.payload("s", json!({})))).unwrap();
+    let notice = text
+        .lines()
+        .find(|line| line.contains("was renamed"))
+        .unwrap();
+    assert!(notice.contains('…'));
+    assert!(notice.len() <= 120, "{notice}");
 }

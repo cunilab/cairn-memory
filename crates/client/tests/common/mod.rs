@@ -78,6 +78,13 @@ impl Server {
             .usage
             .fetched
     }
+
+    pub fn distill(&self, person_id: &str, session: &str) -> usize {
+        self.handle
+            .block_on(self.store.distill_session(person_id, session))
+            .unwrap()
+            .notes
+    }
 }
 
 impl Drop for Server {

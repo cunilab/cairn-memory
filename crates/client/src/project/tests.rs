@@ -114,3 +114,41 @@ fn legacy_files_are_read_and_backfilled_and_broken_files_are_kept() {
     assert_eq!(fs::read_to_string(top.join(FILE)).unwrap(), "broken");
     fs::remove_dir_all(top).unwrap();
 }
+
+#[test]
+fn find_root_walks_up_without_git() {
+    let root = std::env::temp_dir().join(format!("cairn-find-root-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let nested = root.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(find_root(&nested), None, "no project file");
+    fs::create_dir_all(root.join(".cairn")).unwrap();
+    fs::write(
+        root.join(FILE),
+        r#"{"project_id":"project-a","repository":"local:x","name":"X"}"#,
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    assert_eq!(find_root(&nested), Some(root.clone()));
+    assert_eq!(find_root(&root), Some(root.clone()), "cwd itself counts");
+    let sibling = root.join("other");
+    fs::create_dir_all(&sibling).unwrap();
+    assert_eq!(find_root(&sibling), Some(root));
+    let _ = fs::remove_dir_all(
+        std::env::temp_dir().join(format!("cairn-find-root-{}", std::process::id())),
+    );
+}
+
+#[test]
+fn rename_preserves_all_other_bytes() {
+    let top = checkout("rename-bytes", None);
+    fs::create_dir_all(top.join(".cairn")).unwrap();
+    let before = "{\n  \"name\" : \"Old\", \"extra\": {\"name\": \"nested\"},\n  \"project_id\": \"project-a\"\n}\n";
+    fs::write(top.join(FILE), before).unwrap();
+    assert!(write(&top, "project-a", "different", "New \"name\"").unwrap());
+    assert_eq!(
+        fs::read_to_string(top.join(FILE)).unwrap(),
+        before.replacen("\"Old\"", "\"New \\\"name\\\"\"", 1)
+    );
+    fs::remove_dir_all(top).unwrap();
+}

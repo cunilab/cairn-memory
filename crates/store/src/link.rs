@@ -1,4 +1,4 @@
-//! The `link` job (CM-SPEC-008 §4.1): automatic links from shared entities and from a gotcha's
+//! The `link` job (docs/reference/recall.md): automatic links from shared entities and from a gotcha's
 //! fix/cause entities. Independent of the embedding model.
 
 use crate::{Result, Store};
@@ -23,8 +23,7 @@ const AUTO_LINK_CAP: i64 = 8;
 const COHORT: &str = "((o.project_id IS NOT NULL AND o.project_id = $3) OR o.owner_id = $2)
     AND (o.scope <> 'personal' OR o.owner_id = $2)
     AND NOT (o.origin = 'system' AND o.scope = 'global')
-    AND o.status = 'active' AND o.kind <> 'handoff' AND o.memory_id <> $1
-    AND (o.expires_at IS NULL OR o.expires_at > now())";
+    AND o.status = 'active' AND o.kind <> 'handoff' AND o.memory_id <> $1";
 
 /// File, symbol, command and test names of a gotcha's fix and cause text.
 fn fix_names(fields: &Fields) -> Vec<(EntityKind, String)> {

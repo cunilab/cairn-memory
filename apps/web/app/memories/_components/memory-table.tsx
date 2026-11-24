@@ -18,6 +18,8 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn, cairnPage } from "@/lib/cairn";
+import { useAccount } from "@/hooks/use-account";
+import { memoryLabel } from "./memory-label";
 import { onMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { BranchSummary } from "@/lib/generated/BranchSummary";
@@ -30,7 +32,6 @@ const STATUSES: FilterOption[] = [
   { value: "active", label: "Active" },
   { value: "stale", label: "Stale" },
   { value: "superseded", label: "Superseded" },
-  { value: "expired", label: "Expired" },
 ];
 const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
   value: kind,
@@ -43,6 +44,10 @@ export function MemoryTable() {
   const router = useRouter();
   const mobile = useIsMobile();
   const openMemory = useOpenMemory();
+  const account = useAccount();
+  const statuses: FilterOption[] = account?.is_admin
+    ? [...STATUSES, { value: "forgotten", label: "Forgotten" }]
+    : STATUSES;
   const [params, set] = useQueryParams();
   const project = params.get("project") ?? "";
   const kind = params.get("kind") ?? "";
@@ -193,9 +198,33 @@ export function MemoryTable() {
       {
         accessorKey: "status",
         header: "Status",
-        cell: ({ row }) => (
-          <StatusBadge status={row.original.status} cause={row.original.stale_cause} />
-        ),
+        cell: ({ row }) => {
+          const label = memoryLabel({
+            id: row.original.id,
+            status: row.original.status,
+            stale_cause: row.original.stale_cause,
+            wrong: row.original.usage.wrong,
+            links: row.original.links,
+          });
+          return (
+            <div className="flex flex-col items-start gap-1">
+              <StatusBadge status={row.original.status} cause={row.original.stale_cause} />
+              {label ? (
+                label.id ? (
+                  <button
+                    type="button"
+                    className="rounded-sm text-left text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                    onClick={() => openMemory(label.id as string)}
+                  >
+                    {label.text}
+                  </button>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{label.text}</span>
+                )
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         accessorKey: "fetched",
@@ -217,7 +246,7 @@ export function MemoryTable() {
     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
       <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(v) => set({ project: v, branch: null })} />
       <FilterSelect label="Kind" value={kind} allLabel="All kinds" options={KIND_OPTIONS} onChange={(v) => set({ kind: v })} />
-      <FilterSelect label="Status" value={status} allLabel="All statuses" options={STATUSES} onChange={(v) => set({ status: v })} />
+      <FilterSelect label="Status" value={status} allLabel="All statuses" options={statuses} onChange={(v) => set({ status: v })} />
       <FilterSelect label="Branch" value={branch} allLabel={project ? "All branches" : "Choose a project first"} options={branchOptions} disabled={!project} onChange={(v) => set({ branch: v })} />
     </div>
   );

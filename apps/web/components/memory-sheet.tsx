@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
@@ -28,6 +30,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useQueryParams } from "@/hooks/use-query-params";
+import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
@@ -35,6 +38,7 @@ import { announceMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
 import type { MemoryView } from "@/lib/generated/MemoryView";
+import { memoryLabel } from "@/app/memories/_components/memory-label";
 
 const OUT_LABEL: Record<string, string> = {
   relates: "Related",
@@ -120,6 +124,7 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
   return (
     <div className="flex flex-col gap-4 px-4 pb-6">
       <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.summary}</p>
+      {memory.edited_by ? <p className="text-sm text-muted-foreground">Changed by admin</p> : null}
       {memory.reason ? (
         <div>
           <h3 className="text-xs font-medium text-muted-foreground">Why it was saved</h3>
@@ -155,9 +160,7 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
                 ? memory.stale_cause
                 : "Cairn doubts this memory."}
           </p>
-          <p className="text-xs text-muted-foreground">
-            Stale memories that stay unused for 90 days expire on their own.
-          </p>
+
         </Section>
       ) : null}
       <Lineage memory={memory} open={open} />
@@ -231,16 +234,24 @@ type Load = { id: string; memory: MemoryView | null; error: string | null; missi
  */
 export function MemorySheet() {
   const router = useRouter();
+  const account = useAccount();
   const [params, set] = useQueryParams();
   const id = params.get("memory");
   const [loaded, setLoaded] = useState<Load | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState(false);
-  const close = useCallback(() => set({ memory: null }), [set]);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const editing = id !== null && editingId === id;
+  const [title, setTitle] = useState("");
+  const [summary, setSummary] = useState("");
+  const [reason, setReason] = useState("");
+  const [fields, setFields] = useState("");
+  const close = useCallback(() => { setEditingId(null); set({ memory: null }); }, [set]);
   useResetOnHide(() => {
     setLoaded(null);
     setConfirming(false);
+    setEditingId(null);
   });
 
   useEffect(() => {
@@ -294,6 +305,19 @@ export function MemorySheet() {
     }
   }
 
+  async function rewrite() {
+    if (!id) return;
+    setPending(true);
+    try {
+      const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
+      setEditingId(null);
+      announceMemoriesChanged();
+      set({ memory: result.memory_id }, "push");
+      toast.success("Memory rewritten");
+    } catch (cause) { toast.error(cause instanceof Error ? cause.message : "Could not rewrite memory."); }
+    finally { setPending(false); }
+  }
+
   return (
     <>
       <Sheet open={id !== null} onOpenChange={(open) => !open && close()}>
@@ -304,6 +328,27 @@ export function MemorySheet() {
                 <>
                   <KindBadge kind={memory.kind} />
                   <StatusBadge status={memory.status} cause={memory.stale_cause} />
+                  {(() => {
+                    const label = memoryLabel({
+                      id: memory.id,
+                      status: memory.status,
+                      stale_cause: memory.stale_cause,
+                      wrong: memory.usage.wrong,
+                      links: memory.links,
+                    });
+                    if (!label) return null;
+                    return label.id ? (
+                      <button
+                        type="button"
+                        className="rounded-sm text-left text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onClick={() => set({ memory: label.id })}
+                      >
+                        {label.text}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{label.text}</span>
+                    );
+                  })()}
                   <span className="text-xs text-muted-foreground">
                     {memory.project_name ?? words(memory.scope)}
                     {memory.context.branch ? ` · ${memory.context.branch}` : ""}
@@ -319,12 +364,20 @@ export function MemorySheet() {
           {current === null ? <div className="px-4"><LoadingBlock label="Loading memory…" rows={5} /></div> : null}
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
-              <p className="text-sm text-muted-foreground">This memory was forgotten or expired.</p>
+              <p className="text-sm text-muted-foreground">This memory was forgotten.</p>
+              {account?.is_admin && !editing ? <Button variant="outline" onClick={() => { setTitle(""); setSummary(""); setReason(""); setFields(""); setEditingId(id); }}>Rewrite by ID…</Button> : null}
               <Button type="button" variant="outline" onClick={close}>
                 Close
               </Button>
             </div>
           ) : null}
+          {current?.missing && account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
+            <p className="text-sm">Enter a replacement for this memory.</p>
+            <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+            <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+            <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+            <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+          </div> : null}
           {current?.error ? (
             <div className="px-4">
               <ErrorAlert message={current.error} onRetry={() => { setLoaded(null); setAttempt((n) => n + 1); }} />
@@ -333,6 +386,13 @@ export function MemorySheet() {
           {memory ? (
             <>
               <Body memory={memory} open={(next) => set({ memory: next }, "push")} />
+              {account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
+                <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+                <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+                <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+                <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>
+                <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+              </div> : account?.is_admin ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
               {canForget ? (
                 <div className="mt-auto px-4 pb-4">
                   <Button type="button" variant="outline" onClick={() => setConfirming(true)}>

@@ -11,6 +11,8 @@ pub const LIST_MAX_ITEMS: usize = 20;
 pub const LIST_ITEM_MAX: usize = 300;
 pub const FIELDS_MAX_BYTES: usize = 4 * 1024;
 pub const ID_MAX: usize = 128;
+pub const ALIAS_MAX_ITEMS: usize = 5;
+pub const ALIAS_MAX_CHARS: usize = 120;
 
 fn bad<T>(message: impl Into<String>) -> Result<T, Error> {
     Err(Error::Validation(message.into()))
@@ -42,6 +44,8 @@ pub fn validate_save(input: &SaveInput, fields: &Fields, allow_handoff: bool) ->
         ));
     }
     validate_list("evidence", &input.evidence)?;
+    // Agent rows use ords 0..4. A `learned` row (item 15) shares this cap of 5.
+    validate_aliases(&input.aliases)?;
     for (name, id) in [
         ("supersedes", &input.supersedes),
         ("contradicts", &input.contradicts),
@@ -85,6 +89,21 @@ pub fn validate_fields(fields: &Fields) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_aliases(aliases: &[String]) -> Result<(), Error> {
+    if aliases.len() > ALIAS_MAX_ITEMS {
+        return bad(format!("aliases must have at most {ALIAS_MAX_ITEMS} items"));
+    }
+    if aliases
+        .iter()
+        .any(|alias| alias.trim().is_empty() || chars(alias) > ALIAS_MAX_CHARS)
+    {
+        return bad(format!(
+            "each alias must be 1..={ALIAS_MAX_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_list(name: &str, items: &[String]) -> Result<(), Error> {
     if items.len() > LIST_MAX_ITEMS {
         return bad(format!("{name} must have at most {LIST_MAX_ITEMS} items"));
@@ -97,7 +116,7 @@ fn validate_list(name: &str, items: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-/// What an agent's save must carry to be worth keeping (CM-SPEC-008 §5). The first failing rule
+/// What an agent's save must carry to be worth keeping (docs/reference/cli-and-mcp.md). The first failing rule
 /// wins; the message is one line the agent can act on. System saves are built to pass.
 pub fn validate_quality(input: &SaveInput, fields: &Fields) -> Result<(), Error> {
     let quality = |message: &str| Err(Error::Quality(message.to_owned()));

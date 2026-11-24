@@ -1,5 +1,5 @@
 //! `cairn hook <Event> [--agent a] [--config p] [--cairn-managed]`: the capture and injection
-//! hook of every agent host (CM-SPEC-006 §1). The host's event arrives as JSON on stdin; stdout
+//! hook of every agent host (docs/reference/hook.md#events). The host's event arrives as JSON on stdin; stdout
 //! carries only an injection reply. A failure writes one stderr line and still exits 0, so a
 //! hook can never break the host.
 
@@ -12,8 +12,14 @@ mod state;
 
 use crate::{Client, Config, Error, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
-use cairn_core::capture::{WorkContext, redact_work_context};
-use cairn_core::id::now_seconds;
+use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
+use cairn_core::id::{new_id, now_seconds, sha256_hex};
+use cairn_core::instructions::{
+    DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
+};
+use cairn_core::process::distill::{
+    HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
+};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -26,6 +32,42 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
 const DOWN_SECONDS: i64 = 30;
+const NO_PROJECT_HINT: &str =
+    "Cairn: no project here (personal memory). Run cairn init to share with a project.";
+/// Already-dirty paths recorded at SessionStart.
+const BASELINE_MAX: usize = 200;
+
+/// Dirty paths that were clean at SessionStart, then tool edits, capped at `HANDOFF_FILES_MAX`.
+fn changed_paths(state: &SessionState, cwd: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut push = |path: &str| {
+        if !path.is_empty()
+            && files.len() < HANDOFF_FILES_MAX
+            && !files.iter().any(|seen| seen == path)
+        {
+            files.push(path.to_owned());
+        }
+    };
+    let limit = state.baseline_dirty.len() + HANDOFF_FILES_MAX;
+    for path in git::dirty_files(cwd, limit) {
+        if !state.baseline_dirty.iter().any(|seen| seen == &path) {
+            push(&path);
+        }
+    }
+    for path in &state.edited {
+        push(path);
+    }
+    files
+}
+
+/// `cairn save ...` (any path to the binary): a save through the CLI instead of the MCP tool.
+fn is_cairn_save(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let program = words
+        .next()
+        .map(|w| w.rsplit(['/', '\\']).next().unwrap_or(w));
+    matches!(program, Some("cairn" | "cairn.exe")) && words.next() == Some("save")
+}
 
 struct Options {
     event: String,
@@ -156,11 +198,21 @@ struct Hook<'a> {
 impl Hook<'_> {
     /// The text to inject, if the event injects any.
     fn handle(&self) -> Result<Option<String>, String> {
+        self.note_automation();
         match self.event {
             "SessionStart" => Ok(self.start()),
-            "UserPromptSubmit" => self.capture(self.payload.prompt()).map(|()| None),
+            "UserPromptSubmit" => {
+                let prompt = self.payload.prompt();
+                if let Some(capture) = &prompt {
+                    if has_typed_line(&capture.content) {
+                        self.with_state(|s| s.worked_signal = true);
+                    }
+                    self.note_correction(&capture.content);
+                }
+                self.capture(prompt).map(|()| None)
+            }
             "PostToolUse" => self.tool(),
-            "Stop" => {
+            "Stop" | "SubagentStop" => {
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
                 }
@@ -168,15 +220,22 @@ impl Hook<'_> {
                     .with_state(|s| s.dirty.then_some(s.generation))
                     .flatten()
                 {
+                    self.capture_changed_files();
                     self.checkpoint(generation);
                 }
-                Ok(None)
+                // SubagentStop captures like Stop and never asks.
+                if self.event == "SubagentStop" {
+                    Ok(None)
+                } else {
+                    Ok(self.stop_nudge())
+                }
             }
             "PreCompact" => {
                 if let Some(generation) = self
                     .with_state(|s| s.worked.then_some(s.generation))
                     .flatten()
                 {
+                    self.capture_changed_files();
                     self.checkpoint(generation);
                 }
                 Ok(None)
@@ -218,6 +277,11 @@ impl Hook<'_> {
             ClientKind::Hook,
         )
         .post(path, body);
+        if let Err(error) = &result
+            && let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir)
+        {
+            outbox.failure(error);
+        }
         match &result {
             // Only "no answer" (timeout, refused, unreachable); a 5xx answers quickly.
             Err(Error::Request(_)) => {
@@ -259,6 +323,8 @@ impl Hook<'_> {
 
     fn start(&self) -> Option<String> {
         state::sweep(&self.state_dir());
+        let dirty = git::dirty_files(&self.cwd, BASELINE_MAX);
+        self.with_state(|state| state.baseline_dirty = dirty);
         let body = json!({
             "session_id": self.session_id,
             "context": self.work_context(),
@@ -271,24 +337,187 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
-                return None;
+                return self
+                    .config
+                    .nudge()
+                    .then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
             }
         };
         if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
             let _ = self.check.set(check.clone());
         }
         let brief = reply
-            .get("brief")?
-            .as_str()
-            .filter(|brief| !brief.is_empty())?;
-        if brief.len() > inject::BRIEF_MAX_BYTES {
-            eprintln!(
-                "cairn hook: the brief exceeds {} bytes; not injected",
-                inject::BRIEF_MAX_BYTES
-            );
+            .get("brief")
+            .and_then(Value::as_str)
+            .filter(|brief| !brief.is_empty())
+            .filter(|brief| {
+                let fits = brief.len() <= inject::BRIEF_MAX_BYTES;
+                if !fits {
+                    eprintln!(
+                        "cairn hook: the brief exceeds {} bytes; not injected",
+                        inject::BRIEF_MAX_BYTES
+                    );
+                }
+                fits
+            });
+        let resolved = reply
+            .get("project_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        if let Some(id) = resolved.clone() {
+            self.with_state(|s| s.project_id = Some(id));
+        }
+        let line = if !self.config.nudge() {
+            None
+        } else {
+            let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
+            self.with_state(|s| s.stop_nudge = Some(stop));
+            let mut instruction =
+                inject::server_text(&reply, "session_instruction", DEFAULT_SESSION_INSTRUCTION);
+            if resolved.is_none() && !self.file_project() {
+                let first = self
+                    .with_state(|state| {
+                        let first = !state.hinted;
+                        state.hinted = true;
+                        first
+                    })
+                    .unwrap_or(false);
+                if first {
+                    instruction.push('\n');
+                    instruction.push_str(NO_PROJECT_HINT);
+                }
+            }
+            Some(instruction)
+        };
+        let notice = self.top.as_deref()
+            .and_then(|top| crate::project::read_at(top).ok().flatten())
+            .and_then(|file| {
+                let server_name = reply.get("project_name")?.as_str()?;
+                if resolved.as_deref() != Some(file.project_id.as_str()) || file.name.as_deref().is_none_or(|name| name == server_name) {
+                    return None;
+                }
+                let first = self.with_state(|state| {
+                    let first = !state.rename_noticed;
+                    state.rename_noticed = true;
+                    first
+                }).unwrap_or(false);
+                if !first { return None; }
+                // Leave room for the instruction while keeping the notice short.
+                let mut name: String = server_name.chars().filter(|c| !c.is_control()).scan(0, |len, c| {
+                    *len += c.len_utf8();
+                    (*len <= 24).then_some(c)
+                }).collect();
+                if name.len() < server_name.len() { name.push('…'); }
+                Some(format!("Cairn: this project was renamed to {name:?}; run `cairn init` and commit .cairn/project.json."))
+            });
+        let line = match (line, notice) {
+            (Some(line), Some(notice)) => Some(format!("{line}\n{notice}")),
+            (None, Some(notice)) => Some(notice),
+            (line, None) => line,
+        };
+        match (brief, line) {
+            (Some(brief), Some(line)) => Some(format!("{brief}\n{line}")),
+            (Some(brief), None) => Some(brief.to_owned()),
+            (None, line) => line,
+        }
+    }
+
+    /// A readable `.cairn/project.json` at the resolved root.
+    fn file_project(&self) -> bool {
+        self.top
+            .as_deref()
+            .is_some_and(|top| crate::project::project_id_at(top).is_some())
+    }
+
+    /// Reminders are on: not opted out, and a project was resolved from the file or the brief.
+    fn nudging(&self) -> bool {
+        self.config.nudge()
+            && (self.file_project()
+                || self
+                    .with_state(|state| state.project_id.is_some())
+                    .unwrap_or(false))
+    }
+
+    /// `CAIRN_SESSION_ORIGIN=automation` marks the whole session. A subagent payload does not:
+    /// Claude Code sends those events on the parent session id.
+    fn env_automated() -> bool {
+        std::env::var("CAIRN_SESSION_ORIGIN").ok().as_deref() == Some("automation")
+    }
+
+    fn note_automation(&self) {
+        if Self::env_automated() {
+            self.with_state(|state| state.automated = true);
+        }
+    }
+
+    /// Stored only from the env, so a later event still counts after `SessionStart`.
+    fn session_automated(&self) -> bool {
+        Self::env_automated() || self.with_state(|state| state.automated).unwrap_or(false)
+    }
+
+    /// Suppress the ask for this event: env, state stored from the env, or this event's payload.
+    fn automated(&self) -> bool {
+        self.session_automated()
+            || self.payload.text("agent_id").is_some()
+            || self.payload.text("agent_type").is_some()
+            || self.event == "SubagentStop"
+    }
+
+    /// Keeps the first correction line. An automated or subagent session records none.
+    fn note_correction(&self, content: &str) {
+        if self.automated() {
+            return;
+        }
+        let Some(line) = first_correction(content) else {
+            return;
+        };
+        self.with_state(|state| {
+            if state.correction.is_none() {
+                state.correction = Some(event::clip(&line, 95));
+            }
+        });
+    }
+
+    /// The one-time Stop reminder: the session edited files or the user corrected the agent, and
+    /// never saved. A test command or a `Decision:` line alone does not ask. Not when the host is
+    /// already continuing because of a Stop hook (`stop_hook_active`), not for an automated or
+    /// subagent session, not for OpenCode, and not when the stop text is `off`.
+    fn stop_nudge(&self) -> Option<String> {
+        if self.payload.flag("stop_hook_active")
+            || self.automated()
+            || self.agent == "opencode"
+            || !self.nudging()
+        {
             return None;
         }
-        Some(brief.to_owned())
+        let decided = self
+            .payload
+            .assistant()
+            .is_some_and(|message| has_typed_line(&message.content));
+        self.with_state(|s| {
+            s.worked_signal |= decided;
+            let template = s.stop_nudge.as_deref().unwrap_or(DEFAULT_STOP_NUDGE);
+            let correction = s.correction.as_deref().filter(|line| !line.is_empty());
+            if s.nudged
+                || s.saved
+                || template.is_empty()
+                || (s.edited.is_empty() && correction.is_none())
+            {
+                return None;
+            }
+            s.nudged = true;
+            let files = (!s.edited.is_empty()).then(|| fill_stop_nudge(template, s.edited.len()));
+            let clause = correction.map(fill_correction_nudge);
+            match (files, clause) {
+                (Some(files), Some(clause)) => Some(format!("{files} {clause}")),
+                (Some(files), None) => Some(files),
+                (None, Some(clause)) => Some(clause),
+                (None, None) => None,
+            }
+        })
+        .flatten()
     }
 
     /// After the brief is printed: answers its `check` with what git says (files and symbols still
@@ -333,6 +562,20 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        if let Some(mut lookup) = tool.lookup() {
+            lookup["session_id"] = json!(self.session_id);
+            let _ = self.post("/cairn-memory/session/lookup", &lookup);
+            return Ok(None);
+        }
+        if matches!(
+            tool.name.as_str(),
+            "mcp__cairn__memory_save" | "cairn_memory_save"
+        ) {
+            if tool.mcp_save_succeeded() {
+                self.with_state(|s| s.saved = true);
+            }
+            return Ok(None);
+        }
         // A read is neither captured nor work, but it shares the edit's once-per-path topic note
         // and per-session caps.
         if let Some(given) = tool.read_path() {
@@ -343,18 +586,29 @@ impl Hook<'_> {
             return Ok(None);
         }
         if tool.is_work() {
+            let command = tool.shell_command();
+            let tested = command.is_some_and(is_test_command);
+            let saved = command.is_some_and(is_cairn_save) && tool.ok() == Some(true);
             self.with_state(|s| {
                 s.dirty = true;
                 s.worked = true;
                 s.generation += 1;
+                s.worked_signal |= tested;
+                s.saved |= saved;
             });
         }
         if tool.is_file_tool() {
             let mut notes = Vec::new();
             for (given, new_text) in tool.edits() {
                 let Some(path) = git::repo_relative(&given, &self.cwd, self.top.as_deref()) else {
+                    if git::outside_project(&given, &self.cwd, self.top.as_deref()) {
+                        self.with_state(|s| {
+                            s.outside_edits = s.outside_edits.saturating_add(1);
+                        });
+                    }
                     continue;
                 };
+                self.with_state(|s| s.remember_edit(&path));
                 self.capture(Some(tool.edit(&path, &new_text)))?;
                 notes.extend(self.topic(&path));
             }
@@ -365,9 +619,13 @@ impl Hook<'_> {
 
     /// The note text for the first edit of `path`, within the per-session caps.
     fn topic(&self, path: &str) -> Option<String> {
+        // The lookup is reserved before the request, so a failing server is not asked without end.
         let wanted = self.with_state(|s| {
-            !s.topics.iter().any(|seen| seen == path)
+            let wanted = !s.topics.iter().any(|seen| seen == path)
                 && s.topics_injected < inject::TOPICS_PER_SESSION
+                && s.topic_lookups < inject::TOPIC_LOOKUPS_PER_SESSION;
+            s.topic_lookups += u8::from(wanted);
+            wanted
         })?;
         if !wanted {
             return None;
@@ -375,7 +633,7 @@ impl Hook<'_> {
         let body = json!({"path": path, "context": self.work_context()});
         let reply = match self.post("/cairn-memory/session/topic", &body) {
             Ok(reply) => reply,
-            // Not marked seen: the next edit of this path asks again.
+            // Not marked seen: the next edit of this path asks again, while lookups remain.
             Err(error) => {
                 self.warn("Cairn topic notes unavailable", &error);
                 return None;
@@ -418,19 +676,71 @@ impl Hook<'_> {
     /// check remembers a capture only once it is sent or queued, so one that never left is sent
     /// again after the cause (a bad token, a busy outbox) is fixed.
     fn capture(&self, capture: Option<Capture>) -> Result<(), String> {
+        self.capture_outside(capture, 0)
+    }
+
+    /// Paths dirty since SessionStart, plus tool edits, capped. Skipped when that set is empty
+    /// or the same set was already sent. `outside_edits` rides along as a count.
+    fn capture_changed_files(&self) {
+        let cwd = self.cwd.clone();
+        let Some(Some((files, outside, hash))) = self.with_state(|state| {
+            let files = changed_paths(state, &cwd);
+            if files.is_empty() {
+                return None;
+            }
+            let hash = sha256_hex(&files.iter().map(String::as_str).collect::<Vec<_>>());
+            if state.files_sent.as_deref() == Some(hash.as_str()) {
+                return None;
+            }
+            Some((files, state.outside_edits, hash))
+        }) else {
+            return;
+        };
+        let capture = Capture {
+            kind: CaptureKind::Edit,
+            ok: None,
+            content: format!("changed files\n{}", files.join("\n")),
+            files,
+            commands: Vec::new(),
+        };
+        if self.capture_outside(Some(capture), outside).is_ok() {
+            self.with_state(|state| state.files_sent = Some(hash));
+        }
+    }
+
+    fn capture_outside(&self, capture: Option<Capture>, outside_files: u32) -> Result<(), String> {
         let Some(capture) = capture else {
             return Ok(());
         };
-        let hash = capture.content_hash();
+        let (event_id, hash) = if capture.kind == CaptureKind::Command {
+            // A repeat execution has a new tool id. The outbox retains the id assigned here.
+            let event_id = self.payload.text("tool_use_id").map_or_else(
+                || new_id("hk"),
+                |id| {
+                    format!(
+                        "hk_{}",
+                        &sha256_hex(&[&self.session_id, "command", id])[..24]
+                    )
+                },
+            );
+            let hash = sha256_hex(&[&event_id, &capture.content_hash()])[..16].to_owned();
+            (event_id, hash)
+        } else {
+            (capture.event_id(&self.session_id), capture.content_hash())
+        };
         if self.with_state(|s| s.capture_hashes.contains(&hash)) == Some(true) {
             return Ok(());
         }
         let remember = || {
             self.with_state(|s| s.remember_capture(&hash));
         };
-        let event_id = capture.event_id(&self.session_id);
         let mut context = self.work_context();
         (context.files, context.commands) = (capture.files, capture.commands);
+        context.outside_files = outside_files;
+        // Origin sticks in the jsonb merge, so only an env-marked session may set it.
+        if self.session_automated() {
+            context.origin = Some("automation".to_owned());
+        }
         let mut body = json!({
             "event_id": event_id,
             "session_id": self.session_id,
@@ -441,8 +751,18 @@ impl Hook<'_> {
         if let Some(ok) = capture.ok {
             body["ok"] = json!(ok);
         }
+        let outbox = outbox::Outbox::open(&self.config, &self.config_dir);
+        let (depth, health) = outbox.as_ref().and_then(|o| o.health()).unwrap_or_default();
+        body["outbox_depth"] = json!(depth);
+        if let Some(error) = &health {
+            body["hook_error_class"] = json!(error.class);
+            body["hook_error_at"] = json!(error.at);
+        }
         let error = match self.post(OBSERVE, &body) {
             Ok(_) => {
+                if let Some(outbox) = &outbox {
+                    outbox.clear_error(&health);
+                }
                 remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
                     outbox.replay(&self.config, self.agent, &event_id);
@@ -500,9 +820,25 @@ impl Hook<'_> {
             .map_err(|message| eprintln!("cairn hook: {message}"))
             .ok()?;
         let worked = locked.state.worked;
-        locked.delete();
+        let nudged = locked.state.nudged;
+        let saved = locked.state.saved;
+        let automated = locked.state.automated
+            || Self::env_automated()
+            || self.payload.text("agent_id").is_some()
+            || self.payload.text("agent_type").is_some();
+        drop(locked);
         if worked {
-            let body = json!({"session_id": self.session_id});
+            self.capture_changed_files();
+        }
+        if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
+            locked.delete();
+        }
+        if worked {
+            let mut body = json!({"session_id": self.session_id});
+            if !automated {
+                body["nudge_asked"] = json!(nudged);
+                body["nudge_saved"] = json!(saved);
+            }
             if let Err(error) = self.post("/cairn-memory/session/end", &body) {
                 self.warn(
                     "Cairn session close unavailable; idle distillation remains pending",

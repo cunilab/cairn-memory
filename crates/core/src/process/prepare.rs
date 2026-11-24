@@ -168,10 +168,7 @@ mod tests {
             json!({"kind":"note","title":"A short-lived note","summary":"Something worth remembering for a while."}),
             true,
         );
-        assert_eq!(
-            (note.scope, note.expires_at),
-            (Scope::Personal, Some(1_000 + 90 * 86_400))
-        );
+        assert_eq!((note.scope, note.expires_at), (Scope::Personal, None));
         let err = prepare_save(
             input(
                 json!({"kind":"decision","title":"Use one queue","summary":"Jobs run through one Postgres table."}),
@@ -276,6 +273,6 @@ mod tests {
             input(json!({"kind":"handoff","title":"t","summary":"s","reason":"r","fields":{"next_steps":["a"]}})),
             &WorkContext::default(), false, Origin::System, 0,
         ).expect("system handoff");
-        assert_eq!(handoff.expires_at, Some(14 * 86_400));
+        assert_eq!(handoff.expires_at, None);
     }
 }

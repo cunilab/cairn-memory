@@ -36,6 +36,7 @@ text_enum!(Scope { Personal => "personal", Project => "project", Global => "glob
 text_enum!(Status {
     Active => "active", Stale => "stale", Superseded => "superseded", Forgotten => "forgotten",
 });
+text_enum!(Rank { Candidate => "candidate", Normal => "normal" });
 text_enum!(Relation {
     Relates => "relates", Causes => "causes", Fixes => "fixes", DependsOn => "depends_on",
     Supersedes => "supersedes", Contradicts => "contradicts",
@@ -80,6 +81,9 @@ pub struct SaveInput {
     pub contradicts: Option<String>,
     #[serde(default)]
     pub scope: Option<Scope>,
+    /// Up to 5 short questions, each 1..=120 characters. Not part of `identity_hash`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 /// A stored memory as the server returns it.
@@ -107,6 +111,17 @@ pub struct Memory {
     #[serde(skip)]
     pub links: Vec<Link>,
     pub status: Status,
+    pub rank: Rank,
+    #[serde(skip)]
+    pub faded_at: Option<i64>,
+    /// Whether an administrator edited this memory; the editor's identity stays private.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub edited_by: bool,
+    /// Times this knowledge was saved, including the first. At least 1.
+    /// Omitted the first time, same as a search card's `seen`.
+    #[serde(default, skip_serializing_if = "proof_once")]
+    pub proof_count: u32,
     /// Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_cause: Option<String>,
@@ -130,6 +145,10 @@ pub struct Memory {
     /// Internal only; never shown to agents.
     #[serde(skip)]
     pub usage: Usage,
+}
+
+fn proof_once(n: &u32) -> bool {
+    *n < 2
 }
 
 /// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.

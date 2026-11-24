@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { RoleBadge } from "@/components/badges";
+import { AgentInstructionsEditor } from "@/components/agent-instructions-editor";
 import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
 import { FormDialog } from "@/components/form-dialog";
@@ -26,9 +27,11 @@ import type { BranchSummary } from "@/lib/generated/BranchSummary";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectMember } from "@/lib/generated/ProjectMember";
 import type { ProjectView } from "@/lib/generated/ProjectView";
+import type { SessionReport } from "@/lib/generated/SessionReport";
 import { ProjectBranches } from "./project-branches";
+import { ProjectSessions } from "./project-sessions";
 
-const TABS = ["branches", "stale", "members"] as const;
+const TABS = ["branches", "stale", "members", "instructions"] as const;
 
 type Loaded = {
   project: ProjectView;
@@ -43,7 +46,10 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const openMemory = useOpenMemory();
   const [tab, setTab] = useTabParam(TABS);
   const generation = useRef(0);
-  const [data, setData] = useState<Loaded | null>(null);
+  const [projectData, setData] = useState<Loaded | null>(null);
+  const [sessions, setSessions] = useState<SessionReport[] | null>(null);
+  const [sessionsError, setSessionsError] = useState(false);
+  const data = projectData ? { ...projectData, sessions } : null;
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -66,6 +72,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   useResetOnHide(() => {
     generation.current += 1;
     setData(null);
+    setSessions(null);
+    setSessionsError(false);
     setError(null);
     setNotFound(false);
     setRenaming(false);
@@ -94,6 +102,21 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       cancelled = true;
     };
   }, [fetchProject, router, attempt]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const expected = generation.current;
+    cairn<SessionReport[]>(`${path}/sessions?days=30`)
+      .then((result) => {
+        if (!cancelled && generation.current === expected) { setSessions(result); setSessionsError(false); }
+      })
+      .catch((cause: unknown) => {
+        if (cancelled || generation.current !== expected) return;
+        if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+        else setSessionsError(true);
+      });
+    return () => { cancelled = true; };
+  }, [path, router, attempt]);
 
   const submit = useCallback(
     async (write: () => Promise<unknown>, success: string) => {
@@ -237,9 +260,11 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             <TabsTrigger value="branches">Branches</TabsTrigger>
             <TabsTrigger value="stale">Stale ({data.stale.length})</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
+            <TabsTrigger value="instructions">Agent instructions</TabsTrigger>
           </TabsList>
-          <TabsContent value="branches">
+          <TabsContent value="branches" className="space-y-6">
             <ProjectBranches branches={data.branches} />
+            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
           <TabsContent value="stale">
             <DataTable
@@ -261,6 +286,13 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               empty={<p className="p-6 text-sm text-muted-foreground">No members found.</p>}
             />
           </TabsContent>
+          <TabsContent value="instructions">
+            <AgentInstructionsEditor
+              path={`${path}/agent-instructions`}
+              scope="project"
+              canEdit={canTransfer}
+            />
+          </TabsContent>
         </Tabs>
       ) : null}
       <FormDialog
@@ -272,7 +304,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         onSubmit={async (form) => {
           const name = String(form.get("name")).trim();
           if (name.length < 1 || name.length > 80) throw new Error("Use a name of 1 to 80 characters.");
-          await submit(() => cairn(`${path}/rename`, { method: "POST", body: JSON.stringify({ name }) }), "Project renamed");
+          await submit(() => cairn(`${path}/rename`, { method: "POST", body: JSON.stringify({ name }) }), "Update name in .cairn/project.json (or run `cairn init`) and commit it, so teammates see the new name.");
         }}
       >
         <Field>

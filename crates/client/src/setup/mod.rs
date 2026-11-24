@@ -1,5 +1,5 @@
 //! `cairn setup --agent`: installs or removes the Cairn MCP entry, instructions and hook
-//! commands in Claude Code, Codex and OpenCode (CM-SPEC-006 §6). Only Cairn-marked entries are
+//! commands in Claude Code, Codex and OpenCode (docs/reference/hook.md#setup). Only Cairn-marked entries are
 //! ever replaced. All files are read and checked first; a native MCP command runs next, then the
 //! files are written, so a conflict leaves every file as it was. Credentials stay in the Cairn
 //! config; no host file holds one.
@@ -178,8 +178,9 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
             let mut group = json!({"hooks": [handler]});
             if event == "PostToolUse" {
-                group["matcher"] =
-                    json!("Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read");
+                group["matcher"] = json!(
+                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
+                );
             }
             Some(group)
         }

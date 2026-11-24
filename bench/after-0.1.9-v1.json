@@ -1,0 +1,906 @@
+{
+  "call_bytes": {
+    "memory_get": {
+      "calls": 4,
+      "max_bytes": 1402,
+      "mean_bytes": 1066,
+      "mean_tokens_est": 266,
+      "min_bytes": 854,
+      "note": "decision, gotcha, procedure, note; one id per call"
+    },
+    "memory_search": {
+      "calls": 25,
+      "max_bytes": 845,
+      "mean_bytes": 434,
+      "mean_tokens_est": 108,
+      "min_bytes": 55,
+      "note": "limit 5, mean over the gold questions"
+    },
+    "memory_search_kind_decision": {
+      "calls": 3,
+      "limit": 3,
+      "max_bytes": 322,
+      "mean_bytes": 144,
+      "mean_tokens_est": 36,
+      "min_bytes": 55,
+      "note": "3 queries"
+    },
+    "memory_search_kind_handoff": {
+      "bytes": 55,
+      "limit": 2,
+      "results": 0,
+      "text_channel_bytes": 14,
+      "tokens_est": 14
+    }
+  },
+  "corpus": {
+    "distractors": 0,
+    "memories": 70,
+    "question_set": "questions.json",
+    "questions": 25,
+    "weak_queries": 5
+  },
+  "distilled": {
+    "gotcha": 1,
+    "handoff": true,
+    "notes": 2
+  },
+  "fixed_session_cost": {
+    "deferred_hosts_bytes": 2558,
+    "deferred_hosts_tokens_est": 640,
+    "eager_hosts_bytes": 5008,
+    "eager_hosts_tokens_est": 1252,
+    "note": "tools/list (or just names) + initialize.instructions + scripted-session hook injection; excludes retrieval calls"
+  },
+  "label": "after-0.1.9",
+  "links": {
+    "all_memories": {
+      "durable": 62,
+      "durable_with_link_ratio": 0.839,
+      "with_link": 52
+    },
+    "durable": 62,
+    "durable_with_link_ratio": 0.839,
+    "note": "fixture corpus durable memories (decision, rule, gotcha, procedure, fact) with >= 1 link of any relation; all_memories adds the distractors",
+    "with_link": 52
+  },
+  "mcp_surface": {
+    "initialize_instructions_bytes": 663,
+    "initialize_instructions_tokens_est": 166,
+    "largest_tools": [
+      [
+        1178,
+        "memory_save"
+      ],
+      [
+        585,
+        "memory_search"
+      ],
+      [
+        279,
+        "memory_feedback"
+      ]
+    ],
+    "tool_count": 5,
+    "tool_names_bytes": 67,
+    "tools_list_bytes": 2517,
+    "tools_list_tokens_est": 629
+  },
+  "per_question_memory_search": [
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-queue-postgres"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dec-queue-postgres"
+      ],
+      "id": "q01",
+      "kind": "direct",
+      "top5": [
+        "dec-queue-postgres"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-api-versioning-header"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dec-api-versioning-header"
+      ],
+      "id": "q02",
+      "kind": "direct",
+      "top5": [
+        "dec-api-versioning-header"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-cors-preflight"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-cors-preflight"
+      ],
+      "id": "q03",
+      "kind": "direct",
+      "top5": [
+        "got-cors-preflight"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "proc-release"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "proc-release"
+      ],
+      "id": "q04",
+      "kind": "direct",
+      "top5": [
+        "proc-release"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-max-upload"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-max-upload"
+      ],
+      "id": "q05",
+      "kind": "direct",
+      "top5": [
+        "fact-max-upload"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-pr-small"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "rule-pr-small"
+      ],
+      "id": "q06",
+      "kind": "direct",
+      "top5": [
+        "rule-pr-small"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-timezone-report"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-timezone-report"
+      ],
+      "id": "q07",
+      "kind": "direct",
+      "top5": [
+        "got-timezone-report"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-payment-provider"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "fact-payment-provider"
+      ],
+      "id": "q08",
+      "kind": "direct",
+      "top5": [
+        "fact-payment-provider",
+        "dup-webhook-replay"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-tokio-blocking"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "got-tokio-blocking"
+      ],
+      "id": "q09",
+      "kind": "direct",
+      "top5": [
+        "got-tokio-blocking"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "proc-restore-backup"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "proc-restore-backup"
+      ],
+      "id": "q10",
+      "kind": "direct",
+      "top5": [
+        "proc-restore-backup"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "hand-refund-api"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "hand-refund-api"
+      ],
+      "id": "q11",
+      "kind": "direct",
+      "top5": [
+        "hand-refund-api",
+        "rule-idempotency-keys"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "sess-typst"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "sess-typst"
+      ],
+      "id": "q12",
+      "kind": "direct",
+      "top5": [
+        "sess-typst",
+        "dec-pdf-typst"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-feature-flag-cleanup"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "rule-feature-flag-cleanup"
+      ],
+      "id": "q13",
+      "kind": "direct",
+      "top5": [
+        "rule-feature-flag-cleanup",
+        "dec-feature-flags-db"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ],
+      "gold_coverage": {
+        "dup-webhook-replay": 0.143,
+        "got-webhook-duplicates": 0.0
+      },
+      "gold_in_top5": [
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ],
+      "id": "q14",
+      "kind": "paraphrase",
+      "top5": [
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "dec-money-integer-cents",
+        "dup-money-minor-units"
+      ],
+      "gold_coverage": {
+        "dec-money-integer-cents": 0.0,
+        "dup-money-minor-units": 0.0
+      },
+      "gold_in_top5": [
+        "dec-money-integer-cents"
+      ],
+      "id": "q15",
+      "kind": "paraphrase",
+      "top5": [
+        "dec-money-integer-cents"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-prod-region"
+      ],
+      "gold_coverage": {
+        "fact-prod-region": 0.0
+      },
+      "gold_in_top5": [
+        "fact-prod-region"
+      ],
+      "id": "q16",
+      "kind": "paraphrase",
+      "top5": [
+        "fact-prod-region"
+      ]
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "fact-oncall"
+      ],
+      "gold_coverage": {
+        "fact-oncall": 0.667
+      },
+      "gold_in_top5": [
+        "fact-oncall"
+      ],
+      "id": "q17",
+      "kind": "paraphrase",
+      "top5": [
+        "fact-oncall"
+      ]
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "got-migration-lock"
+      ],
+      "gold_coverage": {
+        "got-migration-lock": 0.0
+      },
+      "gold_in_top5": [],
+      "id": "q18",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 1,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-json-bigint"
+      ],
+      "gold_coverage": {
+        "got-json-bigint": 0.0
+      },
+      "gold_in_top5": [
+        "got-json-bigint"
+      ],
+      "id": "q19",
+      "kind": "paraphrase",
+      "top5": [
+        "got-json-bigint"
+      ]
+    },
+    {
+      "cards": 0,
+      "first_gold_rank_in_10": null,
+      "gold": [
+        "fact-vat-sync"
+      ],
+      "gold_coverage": {
+        "fact-vat-sync": 0.167
+      },
+      "gold_in_top5": [],
+      "id": "q20",
+      "kind": "paraphrase",
+      "top5": []
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-idempotency-header",
+        "rule-idempotency-keys"
+      ],
+      "id": "q21",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-idempotency-keys",
+        "dup-idempotency-header"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-log-no-pii",
+        "dup-log-pii"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-log-pii",
+        "rule-log-no-pii"
+      ],
+      "id": "q22",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-log-no-pii",
+        "dup-log-pii"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-migration-expand-contract",
+        "rule-migrations-additive"
+      ],
+      "id": "q23",
+      "kind": "near_duplicate",
+      "top5": [
+        "rule-migrations-additive",
+        "dup-migration-expand-contract"
+      ]
+    },
+    {
+      "cards": 2,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-timeout-pool",
+        "dup-pool-exhaustion"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-pool-exhaustion",
+        "got-timeout-pool"
+      ],
+      "id": "q24",
+      "kind": "near_duplicate",
+      "top5": [
+        "got-timeout-pool",
+        "dup-pool-exhaustion"
+      ]
+    },
+    {
+      "cards": 3,
+      "first_gold_rank_in_10": 1,
+      "gold": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay"
+      ],
+      "gold_coverage": null,
+      "gold_in_top5": [
+        "dup-webhook-replay",
+        "got-webhook-duplicates"
+      ],
+      "id": "q25",
+      "kind": "near_duplicate",
+      "top5": [
+        "got-webhook-duplicates",
+        "dup-webhook-replay",
+        "proc-onboard-merchant"
+      ]
+    }
+  ],
+  "recall": {
+    "memory_search": {
+      "by_kind": {
+        "direct": {
+          "hit5": 1.0,
+          "n": 13,
+          "precision_at_5": 0.7647,
+          "recall5": 1.0,
+          "rr": 1.0
+        },
+        "near_duplicate": {
+          "hit5": 1.0,
+          "n": 5,
+          "precision_at_5": 0.9091,
+          "recall5": 1.0,
+          "rr": 1.0
+        },
+        "paraphrase": {
+          "hit5": 0.7143,
+          "n": 7,
+          "precision_at_5": 1.0,
+          "recall5": 0.6429,
+          "rr": 0.7143
+        }
+      },
+      "bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 845,
+        "mean_bytes": 434,
+        "mean_tokens_est": 108,
+        "min_bytes": 55
+      },
+      "cards_returned": 34,
+      "gold_cards_returned": 29,
+      "hit_at_5": 0.92,
+      "mrr_at_10": 0.92,
+      "precision_at_5": 0.8529,
+      "questions": 25,
+      "recall_at_5": 0.9,
+      "text_channel_bytes_per_call": {
+        "calls": 25,
+        "max_bytes": 750,
+        "mean_bytes": 369,
+        "mean_tokens_est": 92,
+        "min_bytes": 14
+      }
+    }
+  },
+  "recall_holdout": {
+    "cards_returned": 3,
+    "hit_at_5": 0.3,
+    "mrr_at_10": 0.3,
+    "per_question": [
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-auth-sessions-cookies"
+        ],
+        "gold_coverage": {
+          "dec-auth-sessions-cookies": 0.0
+        },
+        "id": "h01",
+        "top5": []
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-deploy-rolling-drain"
+        ],
+        "gold_coverage": {
+          "dec-deploy-rolling-drain": 0.0
+        },
+        "id": "h02",
+        "top5": []
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "dec-pdf-typst"
+        ],
+        "gold_coverage": {
+          "dec-pdf-typst": 0.0
+        },
+        "id": "h03",
+        "top5": []
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "got-upload-clock-skew"
+        ],
+        "gold_coverage": {
+          "got-upload-clock-skew": 0.0
+        },
+        "id": "h04",
+        "top5": []
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "got-docker-arm-build"
+        ],
+        "gold_coverage": {
+          "got-docker-arm-build": 0.0
+        },
+        "id": "h05",
+        "top5": []
+      },
+      {
+        "cards": 1,
+        "first_gold_rank_in_10": 1,
+        "gold": [
+          "rule-secrets-env"
+        ],
+        "gold_coverage": {
+          "rule-secrets-env": 0.0
+        },
+        "id": "h06",
+        "top5": [
+          "rule-secrets-env"
+        ]
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "rule-rate-limits-public"
+        ],
+        "gold_coverage": {
+          "rule-rate-limits-public": 0.143
+        },
+        "id": "h07",
+        "top5": []
+      },
+      {
+        "cards": 0,
+        "first_gold_rank_in_10": null,
+        "gold": [
+          "proc-rotate-db-password"
+        ],
+        "gold_coverage": {
+          "proc-rotate-db-password": 0.0
+        },
+        "id": "h08",
+        "top5": []
+      },
+      {
+        "cards": 1,
+        "first_gold_rank_in_10": 1,
+        "gold": [
+          "fact-retention"
+        ],
+        "gold_coverage": {
+          "fact-retention": 0.0
+        },
+        "id": "h09",
+        "top5": [
+          "fact-retention"
+        ]
+      },
+      {
+        "cards": 1,
+        "first_gold_rank_in_10": 1,
+        "gold": [
+          "fact-pg-version"
+        ],
+        "gold_coverage": {
+          "fact-pg-version": 0.0
+        },
+        "id": "h10",
+        "top5": [
+          "fact-pg-version"
+        ]
+      }
+    ],
+    "precision_at_5": 1.0,
+    "questions": 10
+  },
+  "semantic_channel": {
+    "embedding_model": "pinned all-MiniLM-L6-v2",
+    "mode": "hybrid (lexical + entity + semantic)",
+    "server_health": "enabled"
+  },
+  "session_injection": {
+    "events": [
+      {
+        "event": "SessionStart",
+        "injected_bytes": 1056,
+        "injected_tokens_est": 264,
+        "stdout_bytes": 1192
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/jobs/queue.rs",
+        "injected_bytes": 300,
+        "injected_tokens_est": 75,
+        "stdout_bytes": 379
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/billing/money.rs",
+        "injected_bytes": 151,
+        "injected_tokens_est": 38,
+        "stdout_bytes": 228
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/api/handlers/refund.rs",
+        "injected_bytes": 150,
+        "injected_tokens_est": 38,
+        "stdout_bytes": 227
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/orders/list.rs",
+        "injected_bytes": 171,
+        "injected_tokens_est": 43,
+        "stdout_bytes": 248
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/telemetry.rs",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "templates/invoice.typ",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "migrations/0042_add_tax_column.sql",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "console/src/App.tsx",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/payments/webhooks.rs",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "docs/README.md",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "cargo test (exit 1)",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "src/billing/money.rs",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PostToolUse",
+        "file": "cargo test (exit 0)",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "PreCompact",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 0
+      },
+      {
+        "event": "Stop",
+        "injected_bytes": 0,
+        "injected_tokens_est": 0,
+        "stdout_bytes": 197
+      }
+    ],
+    "note": "SessionStart + 10 Edit PostToolUse on distinct files + a failing and a passing cargo test around one more edit + PreCompact + Stop, bytes of additionalContext",
+    "post_tool_use_bytes": 772,
+    "session_start_bytes": 1056,
+    "total_injected_bytes": 1828,
+    "total_injected_tokens_est": 457
+  },
+  "session_titles_in_recall": 0,
+  "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
+  "usage_after_hooks_delta": 0,
+  "zero_hit": {
+    "memory_search": {
+      "correct_zero_hit": 5,
+      "queries": 5,
+      "rows": [
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w1",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w2",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w3",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w4",
+          "top": []
+        },
+        {
+          "bytes": 55,
+          "hits": 0,
+          "id": "w5",
+          "top": []
+        }
+      ]
+    }
+  },
+  "zero_hit_holdout": {
+    "correct_zero_hit": 5,
+    "queries": 5,
+    "rows": [
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw1",
+        "top": []
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw2",
+        "top": []
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw3",
+        "top": []
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw4",
+        "top": []
+      },
+      {
+        "bytes": 55,
+        "hits": 0,
+        "id": "hw5",
+        "top": []
+      }
+    ]
+  }
+}

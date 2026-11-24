@@ -26,7 +26,7 @@ async fn shared_project_model() {
         .await;
     assert_eq!(status, 403);
 
-    // init creates, then joins by the committed id; a differing name is refused for a member.
+    // Init joins by committed id and returns the authoritative name even when the file is stale.
     let project = app
         .post(
             "projects/init",
@@ -44,15 +44,15 @@ async fn shared_project_model() {
         )
         .await;
     assert_eq!(joined["created"], false);
-    let (status, _) = app
-        .send(
-            "POST",
+    let joined_with_old_name = app
+        .post(
             "projects/init",
             json!({"project_id": id, "repository": "x", "name": "Other"}),
-            Some(&stranger_device),
+            &stranger_device,
         )
         .await;
-    assert_eq!(status, 400);
+    assert_eq!(joined_with_old_name["name"], "Widgets");
+    assert_eq!(joined_with_old_name["created"], false);
 
     // Both are members; saving into the project uses the request context.
     let context =
@@ -229,11 +229,28 @@ async fn init_registers_a_committed_project_the_server_lost() {
     let admin = app.admin("admin").await;
     let owner = app.device(&admin, "owner-laptop").await;
     let id = "proj_zzzzzzzzzzzzzzzzzzzzzzzzzz";
-    // An unknown id (a wiped server) is created again with the same id, owned by the caller.
+    // An unknown id (a wiped server) is not registered on a plain request: whoever asks first
+    // would own it, so the caller has to confirm.
+    let (status, refused) = app
+        .send(
+            "POST",
+            "projects/init",
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(
+        refused.to_string().contains("cairn init --yes"),
+        "{refused}"
+    );
+    assert_eq!(app.get("projects", &owner).await, json!([]));
+    // Confirmed, it is created again with the same id, owned by the caller.
     let restored = app
         .post(
             "projects/init",
-            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets"}),
+            json!({"project_id": id, "repository": "github.com/acme/widgets", "name": "Widgets",
+                   "confirm_register": true}),
             &owner,
         )
         .await;
@@ -419,5 +436,304 @@ async fn quality_error_is_400_quality_one_line() {
     fixed["fields"] = json!({"fix": "Raise the pool size and add a timeout."});
     let (status, reply) = app.send("POST", "remember", fixed, Some(&device)).await;
     assert_eq!(status, 200, "{reply}");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn repository_fallback_status_is_attached_by_repository() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let owner = app.device(&admin, "owner").await;
+    let member_web = app.member(&admin, "member").await;
+    let member = app.device(&member_web, "member-laptop").await;
+    let stranger_web = app.member(&admin, "stranger").await;
+    let stranger = app.device(&stranger_web, "stranger-laptop").await;
+    let repo = "github.com/acme/widgets";
+    let id = app.project(&owner, repo).await;
+    app.post(
+        "projects/init",
+        json!({"project_id": id, "repository": repo, "name": "widgets"}),
+        &member,
+    )
+    .await;
+
+    let attached = app.post(
+        "observe",
+        json!({"event_id": "e1", "session_id": "s1", "kind": "prompt", "content": "work in the repo",
+               "context": {"repository": repo, "branch": "main"}}),
+        &member,
+    )
+    .await;
+    assert_eq!(
+        attached["project_attachment"]["status"],
+        "attached_by_repository"
+    );
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "b1", "context": {"repository": repo}}),
+            &member,
+        )
+        .await;
+    assert_eq!(brief["project_id"], id);
+
+    let other = app.member(&admin, "other").await;
+    let other_device = app.device(&other, "other-laptop").await;
+    let fork = app.project(&other_device, repo).await;
+    app.post(
+        "projects/init",
+        json!({"project_id": fork, "repository": repo, "name": "widgets"}),
+        &member,
+    )
+    .await;
+    let ambiguous = app
+        .post(
+            "observe",
+            json!({"event_id": "e2", "session_id": "s2", "kind": "prompt", "content": "which fork",
+               "context": {"repository": repo}}),
+            &member,
+        )
+        .await;
+    assert_eq!(ambiguous["project_attachment"]["status"], "personal");
+
+    let leaked = app
+        .post(
+            "observe",
+            json!({"event_id": "e3", "session_id": "s3", "kind": "prompt", "content": "not mine",
+               "context": {"repository": repo}}),
+            &stranger,
+        )
+        .await;
+    assert_eq!(leaked["project_attachment"]["status"], "personal");
+    assert!(leaked.get("project_id").is_none());
+    let quiet = app
+        .post(
+            "session/brief",
+            json!({"session_id": "b2", "context": {"repository": repo}}),
+            &stranger,
+        )
+        .await;
+    assert!(quiet.get("project_id").is_none());
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn project_sessions_member_only() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let author = app.member(&admin, "author").await;
+    let stranger = app.member(&admin, "stranger").await;
+    let author_device = app.device(&author, "author-laptop").await;
+    let stranger_device = app.device(&stranger, "stranger-laptop").await;
+
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/sessions-test", "name": "SessionsTest"}),
+            &author_device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+
+    // 3. Non-member GET .../sessions returns 404
+    let (status, body) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=30"),
+            json!(null),
+            Some(&stranger_device),
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+
+    // Create a session for author:
+    let sess = "sess-1";
+    app.post(
+        "observe",
+        json!({
+            "event_id": "ev-1",
+            "session_id": sess,
+            "kind": "prompt",
+            "content": "working on something",
+            "context": {"project_id": pid, "repository": "github.com/acme/sessions-test", "branch": "main"}
+        }),
+        &author_device,
+    )
+    .await;
+
+    // 4. An agent memory_save during a session is counted in agent_saves:
+    let save_res = app
+        .post(
+            "remember",
+            json!({
+                "kind": "fact",
+                "title": "Agent save test",
+                "summary": "Agent saved this during session",
+                "reason": "Test agent saves during session",
+                "context": {"project_id": pid, "repository": "github.com/acme/sessions-test", "branch": "main"}
+            }),
+            &author_device,
+        )
+        .await;
+    assert!(save_res.get("id").is_some());
+
+    app.post("session/end", json!({"session_id": sess}), &author_device)
+        .await;
+
+    // Member GET .../sessions returns rows newest first, <= 50
+    let (status, body) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=30"),
+            json!(null),
+            Some(&author_device),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body.as_array().expect("array of sessions");
+    assert!(!rows.is_empty());
+    assert!(rows.len() <= 50);
+    let s = &rows[0];
+    assert_eq!(s["session_id"], sess);
+    assert_eq!(s["agent_saves"], 1);
+
+    sqlx::query(
+        "INSERT INTO sessions (person_id, session_id, project_id, started_at)
+         SELECT person_id, 'older-' || n, project_id, now() - make_interval(secs => n)
+           FROM sessions CROSS JOIN generate_series(1, 55) AS n WHERE session_id = $1",
+    )
+    .bind(sess)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+    let rows = app
+        .get(&format!("projects/{pid}/sessions?days=7"), &author_device)
+        .await;
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 50);
+    assert!(
+        rows.windows(2)
+            .all(|pair| pair[0]["started_at"].as_i64() >= pair[1]["started_at"].as_i64())
+    );
+    let (invalid, _) = app
+        .send(
+            "GET",
+            &format!("projects/{pid}/sessions?days=8"),
+            json!(null),
+            Some(&author_device),
+        )
+        .await;
+    assert_eq!(invalid, 400);
+
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn device_fixes_scoped() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let a = app.device(&admin, "a").await;
+    let b = app.device(&admin, "b").await;
+    let (device, _) = app.db.store.authenticate_device(&a).await.unwrap();
+    sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,device_id,fix_type,status,first_seen_at,last_seen_at,action) VALUES ('fx_scoped','F5','fp',$1,'computer','queued',now(),now(),$2)")
+        .bind(&device.device_id).bind(json!({"type":"run_update","target":"0.0.1"})).execute(app.db.store.pool()).await.unwrap();
+    let (status, fixes) = app.send("GET", "device/fixes", json!(null), Some(&a)).await;
+    assert_eq!(status, 200, "{fixes}");
+    assert_eq!(fixes.as_array().unwrap().len(), 1);
+    let (status, fixes) = app.send("GET", "device/fixes", json!(null), Some(&b)).await;
+    assert_eq!((status, fixes), (200, json!([])));
+    let (status, _) = app
+        .send(
+            "POST",
+            "device/fixes/fx_scoped",
+            json!({"result":"applied"}),
+            Some(&b),
+        )
+        .await;
+    assert_eq!(status, 404);
+    let state: String = sqlx::query_scalar("SELECT status FROM fixes WHERE fix_id='fx_scoped'")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+    for (id, result, reason, expected, audit) in [
+        ("fx_scoped", "applied", None, "done", "fix_done"),
+        (
+            "fx_current",
+            "skipped",
+            Some("already_current"),
+            "resolved",
+            "fix_done",
+        ),
+        (
+            "fx_failed",
+            "skipped",
+            Some("file_exists"),
+            "failed",
+            "fix_failed",
+        ),
+    ] {
+        if id != "fx_scoped" {
+            sqlx::query("INSERT INTO fixes (fix_id,detector,fingerprint,device_id,fix_type,status,first_seen_at,last_seen_at,action) VALUES ($1,'F5',$1,$2,'computer','queued',now(),now(),'{}')")
+                .bind(id).bind(&device.device_id).execute(app.db.store.pool()).await.unwrap();
+        }
+        let body = if let Some(reason) = reason {
+            json!({"result":result,"reason":reason})
+        } else {
+            json!({"result":result})
+        };
+        let (status, _) = app
+            .send("POST", &format!("device/fixes/{id}"), body, Some(&a))
+            .await;
+        assert_eq!(status, 200);
+        let (state, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status,error FROM fixes WHERE fix_id=$1")
+                .bind(id)
+                .fetch_one(app.db.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(state, expected);
+        assert_eq!(
+            error.as_deref(),
+            if expected == "failed" { reason } else { None }
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_events WHERE action=$1 AND subject_id=$2 AND metadata=$3",
+        )
+        .bind(audit)
+        .bind(id)
+        .bind(json!({"fix_id":id}))
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+    app.finish().await;
+}
+#[tokio::test]
+async fn personal_observation_in_a_project_session_is_distilled_personally() {
+    let Some(app) = App::new().await else { return };
+    let web = app.admin("mixed-capture").await;
+    let device = app.device(&web, "agent").await;
+    let project = app.project(&device, "example.test/mixed-capture").await;
+    for (event, context, expected) in [
+        ("project", json!({"project_id": project}), "attached"),
+        ("personal", json!({}), "personal"),
+    ] {
+        let reply = app.post("observe", json!({
+            "event_id":event,"session_id":"mixed","kind":"prompt","context":context,
+            "content":format!("Decision: keep the {event} note private\nReason: mixed capture contexts")
+        }), &device).await;
+        assert_eq!(reply["project_attachment"]["status"], expected);
+    }
+    app.post("session/end", json!({"session_id":"mixed"}), &device)
+        .await;
+    app.settle().await;
+    let scopes: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT scope, project_id FROM memories WHERE kind = 'decision'")
+            .fetch_all(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(scopes, vec![("personal".to_owned(), None); 2]);
     app.finish().await;
 }

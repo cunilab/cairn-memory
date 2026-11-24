@@ -19,6 +19,7 @@ deterministic: fixed corpus, fixed query order, no clocks or random ids in the o
 """
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -153,6 +154,28 @@ def stats(values):
             "max_bytes": max(values), "mean_tokens_est": est_tokens(mean)}
 
 
+def sample_aliases():
+    """The 200-note alias lists in bench/aliases-0.1.9.md, in distractor order."""
+    text = (ROOT / "bench" / "aliases-0.1.9.md").read_text()
+    start = text.index("<!-- sample-aliases -->\n") + len("<!-- sample-aliases -->\n")
+    end = text.index("\n<!-- /sample-aliases -->", start)
+    return json.loads(text[start:end])
+
+
+def derived_aliases(memory):
+    """Title, plus a gotcha symptom, the same text the migration backfill copies."""
+    aliases = []
+    title = (memory.get("title") or "").strip()
+    if title:
+        aliases.append(title[:120])
+    symptom = str(((memory.get("fields") or {}).get("symptom") or "")).strip()
+    if memory.get("kind") == "gotcha" and symptom:
+        clipped = symptom[:120]
+        if clipped not in aliases:
+            aliases.append(clipped)
+    return aliases
+
+
 def result_ids(structured):
     rows = (structured or {}).get("results") or []
     return [row["id"] for row in rows if isinstance(row, dict) and "id" in row]
@@ -173,6 +196,8 @@ def main():
     parser.add_argument("--max-weak-hits", type=int, help="exit 1 when the main-set weak queries return more than this many cards in total (a CI gate)")
     parser.add_argument("--dump-scores", help="write gold cosine and coverage per main question and the top candidate cosines per weak query "
                         "(calibration input; starts the server with CAIRN_DEBUG_SCORES=1)")
+    parser.add_argument("--no-aliases", action="store_true",
+                        help="load the corpus and distractors with no aliases (A/B against the alias run)")
     parser.add_argument("--budget", type=int, help="pass this token budget to memory_search (default: the server default)")
     parser.add_argument("--dump-injected", help="also write the text each hook event injected to this file (contains random memory ids)")
     args = parser.parse_args()
@@ -194,7 +219,8 @@ def main():
             if q["kind"] == "paraphrase_stem":
                 continue
             for key in q["gold"]:
-                shared = words(q["query"]) & words(searchable(by_key[key]))
+                # Aliases were written blind; words they share with a question are the paraphrase, not leakage.
+                shared = words(q["query"]) & words(searchable({k: v for k, v in by_key[key].items() if k != "aliases"}))
                 assert not shared, f"{q['id']} shares words with {key}: {sorted(shared)}"
 
     model_dir = None
@@ -293,8 +319,11 @@ def main():
 
         # Load the corpus through the same /remember route the save tools use.
         ids = {}
+        distractor_aliases = [] if args.no_aliases else sample_aliases()
         for memory in corpus:
             body = {k: v for k, v in memory.items() if k not in ("key", "context")}
+            if args.no_aliases:
+                body.pop("aliases", None)
             # A corpus memory's own `context.files` (step 6 §6) rides in the request context, where entities read it.
             body.update(scope="project", context={**context, **memory.get("context", {})})
             reply = http.call("/remember", body, device)
@@ -308,6 +337,12 @@ def main():
             if body["scope"] == "personal" and body["kind"] in ("rule", "decision", "gotcha"):
                 body["scope"] = "project"
             body["context"] = context
+            if args.no_aliases:
+                body.pop("aliases", None)
+            elif i < len(distractor_aliases):
+                body["aliases"] = distractor_aliases[i]
+            else:
+                body["aliases"] = derived_aliases(memory)
             ids[memory["key"]] = http.call("/remember", body, device)["id"]
         assert len(set(ids.values())) == len(corpus) + len(distractors), "a distractor was merged into another on save"
 
@@ -324,6 +359,9 @@ def main():
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
+        # Count stored aliases and their vectors separately because alias inference follows the search gate.
+        alias_rows = int(sql("select count(*) from cairn.memory_aliases") or 0)
+        alias_unembedded = int(sql("select count(*) from cairn.memory_aliases where embedding is null") or 0)
         key_of = {v: k for k, v in ids.items()}
 
         # Links per durable memory (step 6 §13): the fixture corpus alone, then everything incl. distractors.
@@ -391,7 +429,7 @@ def main():
         # of the benchmark definition.
         recall = {}
         per_question = []
-        search_wire, search_text = [], []
+        search_wire, search_text, search_ms = [], [], []
         for tool in ("memory_search",):
             wire_all, text_all = [], []
             scores = {"recall5": [], "hit5": [], "rr": [], "cards": [], "goldcards": []}
@@ -399,8 +437,10 @@ def main():
             for q in questions:
                 gold = {ids[k] for k in q["gold"]}
                 # limit 5 is what an agent sees by default; the bytes are measured on it.
+                started = time.perf_counter()
                 shaped, wire, text = mcp.tool(tool, query=q["query"], limit=5, **extra)
                 wire_all.append(wire)
+                search_ms.append((time.perf_counter() - started) * 1000)
                 text_all.append(text)
                 top5 = result_ids(shaped)
                 deep, _, _ = mcp.tool(tool, query=q["query"], limit=10, **extra)
@@ -481,6 +521,10 @@ def main():
         # (d) other call sizes, on corpus data, before the scripted session adds its own memories.
         calls = {"memory_search": stats(search_wire)}
         calls["memory_search"]["note"] = "limit 5, mean over the gold questions"
+        calls["memory_search"]["mean_ms"] = round(sum(search_ms) / len(search_ms), 1)
+        ranked_ms = sorted(search_ms)  # nearest-rank percentiles of the same limit-5 calls
+        calls["memory_search"]["p50_ms"] = round(ranked_ms[math.ceil(0.50 * len(ranked_ms)) - 1], 1)
+        calls["memory_search"]["p95_ms"] = round(ranked_ms[math.ceil(0.95 * len(ranked_ms)) - 1], 1)
         decisions = []
         for query in ("migration lock deploy", "money cents", "payment webhook duplicate"):
             shaped, wire, text = mcp.tool("memory_search", query=query, kind="decision", limit=3)
@@ -544,7 +588,8 @@ def main():
                 break
             time.sleep(0.25)
         settle()
-        system = "origin = 'system' and scope = 'personal'"
+        # An in-project session's notes are project-scoped; a session with no project stays personal.
+        system = "origin = 'system' and scope in ('personal', 'project')"
         distilled = {"notes": int(sql(f"select count(*) from cairn.memories where {system} and kind <> 'handoff'") or 0),
                      "gotcha": int(sql(f"select count(*) from cairn.memories where {system} and kind = 'gotcha'") or 0),
                      "handoff": int(sql("select count(*) from cairn.memories where kind = 'handoff'") or 0) > 0}
@@ -554,7 +599,7 @@ def main():
         for query in ("session", "handoff", "cargo test"):
             shaped, _, _ = mcp.tool("memory_search", query=query, limit=10)
             session_titles += sum(1 for card in (shaped.get("results") or [])
-                                  if re.match(r"^(Session|Handoff) [0-9a-f-]{8,}", card.get("title", "")))
+                                  if re.match(r"^(Session|Handoff) [0-9a-f]{8}-[0-9a-f]{4}", card.get("title", "")))
         mcp.close()
         mcp = None
         session_bytes = {
@@ -579,7 +624,9 @@ def main():
             "label": args.label,
             "token_estimate": "bytes / 4; an estimate, not a tokenizer count",
             "corpus": {"memories": len(corpus), "distractors": len(distractors), "question_set": args.questions,
-                       "questions": len(questions), "weak_queries": len(weak)},
+                       "questions": len(questions), "weak_queries": len(weak),
+                       "aliases": not args.no_aliases, "alias_rows": alias_rows,
+                       "alias_rows_without_embedding": alias_unembedded},
             "semantic_channel": {"server_health": semantic, "embedding_model": "pinned all-MiniLM-L6-v2" if model_dir else None,
                                  "mode": "hybrid (lexical + entity + semantic)" if model_dir else "lexical-only (no embedding model loaded)"},
             "mcp_surface": surface,
@@ -646,6 +693,11 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
     def trace(query):
         return http.call("/search", {"query": query, "context": context, "debug": True}, device)["trace"]
 
+    def top_cosines(rows, gold_ids=()):
+        """The five highest candidate cosines, best first, and whether each is a gold memory."""
+        ranked = sorted((r for r in rows if r["cosine"] is not None), key=lambda r: -r["cosine"])[:5]
+        return [{"cosine": round(r["cosine"], 4), "gold": r["id"] in gold_ids} for r in ranked]
+
     out = {"questions": [], "weak": []}
     for q in questions:
         rows = {row["id"]: row for row in trace(q["query"])}
@@ -653,10 +705,13 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
         for key in q["gold"]:
             row = rows.get(ids[key])
             gold[key] = None if row is None else {k: row[k] for k in ("cosine", "coverage", "entity_hit", "kept")}
-        out["questions"].append({"id": q["id"], "kind": q["kind"], "query": q["query"], "gold": gold})
+        out["questions"].append({"id": q["id"], "kind": q["kind"], "query": q["query"], "gold": gold,
+                                 "top_cosines": top_cosines(rows.values(), {ids[k] for k in q["gold"]}),
+                                 "pool": len(rows)})
     for w in weak:
-        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
-        out["weak"].append({"id": w["id"], "query": w["query"],
+        all_rows = trace(w["query"])
+        rows = sorted(all_rows, key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["weak"].append({"id": w["id"], "query": w["query"], "top_cosines": top_cosines(all_rows),
                             "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     best = sorted((max((g["cosine"] for g in q["gold"].values() if g and g["cosine"] is not None), default=0.0)
                    for q in out["questions"] if q["kind"].startswith("paraphrase")), reverse=True)
@@ -664,12 +719,14 @@ def dump_scores(http, device, context, questions, weak, holdout, ids, key_of, pa
     out["holdout"] = {"questions": [], "weak": []}
     for q in holdout["questions"]:
         rows = {row["id"]: row for row in trace(q["query"])}
-        out["holdout"]["questions"].append({"id": q["id"], "query": q["query"], "gold": {
+        out["holdout"]["questions"].append({"id": q["id"], "query": q["query"],
+                                            "top_cosines": top_cosines(rows.values(), {ids[k] for k in q["gold"]}), "gold": {
             key: (None if ids[key] not in rows else {k: rows[ids[key]][k] for k in ("cosine", "coverage", "entity_hit", "kept")})
             for key in q["gold"]}})
     for w in holdout["weak_queries"]:
-        rows = sorted(trace(w["query"]), key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
-        out["holdout"]["weak"].append({"id": w["id"], "query": w["query"],
+        all_rows = trace(w["query"])
+        rows = sorted(all_rows, key=lambda r: -(r["cosine"] if r["cosine"] is not None else -1))[:3]
+        out["holdout"]["weak"].append({"id": w["id"], "query": w["query"], "top_cosines": top_cosines(all_rows),
                                        "top3": [{"memory": key_of.get(r["id"], "?"), **{k: r[k] for k in ("cosine", "coverage", "entity_hit", "kept")}} for r in rows]})
     out["summary"] = {"paraphrase_best_gold_cosines_desc": best, "fourth_paraphrase_cosine": best[3] if len(best) > 3 else None,
                       "max_weak_cosine": weak_max}

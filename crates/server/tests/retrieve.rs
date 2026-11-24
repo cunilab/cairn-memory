@@ -82,9 +82,10 @@ async fn session_distills_into_notes_and_a_handoff() {
         .post("session/end", json!({"sessionId": "s1"}), &device)
         .await;
     assert_eq!(
-        ended["status"], "empty",
-        "the checkpoint already distilled everything"
+        ended["status"], "queued",
+        "the first end queues final distill for handoff and digest"
     );
+    app.settle().await;
 
     // The handoff is found by kind, and `memory_get` shows its next steps. Another kind finds none.
     let handoff = app
@@ -125,10 +126,22 @@ async fn session_distills_into_notes_and_a_handoff() {
         vec![notes[0]["id"].as_str().unwrap().to_owned()]
     );
 
-    // A second distill replaces the handoff in place instead of adding one.
+    // A second distill adds the next handoff in the chain. An edit makes it at least as rich.
     app.post(
         "observe",
-        event("e3", "Next step: wire the retry metric"),
+        event("e3", "next: wire the retry metric"),
+        &device,
+    )
+    .await;
+    app.post(
+        "observe",
+        json!({
+            "event_id": "e4",
+            "session_id": "s1",
+            "kind": "edit",
+            "content": "Edit src/queue.rs\nx",
+            "context": context
+        }),
         &device,
     )
     .await;
@@ -136,9 +149,14 @@ async fn session_distills_into_notes_and_a_handoff() {
         .await;
     app.settle().await;
     let handoffs = app.get("memories?kind=handoff", &device).await;
-    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    let handoffs = handoffs.as_array().unwrap();
+    assert_eq!(handoffs.len(), 2);
+    let active = handoffs
+        .iter()
+        .find(|memory| memory["status"] == "active")
+        .unwrap();
     assert!(
-        handoffs[0]["fields"]["next_steps"]
+        active["fields"]["next_steps"]
             .to_string()
             .contains("retry metric")
     );
@@ -365,11 +383,19 @@ async fn supersede_and_graph() {
     let device = app.device(&admin, "d").await;
     let old = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Redis", "summary": "Sessions live in Redis.", "reason": "speed and the test says why", "scope": "personal"})).await;
     let new = save(&app, &device, json!({"kind": "decision", "title": "Cache sessions in Postgres", "summary": "Sessions moved to Postgres.", "reason": "one datastore", "scope": "personal", "supersedes": old})).await;
-    // The replaced memory leaves normal search but stays readable and listed.
+    // Both stay in search. The replacement ranks above the superseded card.
     let search = app
         .post("search", json!({"query": "cache sessions"}), &device)
         .await;
-    assert_eq!(ids(&search), vec![new.clone()]);
+    assert_eq!(ids(&search)[0], new);
+    assert!(ids(&search).contains(&old));
+    let old_card = search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == old)
+        .unwrap();
+    assert_eq!(old_card["label"], format!("replaced by {new}"));
     assert!(
         search["results"][0].get("status").is_none(),
         "active cards omit status"
@@ -414,7 +440,8 @@ async fn supersede_and_graph() {
     let search = app
         .post("search", json!({"query": "cache sessions"}), &device)
         .await;
-    assert_eq!(ids(&search), vec![new.clone()]);
+    assert_eq!(ids(&search)[0], new);
+    assert!(ids(&search).contains(&old));
     assert_eq!(search["results"][0]["status"], "stale");
     // Stale is never unexplained: reply, card and record all name the cause.
     assert_eq!(marked["stale_cause"], "feedback");
@@ -607,14 +634,17 @@ async fn observe_is_typed_and_deduped() {
     let command = json!({"event_id": "c1", "session_id": "s", "kind": "command", "ok": false, "content": "cargo test\nexit 101: boom"});
     let first = app.post("observe", command.clone(), &device).await;
     assert_eq!(first["duplicate"], false);
-    let mut again = command;
+    let mut again = command.clone();
     again["event_id"] = "c2".into();
     let again = app.post("observe", again, &device).await;
+    // A later execution of the same command is kept, so the digest can report it.
     assert_eq!(
         (again["accepted"].as_bool(), again["duplicate"].as_bool()),
-        (Some(true), Some(true))
+        (Some(true), Some(false))
     );
     assert_eq!(again["event_id"], "c2");
+    let replay = app.post("observe", command, &device).await;
+    assert_eq!(replay["duplicate"], true);
 
     let ok: Option<bool> = sqlx::query_scalar("SELECT ok FROM observations WHERE event_id = 'c1'")
         .fetch_one(app.db.store.pool())

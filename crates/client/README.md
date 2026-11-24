@@ -10,7 +10,7 @@ token from one shared tool table; the crate holds no account session and opens n
   instruction text, REST mapping).
 - `present` (MCP result envelope), `doctor` (read-only health checks), `hook` (`cairn hook <Event>`: events, outbox,
   state, injection), `project` (project file and repository identity).
-- `setup::configure` (agent MCP and hook installation), `update` (verified self-update, then
+- `fixes` (`cairn fixes`), `setup::configure` (agent MCP and hook installation), `update` (verified self-update, then
   `setup::refresh`), `Config`, `Client`.
 
 ## Depends on

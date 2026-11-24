@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import {
   ChevronsUpDownIcon,
@@ -15,6 +16,7 @@ import {
   SettingsIcon,
   SunIcon,
   WaypointsIcon,
+  WrenchIcon,
 } from "lucide-react";
 import { CairnMark } from "@/components/cairn-logo";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -52,6 +54,7 @@ import { useAttention } from "@/hooks/use-attention";
 import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
 import { THEMES, type Theme } from "@/lib/theme";
+import { cairn } from "@/lib/cairn";
 
 const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
@@ -70,12 +73,14 @@ function NavItem({
   icon: Icon,
   pathname,
   attention,
+  count,
 }: {
   href: string;
   label: string;
   icon: typeof FolderIcon;
   pathname: string;
   attention?: string;
+  count?: number;
 }) {
   const { setOpenMobile } = useSidebar();
   return (
@@ -88,7 +93,7 @@ function NavItem({
         <Icon />
         <span>{label}</span>
       </SidebarMenuButton>
-      {attention ? <SidebarMenuBadge aria-label={attention}>•</SidebarMenuBadge> : null}
+      {count !== undefined ? <SidebarMenuBadge aria-label={`${count} pending fixes`}>{count}</SidebarMenuBadge> : attention ? <SidebarMenuBadge aria-label={attention}>•</SidebarMenuBadge> : null}
     </SidebarMenuItem>
   );
 }
@@ -168,6 +173,17 @@ function AccountMenu() {
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
   const attention = useAttention();
+  const account = useAccount();
+  const [fixCount, setFixCount] = useState(0);
+  useEffect(() => {
+    if (!account?.is_admin) return;
+    let cancelled = false;
+    const refresh = () => void cairn<{ count: number }>("admin/fixes/count").then((result) => { if (!cancelled) setFixCount(result.count); }).catch(() => {});
+    refresh();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60_000);
+    window.addEventListener("cairn-fixes-changed", refresh);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("cairn-fixes-changed", refresh); };
+  }, [account]);
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -187,6 +203,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               {WORKSPACE.map((item) => (
                 <NavItem key={item.href} {...item} pathname={pathname} attention={attention[item.href]} />
               ))}
+              {account?.is_admin ? <NavItem href="/fixes" label="Fixes" icon={WrenchIcon} pathname={pathname} count={fixCount} /> : null}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>

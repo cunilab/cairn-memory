@@ -202,3 +202,18 @@ impl Store {
         Ok(())
     }
 }
+
+impl Store {
+    pub async fn record_hook_health(
+        &self,
+        person_id: &str,
+        device_id: &str,
+        class: Option<&str>,
+        at: Option<i64>,
+        depth: i32,
+    ) -> Result<()> {
+        sqlx::query("UPDATE devices SET outbox_depth=$3, hook_error_class=COALESCE($4,hook_error_class), hook_error_at=COALESCE(CASE WHEN $5::bigint <= EXTRACT(EPOCH FROM now())::bigint + 86400 THEN to_timestamp($5::double precision) END,hook_error_at) WHERE person_id=$1 AND device_id=$2")
+            .bind(person_id).bind(device_id).bind(depth).bind(class).bind(at).execute(&self.pool).await?;
+        Ok(())
+    }
+}

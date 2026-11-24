@@ -1,6 +1,6 @@
 //! Per-session hook state: delivery flags, repeat hashes and injection counters, never memory
 //! text or credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
-//! only while holding `<file>.lock` (CM-SPEC-006 §5).
+//! only while holding `<file>.lock` (docs/reference/hook.md).
 
 use crate::{create_private_dir, write_private};
 use cairn_core::id::sha256_hex;
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 const TOPICS_MAX: usize = 64;
+const EDITED_MAX: usize = 64;
 const HASHES_MAX: usize = 512;
 const STALE: Duration = Duration::from_secs(7 * 86_400);
 const LOCK_STALE: Duration = Duration::from_secs(86_400);
@@ -28,6 +29,49 @@ pub struct SessionState {
     pub capture_hashes: Vec<String>,
     /// Topic notes injected so far; the cap is `inject::TOPICS_PER_SESSION`.
     pub topics_injected: u8,
+    /// Repo files edited in this session (distinct, at most `EDITED_MAX`), for the Stop reminder.
+    #[serde(default)]
+    pub edited: Vec<String>,
+    /// Paths already dirty at SessionStart (`git status --porcelain`), at most 200.
+    #[serde(default)]
+    pub baseline_dirty: Vec<String>,
+    /// Edits outside the project root. A count only; the paths are not stored.
+    #[serde(default)]
+    pub outside_edits: u32,
+    /// Hash of the changed-file set last sent on a checkpoint.
+    #[serde(default)]
+    pub files_sent: Option<String>,
+    /// A recognised test command ran, or a `Decision:`-style line was written.
+    #[serde(default)]
+    pub worked_signal: bool,
+    /// The agent saved to Cairn (the `memory_save` tool or `cairn save`).
+    #[serde(default)]
+    pub saved: bool,
+    /// The Stop reminder text the server gave at session start; the built-in one when none.
+    #[serde(default)]
+    pub stop_nudge: Option<String>,
+    /// The Stop reminder was sent; it is sent once per session.
+    #[serde(default)]
+    pub nudged: bool,
+    /// Topic lookups sent so far; the cap is `inject::TOPIC_LOOKUPS_PER_SESSION`.
+    #[serde(default)]
+    pub topic_lookups: u8,
+    /// Project the brief resolved (the file, or exactly one repository membership).
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// The no-project hint was injected; it is once per session.
+    #[serde(default)]
+    pub hinted: bool,
+    /// The project rename notice was injected.
+    #[serde(default)]
+    pub rename_noticed: bool,
+    /// Set when `CAIRN_SESSION_ORIGIN=automation`. A subagent payload does not set this.
+    #[serde(default)]
+    pub automated: bool,
+    /// The first user correction this session, clipped to 95 bytes. Not set for an automated
+    /// or subagent session.
+    #[serde(default)]
+    pub correction: Option<String>,
 }
 
 fn push_capped(list: &mut Vec<String>, value: &str, cap: usize) {
@@ -41,6 +85,12 @@ impl SessionState {
     pub fn remember_topic(&mut self, path: &str) {
         if !self.topics.iter().any(|seen| seen == path) {
             push_capped(&mut self.topics, path, TOPICS_MAX);
+        }
+    }
+
+    pub fn remember_edit(&mut self, path: &str) {
+        if !self.edited.iter().any(|seen| seen == path) && self.edited.len() < EDITED_MAX {
+            self.edited.push(path.to_owned());
         }
     }
 

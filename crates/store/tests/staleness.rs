@@ -1,6 +1,7 @@
 //! Step 6c: git staleness, merge promotion, distillation into the store, expiry, topic cards.
 
 use cairn_core::capture::{ObservationInput, WorkContext};
+use cairn_core::memory::model::Rank;
 use cairn_core::memory::{Kind, Scope, Status};
 use cairn_store::memory::ListFilter;
 use cairn_store::repo::RepoState;
@@ -18,6 +19,24 @@ fn work(project: &str, branch: &str, files: &[&str], symbols: &[&str]) -> WorkCo
         symbols: symbols.iter().map(|s| (*s).to_owned()).collect(),
         ..WorkContext::default()
     }
+}
+
+/// `Session YYYY-MM-DD on {branch}`.
+fn session_title(title: &str, branch: &str) -> bool {
+    let Some(rest) = title.strip_prefix("Session ") else {
+        return false;
+    };
+    let Some(date) = rest.strip_suffix(&format!(" on {branch}")) else {
+        return false;
+    };
+    let bytes = date.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
 }
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -267,13 +286,37 @@ async fn merge_promotes_branch_and_expires_handoff() {
         .await
         .unwrap();
     for session in ["s1", "s2"] {
+        store.end_session(&a, session).await.unwrap();
         assert!(store.distill_session(&a, session).await.unwrap().handoff);
     }
+    let notes = store
+        .list(
+            &a,
+            &ListFilter {
+                kind: Some(Kind::Note),
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memories;
+    let feat_digest = notes
+        .iter()
+        .find(|m| m.context.branch.as_deref() == Some("feat"))
+        .expect("feat digest")
+        .id
+        .clone();
+    let other_digest = notes
+        .iter()
+        .find(|m| m.context.branch.as_deref() == Some("other"))
+        .expect("other digest")
+        .id
+        .clone();
     let handoffs = |branch: &'static str| {
         let (store, a, pid) = (store, a.clone(), pid.clone());
         async move {
             sqlx::query(
-                "SELECT expires_at <= now() AS expired FROM memories
+                "SELECT coalesce(expires_at <= now(), false) AS expired FROM memories
                   WHERE kind = 'handoff' AND project_id = $1 AND repo_branch = $2",
             )
             .bind(&pid)
@@ -288,9 +331,20 @@ async fn merge_promotes_branch_and_expires_handoff() {
     // the current branch is never "merged" into itself
     report.merged_branches = strings(&["feat", "main"]);
     let out = store.repo_state(&a, &report).await.unwrap();
-    assert_eq!(out.promoted, 1);
+    // The feature-branch rule and that session's digest. The other branch stays.
+    assert_eq!(out.promoted, 2);
     let moved = store.get(&a, &on_feature).await.unwrap();
     assert_eq!(moved.context.branch.as_deref(), Some("main"));
+    assert_eq!(
+        store
+            .get(&a, &feat_digest)
+            .await
+            .unwrap()
+            .context
+            .branch
+            .as_deref(),
+        Some("main")
+    );
     assert_eq!(
         store
             .get(&a, &on_other)
@@ -301,8 +355,18 @@ async fn merge_promotes_branch_and_expires_handoff() {
             .as_deref(),
         Some("other")
     );
-    // the merged branch's handoff is gone from reads and its row is expired; the other lives
-    assert!(handoffs("feat").await.unwrap());
+    assert_eq!(
+        store
+            .get(&a, &other_digest)
+            .await
+            .unwrap()
+            .context
+            .branch
+            .as_deref(),
+        Some("other")
+    );
+    // neither handoff is expired; both stay readable
+    assert!(!handoffs("feat").await.unwrap());
     assert!(!handoffs("other").await.unwrap());
     db.finish().await;
 }
@@ -348,11 +412,33 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
             .await
             .unwrap();
     }
+    store.end_session(&a, "s1").await.unwrap();
     let first = store.distill_session(&a, "s1").await.unwrap();
     assert_eq!((first.notes, first.handoff), (2, true), "gotcha + fact");
-    // another session of the same checkout: the same notes dedupe and the handoff is replaced
+    let written = store
+        .list(
+            &a,
+            &ListFilter {
+                kind: Some(Kind::Note),
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(written.len(), 1, "one digest");
+    assert_eq!(written[0].kind, Kind::Note);
+    assert_eq!(written[0].rank, Rank::Candidate);
+    assert!(
+        session_title(&written[0].title, "feat"),
+        "{}",
+        written[0].title
+    );
+    let digest_id = written[0].id.clone();
+    // another session of the same checkout: the same notes and the same handoff dedupe
+    store.end_session(&a, "s2").await.unwrap();
     let second = store.distill_session(&a, "s2").await.unwrap();
-    assert!(second.handoff);
+    assert!(!second.handoff);
     let all = store
         .list(&a, &ListFilter::default())
         .await
@@ -365,10 +451,25 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
         "one handoff per repo+branch+worktree"
     );
     assert!(of(Kind::Handoff)[0].title.starts_with("Handoff: feat"));
-    assert!(all.iter().all(|m| !m.title.starts_with("Session ")));
+    let digests: Vec<_> = all
+        .iter()
+        .filter(|m| m.title.starts_with("Session "))
+        .collect();
+    assert_eq!(
+        digests.len(),
+        1,
+        "the twin session restates the same digest"
+    );
+    assert_eq!(digests[0].id, digest_id);
+    assert_eq!(digests[0].kind, Kind::Note);
+    assert!(
+        session_title(&digests[0].title, "feat"),
+        "{}",
+        digests[0].title
+    );
     let gotcha = of(Kind::Gotcha);
     assert_eq!(gotcha.len(), 1);
-    assert_eq!(gotcha[0].scope, Scope::Personal);
+    assert_eq!(gotcha[0].scope, Scope::Project);
     assert_eq!(
         gotcha[0].title,
         "`cargo test` failed until money.rs changed"
@@ -380,22 +481,15 @@ async fn distill_writes_system_gotcha_fact_and_one_handoff_per_checkout() {
             .any(|e| e.name == "src/billing/money.rs")
     );
     assert_eq!(of(Kind::Fact).len(), 1);
-    // system gotcha and fact lapse after 180 days; the handoff after 14
-    let days = |m: &cairn_core::memory::Memory| {
-        (m.expires_at.unwrap() - cairn_core::id::now_seconds()) / 86_400
-    };
-    assert!(
-        (179..=180).contains(&days(gotcha[0])),
-        "{}",
-        days(gotcha[0])
-    );
-    assert!((179..=180).contains(&days(of(Kind::Fact)[0])));
-    assert!((13..=14).contains(&days(of(Kind::Handoff)[0])));
+    assert!(gotcha[0].expires_at.is_none());
+    assert!(of(Kind::Fact)[0].expires_at.is_none());
+    assert!(of(Kind::Handoff)[0].expires_at.is_none());
     // another branch of the same project gets its own handoff
     store
         .capture(&a, edit_capture("o1", "s3", "other", "src/x.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s3").await.unwrap();
     store.distill_session(&a, "s3").await.unwrap();
     let handoffs = store
         .list(&a, &ListFilter::default())
@@ -484,8 +578,11 @@ async fn sweep_expires_unused_stale_and_purges_distilled_observations() {
     .fetch_all(store.pool())
     .await
     .unwrap();
-    // titles sort: Billing (recent), Queue claims (old, unused), Queue retries (used)
-    assert_eq!(expired, [false, true, false]);
+    assert_eq!(
+        expired,
+        [false, false, false],
+        "sweep does not expire memories"
+    );
     db.finish().await;
 }
 
@@ -552,16 +649,15 @@ async fn fetch_extends_system_expiry_but_not_a_promoted_copy() {
         .await
         .unwrap();
     assert!(
-        expiry(gotcha.clone()).await > 179.0,
-        "a fetch restarts the 180 days"
+        expiry(gotcha.clone()).await < 11.0,
+        "a fetch does not move expires_at"
     );
-    // a helpful vote does too
     shorten(gotcha.clone()).await;
     store
         .feedback(&a, &gotcha, cairn_store::memory::Vote::Helpful)
         .await
         .unwrap();
-    assert!(expiry(gotcha.clone()).await > 179.0);
+    assert!(expiry(gotcha.clone()).await < 11.0);
     // an agent memory and a promoted global copy are left alone
     let rule_id = store
         .save(
@@ -733,7 +829,7 @@ async fn stale_never_expires_an_agent_memory() {
     .collect();
     for (id, expires) in expires {
         // Only system-derived rows lapse; an agent's memory stays, stale and down-ranked.
-        assert_eq!(expires, id == derived, "{id}");
+        assert!(!expires, "{id} is not expired by sweep");
     }
     assert_eq!(status(&db, &a, &durable).await.0, Status::Stale);
     db.finish().await;
@@ -826,12 +922,37 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
         .capture(&b, edit_capture("e2", "sb", "dev", "src/b.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "sa").await.unwrap();
     assert!(store.distill_session(&a, "sa").await.unwrap().handoff);
+    store.end_session(&b, "sb").await.unwrap();
     assert!(store.distill_session(&b, "sb").await.unwrap().handoff);
+    let notes = store
+        .list(
+            &a,
+            &ListFilter {
+                kind: Some(Kind::Note),
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap()
+        .memories;
+    let mine_digest = notes
+        .iter()
+        .find(|m| m.owner == a)
+        .expect("caller digest")
+        .id
+        .clone();
+    let their_digest = notes
+        .iter()
+        .find(|m| m.owner == b)
+        .expect("other member digest")
+        .id
+        .clone();
     let mut report = state(&pid, "main");
     report.merged_branches = strings(&["dev"]);
     let out = store.repo_state(&a, &report).await.unwrap();
-    assert_eq!(out.promoted, 1, "only the reporter's own memory moves");
+    assert_eq!(out.promoted, 2, "only the reporter's own rows move");
     let branch = |id: String| {
         let store = store.clone();
         async move {
@@ -845,9 +966,11 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
         }
     };
     assert_eq!(branch(mine).await.as_deref(), Some("main"));
+    assert_eq!(branch(mine_digest).await.as_deref(), Some("main"));
     assert_eq!(branch(theirs).await.as_deref(), Some("dev"));
+    assert_eq!(branch(their_digest).await.as_deref(), Some("dev"));
     let expired: Vec<(String, bool)> = sqlx::query(
-        "SELECT owner_id, expires_at <= now() AS expired FROM memories WHERE kind = 'handoff'",
+        "SELECT owner_id, coalesce(expires_at <= now(), false) AS expired FROM memories WHERE kind = 'handoff'",
     )
     .fetch_all(store.pool())
     .await
@@ -857,7 +980,7 @@ async fn repo_state_never_rewrites_another_members_branches_or_handoffs() {
     .collect();
     assert_eq!(expired.len(), 2);
     for (owner, expired) in expired {
-        assert_eq!(expired, owner == a, "only the reporter's handoff expires");
+        assert!(!expired, "{owner} handoff stays");
     }
     db.finish().await;
 }
@@ -881,6 +1004,7 @@ async fn a_forgotten_handoff_does_not_block_the_checkout() {
         .capture(&a, edit_capture("e1", "s1", "feat", "src/a.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s1").await.unwrap();
     assert!(store.distill_session(&a, "s1").await.unwrap().handoff);
     let handoff: String =
         sqlx::query_scalar("SELECT memory_id FROM memories WHERE kind = 'handoff'")
@@ -892,6 +1016,7 @@ async fn a_forgotten_handoff_does_not_block_the_checkout() {
         .capture(&a, edit_capture("e2", "s2", "feat", "src/b.rs", &pid))
         .await
         .unwrap();
+    store.end_session(&a, "s2").await.unwrap();
     assert!(
         store.distill_session(&a, "s2").await.unwrap().handoff,
         "forgetting one handoff is not forgetting the checkout"

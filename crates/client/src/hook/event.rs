@@ -1,4 +1,4 @@
-//! The hook payload and what each event captures (CM-SPEC-006 §1).
+//! The hook payload and what each event captures (docs/reference/hook.md#events).
 
 use super::readonly::{canonical_tool, is_read_only_tool, shell_command_is_readonly};
 use cairn_core::capture::{CaptureKind, redact_sensitive_content};
@@ -42,7 +42,7 @@ impl Payload {
         }
     }
 
-    fn text(&self, key: &str) -> Option<&str> {
+    pub(super) fn text(&self, key: &str) -> Option<&str> {
         self.0
             .get(key)
             .and_then(Value::as_str)
@@ -55,6 +55,11 @@ impl Payload {
 
     pub fn cwd(&self) -> Option<&str> {
         self.text("cwd")
+    }
+
+    /// A boolean field the host sent, such as the Stop hook's `stop_hook_active`.
+    pub fn flag(&self, key: &str) -> bool {
+        self.0.get(key).and_then(Value::as_bool) == Some(true)
     }
 
     pub fn tool(&self) -> Option<Tool<'_>> {
@@ -158,9 +163,111 @@ impl Tool<'_> {
             .filter(|text| !text.is_empty())
     }
 
+    fn mcp_response(&self) -> Option<Value> {
+        let response = self.response?;
+        if ["isError", "is_error"]
+            .iter()
+            .any(|key| response.get(key).and_then(Value::as_bool) == Some(true))
+        {
+            return None;
+        }
+        if let Some(structured) = response.get("structuredContent") {
+            return Some(structured.clone());
+        }
+        if let Some(blocks) = response
+            .as_array()
+            .or_else(|| response.get("content").and_then(Value::as_array))
+        {
+            return blocks
+                .iter()
+                .find(|v| v["type"] == "text")
+                .and_then(|v| v["text"].as_str())
+                .and_then(|text| serde_json::from_str(text).ok());
+        }
+        if let Some(text) = response.as_str() {
+            return serde_json::from_str(text).ok();
+        }
+        response.is_object().then(|| response.clone())
+    }
+
+    pub fn mcp_save_succeeded(&self) -> bool {
+        let Some(result) = self.mcp_response() else {
+            return false;
+        };
+        let has_id = |item: &Value| item["id"].as_str().is_some_and(|id| !id.is_empty());
+        if let Some(items) = result["results"].as_array() {
+            return items.iter().any(|item| {
+                has_id(item) && matches!(item["status"].as_str(), Some("saved" | "duplicate"))
+            });
+        }
+        has_id(&result) && result["deduplicated"].is_boolean()
+    }
+
+    pub fn lookup(&self) -> Option<Value> {
+        let kind = if self.name == "mcp__cairn__memory_search" {
+            "search"
+        } else if self.name == "mcp__cairn__memory_get" {
+            "get"
+        } else {
+            return None;
+        };
+        let query = (kind == "search")
+            .then(|| {
+                self.input_text("query")
+                    .map(redact_sensitive_content)
+                    .map(|q| q.chars().take(120).collect::<String>())
+            })
+            .flatten();
+        let input_ids: Vec<String> = self
+            .input
+            .and_then(|v| v.get("ids"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(20)
+            .map(str::to_owned)
+            .collect();
+        let parsed = self.mcp_response();
+        let records = parsed
+            .as_ref()
+            .and_then(|v| {
+                v.get(if kind == "search" {
+                    "results"
+                } else {
+                    "memories"
+                })
+            })
+            .and_then(Value::as_array);
+        let ids: Vec<String> = if kind == "get" {
+            input_ids
+        } else {
+            records
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.get("id").and_then(Value::as_str))
+                .take(20)
+                .map(str::to_owned)
+                .collect()
+        };
+        let hit = records.map(|r| {
+            if kind == "search" {
+                !ids.is_empty()
+            } else {
+                !r.is_empty()
+            }
+        });
+        Some(serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit}))
+    }
+
     fn command_text(&self) -> Option<&str> {
         self.input_text("command")
             .or_else(|| self.input_text("cmd"))
+    }
+
+    /// The shell command of a `Bash` call, as sent.
+    pub fn shell_command(&self) -> Option<&str> {
+        (self.name == "Bash").then(|| self.command_text()).flatten()
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -273,7 +380,7 @@ impl Tool<'_> {
     }
 
     /// `exit_code == 0` when present, else neither `is_error` nor `interrupted` set; else unknown.
-    fn ok(&self) -> Option<bool> {
+    pub fn ok(&self) -> Option<bool> {
         if let Some(code) = self.exit_code() {
             return Some(code == 0);
         }

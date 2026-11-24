@@ -36,6 +36,16 @@ test("audit labels are human and fall back to the action", () => {
   assert.equal(auditLabel("custom_thing"), "Custom thing");
 });
 
+test("fix and project audit events have explicit labels", () => {
+  assert.equal(auditLabel("fix_applied"), "Applied a fix");
+  assert.equal(auditLabel("fix_ignored"), "Ignored a fix");
+  assert.equal(auditLabel("fix_done"), "Completed a fix");
+  assert.equal(auditLabel("fix_failed"), "Fix failed");
+  assert.equal(auditLabel("fix_copied"), "Copied a fix prompt");
+  assert.equal(auditLabel("project_auto_joined"), "Joined a project automatically");
+  assert.equal(auditLabel("memory_rewritten_by_admin"), "Rewrote a memory as admin");
+});
+
 test("every timeline chip names an action the server counts as Cairn's own", () => {
   const rust = readFileSync(new URL("../../../../../crates/core/src/account/audit.rs", import.meta.url), "utf8");
   const system = [...rust.slice(rust.indexOf("SYSTEM_ACTIONS"), rust.indexOf("];")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);

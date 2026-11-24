@@ -3,7 +3,7 @@ use crate::project::join_member;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::{new_id, now_seconds};
-use cairn_core::memory::kind::SYSTEM_TTL_SECONDS;
+use cairn_core::memory::model::Rank;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
     Usage,
@@ -15,48 +15,50 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};
 use std::collections::{HashMap, HashSet};
 
-/// The visibility rule, reused by every read: not forgotten, not expired, and owned, global, or
-/// in a project the reader belongs to. `alias` is the memories table alias, `me` a bind like `$1`.
-pub(crate) fn visible(alias: &str, me: &str) -> String {
+fn owned(alias: &str, me: &str) -> String {
     format!(
-        "({a}.status <> 'forgotten' AND ({a}.expires_at IS NULL OR {a}.expires_at > now())
-          AND ({a}.owner_id = {me} OR {a}.scope = 'global'
-               OR ({a}.scope = 'project' AND {a}.project_id IN
-                    (SELECT project_id FROM project_members WHERE person_id = {me}))))",
+        "({a}.owner_id = {me} OR {a}.scope = 'global'
+          OR ({a}.scope = 'project' AND {a}.project_id IN
+               (SELECT project_id FROM project_members WHERE person_id = {me})))",
         a = alias
     )
 }
 
-/// The search rule (CM-SPEC-007 §3): live (`active` or `stale`), not expired, and owned, global, or
-/// in one of the reader's projects. `me` is a person bind (`$1`), `projects` a `text[]` bind of the
-/// reader's project ids, loaded once per request. A plain column predicate, so the vector channel
-/// can apply it inside the HNSW scan.
+/// The visibility rule, reused by every read: not forgotten, and owned, global, or in a project
+/// the reader belongs to. Age does not hide a row. `alias` is the memories table alias, `me` a
+/// bind like `$1`.
+pub(crate) fn visible(alias: &str, me: &str) -> String {
+    format!(
+        "({a}.status <> 'forgotten' AND {owned})",
+        a = alias,
+        owned = owned(alias, me)
+    )
+}
+
+/// The search rule: `active`, `stale` or `superseded`, and owned, global, or in one of the
+/// reader's projects. `me` is a person bind (`$1`), `projects` a `text[]` bind of the reader's
+/// project ids, loaded once per request. A plain column predicate, so the vector channel can
+/// apply it inside the HNSW scan. Forgotten rows stay out. Age does not.
 pub(crate) fn searchable(alias: &str, me: &str, projects: &str) -> String {
     format!(
-        "({a}.status IN ('active','stale') AND ({a}.expires_at IS NULL OR {a}.expires_at > now())
+        "({a}.status IN ('active','stale','superseded')
           AND ({a}.owner_id = {me} OR {a}.scope = 'global'
                OR ({a}.scope = 'project' AND {a}.project_id = ANY({projects}))))",
         a = alias
     )
 }
 
-/// `visible`, but an expired memory still counts: the console lists expired ones when asked, and
-/// the audit log names memories that have since expired.
+/// Same as `visible`. The name stays so callers that used to include expired rows keep compiling.
 pub(crate) fn visible_even_if_expired(alias: &str, me: &str) -> String {
-    format!(
-        "({a}.status <> 'forgotten'
-          AND ({a}.owner_id = {me} OR {a}.scope = 'global'
-               OR ({a}.scope = 'project' AND {a}.project_id IN
-                    (SELECT project_id FROM project_members WHERE person_id = {me}))))",
-        a = alias
-    )
+    visible(alias, me)
 }
 
 macro_rules! memory_columns {
     () => {
         "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
-    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status,
+    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
+    m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
@@ -106,6 +108,10 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         entities: Vec::new(),
         links: Vec::new(),
         status: parse(row, "status")?,
+        rank: parse(row, "rank")?,
+        faded_at: row.try_get("faded_at")?,
+        edited_by: row.try_get("edited_by")?,
+        proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
         origin: parse(row, "origin")?,
         expires_at: row.try_get("expires_at")?,
@@ -121,6 +127,35 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
             last_used_at: row.try_get("last_used_at")?,
         },
     })
+}
+
+pub(crate) fn collection_memory(row: &PgRow) -> Result<Option<Memory>> {
+    match memory_from_row(row) {
+        Ok(memory) => Ok(Some(memory)),
+        Err(StoreError::Validation(_)) => {
+            let id: &str = row.try_get("memory_id")?;
+            eprintln!("cairn: skipped malformed memory {id}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Which project a request attaches to, if any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectResolution {
+    pub project_id: Option<String>,
+    /// Set only for the repository fallback (no project id, exactly one membership).
+    pub by_repository: bool,
+}
+
+impl ProjectResolution {
+    fn personal() -> Self {
+        Self {
+            project_id: None,
+            by_repository: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,8 +186,8 @@ pub struct ListFilter {
     pub branch: Option<String>,
     /// A web search over title, summary, reason and fields. Never counts a fetch.
     pub q: Option<String>,
-    /// Memories past `expires_at` (and not yet swept) instead of live ones; `statuses` is ignored.
-    pub expired: bool,
+    /// An admin listing `forgotten` rows. Everyone else stays on `visible`.
+    pub see_forgotten: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -192,40 +227,113 @@ impl Store {
         origin: Origin,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        let project_id = self.context_project(person_id, work).await?;
+        let project_id = self.context_project(person_id, work, device_id).await?;
+        self.save_with_project(
+            person_id,
+            input,
+            work,
+            origin,
+            device_id,
+            project_id.as_deref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_with_project(
+        &self,
+        person_id: &str,
+        input: SaveInput,
+        work: &WorkContext,
+        origin: Origin,
+        device_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<Saved> {
+        let mut input = input;
+        input.aliases = input
+            .aliases
+            .iter()
+            .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
+            .collect();
+        let aliases = input.aliases.clone();
         let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
         let mut tx = self.pool.begin().await?;
-        let saved = insert_memory(
-            &mut tx,
-            person_id,
-            project_id.as_deref(),
-            &new,
-            None,
-            device_id,
-        )
-        .await?;
+        let saved = insert_memory(&mut tx, person_id, project_id, &new, None, device_id).await?;
+        if !saved.deduplicated {
+            insert_agent_aliases(&mut tx, &saved.id, &aliases).await?;
+        }
         tx.commit().await?;
         Ok(saved)
     }
 
     /// The request's project when the person is (or by the committed file becomes) a member.
+    /// With no project id, exactly one membership for a non-`local:` repository is that project.
     pub(crate) async fn context_project(
         &self,
         person_id: &str,
         work: &WorkContext,
+        device_id: Option<&str>,
     ) -> Result<Option<String>> {
-        let Some(project_id) = work
+        if let Some(project_id) = work
             .project_id
             .as_deref()
             .map(str::trim)
-            .filter(|p| !p.is_empty())
+            .filter(|id| !id.is_empty())
+        {
+            let mut tx = self.pool.begin().await?;
+            let (exists, inserted) = join_member(&mut tx, person_id, project_id).await?;
+            if inserted {
+                crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"project_file"})).await?;
+            }
+            tx.commit().await?;
+            return Ok(exists.then(|| project_id.to_owned()));
+        }
+        Ok(self.resolve_project(person_id, work).await?.project_id)
+    }
+
+    /// How a request attaches. An explicit project id counts only when the person is already a
+    /// member (capture joins first). `by_repository` is the single-membership fallback.
+    pub async fn resolve_project(
+        &self,
+        person_id: &str,
+        work: &WorkContext,
+    ) -> Result<ProjectResolution> {
+        if let Some(project_id) = work
+            .project_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            let member = self.is_member(person_id, project_id).await?;
+            return Ok(ProjectResolution {
+                project_id: member.then(|| project_id.to_owned()),
+                by_repository: false,
+            });
+        }
+        let Some(repository) = work
+            .repository
+            .as_deref()
+            .map(str::trim)
+            .filter(|repository| !repository.is_empty() && !repository.starts_with("local:"))
         else {
-            return Ok(None);
+            return Ok(ProjectResolution::personal());
         };
-        let mut tx = self.pool.begin().await?;
-        let exists = join_member(&mut tx, person_id, project_id).await?;
-        tx.commit().await?;
-        Ok(exists.then(|| project_id.to_owned()))
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT p.project_id FROM projects p
+              JOIN project_members m ON m.project_id = p.project_id
+             WHERE p.repository = $1 AND m.person_id = $2
+             LIMIT 2",
+        )
+        .bind(repository)
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(match ids.as_slice() {
+            [id] => ProjectResolution {
+                project_id: Some(id.clone()),
+                by_repository: true,
+            },
+            _ => ProjectResolution::personal(),
+        })
     }
 
     pub async fn get(&self, person_id: &str, memory_id: &str) -> Result<Memory> {
@@ -245,15 +353,21 @@ impl Store {
 
     /// Counts an explicit fetch by an agent (`get` or search). Internal usage; never shown.
     pub async fn mark_fetched(&self, memory_ids: &[String]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE memories SET faded_at = NULL WHERE memory_id = ANY($1) AND faded_at IS NOT NULL")
+            .bind(memory_ids)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             "INSERT INTO usage (memory_id, fetched, last_used_at)
              SELECT id, 1, now() FROM unnest($1::text[]) AS id WHERE EXISTS (SELECT 1 FROM memories WHERE memory_id = id)
              ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now()",
         )
         .bind(memory_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        extend_system_expiry(&self.pool, memory_ids).await?;
+        promote_candidates(&mut *tx, memory_ids).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -269,21 +383,13 @@ impl Store {
             }
             None => (None, None),
         };
-        let statuses: Vec<String> = if filter.expired {
-            Vec::new()
-        } else {
-            filter
-                .statuses
-                .iter()
-                .map(|s| s.as_str().to_owned())
-                .collect()
-        };
-        // A promoted global copy lapses for everyone at once; it is nobody's to see as expired.
-        let scope = if filter.expired {
-            format!(
-                "{} AND m.expires_at <= now() AND NOT (m.origin = 'system' AND m.scope = 'global')",
-                visible_even_if_expired("m", "$1")
-            )
+        let statuses: Vec<String> = filter
+            .statuses
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        let scope = if filter.see_forgotten {
+            owned("m", "$1")
         } else {
             visible("m", "$1")
         };
@@ -331,7 +437,7 @@ impl Store {
         };
         let mut memories = rows
             .iter()
-            .map(memory_from_row)
+            .filter_map(|row| collection_memory(row).transpose())
             .collect::<Result<Vec<_>>>()?;
         self.attach(person_id, &mut memories).await?;
         Ok(Page {
@@ -480,15 +586,16 @@ impl Store {
                 .await?;
         }
         if vote == Vote::Helpful {
-            extend_system_expiry(&mut *tx, &[memory_id.to_owned()]).await?;
+            let ids = [memory_id.to_owned()];
+            promote_candidates(&mut *tx, &ids).await?;
         }
         tx.commit().await?;
         Ok(new_status)
     }
 
-    /// Owner only. The row stays as `forgotten` with its text blanked and `identity_hash` kept, so
-    /// saving the same thing again is a 409. Embedding, entity and link rows are deleted, and a
-    /// memory this one superseded comes back unless another live memory also supersedes it.
+    /// Owner only. The row stays as `forgotten` with its text, fields, embedding, entities and
+    /// links kept, so saving the same thing again is a 409. Pending jobs are cancelled. A memory
+    /// this one superseded comes back unless another non-forgotten memory also supersedes it.
     /// True when this call forgot it, false when it already was forgotten.
     pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
@@ -511,23 +618,12 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE memories SET status = 'forgotten', title = '', summary = '', reason = '', fields = '{}',
-                    evidence = '{}', evidence_count = 0, repo = NULL, repo_branch = NULL,
-                    repo_worktree = NULL, repo_commit = NULL, embedding = NULL, embedding_model = NULL,
-                    embedding_source = NULL, stale_cause = NULL, status_changed_at = now(), updated_at = now()
+            "UPDATE memories SET status = 'forgotten', status_changed_at = now(), updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("DELETE FROM entities WHERE memory_id = $1")
-            .bind(memory_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM links WHERE source_id = $1 OR target_id = $1")
-            .bind(memory_id)
-            .execute(&mut *tx)
-            .await?;
         sqlx::query("DELETE FROM jobs WHERE kind IN ('embed','consolidate','link') AND job_key = $1 AND status = 'pending'")
             .bind(memory_id)
             .execute(&mut *tx)
@@ -540,25 +636,8 @@ impl Store {
     }
 }
 
-/// Back to `active` when no remaining live memory supersedes it.
-/// A system gotcha or fact that is used keeps living: its 180 days restart. A promoted global
-/// copy has no age limit (it lives while two sources do), so it is left alone.
-async fn extend_system_expiry<'e>(
-    db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
-    memory_ids: &[String],
-) -> Result<()> {
-    sqlx::query(&format!(
-        "UPDATE memories SET expires_at = now() + make_interval(secs => {SYSTEM_TTL_SECONDS})
-          WHERE memory_id = ANY($1) AND origin = 'system' AND kind IN ('gotcha','fact')
-            AND scope <> 'global' AND expires_at > now()"
-    ))
-    .bind(memory_ids)
-    .execute(db)
-    .await?;
-    Ok(())
-}
-
-async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
+/// Back to `active` when no remaining non-forgotten memory supersedes it.
+pub(crate) async fn restore_if_unsuperseded(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
     sqlx::query(
         "UPDATE memories SET status = 'active', status_changed_at = now(), updated_at = now()
           WHERE memory_id = $1 AND status = 'superseded'
@@ -625,9 +704,26 @@ pub(crate) async fn link_tx(
     Ok(())
 }
 
+/// A fetch, a helpful vote, a duplicate save, or a consolidate re-statement confirms a candidate.
+pub(crate) async fn promote_candidates<'e>(
+    db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    memory_ids: &[String],
+) -> Result<()> {
+    if memory_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE memories SET rank = 'normal' WHERE memory_id = ANY($1) AND rank = 'candidate'",
+    )
+    .bind(memory_ids)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Inserts a derived memory with its entities, usage row, agent links and embed job. An identical
-/// memory (same owner, scope, project and identity hash) returns as a duplicate, or is revived when
-/// it had expired; a forgotten one is a 409. `fixed_id` is for the deterministic handoff id.
+/// memory (same owner, scope, project and identity hash) returns as a duplicate. A forgotten one
+/// is a 409. `fixed_id` is for a caller that already chose the id.
 pub(crate) async fn insert_memory(
     tx: &mut PgConnection,
     person_id: &str,
@@ -642,11 +738,20 @@ pub(crate) async fn insert_memory(
         project_id
     };
     let id = fixed_id.map_or_else(|| new_id("mem"), str::to_owned);
+    // A distilled note starts low. Handoffs and promoted global copies stay at the normal rank.
+    let rank = if new.origin == Origin::System
+        && new.kind != Kind::Handoff
+        && new.scope != Scope::Global
+    {
+        Rank::Candidate
+    } else {
+        Rank::Normal
+    };
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -670,11 +775,12 @@ pub(crate) async fn insert_memory(
     .bind(new.expires_at.map(|t| t as f64))
     .bind(new.origin.as_str())
     .bind(device_id)
+    .bind(rank.as_str())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
         let existing = sqlx::query(
-            "SELECT memory_id, status, coalesce(expires_at <= now(), false) AS expired FROM memories
+            "SELECT memory_id, status FROM memories
               WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '') AND identity_hash = $4",
         )
         .bind(person_id)
@@ -688,21 +794,13 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
-        // Saving again after expiry gives the same memory a new life; until the sweep deletes the
-        // row it would otherwise stay hidden while the save reported success.
-        let revived: bool = existing.try_get("expired")?;
-        if revived {
-            sqlx::query(
-                "UPDATE memories SET expires_at = to_timestamp($2), updated_at = now() WHERE memory_id = $1",
-            )
-            .bind(&id)
-            .bind(new.expires_at.map(|t| t as f64))
-            .execute(&mut *tx)
-            .await?;
-            enqueue_tx(tx, JobKind::Embed, &id).await?;
-            if new.kind != Kind::Handoff {
-                enqueue_tx(tx, JobKind::Link, &id).await?;
-            }
+        if new.origin != Origin::System {
+            // Saving the same note again confirms it and counts as another sighting.
+            promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
+            sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
         }
         // Identity ignores the reason, so a correction that only changes it dedupes onto its own
         // target: keep the new reason and skip the self-link.
@@ -717,7 +815,7 @@ pub(crate) async fn insert_memory(
         return Ok(Saved {
             id,
             status,
-            deduplicated: !revived,
+            deduplicated: true,
         });
     };
     let (kinds, names): (Vec<&str>, Vec<&str>) = new
@@ -747,6 +845,25 @@ pub(crate) async fn insert_memory(
     })
 }
 
+/// Agent aliases for a new memory, ords 0..4. A duplicate save leaves the stored rows as they are.
+async fn insert_agent_aliases(
+    tx: &mut PgConnection,
+    memory_id: &str,
+    aliases: &[String],
+) -> Result<()> {
+    for (ord, text) in aliases.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO memory_aliases (memory_id, ord, source, text) VALUES ($1, $2, 'agent', $3)",
+        )
+        .bind(memory_id)
+        .bind(ord as i16)
+        .bind(text)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
+}
+
 /// The `supersedes` and `contradicts` links a save carries; a duplicate save adds any it lacks.
 async fn save_links(
     tx: &mut PgConnection,
@@ -765,4 +882,97 @@ async fn save_links(
         }
     }
     Ok(())
+}
+
+impl Store {
+    /// Admin edit retains the owner and provenance, and atomically audits the successor.
+    pub async fn rewrite_memory(
+        &self,
+        admin: &str,
+        id: &str,
+        title: String,
+        summary: String,
+        reason: String,
+        fields: Option<serde_json::Value>,
+    ) -> Result<String> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "{MEMORY_SELECT} WHERE m.memory_id=$1 FOR UPDATE OF m"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        let old = memory_from_row(&row)?;
+        if old.status == Status::Forgotten {
+            return Err(StoreError::Conflict(
+                "forgotten memories cannot be rewritten".into(),
+            ));
+        }
+        if old.status == Status::Superseded {
+            return Err(StoreError::Conflict("rewrite the current version".into()));
+        }
+        let context = WorkContext {
+            project_id: old.project_id.clone(),
+            repository: old.context.repo.clone(),
+            branch: old.context.branch.clone(),
+            worktree: old.context.worktree.clone(),
+            commit: old.context.commit.clone(),
+            ..WorkContext::default()
+        };
+        let input = SaveInput {
+            kind: old.kind,
+            title,
+            summary,
+            reason,
+            fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
+            evidence: old.evidence.clone(),
+            supersedes: Some(id.to_owned()),
+            contradicts: None,
+            scope: Some(old.scope),
+            aliases: Vec::new(),
+        };
+        let prepared = prepare_save(
+            input,
+            &context,
+            old.project_id.is_some(),
+            old.origin,
+            now_seconds(),
+        )?;
+        if prepared.identity_hash == old.identity_hash {
+            return Err(StoreError::Conflict(
+                "nothing to rewrite: title, summary and fields are unchanged".into(),
+            ));
+        }
+        let saved = insert_memory(
+            &mut tx,
+            &old.owner,
+            old.project_id.as_deref(),
+            &prepared,
+            None,
+            None,
+        )
+        .await?;
+        if saved.deduplicated {
+            return Err(StoreError::Conflict(
+                "rewrite matches an existing memory".into(),
+            ));
+        }
+        sqlx::query("UPDATE memories SET edited_by=$2 WHERE memory_id=$1")
+            .bind(&saved.id)
+            .bind(admin)
+            .execute(&mut *tx)
+            .await?;
+        crate::account::audit_tx(
+            &mut tx,
+            admin,
+            None,
+            "memory_rewritten_by_admin",
+            Some(id),
+            serde_json::json!({"old_id":id,"new_id":saved.id}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(saved.id)
+    }
 }

@@ -3,6 +3,7 @@
 //! session and never touches a store file.
 
 pub mod doctor;
+pub mod fixes;
 pub mod hook;
 pub mod mcp;
 pub mod present;
@@ -59,6 +60,8 @@ pub struct Config {
     token: String,
     /// File this config was loaded from. `new` has none until `save` plus `load`.
     path: Option<PathBuf>,
+    /// `"nudge": false` in the file turns the hook's reminders off.
+    nudge: bool,
 }
 
 impl fmt::Debug for Config {
@@ -83,6 +86,7 @@ impl Config {
             url: normalize_url(url)?,
             token: token.to_owned(),
             path: None,
+            nudge: true,
         })
     }
 
@@ -122,7 +126,23 @@ impl Config {
         };
         let mut config = Self::new(url, token)?;
         config.path = Some(path.to_path_buf());
+        config.nudge = stored.get("nudge").and_then(Value::as_bool) != Some(false);
         Ok(config)
+    }
+
+    /// Keeps the opt-out of the config file already at `path`, so a new `cairn setup` does not
+    /// turn reminders back on.
+    pub fn keeping_nudge_of(mut self, path: &Path) -> Self {
+        if let Ok(old) = Self::load_from(path) {
+            self.nudge = old.nudge;
+        }
+        self
+    }
+
+    /// Whether the hook may remind the agent to search and save: on unless the config file says
+    /// `"nudge": false` or `CAIRN_NO_NUDGE=1` is set.
+    pub fn nudge(&self) -> bool {
+        self.nudge && std::env::var("CAIRN_NO_NUDGE").as_deref() != Ok("1")
     }
 
     /// Writes the file with mode 0600 from the start, replacing it atomically. A directory
@@ -135,7 +155,11 @@ impl Config {
             .parent()
             .ok_or_else(|| Error::Config("config path has no directory".to_owned()))?;
         create_private_dir(dir).map_err(io)?;
-        let body = json!({ "url": self.url, "token": self.token }).to_string();
+        let mut body = json!({ "url": self.url, "token": self.token });
+        if !self.nudge {
+            body["nudge"] = json!(false);
+        }
+        let body = body.to_string();
         write_private(path, body.as_bytes()).map_err(io)
     }
 }
@@ -409,6 +433,25 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         (url, receiver)
+    }
+
+    #[test]
+    fn the_nudge_opt_out_survives_a_new_setup() {
+        let path = temp_dir("nudge").join("cairn").join("config.json");
+        let new = || Config::new("https://cairn.example.test", TOKEN).unwrap();
+        new().save(&path).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("nudge"));
+        fs::write(
+            &path,
+            format!(r#"{{"url":"https://cairn.example.test","token":"{TOKEN}","nudge":false}}"#),
+        )
+        .unwrap();
+        assert!(!Config::load_from(&path).unwrap().nudge);
+        // Setup builds a fresh config, then keeps the choice already in the file.
+        let again = new().keeping_nudge_of(&path);
+        again.save(&path).unwrap();
+        assert!(!Config::load_from(&path).unwrap().nudge);
+        assert!(new().nudge && Config::load_from(&temp_dir("nudge-none").join("x")).is_err());
     }
 
     #[test]

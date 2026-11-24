@@ -11,7 +11,7 @@ const COMMAND_PROGRAMS: [&str; 20] = [
 /// A module that is only one of these says nothing about the code.
 const GENERIC_MODULES: [&str; 5] = ["src", "lib", "app", "crates", "packages"];
 
-/// Deterministic entities (CM-SPEC-008 §3): the request's lists first, then backticked spans, then
+/// Deterministic entities (docs/architecture.md): the request's lists first, then backticked spans, then
 /// bare text; the parent directory of every file last. Deduplicated, capped at 32 (first wins).
 /// The one function behind save, link jobs and the search entity channel.
 pub fn derive(texts: &[&str], context: &WorkContext) -> Vec<Entity> {

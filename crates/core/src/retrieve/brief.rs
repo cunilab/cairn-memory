@@ -117,7 +117,6 @@ pub fn session_brief(
         .filter(|m| {
             m.kind == Kind::Handoff
                 && ctx.repository.is_some()
-                && ctx.branch.is_some()
                 && m.context.repo == ctx.repository
                 && m.context.branch == ctx.branch
                 && m.context.worktree == ctx.worktree
@@ -379,6 +378,24 @@ mod tests {
         h.context.branch = Some("main".into());
         h.status = Status::Superseded;
         assert!(!brief(&[h], &ctx, &[]).contains("\"id\":\"h\""));
+    }
+
+    #[test]
+    fn brief_shows_handoff_without_git() {
+        let mut h = memory("h", Kind::Handoff, Scope::Personal);
+        h.context.repo = Some("local:myproject".into());
+        h.context.branch = None;
+        let mut non_git_ctx = ctx();
+        non_git_ctx.repository = Some("local:myproject".into());
+        non_git_ctx.branch = None;
+        non_git_ctx.project_id = None;
+        assert!(brief(&[h.clone()], &non_git_ctx, &[]).contains("\"id\":\"h\""));
+
+        // A git project still only shows the current branch's handoff
+        let mut git_ctx = ctx();
+        git_ctx.repository = Some("local:myproject".into());
+        git_ctx.branch = Some("main".into());
+        assert!(!brief(&[h], &git_ctx, &[]).contains("\"id\":\"h\""));
     }
 
     #[test]

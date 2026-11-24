@@ -3,7 +3,7 @@
 
 use cairn_client::tools::{self, Tool};
 use cairn_client::{
-    Client, Config, Error, doctor, hook, mcp, project, selected_config_path, setup, update,
+    Client, Config, Error, doctor, fixes, hook, mcp, project, selected_config_path, setup, update,
     warn_ignored_legacy_config,
 };
 use serde_json::{Map, Value, json};
@@ -14,8 +14,8 @@ use std::process;
 
 const USAGE: &str = "Usage:
   cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
-  cairn init [name]             (create or join; write .cairn/project.json)
-  cairn init --rename <name>    (owner only; update server and project file)
+  cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
+  cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
   cairn update [--check]        (install the latest release; --check only reports)
@@ -42,7 +42,15 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     let known = |name: &str| {
         matches!(
             name,
-            "init" | "setup" | "mcp" | "update" | "version" | "--version" | "doctor" | "hook"
+            "init"
+                | "setup"
+                | "mcp"
+                | "update"
+                | "version"
+                | "--version"
+                | "doctor"
+                | "hook"
+                | "fixes"
         ) || tools::find(name).is_some()
     };
     if matches!(args, [flag] if flag == "--help" || flag == "-h")
@@ -59,7 +67,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     for (index, value) in args.iter().enumerate() {
         let allowed = (index == 0 && value == "--version")
             || (index == 1 && args[0] == "update" && value == "--check")
-            || (index == 1 && args[0] == "init" && value == "--rename")
+            || (args[0] == "init" && value == "--yes")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
         if value.starts_with('-') && value != "-" && !allowed {
@@ -85,7 +93,16 @@ fn main() {
         }
     }
     update::remove_old_exe();
+    if matches!(args.first().map(String::as_str), Some("init" | "doctor")) {
+        let _ = fixes::apply_automatically();
+    }
     let result = match args.first().map(String::as_str) {
+        Some("fixes") => match &args[1..] {
+            [] => fixes::list(),
+            [apply] if apply == "apply" => fixes::apply(None),
+            [apply, id] if apply == "apply" => fixes::apply(Some(id)),
+            _ => usage(),
+        },
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
         Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),
@@ -99,8 +116,8 @@ fn main() {
             Ok(())
         }
         Some("update") => match &args[1..] {
-            [] => update::update(false),
-            [flag] if flag == "--check" => update::update(true),
+            [] => update::update(false).map(|_| ()),
+            [flag] if flag == "--check" => update::update(true).map(|_| ()),
             _ => usage(),
         },
         Some(name) => match tools::find(name).filter(|tool| tool.cli == name) {
@@ -147,8 +164,8 @@ fn setup(args: &[String]) -> Result<(), Error> {
         return Ok(());
     }
     warn_ignored_legacy_config();
-    let config = Config::new(url, &read_token()?)?;
     let path = selected_config_path()?;
+    let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
     config.save(&path)?;
     println!("Cairn configured for {} ({})", config.url(), path.display());
     setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
@@ -161,13 +178,15 @@ fn setup(args: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Creates (or finds) the caller's project for this repository and writes
-/// `<git toplevel>/.cairn/project.json`, which people commit so teammates join the project.
+/// Creates (or finds) the caller's project for this folder and writes
+/// `.cairn/project.json`. Inside git the root is the checkout; otherwise it is the working
+/// folder and the repository is `local:<folder name>`. This never stages or commits.
 fn init(args: &[String]) -> Result<(), Error> {
-    let (rename, name) = match args {
-        [] => (false, None),
-        [name] if name != "--rename" => (false, Some(name.trim())),
-        [flag, name] if flag == "--rename" => (true, Some(name.trim())),
+    let yes = args.iter().any(|arg| arg == "--yes");
+    let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
+    let name = match args.as_slice() {
+        [] => None,
+        [name] => Some(name.trim()),
         _ => usage(),
     };
     if name.is_some_and(str::is_empty) {
@@ -175,49 +194,28 @@ fn init(args: &[String]) -> Result<(), Error> {
     }
     let cwd = env::current_dir()
         .map_err(|error| Error::Input(format!("cannot read the current directory: {error}")))?;
-    let top = project::toplevel(&cwd)
-        .ok_or_else(|| Error::Input("not inside a git repository".to_owned()))?;
+    let git_top = project::toplevel(&cwd);
+    let top = git_top.clone().unwrap_or(cwd);
     let repository = project::repository_name(&top);
-    let existing = project::read(&cwd)?;
-    if !rename
-        && let (Some(requested), Some(recorded)) = (
-            name,
-            existing.as_ref().and_then(|file| file.name.as_deref()),
-        )
-        && requested != recorded
+    let existing = project::read_at(&top)?;
+    if let (Some(requested), Some(recorded)) = (
+        name,
+        existing.as_ref().and_then(|file| file.name.as_deref()),
+    ) && requested != recorded
     {
         return Err(Error::Input(format!(
-            "project file names {recorded:?}; use `cairn init --rename <name>` as the owner to rename it"
+            "project file names {recorded:?}; rename it in the web console"
         )));
     }
     let client = Client::new(Config::load()?);
-    let created = if rename {
-        let file = existing.as_ref().ok_or_else(|| {
-            Error::Input("no .cairn/project.json; run `cairn init [name]` first".to_owned())
-        })?;
-        // `.` and `..` survive percent-encoding and would climb out of the route.
-        if !file
-            .project_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            return Err(Error::Input(
-                "project id in .cairn/project.json is invalid".to_owned(),
-            ));
-        }
-        let path = format!("/cairn-memory/projects/{}/rename", file.project_id);
-        client.post(&path, &json!({"name": name}))?
-    } else {
-        let mut body = json!({ "repository": repository });
-        if let Some(file) = &existing {
-            body["project_id"] = json!(file.project_id);
-        }
-        if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref()))
-        {
-            body["name"] = json!(name);
-        }
-        client.post("/cairn-memory/projects/init", &body)?
-    };
+    let mut body = json!({ "repository": repository, "confirm_register": yes });
+    if let Some(file) = &existing {
+        body["project_id"] = json!(file.project_id);
+    }
+    if let Some(name) = name.or_else(|| existing.as_ref().and_then(|file| file.name.as_deref())) {
+        body["name"] = json!(name);
+    }
+    let created = client.post("/cairn-memory/projects/init", &body)?;
     let project_id = created["project_id"]
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project id".to_owned()))?;
@@ -225,9 +223,18 @@ fn init(args: &[String]) -> Result<(), Error> {
         .as_str()
         .ok_or_else(|| Error::Input("the server sent no project name".to_owned()))?;
     let written = project::write(&top, project_id, &repository, name)?;
-    if created["created"] == true && existing.is_some() && !rename {
+    if existing
+        .as_ref()
+        .and_then(|file| file.name.as_deref())
+        .is_some_and(|old| old != name)
+    {
         println!(
-            "The server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are its owner."
+            "Project renamed to {name:?} in the web; updated .cairn/project.json — commit it."
+        );
+    }
+    if created["created"] == true && existing.is_some() {
+        println!(
+            "Warning: the server did not know project {project_id} (a wiped or new server). Registered it again with the same id and repository {repository}; you are now its owner. Tell your team if you did not expect this."
         );
     } else if !written {
         println!("already initialized, you are a member");
@@ -238,7 +245,15 @@ fn init(args: &[String]) -> Result<(), Error> {
         if written { "written" } else { "already set" },
         path.display()
     );
-    println!("Commit .cairn/project.json so teammates who capture here join the project.");
+    if git_top.is_some() && !project::project_file_tracked(&top) {
+        println!(
+            "Commit .cairn/project.json so clones and worktrees attach: git add .cairn/project.json && git commit"
+        );
+    } else if git_top.is_none() {
+        println!(
+            "Keep .cairn/project.json with this folder; copies of the folder attach to the same project."
+        );
+    }
     Ok(())
 }
 

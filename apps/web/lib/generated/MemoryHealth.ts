@@ -3,4 +3,4 @@
 /**
  * The dashboard's health card, from the same numbers as `stale` and `links`.
  */
-export type MemoryHealth = { expiring: number, stale_missing: number, stale_feedback: number, linked_ratio: number, };
+export type MemoryHealth = { stale_missing: number, stale_feedback: number, linked_ratio: number, };

@@ -30,11 +30,13 @@ async fn init_join_rename_transfer_and_members() {
             .is_err()
     );
 
-    assert!(
+    assert_eq!(
         store
-            .join_project(&member, &project.project_id, Some("wrong"))
+            .join_project(&member, &project.project_id, Some("old name"))
             .await
-            .is_err()
+            .unwrap()
+            .name,
+        "cairn"
     );
     store
         .join_project(&member, &project.project_id, Some("cairn"))
@@ -163,5 +165,64 @@ async fn branches_and_conflicts_are_derived_from_memories() {
             .unwrap()
             .is_empty()
     );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn auto_join_audited_once() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("owner").await;
+    let member = db.person("member").await;
+    let (project, _) = db
+        .store
+        .init_project(&owner, "github.com/acme/repo", None)
+        .await
+        .unwrap();
+    for event in ["join-one", "join-two"] {
+        let input = serde_json::from_value(serde_json::json!({"event_id":event,"session_id":"join", "kind":"prompt", "content":"working", "context":{"project_id":project.project_id}})).unwrap();
+        db.store.capture(&member, input).await.unwrap();
+    }
+    assert!(
+        db.store
+            .is_member(&member, &project.project_id)
+            .await
+            .unwrap()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE person_id=$1 AND action='project_auto_joined' AND subject_id=$2 AND metadata->>'source'='project_file'")
+        .bind(&member).bind(&project.project_id).fetch_one(db.store.pool()).await.unwrap();
+    assert_eq!(count, 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn remote_alone_never_joins() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("owner").await;
+    let other = db.person("other").await;
+    let (project, _) = db
+        .store
+        .init_project(&owner, "github.com/acme/repo", None)
+        .await
+        .unwrap();
+    let input = serde_json::from_value(serde_json::json!({"event_id":"remote-one","session_id":"remote", "kind":"prompt", "content":"working", "context":{"repository":"github.com/acme/repo"}})).unwrap();
+    db.store.capture(&other, input).await.unwrap();
+    assert!(
+        !db.store
+            .is_member(&other, &project.project_id)
+            .await
+            .unwrap()
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE person_id=$1 AND action='project_auto_joined'",
+    )
+    .bind(&other)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
     db.finish().await;
 }

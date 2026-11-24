@@ -107,6 +107,72 @@ async fn bare_project_context_inherits_the_session_context() {
 }
 
 #[tokio::test]
+async fn mixed_capture_sessions_distill_personally_after_end_and_replay() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let (a, _) = db
+        .store
+        .init_project(&me, "example.test/a", None)
+        .await
+        .unwrap();
+    let (b, _) = db
+        .store
+        .init_project(&me, "example.test/b", None)
+        .await
+        .unwrap();
+    for (session, first, second) in [
+        ("project-to-personal", Some(a.project_id.as_str()), None),
+        ("personal-to-project", None, Some(a.project_id.as_str())),
+        (
+            "project-to-project",
+            Some(a.project_id.as_str()),
+            Some(b.project_id.as_str()),
+        ),
+    ] {
+        for (turn, project_id) in [("first", first), ("second", second)] {
+            let mut input = prompt(
+                &format!("{session}-{turn}"),
+                session,
+                &format!(
+                    "Decision: keep {session} {turn} isolated\nReason: ownership of capture context"
+                ),
+            );
+            input.context = WorkContext {
+                project_id: project_id.map(str::to_owned),
+                ..WorkContext::default()
+            };
+            assert!(
+                !db.store
+                    .capture(&me, input.clone())
+                    .await
+                    .unwrap()
+                    .duplicate
+            );
+            if turn == "first" {
+                assert!(db.store.end_session(&me, session).await.unwrap());
+            }
+            assert!(db.store.capture(&me, input).await.unwrap().duplicate);
+        }
+        assert!(db.store.end_session(&me, session).await.unwrap());
+        assert_eq!(
+            db.store.distill_session(&me, session).await.unwrap().notes,
+            2
+        );
+    }
+    let scopes: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT scope, project_id FROM memories WHERE owner_id = $1 AND kind = 'decision'",
+    )
+    .bind(&me)
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(scopes, vec![("personal".to_owned(), None); 6]);
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn ending_a_session_queues_distill_and_distill_writes_notes_and_one_handoff() {
     let Some(db) = TestDb::new().await else {
         return;
@@ -161,15 +227,15 @@ async fn ending_a_session_queues_distill_and_distill_writes_notes_and_one_handof
         .iter()
         .find(|m| m.kind == Kind::Handoff)
         .expect("handoff");
-    assert!(handoff.expires_at.is_some());
+    assert!(handoff.expires_at.is_none());
     assert_eq!(
         handoff.fields.to_json()["next_steps"][0],
         "TODO: wire the worker"
     );
 
-    // Distilling again upserts the handoff and dedupes the note.
+    // Distilling the same captures again does not add a second handoff.
     let again = db.store.distill_session(&me, "s1").await.unwrap();
-    assert!(again.handoff);
+    assert!(!again.handoff);
     let all = db
         .store
         .list(&me, &ListFilter::default())
@@ -240,7 +306,7 @@ async fn sweep_closes_idle_sessions_and_deletes_old_rows() {
             report.memories_deleted,
             report.observations_deleted
         ),
-        (1, 1, 1)
+        (1, 0, 1)
     );
     let jobs = db
         .store
@@ -254,6 +320,191 @@ async fn sweep_closes_idle_sessions_and_deletes_old_rows() {
         0,
         "closed sessions are not closed twice"
     );
+    db.finish().await;
+}
+
+/// A memory far past `expires_at` is still there after sweep, and a new note has no TTL.
+#[tokio::test]
+async fn sweep_never_deletes_or_expires_memories() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let kinds = [
+        ("decision", true),
+        ("rule", true),
+        ("gotcha", true),
+        ("procedure", true),
+        ("fact", true),
+        ("preference", true),
+        ("note", false),
+    ];
+    for (kind, needs_reason) in kinds {
+        let mut body = serde_json::json!({
+            "kind": kind,
+            "title": format!("{kind} title for tests"),
+            "summary": format!("{kind} summary is long enough for the test"),
+        });
+        if needs_reason {
+            body["reason"] = serde_json::json!("because the test says why");
+        }
+        if kind == "gotcha" {
+            body["fields"] = serde_json::json!({
+                "symptom": "the client hangs",
+                "cause": "no timeout",
+                "fix": "set the timeout explicitly in the client"
+            });
+        }
+        if kind == "procedure" {
+            body["fields"] = serde_json::json!({"steps": ["open the gate", "close the gate"]});
+        }
+        let saved = db
+            .store
+            .save(&me, cairn_store::testing::save_input(body), &work)
+            .await
+            .unwrap();
+        let memory = db.store.get(&me, &saved.id).await.unwrap();
+        assert!(
+            memory.expires_at.is_none(),
+            "{kind} expires_at = {:?}",
+            memory.expires_at
+        );
+    }
+    let old = db
+        .store
+        .save(
+            &me,
+            cairn_store::testing::save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Ancient fact title",
+                "summary": "Ancient fact summary is long enough",
+                "reason": "because the test says why"
+            })),
+            &work,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE memories SET expires_at = now() - interval '400 days' WHERE memory_id = $1",
+    )
+    .bind(&old.id)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    let report = db.store.sweep().await.unwrap();
+    assert_eq!(report.memories_deleted, 0);
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let still = db.store.get(&me, &old.id).await.expect("expired row stays");
+    assert_eq!(still.title, "Ancient fact title");
+    let found = db
+        .store
+        .search(
+            &me,
+            "Ancient fact title",
+            None,
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        found.results.iter().any(|card| card.id == old.id),
+        "lexical search still returns it: {found:?}"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn withdrawn_promoted_copy_stays_active() {
+    use cairn_core::memory::Status;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let (project, _) = db
+        .store
+        .init_project(&me, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let work = WorkContext {
+        project_id: Some(project.project_id),
+        ..WorkContext::default()
+    };
+    let one = db
+        .store
+        .save(&me, cairn_store::testing::rule("Source one rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let two = db
+        .store
+        .save(&me, cairn_store::testing::rule("Source two rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, reason, evidence_hash, identity_hash, origin)
+         VALUES ('mem_global_copy', $1, 'global', 'rule', 'Global copy title', 'Global copy summary is long enough', 'because the test says why', 'eg', 'ig', 'system')",
+    )
+    .bind(&me)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO links (source_id, target_id, relation, origin) VALUES
+           ('mem_global_copy', $1, 'relates', 'auto'),
+           ('mem_global_copy', $2, 'relates', 'auto')",
+    )
+    .bind(&one)
+    .bind(&two)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    db.store.forget(&me, &one).await.unwrap();
+    assert_eq!(db.store.reconcile_promoted().await.unwrap(), (0, 0));
+    let copy = db.store.get(&me, "mem_global_copy").await.unwrap();
+    assert_eq!(copy.status, Status::Active);
+    let links: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM links WHERE source_id = 'mem_global_copy' AND relation = 'relates'",
+    )
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(links, 2);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn repeated_command_results_stay_in_order() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    for (event, ok) in [("e1", Some(false)), ("e2", Some(true)), ("e3", Some(false))] {
+        let mut input = observation(event, "s1", "cargo test");
+        input.kind = cairn_core::capture::CaptureKind::Command;
+        input.ok = ok;
+        let stored = db.store.capture(&me, input).await.unwrap();
+        assert!(!stored.duplicate, "{event}");
+    }
+    let mut replay = observation("e3", "s1", "cargo test");
+    replay.kind = cairn_core::capture::CaptureKind::Command;
+    replay.ok = Some(false);
+    assert!(db.store.capture(&me, replay).await.unwrap().duplicate);
+    let rows = db.store.session_observations(&me, "s1").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.last().unwrap().ok, Some(false));
     db.finish().await;
 }
 
@@ -368,5 +619,236 @@ async fn brief_session_keeps_recent_files_across_captures() {
     assert_eq!(context["branch"], "main");
     // A session opened by the brief has nothing to distill.
     assert!(!db.store.end_session(&me, "unused").await.unwrap());
+    db.finish().await;
+}
+
+async fn session_project(db: &TestDb, person: &str, session: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT project_id FROM sessions WHERE person_id = $1 AND session_id = $2")
+        .bind(person)
+        .bind(session)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap()
+}
+
+fn repo_observation(event: &str, session: &str, repository: &str) -> ObservationInput {
+    serde_json::from_value(serde_json::json!({
+        "event_id": event,
+        "session_id": session,
+        "content": format!("captured {event}"),
+        "kind": "assistant",
+        "context": {"repository": repository, "branch": "main"}
+    }))
+    .unwrap()
+}
+
+/// One member project for the repository attaches; two, or none, stays personal.
+#[tokio::test]
+async fn repository_fallback_needs_exactly_one_membership() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let repo = "github.com/acme/widgets";
+    let owner_a = db.person("owner-a").await;
+    let owner_b = db.person("owner-b").await;
+    let member = db.person("member").await;
+    let stranger = db.person("stranger").await;
+    let (first, _) = db
+        .store
+        .init_project(&owner_a, repo, Some("Widgets"))
+        .await
+        .unwrap();
+    let (second, _) = db
+        .store
+        .init_project(&owner_b, repo, Some("Fork"))
+        .await
+        .unwrap();
+    db.store
+        .join_project(&member, &first.project_id, None)
+        .await
+        .unwrap();
+
+    db.store
+        .capture(&member, repo_observation("one", "s-one", repo))
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-one").await.as_deref(),
+        Some(first.project_id.as_str()),
+        "exactly one membership attaches"
+    );
+    // The case the personal-session fixture must not hit: no project id, but this repository
+    // is the person's only project, so the session and its distilled note attach.
+    let mut decision = repo_observation("decide", "s-decide", repo);
+    decision.content =
+        "Decision: keep the queue in Postgres\nReason: one database is enough here".to_owned();
+    db.store.capture(&member, decision).await.unwrap();
+    assert!(
+        db.store
+            .distill_session(&member, "s-decide")
+            .await
+            .unwrap()
+            .notes
+            >= 1
+    );
+    let (note_project, rank): (Option<String>, String) = sqlx::query_as(
+        "SELECT project_id, rank FROM memories WHERE owner_id = $1 AND kind = 'decision'",
+    )
+    .bind(&member)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (note_project.as_deref(), rank.as_str()),
+        (Some(first.project_id.as_str()), "candidate")
+    );
+    let saved = db
+        .store
+        .save(
+            &member,
+            cairn_store::testing::rule("Repository fallback save"),
+            &WorkContext {
+                repository: Some(repo.into()),
+                ..WorkContext::default()
+            },
+        )
+        .await
+        .unwrap();
+    let saved_project: Option<String> =
+        sqlx::query_scalar("SELECT project_id FROM memories WHERE memory_id = $1")
+            .bind(&saved.id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(saved_project.as_deref(), Some(first.project_id.as_str()));
+
+    db.store
+        .join_project(&member, &second.project_id, None)
+        .await
+        .unwrap();
+    db.store
+        .capture(&member, repo_observation("two", "s-two", repo))
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-two").await,
+        None,
+        "two memberships stay personal"
+    );
+
+    db.store
+        .capture(&stranger, repo_observation("out", "s-out", repo))
+        .await
+        .unwrap();
+    assert_eq!(session_project(&db, &stranger, "s-out").await, None);
+    assert!(
+        !db.store
+            .is_member(&stranger, &first.project_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.store
+            .is_member(&stranger, &second.project_id)
+            .await
+            .unwrap(),
+        "a non-member learns nothing and joins nothing"
+    );
+
+    let (local, _) = db
+        .store
+        .init_project(&member, "local:widget", None)
+        .await
+        .unwrap();
+    db.store
+        .capture(
+            &member,
+            repo_observation("local", "s-local", "local:widget"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        session_project(&db, &member, "s-local").await,
+        None,
+        "local: is not a repository fallback"
+    );
+    assert_ne!(
+        session_project(&db, &member, "s-local").await.as_deref(),
+        Some(local.project_id.as_str())
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn handoff_chain_link_has_system_origin() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    db.store
+        .capture(&me, prompt("e1", "s1", "TODO: step 1 in chain"))
+        .await
+        .unwrap();
+    assert!(db.store.checkpoint_session(&me, "s1").await.unwrap());
+    assert!(db.store.end_session(&me, "s1").await.unwrap());
+    let r1 = db.store.distill_session(&me, "s1").await.unwrap();
+    assert!(r1.handoff, "first handoff written");
+
+    db.store
+        .capture(&me, prompt("e2", "s2", "TODO: step 2 in chain"))
+        .await
+        .unwrap();
+    assert!(db.store.checkpoint_session(&me, "s2").await.unwrap());
+    assert!(db.store.end_session(&me, "s2").await.unwrap());
+    let r2 = db.store.distill_session(&me, "s2").await.unwrap();
+    assert!(r2.handoff, "second handoff written");
+
+    let (relation, origin): (String, String) =
+        sqlx::query_as("SELECT relation, origin FROM links WHERE relation = 'supersedes'")
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(relation, "supersedes");
+    assert_eq!(
+        origin, "system",
+        "new chain link written with origin 'system'"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn lookup_log_swept_after_14_days() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("lookup-sweep").await;
+    sqlx::query("INSERT INTO lookup_log (person_id,kind,at) VALUES ($1,'search',now()-interval '15 days'),($1,'search',now()-interval '13 days')")
+        .bind(&me).execute(db.store.pool()).await.unwrap();
+    sqlx::query("INSERT INTO fixes(fix_id,detector,fingerprint,fix_type,status,first_seen_at,last_seen_at) VALUES ('fix','test','test','report','done',now()-interval '90 days',now()-interval '90 days')")
+        .execute(db.store.pool()).await.unwrap();
+    let tables: Vec<String> = sqlx::query_scalar("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename <> 'lookup_log' ORDER BY tablename")
+        .fetch_all(db.store.pool()).await.unwrap();
+    let mut before = Vec::new();
+    for table in &tables {
+        before.push(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap(),
+        );
+    }
+    db.store.sweep().await.unwrap();
+    for (table, expected) in tables.iter().zip(before) {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+        assert!(count >= expected, "{table} lost rows");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lookup_log")
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
     db.finish().await;
 }

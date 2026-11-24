@@ -2,7 +2,7 @@ use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Scope, Status};
 use cairn_core::process::jobs::JobKind;
 use cairn_core::retrieve::hybrid::fuse;
-use cairn_store::retrieve::Narrow;
+use cairn_store::retrieve::{ALIASES_IN_SEARCH, Narrow};
 use cairn_store::testing::{TestDb, rule, save_input};
 
 /// A unit vector with `weight` on axis 0 and the rest on axis `axis`, so cosine to axis 0 is `weight`.
@@ -11,6 +11,17 @@ fn tilted(weight: f32, axis: usize) -> Vec<f32> {
     v[0] = weight;
     v[axis] = (1.0 - weight * weight).sqrt();
     v
+}
+
+async fn current_embedding_hash(store: &cairn_store::Store, id: &str) -> String {
+    store
+        .embed_items(&[id.to_owned()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .source_hash
 }
 
 #[tokio::test]
@@ -52,11 +63,25 @@ async fn embeddings_upsert_by_source_hash() {
         Some(pending[0].source_hash.as_str())
     );
     assert!(
-        store
+        !store
             .upsert_embedding(&id, "other-hash", &tilted(1.0, 2))
             .await
             .unwrap(),
-        "new hash replaces the vector"
+        "a stale hash cannot replace the vector"
+    );
+    sqlx::query(
+        "UPDATE memories SET summary='An updated summary for embedding' WHERE memory_id=$1",
+    )
+    .bind(&id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let new_hash = current_embedding_hash(&db.store, &id).await;
+    assert!(
+        store
+            .upsert_embedding(&id, &new_hash, &tilted(1.0, 2))
+            .await
+            .unwrap()
     );
     assert!(store.pending_embeddings(10).await.unwrap().is_empty());
     assert!(
@@ -106,7 +131,10 @@ async fn candidate_channels_respect_visibility_and_fuse() {
         .unwrap()
         .id;
     for (id, vector) in [(&pool, tilted(1.0, 1)), (&unrelated, tilted(0.2, 2))] {
-        store.upsert_embedding(id, "h", &vector).await.unwrap();
+        store
+            .upsert_embedding(id, &current_embedding_hash(&db.store, id).await, &vector)
+            .await
+            .unwrap();
     }
 
     let mine = store.member_projects(&me).await.unwrap();
@@ -511,11 +539,19 @@ async fn candidate_load_reports_cosine_and_skips_unsearchable() {
     let no_vector = store.save(&me, rule("none"), &work).await.unwrap().id;
     let gone = store.save(&me, rule("gone"), &work).await.unwrap().id;
     store
-        .upsert_embedding(&near, "h", &tilted(0.9, 1))
+        .upsert_embedding(
+            &near,
+            &current_embedding_hash(&db.store, &near).await,
+            &tilted(0.9, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&far, "h", &tilted(0.2, 2))
+        .upsert_embedding(
+            &far,
+            &current_embedding_hash(&db.store, &far).await,
+            &tilted(0.2, 2),
+        )
         .await
         .unwrap();
     store.forget(&me, &gone).await.unwrap();
@@ -574,7 +610,11 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
                 .id,
         );
         store
-            .upsert_embedding(ids.last().unwrap(), "h", &tilted(1.0, ids.len()))
+            .upsert_embedding(
+                ids.last().unwrap(),
+                &current_embedding_hash(&db.store, ids.last().unwrap()).await,
+                &tilted(1.0, ids.len()),
+            )
             .await
             .unwrap();
     }
@@ -618,13 +658,17 @@ async fn forgotten_superseded_and_expired_are_never_searchable() {
     .execute(store.pool())
     .await
     .unwrap();
-    assert_eq!(channels().await, (1, 1, 1), "only the live memory remains");
+    assert_eq!(
+        channels().await,
+        (3, 3, 3),
+        "superseded and old rows stay searchable; forgotten does not"
+    );
     sqlx::query("UPDATE memories SET status = 'stale' WHERE memory_id = $1")
         .bind(&ids[3])
         .execute(store.pool())
         .await
         .unwrap();
-    assert_eq!(channels().await, (1, 1, 1), "stale stays searchable");
+    assert_eq!(channels().await, (3, 3, 3), "stale stays searchable");
     db.finish().await;
 }
 
@@ -670,7 +714,11 @@ async fn visibility_matrix_for_all_four_channels() {
     let seed = save("global", "link seed").await;
     for id in [&personal, &shared, &global, &seed] {
         store
-            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
     }
@@ -841,24 +889,44 @@ async fn consolidate_supersedes_in_cohort_and_relates_in_band() {
     let global = store.save(&me, global, &work).await.unwrap().id;
 
     store
-        .upsert_embedding(&alpha, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &alpha,
+            &current_embedding_hash(&db.store, &alpha).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&beta, "h", &tilted(0.95, 1))
+        .upsert_embedding(
+            &beta,
+            &current_embedding_hash(&db.store, &beta).await,
+            &tilted(0.95, 1),
+        )
         .await
         .unwrap(); // cos 0.95 to alpha: supersede
     store
-        .upsert_embedding(&gamma, "h", &tilted(0.80, 2))
+        .upsert_embedding(
+            &gamma,
+            &current_embedding_hash(&db.store, &gamma).await,
+            &tilted(0.80, 2),
+        )
         .await
         .unwrap(); // 0.80: relates only
     store
-        .upsert_embedding(&delta, "h", &tilted(0.30, 3))
+        .upsert_embedding(
+            &delta,
+            &current_embedding_hash(&db.store, &delta).await,
+            &tilted(0.30, 3),
+        )
         .await
         .unwrap(); // 0.30: left alone
     for id in [&fact, &theirs, &global] {
         store
-            .upsert_embedding(id, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
     }
@@ -909,7 +977,11 @@ async fn consolidate_supersedes_in_cohort_and_relates_in_band() {
     disputing.contradicts = Some(beta.clone());
     let epsilon = store.save(&me, disputing, &work).await.unwrap().id;
     store
-        .upsert_embedding(&epsilon, "h", &tilted(0.97, 1))
+        .upsert_embedding(
+            &epsilon,
+            &current_embedding_hash(&db.store, &epsilon).await,
+            &tilted(0.97, 1),
+        )
         .await
         .unwrap();
     let disputed = store.consolidate_memory(&epsilon).await.unwrap();
@@ -939,11 +1011,19 @@ async fn relates_band_adds_one_auto_link() {
         .unwrap()
         .id;
     store
-        .upsert_embedding(&a, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &a,
+            &current_embedding_hash(&db.store, &a).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     store
-        .upsert_embedding(&b, "h", &tilted(0.80, 2))
+        .upsert_embedding(
+            &b,
+            &current_embedding_hash(&db.store, &b).await,
+            &tilted(0.80, 2),
+        )
         .await
         .unwrap();
     let outcome = store.consolidate_memory(&b).await.unwrap();
@@ -1006,11 +1086,19 @@ async fn consolidate_finds_a_duplicate_among_many_other_peoples_vectors() {
     let a = db.store.save(&me, rule("alpha"), &work).await.unwrap().id;
     let b = db.store.save(&me, rule("beta"), &work).await.unwrap().id;
     db.store
-        .upsert_embedding(&a, "h", &tilted(1.0, 1))
+        .upsert_embedding(
+            &a,
+            &current_embedding_hash(&db.store, &a).await,
+            &tilted(1.0, 1),
+        )
         .await
         .unwrap();
     db.store
-        .upsert_embedding(&b, "h", &tilted(0.95, 1))
+        .upsert_embedding(
+            &b,
+            &current_embedding_hash(&db.store, &b).await,
+            &tilted(0.95, 1),
+        )
         .await
         .unwrap();
     // 200 rows of another person, all closer to beta than alpha is: more than hnsw's ef_search
@@ -1098,7 +1186,11 @@ async fn consolidate_does_not_merge_across_projects() {
         .id;
     for (id, weight) in [(&a, 1.0), (&b, 0.95), (&c, 0.96)] {
         store
-            .upsert_embedding(id, "h", &tilted(weight, 1))
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(&db.store, id).await,
+                &tilted(weight, 1),
+            )
             .await
             .unwrap();
     }
@@ -1207,11 +1299,19 @@ async fn concurrent_consolidation_of_a_mutual_pair_never_fails() {
             .unwrap()
             .id;
         store
-            .upsert_embedding(&a, "h", &tilted(1.0, 1))
+            .upsert_embedding(
+                &a,
+                &current_embedding_hash(&db.store, &a).await,
+                &tilted(1.0, 1),
+            )
             .await
             .unwrap();
         store
-            .upsert_embedding(&b, "h", &tilted(0.95, 1))
+            .upsert_embedding(
+                &b,
+                &current_embedding_hash(&db.store, &b).await,
+                &tilted(0.95, 1),
+            )
             .await
             .unwrap();
         let (left, right) =
@@ -1418,5 +1518,929 @@ async fn lexical_or_channel_caps_the_rows_it_ranks() {
         .await
         .unwrap();
     assert_eq!(found.first().map(|(id, _)| id.as_str()), Some("m77"));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_skips_candidates() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let (project, _) = store
+        .init_project(&me, "github.com/acme/cairn", None)
+        .await
+        .unwrap();
+    let work = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        repository: Some("github.com/acme/cairn".into()),
+        branch: Some("main".into()),
+        ..WorkContext::default()
+    };
+    store
+        .save(&me, rule("Keep this rule visible"), &work)
+        .await
+        .unwrap();
+    let gotcha = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "gotcha",
+                "scope": "project",
+                "title": "Candidate gotcha stays out",
+                "summary": "A low-rank gotcha must not enter the session brief.",
+                "reason": "Seen once in a session.",
+                "fields": {"symptom": "brief showed it", "fix": "leave it candidate"}
+            })),
+            &work,
+        )
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&gotcha)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    assert!(brief.contains("Keep this rule visible"), "{brief}");
+    assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn digest_searchable_not_in_brief() {
+    use cairn_core::memory::Kind;
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("a").await;
+    let (project, _) = store
+        .init_project(&person, "github.com/acme/one", None)
+        .await
+        .unwrap();
+    let pid = project.project_id.clone();
+    let take = |event: &str, kind: &str, content: &str, ok: Option<bool>, file: Option<&str>| {
+        let mut context = serde_json::json!({
+            "repository": "github.com/acme/one",
+            "branch": "feat",
+            "worktree": "wt-1",
+            "project_id": pid,
+        });
+        if kind == "command" {
+            context["commands"] = serde_json::json!([content.lines().next().unwrap_or("")]);
+        }
+        if let Some(file) = file {
+            context["files"] = serde_json::json!([file]);
+        }
+        serde_json::from_value(serde_json::json!({
+            "event_id": event,
+            "session_id": "digest",
+            "kind": kind,
+            "ok": ok,
+            "content": content,
+            "context": context,
+        }))
+        .unwrap()
+    };
+    store
+        .capture(
+            &person,
+            take(
+                "p1",
+                "prompt",
+                "zephyr-quilt: do not copy this prompt into the digest",
+                None,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .capture(
+            &person,
+            take(
+                "c1",
+                "command",
+                "cargo test\nexit 101: error[E0308]: mismatched types",
+                Some(false),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    // Plain names: the english parser keeps `src/LedControls.tsx` as one lexeme, so
+    // `LedControls removed` would not match a path. These files are the words themselves.
+    for (event, file) in [("e1", "LedControls"), ("e2", "removed")] {
+        store
+            .capture(
+                &person,
+                take(event, "edit", &format!("Edit {file}\nx"), None, Some(file)),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .capture(
+            &person,
+            take("c2", "command", "cargo test", Some(true), None),
+        )
+        .await
+        .unwrap();
+    store.end_session(&person, "digest").await.unwrap();
+    store.distill_session(&person, "digest").await.unwrap();
+    let work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("github.com/acme/one".into()),
+        branch: Some("feat".into()),
+        worktree: Some("wt-1".into()),
+        ..WorkContext::default()
+    };
+    let brief = store
+        .brief(&person, &work, &["LedControls".into()])
+        .await
+        .unwrap();
+    assert!(!brief.contains("LedControls"), "{brief}");
+    assert!(!brief.contains("cargo test pass"), "{brief}");
+    let cards = store
+        .search(
+            &person,
+            "LedControls removed",
+            None,
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let digest = cards
+        .results
+        .iter()
+        .find(|card| card.kind == Kind::Note)
+        .expect("search finds the digest");
+    assert!(digest.summary.contains("LedControls"), "{}", digest.summary);
+    assert!(digest.summary.contains("removed"), "{}", digest.summary);
+    assert!(
+        digest.summary.contains("cargo test pass"),
+        "{}",
+        digest.summary
+    );
+    assert!(
+        !digest.summary.contains("zephyr-quilt"),
+        "{}",
+        digest.summary
+    );
+    db.finish().await;
+}
+
+async fn equalize(store: &cairn_store::Store, ids: &[&str]) {
+    let text = "Shared marker wording for the rank test exactly";
+    for id in ids {
+        sqlx::query("UPDATE memories SET title = $2, summary = $2, reason = $3, updated_at = now() - interval '400 days' WHERE memory_id = $1")
+            .bind(id)
+            .bind(text)
+            .bind("because the test says why this is true")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(store, id).await,
+                &tilted(1.0, 1),
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn superseded_is_searchable_ranked_below_and_labelled() {
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let old = db
+        .store
+        .save(&me, rule("Cache sessions in Redis"), &work)
+        .await
+        .unwrap()
+        .id;
+    let mut newer = rule("Cache sessions in Postgres");
+    newer.supersedes = Some(old.clone());
+    let new = db.store.save(&me, newer, &work).await.unwrap().id;
+    equalize(&db.store, &[&old, &new]).await;
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Shared marker wording",
+            Some(&tilted(1.0, 1)),
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let ids: Vec<&str> = cards.results.iter().map(|card| card.id.as_str()).collect();
+    assert!(
+        ids.contains(&old.as_str()) && ids.contains(&new.as_str()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.iter().position(|id| *id == new).unwrap()
+            < ids.iter().position(|id| *id == old).unwrap(),
+        "replacement ranks first: {ids:?}"
+    );
+    let label = cards
+        .results
+        .iter()
+        .find(|card| card.id == old)
+        .unwrap()
+        .label
+        .clone()
+        .unwrap();
+    assert_eq!(label, format!("replaced by {new}"));
+    assert!(label.len() <= 42, "{label}");
+    assert!(
+        cards
+            .results
+            .iter()
+            .find(|card| card.id == new)
+            .unwrap()
+            .label
+            .is_none()
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn stale_labels() {
+    use cairn_core::retrieve::filter::Filter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext::default();
+    let live = db
+        .store
+        .save(&me, rule("Live marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let voted = db
+        .store
+        .save(&me, rule("Voted marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    let missing = db
+        .store
+        .save(&me, rule("Missing marker rule"), &work)
+        .await
+        .unwrap()
+        .id;
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'feedback' WHERE memory_id = $1",
+    )
+    .bind(&voted)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE usage SET wrong = 2 WHERE memory_id = $1")
+        .bind(&voted)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE memories SET status = 'stale', stale_cause = 'missing' WHERE memory_id = $1",
+    )
+    .bind(&missing)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    equalize(&db.store, &[&live, &voted, &missing]).await;
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Shared marker wording",
+            Some(&tilted(1.0, 1)),
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    let pos = |id: &str| cards.results.iter().position(|card| card.id == id).unwrap();
+    assert!(
+        pos(&live) < pos(&voted) && pos(&live) < pos(&missing),
+        "{:?}",
+        cards.results
+    );
+    let label = |id: &str| {
+        cards
+            .results
+            .iter()
+            .find(|card| card.id == id)
+            .unwrap()
+            .label
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(label(&voted), "voted wrong 2x");
+    assert_eq!(label(&missing), "file deleted");
+    assert!(label(&voted).len() <= 16 && label(&missing).len() <= 16);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn forget_keeps_content_but_hides() {
+    use cairn_core::memory::Status;
+    use cairn_core::retrieve::filter::Filter;
+    use cairn_store::memory::ListFilter;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let work = WorkContext {
+        files: vec!["src/kept.rs".into()],
+        ..WorkContext::default()
+    };
+    let other = db
+        .store
+        .save(&me, rule("Other kept rule"), &WorkContext::default())
+        .await
+        .unwrap()
+        .id;
+    let mut body = rule("Forget keeps this rule");
+    body.supersedes = Some(other);
+    let id = db.store.save(&me, body, &work).await.unwrap().id;
+    db.store
+        .upsert_embedding(
+            &id,
+            &current_embedding_hash(&db.store, &id).await,
+            &tilted(1.0, 1),
+        )
+        .await
+        .unwrap();
+    assert!(db.store.forget(&me, &id).await.unwrap());
+    let row: (String, String, i32, i64, i64) = sqlx::query_as(
+        "SELECT title, summary,
+                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END,
+                (SELECT count(*) FROM entities WHERE memory_id = $1),
+                (SELECT count(*) FROM links WHERE source_id = $1 OR target_id = $1)
+           FROM memories WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, "Forget keeps this rule");
+    assert!(!row.1.is_empty());
+    assert_eq!(
+        (row.2, row.4),
+        (1, 1),
+        "embedding and the supersedes link stay"
+    );
+    assert!(row.3 >= 1, "entities stay");
+    let cards = db
+        .store
+        .search(
+            &me,
+            "Forget keeps this rule",
+            None,
+            5,
+            1200,
+            &Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(cards.results.iter().all(|card| card.id != id));
+    let listed = db.store.list(&me, &ListFilter::default()).await.unwrap();
+    assert!(listed.memories.iter().all(|memory| memory.id != id));
+    let admin = db
+        .store
+        .list(
+            &me,
+            &ListFilter {
+                statuses: vec![Status::Forgotten],
+                see_forgotten: true,
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin.memories.len(), 1);
+    assert_eq!(admin.memories[0].status, Status::Forgotten);
+    let brief = db
+        .store
+        .brief(&me, &WorkContext::default(), &[])
+        .await
+        .unwrap();
+    assert!(!brief.contains("Forget keeps this rule"), "{brief}");
+    db.finish().await;
+}
+
+/// More than 50 handoffs on one checkout. The newest is thin; the rich one is
+/// the second newest, so a newest-first limit of 50 still reaches it.
+#[tokio::test]
+async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    sqlx::query(
+        r#"INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash,
+                                 identity_hash, fields, repo, repo_branch, repo_worktree, created_at)
+           SELECT CASE WHEN i = 51 THEN 'chain_thin_newest'
+                       WHEN i = 50 THEN 'chain_rich'
+                       ELSE 'chain_old_' || i END,
+                  $1, 'personal', 'handoff', 'Handoff', 'chain row', 'e',
+                  CASE WHEN i = 51 THEN 'chain_thin_newest'
+                       WHEN i = 50 THEN 'chain_rich'
+                       ELSE 'chain_old_' || i END,
+                  CASE WHEN i = 50 THEN '{"files":["src/pay.rs"]}'::jsonb ELSE '{}'::jsonb END,
+                  'github.com/acme/one', 'feat', 'wt-1',
+                  now() + make_interval(secs => i)
+             FROM generate_series(1, 51) i"#,
+    )
+    .bind(&me)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    let brief = db
+        .store
+        .brief(
+            &me,
+            &WorkContext {
+                repository: Some("github.com/acme/one".into()),
+                branch: Some("feat".into()),
+                worktree: Some("wt-1".into()),
+                ..WorkContext::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        brief.contains("chain_rich"),
+        "brief shows the newest rich handoff: {brief}"
+    );
+    assert!(
+        !brief.contains("chain_thin_newest"),
+        "brief skips the thin newest: {brief}"
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_shows_handoff_without_git() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let (project, _) = db
+        .store
+        .init_project(&me, "local:nongit-project", None)
+        .await
+        .unwrap();
+    let pid = project.project_id;
+
+    // Handoff with repo_branch NULL (non-git project)
+    sqlx::query(
+        r#"INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                                 evidence_hash, identity_hash, fields, repo, repo_branch, repo_worktree, created_at)
+           VALUES ('nongit_handoff', $1, $2, 'personal', 'handoff', 'Handoff nongit', 'summary of handoff',
+                   'e_nongit', 'id_nongit', '{"files":["README.md"]}'::jsonb,
+                   'local:nongit-project', NULL, NULL, now())"#,
+    )
+    .bind(&me)
+    .bind(&pid)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+
+    // Brief for non-git context (branch: None)
+    let non_git_work = WorkContext {
+        project_id: Some(pid.clone()),
+        repository: Some("local:nongit-project".into()),
+        branch: None,
+        worktree: None,
+        ..WorkContext::default()
+    };
+    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap();
+    assert!(
+        brief.contains("nongit_handoff"),
+        "non-git brief must show the handoff: {brief}"
+    );
+
+    // Git context (branch: Some("main")) does not show the non-git handoff
+    let git_work = WorkContext {
+        project_id: Some(pid),
+        repository: Some("local:nongit-project".into()),
+        branch: Some("main".into()),
+        worktree: None,
+        ..WorkContext::default()
+    };
+    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap();
+    assert!(
+        !git_brief.contains("nongit_handoff"),
+        "git brief must only show matching branch's handoff: {git_brief}"
+    );
+
+    db.finish().await;
+}
+
+/// Alias rows are embedded by the same path as the memory, and a query whose only close vector
+/// is an alias returns that memory.
+#[tokio::test]
+async fn disabled_alias_search_keeps_rows_without_enqueuing_alias_vectors() {
+    if ALIASES_IN_SEARCH {
+        return;
+    }
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("alias-gate").await;
+    let store = &db.store;
+    let id = store.save(&me, save_input(serde_json::json!({
+        "kind":"fact", "title":"Alias pause fixture", "summary":"The search gate stops alias inference", "reason":"Vectors are unnecessary while disabled",
+        "aliases":["existing alias vector", "new alias without vector"]
+    })), &WorkContext::default()).await.unwrap().id;
+    let hash = current_embedding_hash(store, &id).await;
+    store
+        .upsert_embedding(&id, &hash, &tilted(1.0, 1))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memory_aliases a SET embedding=m.embedding,embedding_source='fixture' FROM memories m WHERE m.memory_id=a.memory_id AND a.memory_id=$1 AND a.ord=0")
+        .bind(&id).execute(store.pool()).await.unwrap();
+    sqlx::query("DELETE FROM jobs WHERE kind='embed' AND job_key=$1")
+        .bind(&id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.enqueue_missing_embeddings(10).await.unwrap(), 0);
+    assert!(store.pending_embeddings(10).await.unwrap().is_empty());
+    assert!(
+        store
+            .embed_items(std::slice::from_ref(&id))
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.alias_ord.is_none())
+    );
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT text,embedding IS NOT NULL FROM memory_aliases WHERE memory_id=$1 ORDER BY ord",
+    )
+    .bind(id)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("existing alias vector".to_owned(), true),
+            ("new alias without vector".to_owned(), false)
+        ]
+    );
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn aliases_embedded_and_searched() {
+    if !ALIASES_IN_SEARCH {
+        return;
+    }
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Alias search title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["how do I renew the parking permit"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let pending = store.pending_embeddings(10).await.unwrap();
+    let memory_item = pending
+        .iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap()
+        .clone();
+    assert!(
+        store
+            .upsert_embedding(&id, &memory_item.source_hash, &tilted(0.2, 2))
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM jobs WHERE kind = 'embed' AND job_key = $1")
+        .bind(&id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.enqueue_missing_embeddings(10).await.unwrap(), 1);
+    let items = store.embed_items(std::slice::from_ref(&id)).await.unwrap();
+    let alias = items
+        .iter()
+        .find(|item| item.alias_ord == Some(0))
+        .expect("alias text is embedded with the memory");
+    assert_eq!(alias.text, "how do I renew the parking permit");
+    assert!(
+        store
+            .upsert_embedding(&id, &alias.source_hash, &tilted(1.0, 1))
+            .await
+            .unwrap()
+    );
+    let nulls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memory_aliases a
+           JOIN memories m ON m.memory_id = a.memory_id
+          WHERE a.embedding IS NULL AND m.status <> 'forgotten'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(nulls, 0);
+    let projects = store.member_projects(&me).await.unwrap();
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    if ALIASES_IN_SEARCH {
+        assert_eq!(found[0].0, id);
+        assert!(found[0].1 > 0.99, "{found:?}");
+    } else {
+        assert!(found.iter().all(|(_, score)| *score < 0.5), "{found:?}");
+    }
+    db.finish().await;
+}
+
+/// Forgetting a memory keeps the alias row and hides it from vector search.
+#[tokio::test]
+async fn forgotten_aliases_not_returned() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Forgotten alias title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["where is the telescope mirror stored"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    for item in store.pending_embeddings(10).await.unwrap() {
+        let vector = if item.alias_ord.is_some() {
+            tilted(1.0, 1)
+        } else {
+            tilted(0.2, 2)
+        };
+        store
+            .upsert_embedding(&id, &item.source_hash, &vector)
+            .await
+            .unwrap();
+    }
+    let projects = store.member_projects(&me).await.unwrap();
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert!(found.iter().any(|(hit, _)| hit == &id));
+    if ALIASES_IN_SEARCH {
+        assert_eq!(found[0].0, id);
+    }
+    assert!(store.forget(&me, &id).await.unwrap());
+    let found = store
+        .vector_candidates(&me, &projects, &tilted(1.0, 1), 5, &Narrow::NONE)
+        .await
+        .unwrap();
+    assert!(found.iter().all(|(hit, _)| hit != &id), "{found:?}");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_aliases WHERE memory_id = $1")
+        .bind(&id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(left, 1, "forget hides the row; it does not delete it");
+    db.finish().await;
+}
+
+/// One memory whose own vector is far from the query axis and whose alias vector is on it;
+/// returns its id. The query text shares no word with the memory.
+async fn alias_only_memory(db: &TestDb, me: &str) -> String {
+    let store = &db.store;
+    let id = store
+        .save(
+            me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Alias gate title",
+                "summary": "The body of the memory is about something else entirely.",
+                "reason": "because the test needs one",
+                "aliases": ["where is the telescope mirror stored"],
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    for item in store.pending_embeddings(10).await.unwrap() {
+        let vector = if item.alias_ord.is_some() {
+            tilted(1.0, 1)
+        } else {
+            tilted(0.2, 2)
+        };
+        store
+            .upsert_embedding(&id, &item.source_hash, &vector)
+            .await
+            .unwrap();
+    }
+    id
+}
+
+/// The gate sees the best of the memory and alias cosines: a query that only an alias is close to
+/// passes it through `Store::search`, and forgetting the memory hides it again.
+#[tokio::test]
+async fn alias_only_query_passes_gate_in_search() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = alias_only_memory(&db, &me).await;
+    let query = tilted(1.0, 1);
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cards.results.iter().any(|c| c.id == id),
+        ALIASES_IN_SEARCH,
+        "{cards:?}"
+    );
+    assert!(store.forget(&me, &id).await.unwrap());
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(!cards.results.iter().any(|c| c.id == id), "{cards:?}");
+    db.finish().await;
+}
+
+/// An alias that is only weakly close (cosine 0.3, under the gate) does not make an off-topic
+/// query return the memory.
+#[tokio::test]
+async fn weak_query_returns_nothing_with_aliases_present() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    alias_only_memory(&db, &me).await;
+    let query = tilted(0.3, 3);
+    let cards = store
+        .search(
+            &me,
+            "kiwi marmalade",
+            Some(&query),
+            5,
+            1200,
+            &cairn_core::retrieve::filter::Filter::default(),
+        )
+        .await
+        .unwrap();
+    assert!(cards.results.is_empty(), "{cards:?}");
+    db.finish().await;
+}
+
+/// An alias whose text equals the memory embed text still gets its own vector.
+#[tokio::test]
+async fn alias_matching_embed_text_keeps_its_own_vector() {
+    if !ALIASES_IN_SEARCH {
+        return;
+    }
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("me").await;
+    let id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "fact",
+                "title": "Abcdefgh",
+                "summary": "0123456789abcdefghij",
+                "reason": "0123456789",
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let pending = store.pending_embeddings(10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let text = pending[0].text.clone();
+    assert!(
+        text.chars().count() <= 120,
+        "embed text must fit an alias: {text}"
+    );
+    sqlx::query(
+        "INSERT INTO memory_aliases (memory_id, ord, source, text) VALUES ($1, 0, 'agent', $2)",
+    )
+    .bind(&id)
+    .bind(&text)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let pending = store.pending_embeddings(10).await.unwrap();
+    let memory = pending
+        .iter()
+        .find(|item| item.alias_ord.is_none())
+        .unwrap();
+    let alias = pending
+        .iter()
+        .find(|item| item.alias_ord == Some(0))
+        .unwrap();
+    assert_eq!(alias.text, memory.text);
+    assert_ne!(alias.source_hash, memory.source_hash);
+    let memory_hash = memory.source_hash.clone();
+    let alias_hash = alias.source_hash.clone();
+    assert!(
+        store
+            .upsert_embedding(&id, &memory_hash, &tilted(1.0, 1))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .upsert_embedding(&id, &alias_hash, &tilted(0.2, 2))
+            .await
+            .unwrap()
+    );
+    let memory_dist: f32 = sqlx::query_scalar(
+        "SELECT (embedding <=> $2::vector)::float4 FROM memories WHERE memory_id = $1",
+    )
+    .bind(&id)
+    .bind(vector_literal(&tilted(1.0, 1)))
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let alias_dist: f32 = sqlx::query_scalar("SELECT (embedding <=> $2::vector)::float4 FROM memory_aliases WHERE memory_id = $1 AND ord = 0")
+        .bind(&id)
+        .bind(vector_literal(&tilted(0.2, 2)))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let cross: f32 = sqlx::query_scalar("SELECT (embedding <=> $2::vector)::float4 FROM memory_aliases WHERE memory_id = $1 AND ord = 0")
+        .bind(&id)
+        .bind(vector_literal(&tilted(1.0, 1)))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(memory_dist < 0.01, "memory vector {memory_dist}");
+    assert!(alias_dist < 0.01, "alias vector {alias_dist}");
+    assert!(cross > 0.5, "alias kept its own vector, cross {cross}");
     db.finish().await;
 }

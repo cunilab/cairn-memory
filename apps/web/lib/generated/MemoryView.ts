@@ -5,6 +5,7 @@ import type { Fields } from "./Fields";
 import type { Kind } from "./Kind";
 import type { LinkView } from "./LinkView";
 import type { Origin } from "./Origin";
+import type { Rank } from "./Rank";
 import type { Scope } from "./Scope";
 import type { Status } from "./Status";
 import type { UsageView } from "./UsageView";
@@ -25,7 +26,16 @@ missing_entities: Array<string>, links: Array<LinkView>, id: string, owner: stri
 /**
  * Serialized as the bare per-kind object.
  */
-fields: Fields, evidence?: Array<string>, evidence_count: number, context: Context, entities?: Array<Entity>, status: Status, 
+fields: Fields, evidence?: Array<string>, evidence_count: number, context: Context, entities?: Array<Entity>, status: Status, rank: Rank, 
+/**
+ * Whether an administrator edited this memory; the editor's identity stays private.
+ */
+edited_by?: boolean, 
+/**
+ * Times this knowledge was saved, including the first. At least 1.
+ * Omitted the first time, same as a search card's `seen`.
+ */
+proof_count?: number, 
 /**
  * Why a stale memory went stale: `feedback` (wrong votes) or `missing` (cited code is gone).
  */

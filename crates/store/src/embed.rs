@@ -1,5 +1,6 @@
 use crate::jobs::enqueue_tx;
 use crate::memory::{MEMORY_SELECT, memory_from_row};
+use crate::retrieve::ALIASES_IN_SEARCH;
 use crate::{Result, Store, StoreError};
 use cairn_core::memory::{Entity, EntityKind};
 use cairn_core::process::embed::{embedding_text, model_label, source_hash, validate_vector};
@@ -7,12 +8,37 @@ use cairn_core::process::jobs::JobKind;
 use sqlx::Row;
 use std::collections::HashMap;
 
-/// A memory that still needs a vector.
+/// A memory or one of its aliases that still needs a vector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbedItem {
     pub memory_id: String,
     pub text: String,
     pub source_hash: String,
+    /// `None` is the memory row. `Some(ord)` is that alias row.
+    pub alias_ord: Option<i16>,
+}
+
+/// The embed worker forwards `source_hash` and not `alias_ord`, so an alias hash is
+/// `alias:{ord}:{content_hash}`. A memory hash is hex and never has this prefix.
+fn alias_source_hash(ord: i16, text: &str) -> String {
+    format!("alias:{ord}:{}", source_hash(text))
+}
+
+fn parse_alias_hash(source_hash: &str) -> Option<(i16, &str)> {
+    let rest = source_hash.strip_prefix("alias:")?;
+    let (ord, content) = rest.split_once(':')?;
+    Some((ord.parse().ok()?, content))
+}
+
+fn alias_item(row: &sqlx::postgres::PgRow) -> Result<EmbedItem> {
+    let text: String = row.try_get("text")?;
+    let ord: i16 = row.try_get("ord")?;
+    Ok(EmbedItem {
+        memory_id: row.try_get("memory_id")?,
+        source_hash: alias_source_hash(ord, &text),
+        text,
+        alias_ord: Some(ord),
+    })
 }
 
 /// `[v1,v2,..]`, the text form pgvector reads.
@@ -26,14 +52,21 @@ impl Store {
     pub async fn pending_embeddings(&self, limit: i64) -> Result<Vec<EmbedItem>> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
+              WHERE m.status <> 'forgotten'
                 AND m.embedding IS NULL
               ORDER BY m.created_at, m.memory_id LIMIT $1"
         ))
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        self.embed_items_from(&rows).await
+        let mut items = self.embed_items_from(&rows).await?;
+        if (items.len() as i64) < limit {
+            items.extend(
+                self.alias_embed_items(None, limit - items.len() as i64)
+                    .await?,
+            );
+        }
+        Ok(items)
     }
 
     /// Queues an embed job for every live memory that has no vector and no pending or running
@@ -43,13 +76,16 @@ impl Store {
         loop {
             let ids: Vec<String> = sqlx::query_scalar(
                 "SELECT m.memory_id FROM memories m
-                  WHERE m.status <> 'forgotten' AND (m.expires_at IS NULL OR m.expires_at > now())
-                    AND m.embedding IS NULL
+                  WHERE m.status <> 'forgotten'
+                    AND (m.embedding IS NULL
+                         OR ($2 AND EXISTS (SELECT 1 FROM memory_aliases a
+                                     WHERE a.memory_id = m.memory_id AND a.embedding IS NULL)))
                     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'embed' AND j.job_key = m.memory_id
                                        AND j.status IN ('pending', 'running'))
                   ORDER BY m.created_at, m.memory_id LIMIT $1",
             )
             .bind(batch)
+            .bind(ALIASES_IN_SEARCH)
             .fetch_all(&self.pool)
             .await?;
             let mut added = 0;
@@ -63,18 +99,19 @@ impl Store {
         }
     }
 
-    /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten or
-    /// expired memory has no item.
+    /// The same items for specific memories (the ids of claimed `embed` jobs). A forgotten memory
+    /// has no item.
     pub async fn embed_items(&self, ids: &[String]) -> Result<Vec<EmbedItem>> {
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE m.memory_id = ANY($1) AND m.status <> 'forgotten'
-                AND (m.expires_at IS NULL OR m.expires_at > now())"
+              WHERE m.memory_id = ANY($1) AND m.status <> 'forgotten'"
         ))
         .bind(ids)
         .fetch_all(&self.pool)
         .await?;
-        self.embed_items_from(&rows).await
+        let mut items = self.embed_items_from(&rows).await?;
+        items.extend(self.alias_embed_items(Some(ids), 0).await?);
+        Ok(items)
     }
 
     async fn embed_items_from(&self, rows: &[sqlx::postgres::PgRow]) -> Result<Vec<EmbedItem>> {
@@ -101,9 +138,52 @@ impl Store {
                     memory_id: memory.id.clone(),
                     source_hash: source_hash(&text),
                     text,
+                    alias_ord: None,
                 }
             })
             .collect())
+    }
+
+    /// Alias rows with no vector. `ids` limits them to those memories; otherwise the oldest `limit`.
+    async fn alias_embed_items(
+        &self,
+        ids: Option<&[String]>,
+        limit: i64,
+    ) -> Result<Vec<EmbedItem>> {
+        if !ALIASES_IN_SEARCH {
+            return Ok(Vec::new());
+        }
+        let rows = match ids {
+            Some(ids) => {
+                sqlx::query(
+                    "SELECT a.memory_id, a.ord, a.text
+                       FROM memory_aliases a
+                       JOIN memories m ON m.memory_id = a.memory_id
+                      WHERE a.memory_id = ANY($1)
+                        AND a.embedding IS NULL
+                        AND m.status <> 'forgotten'
+                      ORDER BY m.created_at, a.memory_id, a.ord",
+                )
+                .bind(ids)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT a.memory_id, a.ord, a.text
+                       FROM memory_aliases a
+                       JOIN memories m ON m.memory_id = a.memory_id
+                      WHERE a.embedding IS NULL
+                        AND m.status <> 'forgotten'
+                      ORDER BY m.created_at, a.memory_id, a.ord
+                      LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        rows.iter().map(alias_item).collect()
     }
 
     /// Stores a vector for a live memory. The same `source_hash` and model is a no-op (false).
@@ -116,6 +196,55 @@ impl Store {
     ) -> Result<bool> {
         validate_vector(vector)?;
         let mut tx = self.pool.begin().await?;
+        if let Some((ord, content_hash)) = parse_alias_hash(source_hash) {
+            let text: Option<String> = sqlx::query_scalar("SELECT a.text FROM memory_aliases a JOIN memories m ON m.memory_id=a.memory_id WHERE a.memory_id=$1 AND a.ord=$2 AND m.status <> 'forgotten' FOR UPDATE OF a")
+                .bind(memory_id).bind(ord).fetch_optional(&mut *tx).await?;
+            if !text
+                .as_deref()
+                .is_some_and(|text| cairn_core::process::embed::source_hash(text) == content_hash)
+            {
+                return Ok(false);
+            }
+            let done = sqlx::query(
+                "UPDATE memory_aliases SET embedding = $4::vector, embedding_source = $3
+                  WHERE memory_id = $1 AND ord = $2
+                    AND (embedding IS NULL OR embedding_source IS DISTINCT FROM $3)",
+            )
+            .bind(memory_id)
+            .bind(ord)
+            .bind(content_hash)
+            .bind(vector_text(vector))
+            .execute(&mut *tx)
+            .await?;
+            let written = done.rows_affected() == 1;
+            tx.commit().await?;
+            return Ok(written);
+        }
+        let row = sqlx::query(&format!(
+            "{MEMORY_SELECT} WHERE m.memory_id=$1 AND m.status <> 'forgotten' FOR UPDATE OF m"
+        ))
+        .bind(memory_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else { return Ok(false) };
+        let mut memory = memory_from_row(&row)?;
+        let entities =
+            sqlx::query("SELECT kind,name FROM entities WHERE memory_id=$1 ORDER BY kind,name")
+                .bind(memory_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for entity in entities {
+            memory.entities.push(Entity {
+                kind: entity
+                    .try_get::<String, _>("kind")?
+                    .parse()
+                    .map_err(StoreError::Validation)?,
+                name: entity.try_get("name")?,
+            });
+        }
+        if cairn_core::process::embed::source_hash(&embedding_text(&memory)) != source_hash {
+            return Ok(false);
+        }
         let done = sqlx::query(
             "UPDATE memories SET embedding = $4::vector, embedding_model = $2, embedding_source = $3
               WHERE memory_id = $1 AND status <> 'forgotten'

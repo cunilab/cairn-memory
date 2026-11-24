@@ -24,10 +24,13 @@ pub struct Consolidated {
 const PROMOTE_AT: f32 = SUPERSEDE_AT;
 /// The owner of every promoted copy: no person wrote it.
 pub(crate) const SYSTEM_OWNER: &str = "system";
-/// Kinds that are promoted; a lock per kind serialises promotion and withdrawal of one kind so two
-/// twins promoted at once make one copy, and nothing else waits.
-const PROMOTED_KINDS: [&str; 2] = ["gotcha", "rule"];
 
+pub(crate) async fn lock_cohort(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0)) FROM memories WHERE memory_id=$1")
+        .bind(memory_id).execute(tx).await?;
+    Ok(())
+}
+/// A lock per kind so two twins promoted at once make one copy.
 async fn lock_promotion(tx: &mut PgConnection, kind: &str) -> Result<()> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || '|promote|' || $1, 0))",
@@ -61,16 +64,10 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         // One consolidation per cohort at a time: two jobs on a mutual near-duplicate pair each
         // update the other's row and would deadlock.
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended(
-                        concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0))
-               FROM memories WHERE memory_id = $1",
-        )
-        .bind(memory_id)
-        .execute(&mut *tx)
-        .await?;
+        lock_cohort(&mut tx, memory_id).await?;
         let subject = sqlx::query(
-            "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, embedding::text AS embedding
+            "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary,
+                    embedding::text AS embedding
                FROM memories WHERE memory_id = $1 AND embedding IS NOT NULL FOR UPDATE",
         )
         .bind(memory_id)
@@ -86,6 +83,11 @@ impl Store {
         }
         let vector: String = subject.try_get("embedding")?;
         let subject_branch: Option<String> = subject.try_get("repo_branch")?;
+        let subject_text = format!(
+            "{} {}",
+            subject.try_get::<String, _>("title")?,
+            subject.try_get::<String, _>("summary")?
+        );
         let subject_origin: Origin = subject
             .try_get::<String, _>("origin")?
             .parse()
@@ -94,12 +96,12 @@ impl Store {
         // window to other people's nearest vectors first.
         let neighbours = sqlx::query(
             "WITH cohort AS MATERIALIZED (
-                 SELECT m.memory_id, m.created_at, m.embedding, m.repo_branch, m.origin
+                 SELECT m.memory_id, m.created_at, m.embedding, m.repo_branch, m.origin, m.title, m.summary
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
-                    AND m.memory_id <> $6 AND m.status IN ('active','stale')
-                    AND (m.expires_at IS NULL OR m.expires_at > now()))
-             SELECT c.memory_id, c.repo_branch, c.origin, 1 - (c.embedding <=> $1::vector) AS cosine,
+                    AND m.memory_id <> $6 AND m.status IN ('active','stale'))
+             SELECT c.memory_id, c.repo_branch, c.origin, c.title, c.summary,
+                    1 - (c.embedding <=> $1::vector) AS cosine,
                     (c.created_at, c.memory_id) > (s.created_at, s.memory_id) AS neighbour_newer
                FROM cohort c JOIN memories s ON s.memory_id = $6
               ORDER BY c.embedding <=> $1::vector, c.memory_id LIMIT $7",
@@ -125,6 +127,11 @@ impl Store {
             if declared_contradiction(&mut tx, memory_id, &neighbour).await? {
                 continue;
             }
+            let related: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM links WHERE relation='relates' AND ((source_id=$1 AND target_id=$2) OR (source_id=$2 AND target_id=$1)))")
+                .bind(memory_id).bind(&neighbour).fetch_one(&mut *tx).await?;
+            if related {
+                continue;
+            }
             let neighbour_newer: bool = row.try_get("neighbour_newer")?;
             let neighbour_branch: Option<String> = row.try_get("repo_branch")?;
             let neighbour_origin: Origin = row
@@ -139,10 +146,27 @@ impl Store {
                 branch: neighbour_branch.as_deref(),
                 origin: neighbour_origin,
             };
+            let neighbour_text = format!(
+                "{} {}",
+                row.try_get::<String, _>("title")?,
+                row.try_get::<String, _>("summary")?
+            );
             let band = if neighbour_newer {
-                guard(band, neighbour_side, subject_side)
+                guard(
+                    band,
+                    neighbour_side,
+                    subject_side,
+                    &neighbour_text,
+                    &subject_text,
+                )
             } else {
-                guard(band, subject_side, neighbour_side)
+                guard(
+                    band,
+                    subject_side,
+                    neighbour_side,
+                    &subject_text,
+                    &neighbour_text,
+                )
             };
             match band {
                 Band::Supersede if !subject_superseded => {
@@ -197,7 +221,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Global promotion (CM-SPEC-008 §4.3): a project rule or gotcha written by an agent whose
+    /// Global promotion (docs/architecture.md): a project rule or gotcha written by an agent whose
     /// near-identical twin lives in another project (any owner) yields one global copy linked to
     /// both. Only `scope = project` memories of kind rule or gotcha are ever read as twins or
     /// promoted; the copy goes through the same redaction as every save. Returns the copy's id.
@@ -214,8 +238,7 @@ impl Store {
         .await?;
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT} WHERE m.memory_id = $1 AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
-                AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL
-                AND (m.expires_at IS NULL OR m.expires_at > now())"
+                AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL"
         ))
         .bind(memory_id)
         .fetch_all(&mut *lock)
@@ -237,7 +260,6 @@ impl Store {
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.scope = 'project' AND m.project_id <> $2
                     AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent'
-                    AND (m.expires_at IS NULL OR m.expires_at > now())
                   ORDER BY m.embedding <=> $1::vector LIMIT 5)
              SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1",
         )
@@ -312,67 +334,10 @@ impl Store {
         Ok(Some(global))
     }
 
-    /// Withdraws every promoted global copy that has fewer than 2 live sources (`expires_at = now()`
-    /// hides it from every read) and brings back one whose two live sources returned. A source is
-    /// live when the copy links to it, it is project-scoped, `active` or `stale`, unexpired and not
-    /// forgotten. Safe to run often. Returns `(withdrawn, revived)`.
+    /// Promoted copies stay `active` and keep their `relates` links. Nothing is hidden for age or
+    /// for a source count. Returns `(0, 0)`.
     pub async fn reconcile_promoted(&self) -> Result<(usize, usize)> {
-        let (mut withdrawn_total, mut revived_total) = (0, 0);
-        for kind in PROMOTED_KINDS {
-            let mut tx = self.pool.begin().await?;
-            lock_promotion(&mut tx, kind).await?;
-            let counted = "WITH counted AS (
-               SELECT g.memory_id, g.expires_at,
-                      (SELECT count(DISTINCT s.memory_id) FROM links l JOIN memories s ON s.memory_id = l.target_id
-                        WHERE l.source_id = g.memory_id AND l.relation = 'relates' AND l.origin = 'auto'
-                          AND s.scope = 'project' AND s.status IN ('active','stale')
-                          AND (s.expires_at IS NULL OR s.expires_at > now())) AS live
-                 FROM memories g
-                WHERE g.origin = 'system' AND g.scope = 'global' AND g.kind = $1
-                  AND g.status IN ('active','stale'))";
-            let withdrawn = sqlx::query(&format!(
-                "{counted} UPDATE memories m SET expires_at = now(), updated_at = now() FROM counted c
-                  WHERE m.memory_id = c.memory_id AND c.live < 2 AND (c.expires_at IS NULL OR c.expires_at > now())
-                  RETURNING m.memory_id, c.live"
-            ))
-            .bind(kind)
-            .fetch_all(&mut *tx)
-            .await?;
-            // Only an active copy comes back; one flagged wrong (stale) lapses with the age sweep.
-            let revived = sqlx::query(&format!(
-                "{counted} UPDATE memories m SET expires_at = NULL, updated_at = now() FROM counted c
-                  WHERE m.memory_id = c.memory_id AND m.status = 'active' AND c.live >= 2 AND c.expires_at <= now()
-                  RETURNING m.memory_id"
-            ))
-            .bind(kind)
-            .fetch_all(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            for row in &withdrawn {
-                let (id, live): (String, i64) = (row.try_get("memory_id")?, row.try_get("live")?);
-                // The copy has no person as owner: its sources' owners see the withdrawal.
-                let owners: Vec<String> = sqlx::query_scalar(
-                    "SELECT DISTINCT s.owner_id FROM links l JOIN memories s ON s.memory_id = l.target_id
-                      WHERE l.source_id = $1 AND l.relation = 'relates' AND l.origin = 'auto'",
-                )
-                .bind(&id)
-                .fetch_all(&self.pool)
-                .await?;
-                for owner in owners {
-                    self.record_audit(
-                        &owner,
-                        None,
-                        "memory_withdrawn",
-                        Some(&id),
-                        serde_json::json!({"global_id": id, "live": live}),
-                    )
-                    .await?;
-                }
-            }
-            withdrawn_total += withdrawn.len();
-            revived_total += revived.len();
-        }
-        Ok((withdrawn_total, revived_total))
+        Ok((0, 0))
     }
 }
 
@@ -395,6 +360,7 @@ fn global_copy(a: &Memory, b: &Memory) -> SaveInput {
         supersedes: None,
         contradicts: None,
         scope: Some(Scope::Global),
+        aliases: Vec::new(),
     }
 }
 
@@ -412,22 +378,24 @@ async fn declared_contradiction(tx: &mut PgConnection, a: &str, b: &str) -> Resu
 /// `older` becomes `superseded`; `newer` keeps its text and gains the older's evidence and count.
 async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()> {
     let rows = sqlx::query(
-        "SELECT memory_id, evidence, evidence_count FROM memories WHERE memory_id = ANY($1)",
+        "SELECT memory_id, evidence, evidence_count, proof_count FROM memories WHERE memory_id = ANY($1)",
     )
     .bind([newer, older])
     .fetch_all(&mut *tx)
     .await?;
     let (mut newer_evidence, mut older_evidence) = (Vec::<String>::new(), Vec::<String>::new());
     let (mut newer_count, mut older_count) = (0_i32, 0_i32);
+    let (mut newer_proof, mut older_proof) = (0_i32, 0_i32);
     for row in rows {
-        let (evidence, count) = (
+        let (evidence, count, proof) = (
             row.try_get::<Vec<String>, _>("evidence")?,
             row.try_get::<i32, _>("evidence_count")?,
+            row.try_get::<i32, _>("proof_count")?,
         );
         if row.try_get::<String, _>("memory_id")? == newer {
-            (newer_evidence, newer_count) = (evidence, count);
+            (newer_evidence, newer_count, newer_proof) = (evidence, count, proof);
         } else {
-            (older_evidence, older_count) = (evidence, count);
+            (older_evidence, older_count, older_proof) = (evidence, count, proof);
         }
     }
     for item in older_evidence {
@@ -435,11 +403,12 @@ async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()
             newer_evidence.push(item);
         }
     }
-    sqlx::query("UPDATE memories SET evidence = $2, evidence_count = $3, evidence_hash = $4, updated_at = now() WHERE memory_id = $1")
+    sqlx::query("UPDATE memories SET evidence = $2, evidence_count = $3, evidence_hash = $4, proof_count = $5, updated_at = now() WHERE memory_id = $1")
         .bind(newer)
         .bind(&newer_evidence)
         .bind(newer_count + older_count)
         .bind(evidence_hash(&newer_evidence))
+        .bind(newer_proof + older_proof)
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE memories SET status = 'superseded', stale_cause = NULL, status_changed_at = now(), updated_at = now() WHERE memory_id = $1 AND status IN ('active','stale')")
@@ -454,5 +423,8 @@ async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()
     .bind(older)
     .execute(&mut *tx)
     .await?;
+    // The newer side restates the older one, which confirms it.
+    let confirmed = [newer.to_owned()];
+    crate::memory::promote_candidates(&mut *tx, &confirmed).await?;
     Ok(())
 }

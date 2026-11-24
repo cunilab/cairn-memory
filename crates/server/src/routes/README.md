@@ -5,7 +5,8 @@ The REST handlers, one file per area. Each file owns its request and response ty
 `Store` methods; `mod.rs` only lists paths. Every path is under `/cairn-memory`.
 
 ## Entry points
-- `health`: `/health`, `/livez`. `account`: `/auth/*`. `device`: `/devices*`. `admin`: `/admin/jobs*`.
+- `health`: `/health`, `/livez`. `account`: `/auth/*`. `device`: `/devices*`. `admin`: `/admin/jobs*`, `/admin/fixes*`, `/admin/searches`, memory rewrite.
+- `fixes`, `instructions`, `stats`: device fixes, agent instructions and console statistics.
 - `project`: `/projects*`. `capture`: `/observe`, `/session/*`.
 - `memory`: `/remember`, `/get`, `/memories*`, `/feedback`, `/forget`.
 - `retrieve`: `/search`, `/session/brief`,

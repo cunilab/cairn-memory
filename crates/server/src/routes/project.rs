@@ -9,7 +9,7 @@ use cairn_core::memory::{Scope, Status};
 use cairn_core::project::Project;
 use cairn_store::StoreError;
 use cairn_store::memory::ListFilter;
-use cairn_store::project::{BranchSummary, Conflict};
+use cairn_store::project::{BranchSummary, Conflict, SessionReport};
 use serde::{Deserialize, Serialize};
 
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "ProjectView"))]
@@ -55,6 +55,10 @@ pub struct Init {
     repository: String,
     #[serde(default)]
     name: Option<String>,
+    /// The caller knows the server has never seen `project_id` (a wipe or a new server) and
+    /// accepts becoming its owner. Without it an unknown id is refused.
+    #[serde(default)]
+    confirm_register: bool,
 }
 
 #[derive(Serialize)]
@@ -118,11 +122,17 @@ pub async fn init(
     let (project, created) = match body.project_id.as_deref() {
         Some(id) => match state
             .store
-            .join_project(&account.person_id, id, body.name.as_deref())
+            .join_project_from(
+                &account.person_id,
+                id,
+                body.name.as_deref(),
+                caller.device_id.as_deref(),
+            )
             .await
         {
             Ok(project) => (project, false),
             // A wiped or rebuilt server: register the committed id again, owned by the caller.
+            // Whoever asks first owns it, so the caller must say they know that.
             Err(StoreError::NotFound(_)) => {
                 state
                     .store
@@ -131,6 +141,7 @@ pub async fn init(
                         id,
                         &body.repository,
                         body.name.as_deref(),
+                        body.confirm_register,
                     )
                     .await?
             }
@@ -301,6 +312,29 @@ pub async fn conflicts(
         state
             .store
             .project_conflicts(&account.person_id, &project_id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SessionsQuery {
+    pub days: Option<i32>,
+}
+
+pub async fn sessions(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Path(project_id): Path<String>,
+    Query(query): Query<SessionsQuery>,
+) -> ApiResult<Vec<SessionReport>> {
+    let days = query.days.unwrap_or(30);
+    if ![7, 30, 90].contains(&days) {
+        return Err(ApiError::invalid("days must be 7, 30 or 90"));
+    }
+    Ok(Json(
+        state
+            .store
+            .project_sessions(&account.person_id, &project_id, days)
             .await?,
     ))
 }

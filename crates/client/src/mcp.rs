@@ -284,6 +284,9 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["title"], "Cairn");
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert_eq!(instructions, tools::instructions());
+        assert!(!instructions.contains("source of truth"));
+        assert!(!instructions.contains("do not keep memory in local files"));
+        assert!(instructions.len() <= 700);
         assert!(
             server
                 .handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
@@ -314,9 +317,11 @@ mod tests {
         let mut server = server();
         call(&mut server, 1, "initialize", json!({}));
 
-        let missing = call(&mut server, 2, "tools/call", json!({"name": "memory_save"}));
+        // memory_save has no top-level required, so a missing field is the server's
+        // error. memory_get still rejects missing ids locally, before any request.
+        let missing = call(&mut server, 2, "tools/call", json!({"name": "memory_get"}));
         assert_eq!(missing["result"]["isError"], true);
-        assert_eq!(missing["result"]["content"][0]["text"], "kind is required");
+        assert_eq!(missing["result"]["content"][0]["text"], "ids is required");
 
         let unknown = call(&mut server, 3, "tools/call", json!({"name": "unknown"}));
         assert_eq!(unknown["error"]["code"], -32602);
@@ -476,5 +481,39 @@ mod tests {
             .collect();
         assert_eq!(codes, [json!(-32700), json!(-32600), Value::Null]);
         assert_eq!(replies[2]["result"], json!({}));
+    }
+
+    /// Compact JSON bytes of `memory_save`'s inputSchema before `items` was added.
+    #[test]
+    fn five_tools_and_schema_budget() {
+        let list = tools::tools_list();
+        let tools = list["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 5);
+        let save = tools
+            .iter()
+            .find(|tool| tool["name"] == "memory_save")
+            .unwrap();
+        let schema = save["inputSchema"].to_string();
+        const BEFORE: usize = 532;
+        assert!(
+            schema.len() >= BEFORE,
+            "schema shrank: {} < {BEFORE}",
+            schema.len()
+        );
+        let grown = schema.len() - BEFORE;
+        assert!(
+            schema.contains("\"maxItems\":3"),
+            "items schema missing: {schema}"
+        );
+        // Item 03 used at most 450 bytes. Item 09 adds at most 200 for aliases.
+        assert!(grown <= 650, "schema grew by {grown}: {schema}");
+        assert!(
+            save["description"]
+                .as_str()
+                .unwrap()
+                .contains("items: up to 3 notes in one call."),
+            "{}",
+            save["description"]
+        );
     }
 }

@@ -6,7 +6,9 @@
 pub mod account;
 pub mod capture;
 pub mod error;
+pub mod fixes;
 pub mod id;
+pub mod instructions;
 pub mod memory;
 pub mod process;
 pub mod project;

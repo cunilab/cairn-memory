@@ -414,7 +414,7 @@ fn help_and_flag_errors_never_make_a_request() {
     std::fs::write(&file, original).unwrap();
     let output = invoke(&["init", "Different"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--rename"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("web console"));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
     assert_eq!(
         listener.accept().unwrap_err().kind(),
@@ -517,6 +517,38 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
 }
 
 #[test]
+fn non_git_project_saves_attach_from_root_and_child_for_cli_and_mcp() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "plain-save");
+    let root = temp_dir("plain-save-root");
+    let child = root.join("nested");
+    std::fs::create_dir(&child).unwrap();
+    assert!(team.owner.run_in(&root, &["init"]).status.success());
+    let identity: Value =
+        serde_json::from_slice(&std::fs::read(root.join(".cairn/project.json")).unwrap()).unwrap();
+    for dir in [&root, &child] {
+        let mut input: Value = serde_json::from_str(DECISION).unwrap();
+        input["scope"] = json!("project");
+        let cli = team.owner.json_in(dir, &["save", &input.to_string()]);
+        let mut mcp = team.owner.mcp_in(dir);
+        let saved = mcp.ok("memory_save", input);
+        assert_eq!(saved["id"], cli["id"]);
+        let full = mcp.ok("memory_get", json!({"ids": [saved["id"]]}));
+        assert_eq!(full["memories"][0]["scope"], "project");
+        let view = team
+            .owner_web
+            .get(&format!(
+                "/cairn-memory/memories/{}",
+                saved["id"].as_str().unwrap()
+            ))
+            .unwrap();
+        assert_eq!(view["project_id"], identity["project_id"]);
+    }
+}
+
+#[test]
 fn init_registers_a_committed_project_again_after_a_server_wipe() {
     let Some(server) = Server::start() else {
         return;
@@ -538,8 +570,22 @@ fn init_registers_a_committed_project_again_after_a_server_wipe() {
         text.contains(&format!("fail  project  {id} is not on the server")),
         "{text}"
     );
-    // init registers the same id again, as owner, and says why.
-    let init = team.owner.run_in(&dir, &["init"]);
+    // A plain init refuses: whoever registers an unknown id first owns it. Nothing is written.
+    let refused = team.owner.run_in(&dir, &["init"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!refused.status.success(), "{said}");
+    assert!(said.contains("cairn init --yes"), "{said}");
+    let still = team.owner.run_in(&dir, &["doctor"]);
+    assert!(
+        String::from_utf8_lossy(&still.stdout).contains("is not on the server"),
+        "still unregistered"
+    );
+    // With --yes it registers the same id again, as owner, and warns why.
+    let init = team.owner.run_in(&dir, &["init", "--yes"]);
     let said = String::from_utf8_lossy(&init.stdout).into_owned();
     assert!(
         init.status.success(),
@@ -547,7 +593,7 @@ fn init_registers_a_committed_project_again_after_a_server_wipe() {
         String::from_utf8_lossy(&init.stderr)
     );
     assert!(
-        said.contains(&format!("did not know project {id}")),
+        said.contains(&format!("Warning: the server did not know project {id}")),
         "{said}"
     );
     assert!(

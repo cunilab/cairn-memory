@@ -27,8 +27,16 @@ const AUDIT_LABEL: Record<string, string> = {
   project_initialized: "Registered a project",
   project_renamed: "Renamed a project",
   project_transferred: "Transferred a project",
+  agent_instructions_changed: "Changed agent instructions",
   memory_forgotten: "Forgot a memory",
   memories_imported: "Imported memories",
+  fix_applied: "Applied a fix",
+  fix_ignored: "Ignored a fix",
+  fix_done: "Completed a fix",
+  fix_failed: "Fix failed",
+  fix_copied: "Copied a fix prompt",
+  project_auto_joined: "Joined a project automatically",
+  memory_rewritten_by_admin: "Rewrote a memory as admin",
 };
 
 export function auditLabel(action: string): string {

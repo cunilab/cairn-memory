@@ -132,6 +132,10 @@ pub async fn brief(
     Json(body): Json<Brief>,
 ) -> Result<Json<Value>, ApiError> {
     let context = body.context.unwrap_or_default();
+    let resolved = state
+        .store
+        .resolve_project(&account.person_id, &context)
+        .await?;
     state
         .store
         .record_session_files(
@@ -154,9 +158,31 @@ pub async fn brief(
         }
         _ => None,
     };
-    let mut reply = json!({"brief": brief, "max_bytes": SESSION_BRIEF_MAX_BYTES});
+    // The texts the hook appends at start and sends at Stop, so it needs no other request.
+    let instructions = state
+        .store
+        .effective_instructions(&account.person_id, context.project_id.as_deref())
+        .await?;
+    let mut reply = json!({
+        "brief": brief,
+        "max_bytes": SESSION_BRIEF_MAX_BYTES,
+        "instructions": {
+            "session_instruction": instructions.session_instruction.text,
+            "stop_nudge": instructions.stop_nudge.text,
+        },
+    });
     if let Some(check) = check {
         reply["check"] = json!(check);
+    }
+    if let Some(project_id) = resolved.project_id {
+        if let Some(name) = state
+            .store
+            .project_name(&account.person_id, &project_id)
+            .await?
+        {
+            reply["project_name"] = json!(name);
+        }
+        reply["project_id"] = json!(project_id);
     }
     record(
         &state,

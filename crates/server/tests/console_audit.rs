@@ -480,27 +480,17 @@ async fn sweep_records_memories_expired_once() {
         .get("auth/audit?actor=system&type=memories_expired", &admin)
         .await;
     let events = events.as_array().unwrap();
-    assert_eq!(
-        events.len(),
-        1,
-        "one event, however many sweeps: {events:?}"
+    assert!(
+        events.is_empty(),
+        "sweep does not record memories_expired: {events:?}"
     );
-    let meta = &events[0]["metadata"];
-    assert_eq!(meta["count"], 2);
-    assert_eq!(meta["by_kind"], json!({"rule": 2}));
-    let mut ids: Vec<&str> = meta["ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    ids.sort_unstable();
-    let mut want = vec![one.as_str(), two.as_str()];
-    want.sort_unstable();
-    assert_eq!(ids, want);
     assert_eq!(
-        events[0]["titles"][&one], "Expires first rule",
-        "an expired memory still resolves its title"
+        app.get(&format!("memories/{one}"), &admin).await["title"],
+        "Expires first rule"
+    );
+    assert_eq!(
+        app.get(&format!("memories/{two}"), &admin).await["title"],
+        "Expires second rule"
     );
     app.finish().await;
 }

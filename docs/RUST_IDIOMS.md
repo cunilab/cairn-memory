@@ -17,7 +17,7 @@ maintenance inexpensive.
 
 ## 1. Working sequence
 
-1. Read `AGENTS.md`, `MEMORY.md`, `README.md`, and `docs/README.md` when the
+1. Read `AGENTS.md`, `README.md`, and `docs/README.md` when the
    change affects product behavior or architecture.
 2. Identify the public boundary, callers, serialized data, migrations, and
    tests before changing an API or type.
@@ -193,7 +193,7 @@ Prefer Rust concepts over patterns imported from object-oriented languages:
   Avoid accepting many spellings without a reason.
 - Keep HTTP handlers thin: extract, authenticate, call a domain/storage method,
   and map the result. Put validation, ownership, and transitions below the
-  transport layer so file-backed and PostgreSQL paths behave consistently.
+  transport layer so callers behave consistently.
 
 ## 9. Documentation and comments
 
@@ -205,7 +205,7 @@ Prefer Rust concepts over patterns imported from object-oriented languages:
   comment because it teaches the next contributor the wrong invariant.
 - Name constants for policy values and document their operational reason. Do
   not scatter unexplained numeric limits through control flow.
-- Put product and trust-boundary decisions in `docs/` and ADRs, not only in
+- Put product and trust-boundary decisions in the Decisions section of `docs/architecture.md` or `docs/release.md`, not only in
   source comments.
 
 ## 10. Static checks and review gates
@@ -244,8 +244,7 @@ document the deliberate choice. In particular:
 - compatibility aliases and serialized fields are public behavior;
 - migration safety outranks a locally simpler schema;
 - bounded work and redaction outrank cleverness or micro-optimization;
-- the file-backed adapter and PostgreSQL adapter should expose equivalent
-  owner-facing behavior where both support the same feature.
+- PostgreSQL remains the authoritative store for owner-facing behavior.
 
 ## Review checklist
 
