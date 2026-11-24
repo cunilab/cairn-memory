@@ -95,7 +95,7 @@ export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
       },
       {
         accessorKey: "agent_saves",
-        header: "Agent saves (saves during the session)",
+        header: "New records in this time window",
         cell: ({ row }) => (
           <span className="tabular-nums">{row.original.agent_saves}</span>
         ),
@@ -122,8 +122,9 @@ export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="text-sm font-medium text-muted-foreground">
-        {summaryLine(sessions.length, withSaves)}
+      <div className="text-sm text-muted-foreground">
+        <p className="font-medium">{summaryLine(sessions.length, withSaves)}</p>
+        <p>Counts are new records during each session&apos;s time window.</p>
       </div>
       <DataTable
         label="project sessions"

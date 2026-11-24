@@ -18,4 +18,6 @@ Run `cairn init "Project name"` in a folder and commit `.cairn/project.json`; th
 
 **An ID grants membership:** anyone with an account on the server and the project ID can join and read project memories and member emails. A Git remote alone does not grant membership. Joins made using the project file are audited. Protect the file accordingly; deleting it does not remove an existing membership.
 
+A checkout with no project file still attaches when its Git remote matches exactly one project the person already belongs to. Captures and project-scoped saves in that checkout are project memories, so the other members can read them. Zero matching memberships, or more than one, stay personal. Use `.cairn/project.json` when the checkout should be shared on purpose.
+
 The project owner or an administrator can transfer ownership to an existing member using the web console. The former owner remains a member.

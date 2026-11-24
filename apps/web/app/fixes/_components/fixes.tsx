@@ -108,7 +108,7 @@ export function Fixes() {
         {selected.owner_email && selected.prompt ? <p>Only {selected.owner_email} can run this prompt.</p> : null}
         {selected.status === "queued" ? <p>Queued for {selected.device_name}</p> : null}
         {selected.detector === "F6" && selected.fix_type === "computer" ? <p className="font-bold">This joins the person to the project.</p> : null}
-        {selected.detector === "F9" ? <p className="font-bold">This removes the text for good. Rotate the secret now.</p> : null}
+        {selected.detector === "F9" ? <p className="font-bold">This redacts the secret in the title, summary, reason, and kind fields. It can remain in evidence or an older version. Rotate the secret now.</p> : null}
         <p>Change: {selected.action.type?.replaceAll("_", " ") ?? "Report"}</p>
         <pre className="whitespace-pre-wrap break-words">{JSON.stringify(selected.action, null, 2)}</pre>
         <pre className="whitespace-pre-wrap break-words">{JSON.stringify(selected.evidence, null, 2)}</pre>
@@ -116,6 +116,6 @@ export function Fixes() {
         {selected.error ? <p role="alert">{selected.error}</p> : null}
         <div className="flex flex-wrap gap-2">{buttonsFor(selected).map((button) => <Button key={button} disabled={busy} onClick={() => button === "Apply" && selected.detector === "F9" ? setConfirming(true) : void action(button)}>{button}</Button>)}</div>
       </div> : null}</SheetContent></Sheet>
-    <AlertDialog open={confirming} onOpenChange={setConfirming}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Apply secret redaction?</AlertDialogTitle><AlertDialogDescription className="font-bold">This removes the text for good. Rotate the secret now.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => void action("Apply")}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <AlertDialog open={confirming} onOpenChange={setConfirming}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Apply secret redaction?</AlertDialogTitle><AlertDialogDescription className="font-bold">This redacts the secret in the title, summary, reason, and kind fields. It can remain in evidence or an older version. Rotate the secret now.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => void action("Apply")}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </>;
 }

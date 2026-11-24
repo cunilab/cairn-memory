@@ -56,11 +56,12 @@ flowchart TD
     Gate --> Results[Compact cards or brief]
 ```
 
-Capture stays personal when project attachment fails; recognized projects can receive distilled notes. The hook uses a bounded outbox during outages. Explicit saves are validated and deduplicated; corrections name the old memory in `supersedes`. Forget hides the retained record from normal recall. Feedback can mark a memory stale. A project file identifies membership, so protect it as shared access to the project's memories.
+Capture stays personal when project attachment fails. A mixed or indeterminate session cohort stays personal. A checkout whose remote matches exactly one existing membership attaches to that project, and those writes are shared with its members; the remote does not grant membership. Recognized projects can receive distilled notes. The hook uses a bounded outbox during outages. Explicit saves are validated and deduplicated; corrections name the old memory in `supersedes`. Forget hides the retained record from normal recall. Feedback can mark a memory stale. A project file identifies membership, so protect it as shared access to the project's memories.
 
 ## Decisions and why
 
 - Project owners rename in the web console. Joining uses the project ID even if the file has an old name; `cairn init` updates that name, and session-start notices remind teammates to update and commit the file.
+- A matching Git remote attaches only an existing single membership and shares that checkout's writes. It does not grant membership. Mixed capture cohorts stay personal. The source-of-truth sentence is session-start only.
 
 - **Server-authoritative PostgreSQL:** one store and one authorization boundary keep shared state consistent; pgvector supports local semantic retrieval.
 - **Self-hosted accounts:** the first account is the administrator; password and device credentials are stored as hashes. Humans manage devices in the web console.

@@ -23,7 +23,7 @@ Assistant messages are captured only with `CAIRN_CAPTURE_ASSISTANT=1`. Set `CAIR
 
 ## Reminders (agent nudges)
 
-The start instruction tells agents when to search and save with Cairn. The Stop reminder can ask the host to save up to three useful notes after work. It runs at most once per eligible session. OpenCode does not support continuing the turn from the Stop reminder. Project instructions override global instructions, which override built-in text; edit them in the web console. Setting the Stop text to `off` disables the ask for that scope; an empty text falls back to the next level. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable nudges.
+The start instruction tells agents when to search and save with Cairn, and it is the only place that says Cairn is the source of truth. The Stop reminder can ask the host to save up to three useful notes after work. It runs at most once per eligible session. A Cairn save counts only when the CLI exits successfully or the MCP result saved or deduplicated at least one item; a failed save still allows the ask. Each command execution is kept, so the digest reports the last result of a repeated test. OpenCode does not support continuing the turn from the Stop reminder. Project instructions override global instructions, which override built-in text; edit them in the web console. Setting the Stop text to `off` disables the ask for that scope; an empty text falls back to the next level. Set `nudge` to `false` in the client configuration or `CAIRN_NO_NUDGE=1` to disable nudges.
 
 ## Injection budget
 

@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { formatWhyNone, hasSaves, renderOutcomeStatus, summaryLine } from "./session-summary.ts";
+
+test("the sessions table names the time-window count", () => {
+  const sheet = readFileSync(new URL("../_components/project-sessions.tsx", import.meta.url), "utf8");
+  assert.match(sheet, /New records in this time window/);
+  assert.match(sheet, /new records during each session/);
+});
 
 test("renders_summary_line", () => {
   assert.equal(summaryLine(0, 0), "0 sessions, 0 with saves");

@@ -13,24 +13,37 @@ This release improves project capture, handoffs, retrieval and the web console. 
 | Item | Change | Agent token cost |
 | --- | --- | --- |
 | 01 | Distilled notes attach to a recognized project and start as lower-ranked candidates; use or confirmation promotes them. | No added context; candidates are excluded from briefs. |
-| 02 | Projects are recognized with or without Git. `cairn init` can initialize a non-Git folder; an unrecognized project gets a hint. | About 22 tokens for the hint, once per session without a project. |
+| 02 | Projects are recognized with or without Git. `cairn init` can initialize a non-Git folder; an unrecognized project gets a hint. A checkout whose remote matches exactly one project the person already belongs to attaches to that project. | About 22 tokens for the hint, once per session without a project. |
 | 03 | In a recognized project, after a session that edited files or was corrected, the Stop hook asks once (not on OpenCode) for up to three reusable notes, saved in one `memory_save` call. | About 40 tokens for the ask; up to about 110 tokens added to the tool schema. Agent-written notes cost output tokens. |
-| 04 | Sessions with changed files produce a searchable project digest, including changed files and test results. | No brief tokens; a search hit costs a normal card, about 60–100 tokens. |
+| 04 | Sessions with changed files produce a searchable project digest, including changed files and the last result of each test command. | No brief tokens; a search hit costs a normal card, about 60–100 tokens. |
 | 05 | A short chat no longer overwrites a useful handoff; explicit next steps and changed files are preserved. | No added agent tokens. |
 | 06 | A detected user correction adds a request to save a reusable rule to the existing Stop ask. | About 25 tokens plus the quote, only when a correction is detected. |
 | 07 | A write-side benchmark checks capture, handoffs, digests and the save ask in CI. | None at runtime. |
-| 08 | The project page reports recent sessions, their changes, saves and reasons for missing output. | None; web only. |
-| 09 | Saves can include up to five aliases, and existing memories receive derived aliases. Alias vector search remains disabled because its benchmark introduced weak-query hits. | About 60 schema tokens per session; agent-written aliases add about 20–60 output tokens per note. Search response size is unchanged. |
+| 08 | The project page reports recent sessions, their changes, and reasons for missing output. Save counts are new records during each session's time window. | None; web only. |
+| 09 | Saves can include up to five aliases, and existing memories receive derived aliases. Alias vector search remains disabled because its benchmark introduced weak-query hits. While it is off, new alias vectors are not generated; stored aliases and existing vectors stay. | About 60 schema tokens per session; agent-written aliases add about 20–60 output tokens per note. Search response size is unchanged. |
 | 10 | A local cross-encoder was evaluated but is not shipped: it increased weak-query hits and latency. | None. |
 | 11 | Repeated knowledge records a proof count and receives a small ranking boost; material differences such as numbers or file names prevent automatic merging. | About three tokens for `seen`, only when the count is at least two. |
 | 12 | Automated and subagent sessions still capture and distill, but do not receive the Stop ask or overwrite a person's handoff. Use `CAIRN_SESSION_ORIGIN=automation` for automated sessions. | Fewer tokens in those sessions because there is no ask. |
 | 13 | Cairn records data for Fixes, including missed searches, hook errors and whether the save ask was followed. | None in agent context. |
 | 14 | Server detectors identify issues and create Fixes with evidence and an action. | None in agent context. |
-| 15 | Admins can review Fixes in the web console, apply supported actions, ignore issues or copy an agent prompt. Applying a fix can turn off the Stop ask for a project (a project ignores it), lower the rank of a long-unused memory, undo a wrong automatic merge, or permanently remove a detected secret. | None during normal sessions; a copied prompt costs about 60 tokens if pasted. |
+| 15 | Admins can review Fixes in the web console, apply supported actions, ignore issues or copy an agent prompt. Applying a fix can turn off the Stop ask for a project (a project ignores it), lower the rank of a long-unused memory, undo a wrong automatic merge, or redact a detected secret in the covered fields. History is paged, and each nightly pass opens at most 100 unused-memory proposals. | None during normal sessions; a copied prompt costs about 60 tokens if pasted. |
 | 16 | A computer fix is queued for its device. It runs the next time someone there runs `cairn doctor`, `cairn init` or `cairn fixes apply [id]`; `cairn fixes` lists it. Opening a known project using its `.cairn/project.json` joins the person and records an audit event. | None in agent context. |
 | 17 | Age no longer hides memories. Stale and replaced memories remain searchable with labels and lower ranking; forgotten memories remain hidden. | No added bytes on active cards; about 30 bytes on stale cards and about 75 on replaced cards (status and label). |
-| 18 | The session-start instruction tells agents to use Cairn as their memory. Built-in agent memory remains enabled; nothing is copied or blocked. | Compared with 0.1.8, about 260 bytes (~65 tokens) per session start, plus an 81-byte hint once per session outside a project, and +30 bytes once in the MCP instructions. Disable it with `nudge: false`. |
+| 18 | The session-start instruction tells agents to use Cairn as their memory. That source-of-truth sentence is not repeated in MCP `initialize`. Built-in agent memory remains enabled; nothing is copied or blocked. | Compared with 0.1.8, about 260 bytes (~65 tokens) per session start, plus an 81-byte hint once per session outside a project. Disable it with `nudge: false`. |
 | 19 | Owners rename projects in the web console. A session-start notice flags an old project file; `cairn init` updates its name so it can be committed. | One short line once per session only when names differ. |
+
+## Review corrections
+
+- A capture with no project stays personal. A session that mixes projects, or mixes project and personal work, distills each attachment on its own. A mixed or indeterminate cohort is personal, so a personal note is not written into a project.
+- Explicit CLI and MCP saves with project scope use the same non-Git lookup as the hook: the nearest `.cairn/project.json`, at the folder root and in a nested folder.
+- The digest reports the last execution of each test command, including a repeated failure of the same command.
+- A Cairn save suppresses the Stop ask only after the CLI exits successfully or the MCP result saved or deduplicated at least one item. A failed save is not recorded as a save.
+- A device update fix is finished only when the installed version reaches the queued target. An unpublished target stays retryable.
+- A Git checkout whose remote matches exactly one project the person already belongs to attaches to that project without `.cairn/project.json`. Writes there are project memories and are visible to the other members. The remote does not grant membership. Zero matches, or more than one, stay personal.
+- Secret detection covers `title`, `summary`, `reason`, and kind `fields` on active, stale, and superseded memories that are not global or system. Apply rewrites those fields on the supersedes chain and keeps every record readable. It does not read evidence. A secret can remain in evidence, or in a version that is not on that chain. Rotate it. The console states this before Apply.
+- The project session table counts new records during each session's time window. One new row can fall in two overlapping sessions, and a deduplicated save adds no row.
+- The dashboard does not count memories as expiring. The stored `expires_at` column remains.
+- The checked-in write measurement is 645 hook bytes. The benchmark allows 55 more, and no more than 700.
 
 Agent instructions and the Stop reminder are editable in the web. Set `nudge` to `false` in the client config or set `CAIRN_NO_NUDGE=1` to disable nudges. Setting the Stop text to `off` disables the ask for that scope; an empty text falls back to the next level. Search ranking now uses proof count, rank and status, so results can differ from 0.1.8. See [the benchmark analysis](../bench/README.md) for the gate and benchmark limits.
 

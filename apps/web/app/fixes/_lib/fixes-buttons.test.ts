@@ -31,8 +31,11 @@ test("searches load with the searches tab and history is paged", () => {
   assert.doesNotMatch(sheet, /Promise\.all\(\[cairn<Fix\[\]>\("admin\/fixes"\), cairn<Search\[\]>\("admin\/searches"\)\]\)/);
 });
 
-test("F9 Apply requires confirmation", () => {
+test("F9 Apply requires confirmation and names the covered fields", () => {
   const sheet = readFileSync(new URL("../_components/fixes.tsx", import.meta.url), "utf8");
   assert.match(sheet, /<AlertDialog/);
   assert.match(sheet, /<AlertDialogAction[^>]*onClick=\{\(\) => void action\("Apply"\)\}/);
+  assert.match(sheet, /title, summary, reason, and kind fields/);
+  assert.match(sheet, /evidence or an older version/);
+  assert.doesNotMatch(sheet, /removes the text for good/);
 });
