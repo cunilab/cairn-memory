@@ -6,7 +6,7 @@ status: draft
 
 # Cairn Memory 0.1.7 release notes
 
-Fixes from live agent tests of 0.1.6. No schema change, no new tools. Ranking amendment: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
+Fixes from live agent tests of 0.1.6. No schema change, no new tools. Ranking amendment: [Architecture decisions](./architecture.md#decisions-and-why).
 
 ## What changed for users
 

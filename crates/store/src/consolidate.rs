@@ -221,7 +221,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Global promotion (CM-SPEC-008 §4.3): a project rule or gotcha written by an agent whose
+    /// Global promotion (docs/architecture.md): a project rule or gotcha written by an agent whose
     /// near-identical twin lives in another project (any owner) yields one global copy linked to
     /// both. Only `scope = project` memories of kind rule or gotcha are ever read as twins or
     /// promoted; the copy goes through the same redaction as every save. Returns the copy's id.

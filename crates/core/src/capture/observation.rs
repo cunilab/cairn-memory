@@ -42,7 +42,7 @@ pub struct WorkContext {
     pub origin: Option<String>,
 }
 
-/// What the hook captured (CM-SPEC-006 C4).
+/// What the hook captured (docs/reference/hook.md#events).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureKind {

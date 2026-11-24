@@ -1,4 +1,4 @@
-//! The hook payload and what each event captures (CM-SPEC-006 §1).
+//! The hook payload and what each event captures (docs/reference/hook.md#events).
 
 use super::readonly::{canonical_tool, is_read_only_tool, shell_command_is_readonly};
 use cairn_core::capture::{CaptureKind, redact_sensitive_content};

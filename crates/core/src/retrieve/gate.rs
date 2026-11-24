@@ -7,7 +7,7 @@
 /// Share of the query's lexemes the memory contains.
 pub const COVERAGE_MIN: f32 = 0.5;
 /// Cosine that keeps a hit with no word in common (a paraphrase). Measured on bench v2 (see
-/// `docs/experiments/embedding-model-comparison.md`): 0.43 leaks no weak query.
+/// `bench/README.md`): 0.43 leaks no weak query.
 pub const COSINE_STRONG: f32 = 0.43;
 /// Cosine a words-only hit (coverage at least `COVERAGE_MIN`) needs when the memory has an
 /// embedding. A word the query shares with every note of a store (the project's own name) is not

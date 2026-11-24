@@ -2,7 +2,7 @@
 # breaks branch protection until the rule is updated.
 # Jobs that need PostgreSQL (rust-tests, acceptance-smokes) each run the same
 # pgvector/pgvector:pg17 service and the same CAIRN_TEST_DATABASE_URL. Tests and smokes isolate
-# themselves in a schema, so one database serves all of them (spec docs/specs/0.1.6-foundation.md, section 5).
+# themselves in a schema, so one database serves all of them (see docs/development.md).
 name: CI
 
 on:
@@ -35,16 +35,16 @@ jobs:
         # bench_distractors.py is generated corpus text, not code ("Reference for reviews.").
         run: |
           if grep -rniE 'similarity.review|review_queue|reviews' --exclude=bench_distractors.py crates apps/web/app apps/web/components scripts; then
-            echo "the human review queue is gone (CM-SPEC-008 P11); do not bring it back" >&2
+            echo "the human review queue is gone; do not bring it back" >&2
             exit 1
           fi
-      - name: no rate limiter, no human job controls (owner decisions, CM-SPEC-009)
+      - name: no rate limiter, no human job controls
         run: |
           if grep -rniE 'rate_limited|AuthRateLimiter|requeue_job|discard_job|jobs/\{job_id\}' crates/server/src crates/store/src; then
             echo "Cairn has no auth rate limiter or lockout, and jobs are read-only (retried automatically)" >&2
             exit 1
           fi
-      - name: the web reads no retired route and matches no English error text (CM-SPEC-009)
+      - name: the web reads no retired route and matches no English error text
         # Quoted names only: "memories/export" (the current export) and "@/lib/export" do not match.
         run: |
           if grep -rnE --exclude-dir=generated --exclude='*.test.ts' "SESSION_REQUIRED_MESSAGES|[\"'\`](delete|diagnose|export)[\"'\`]|/cairn-memory/(delete|diagnose|export)" apps/web/app apps/web/components apps/web/lib apps/web/hooks crates/server/src; then
@@ -58,7 +58,7 @@ jobs:
             echo "cairn-core must not depend on sqlx, tokio, axum or reqwest" >&2
             exit 1
           fi
-      - name: migrations do not destroy data (docs/plan/0.1.9/00-guard.md)
+      - name: migrations do not destroy data (docs/development.md#migrations)
         run: |
           python3 scripts/check_migrations.py
           python3 scripts/test_check_migrations.py

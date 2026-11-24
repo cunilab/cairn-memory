@@ -1,6 +1,6 @@
 //! The offline outbox: captures that could not be delivered wait in
 //! `<config_dir>/outbox.json`, bound to one origin and device, and are replayed after the next
-//! successful POST (CM-SPEC-006 §4). The lock is held only to read or write the file, never
+//! successful POST (docs/reference/hook.md#outbox). The lock is held only to read or write the file, never
 //! while a request is in flight, so a capture that fails during a replay is still kept.
 
 use super::OBSERVE;

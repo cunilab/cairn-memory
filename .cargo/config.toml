@@ -1,4 +1,4 @@
-# ts-rs writes the web console's generated types here (docs/specs/0.1.6-step7-web-hardening.md W4):
+# ts-rs writes the web console's generated types here (apps/web/README.md):
 #   cargo test --workspace --features ts export_bindings
 [env]
 TS_RS_EXPORT_DIR = { value = "apps/web/lib/generated", relative = true }

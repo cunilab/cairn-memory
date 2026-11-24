@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail when a migration drops, deletes, or truncates data or schema.
 
-See docs/plan/0.1.9/00-guard.md. Dollar-quoted bodies are scanned with the rest
+See docs/development.md#migrations. Dollar-quoted bodies are scanned with the rest
 of the file; they are not skipped.
 """
 
@@ -23,7 +23,7 @@ FLAG_PATTERNS = (
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT = re.compile(r"--[^\n]*")
 WHITESPACE = re.compile(r"\s+")
-SPEC = "docs/plan/0.1.9/00-guard.md"
+SPEC = "docs/development.md#migrations"
 
 
 def normalise(text: str) -> str:

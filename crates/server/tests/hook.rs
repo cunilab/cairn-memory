@@ -1,4 +1,4 @@
-//! Automated and subagent sessions do not get the Stop ask (docs/plan/0.1.9/12).
+//! Automated and subagent sessions do not get the Stop ask (docs/reference/hook.md).
 
 mod common;
 

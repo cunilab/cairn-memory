@@ -116,7 +116,7 @@ fn validate_list(name: &str, items: &[String]) -> Result<(), Error> {
     Ok(())
 }
 
-/// What an agent's save must carry to be worth keeping (CM-SPEC-008 §5). The first failing rule
+/// What an agent's save must carry to be worth keeping (docs/reference/cli-and-mcp.md). The first failing rule
 /// wins; the message is one line the agent can act on. System saves are built to pass.
 pub fn validate_quality(input: &SaveInput, fields: &Fields) -> Result<(), Error> {
     let quality = |message: &str| Err(Error::Quality(message.to_owned()));

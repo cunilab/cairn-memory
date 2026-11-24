@@ -1,6 +1,6 @@
 //! Per-session hook state: delivery flags, repeat hashes and injection counters, never memory
 //! text or credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
-//! only while holding `<file>.lock` (CM-SPEC-006 §5).
+//! only while holding `<file>.lock` (docs/reference/hook.md).
 
 use crate::{create_private_dir, write_private};
 use cairn_core::id::sha256_hex;

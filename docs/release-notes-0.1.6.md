@@ -6,7 +6,7 @@ status: draft
 
 # Cairn Memory 0.1.6 release notes
 
-Design record: [ADR 0015](./adr/0015-0.1.6-memory-model-and-agent-surface.md).
+Design record: [Architecture decisions](./architecture.md#decisions-and-why).
 
 ## What changed for users
 

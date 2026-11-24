@@ -6,7 +6,7 @@ license.workspace = true
 description = "REST transport for Cairn Memory"
 
 [features]
-# Generates the web console's TypeScript types (docs/specs/0.1.6-step7-web-hardening.md W4).
+# Generates the web console's TypeScript types (apps/web/README.md).
 ts = ["dep:ts-rs", "cairn-core/ts", "cairn-store/ts"]
 
 [dependencies]

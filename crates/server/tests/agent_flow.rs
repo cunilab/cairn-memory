@@ -20,7 +20,7 @@ fn full_note() -> Value {
         "summary": "A full item may set fields, evidence and scope.",
         "reason": "The server validates each item as a SaveInput.",
         "fields": {"source": "the release notes"},
-        "evidence": ["docs/plan/0.1.9/03-save-ask.md"],
+        "evidence": ["docs/user-guide.md"],
         "scope": "personal"
     })
 }

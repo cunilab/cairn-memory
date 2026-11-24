@@ -8,7 +8,7 @@ status: accepted
 
 `claude-code-hooks.json` wires the six Claude Code hook events to `cairn hook`, the hook that is
 part of the `cairn` binary. Events, fields and limits are in the
-[hook contract](../contracts/hook-v1.md#events).
+[hook contract](../reference/hook.md#events).
 
 | Event | What `cairn hook` does |
 | --- | --- |
@@ -21,7 +21,7 @@ part of the `cairn` binary. Events, fields and limits are in the
 Automatic installation is `cairn setup <url> --agent claude` with the device token on stdin; it
 installs these hooks plus the MCP entry, preserves unrelated config, and replaces any older
 Cairn-managed entry. The manual example below is for a custom project-only integration. The
-[hook contract](../contracts/hook-v1.md#setup) owns the setup rules.
+[hook contract](../reference/hook.md#setup) owns the setup rules.
 
 ## Setup
 
