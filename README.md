@@ -77,40 +77,54 @@ Set `POSTGRES_PASSWORD` in your environment before starting Compose; use a URL-s
 
 ### 2. Install and configure the first device
 
-Download the binary for your platform and `SHA256SUMS` from the same [GitHub release](https://github.com/cunilab/cairn-memory/releases). For example, on macOS arm64:
+Copy and paste the block for your platform. It downloads the latest release, verifies it against `SHA256SUMS`, installs it as `cairn` and prints the version.
+
+macOS (Apple silicon):
 
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
-curl -fLO "$base/cairn-aarch64-apple-darwin"
+asset=cairn-aarch64-apple-darwin
+curl -fLO "$base/$asset"
 curl -fLO "$base/SHA256SUMS"
-grep '  cairn-aarch64-apple-darwin$' SHA256SUMS | shasum -a 256 -c -
-chmod +x cairn-aarch64-apple-darwin
-# Move it to a directory on PATH as cairn.
+grep "  $asset$" SHA256SUMS | shasum -a 256 -c -
+chmod +x "$asset"
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+cairn --version
 ```
 
-On Linux x86-64 (use `aarch64-unknown-linux-musl` on arm64):
+Linux (x86-64 or arm64; `uname -m` picks the right binary):
 
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
-asset=cairn-x86_64-unknown-linux-musl
+asset=cairn-$(uname -m)-unknown-linux-musl
 curl -fLO "$base/$asset"
 curl -fLO "$base/SHA256SUMS"
 grep "  $asset$" SHA256SUMS | sha256sum -c -
 chmod +x "$asset"
-# Move it to a directory on PATH as cairn.
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+cairn --version
 ```
 
-On Windows x86-64 in PowerShell:
+If `cairn` is not found, add `~/.local/bin` to `PATH`, for example `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc` (or `~/.zshrc`), and open a new terminal.
+
+Windows (x86-64, PowerShell):
 
 ```powershell
 $base = "https://github.com/cunilab/cairn-memory/releases/latest/download"
 $asset = "cairn-x86_64-pc-windows-msvc.exe"
 Invoke-WebRequest "$base/$asset" -OutFile $asset
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
-Get-FileHash $asset -Algorithm SHA256
-Select-String -Path SHA256SUMS -Pattern $asset -SimpleMatch
-# Compare the hashes, then place the binary on PATH as cairn.exe.
+$expected = ((Select-String -Path SHA256SUMS -Pattern $asset -SimpleMatch).Line -split '\s+')[0]
+if ((Get-FileHash $asset -Algorithm SHA256).Hash -ne $expected) { throw "SHA256 mismatch for $asset" }
+$dir = "$env:LOCALAPPDATA\cairn\bin"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Move-Item -Force $asset "$dir\cairn.exe"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User") }
+& "$dir\cairn.exe" --version
 ```
+
+Open a new PowerShell window afterwards so `cairn` is on `PATH`.
 
 Alternatively build from source with `cargo build --release -p cairn-client`; the binary is `target/release/cairn` (or `cairn.exe` on Windows).
 
