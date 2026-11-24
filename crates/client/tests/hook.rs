@@ -1604,6 +1604,71 @@ fn a_hanging_git_does_not_hold_the_hook() {
 // ---- real server ------------------------------------------------------------------------
 
 #[test]
+fn real_hook_switches_context_within_one_session_without_sharing_notes() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-scopes");
+    let personal = temp_dir("hook-scopes-personal");
+    let a = checkout("hook-scopes-project-a");
+    let b = checkout("hook-scopes-project-b");
+    for (dir, remote) in [
+        (&a, "https://example.test/a.git"),
+        (&b, "https://example.test/b.git"),
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["remote", "add", "origin", remote])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    for dir in [&a, &b] {
+        assert!(team.owner.run_in(dir, &["init"]).status.success());
+    }
+    let run = |dir: &std::path::Path, event, session, extra: Value| {
+        let mut payload = json!({"session_id":session,"cwd":dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+    };
+    for (session, first, last) in [
+        ("personal-to-a", &personal, &a),
+        ("a-to-b", &a, &b),
+        ("b-to-personal", &b, &personal),
+    ] {
+        for (i, dir) in [first, last].into_iter().enumerate() {
+            let extra = json!({"prompt":format!("Decision: keep {session} turn {i} isolated\nReason: capture scope follows checkout")});
+            run(dir, "UserPromptSubmit", session, extra.clone());
+            run(dir, "UserPromptSubmit", session, extra);
+        }
+        run(last, "SessionEnd", session, json!({}));
+        server.distill(&team.owner_id, session);
+    }
+    let list = team
+        .owner_web
+        .get("/cairn-memory/memories?kind=decision")
+        .unwrap();
+    let decisions = list.as_array().unwrap();
+    assert_eq!(decisions.len(), 6);
+    assert!(
+        decisions
+            .iter()
+            .all(|row| row["scope"] == "personal" && row["project_id"].is_null())
+    );
+}
+
+#[test]
 fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     let Some(server) = Server::start() else {
         return;

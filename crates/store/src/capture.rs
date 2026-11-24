@@ -14,7 +14,7 @@ use cairn_core::process::distill::distill;
 const HANDOFF_CHAIN_ORIGIN: &str = "system";
 use cairn_core::process::jobs::{JOB_DONE_RETENTION_SECONDS, JobKind, distill_key};
 use cairn_core::process::{Origin, prepare_save};
-use sqlx::Row;
+use sqlx::{PgExecutor, Row};
 
 pub(crate) const RECENT_FILES_MAX: usize = 20;
 pub(crate) const RECENT_FILE_MAX_BYTES: usize = 512;
@@ -54,6 +54,18 @@ impl Store {
         device_id: Option<&str>,
     ) -> Result<CaptureResult> {
         let mut observation = normalize_observation(&input)?;
+        let result = |duplicate| CaptureResult {
+            accepted: true,
+            duplicate,
+            event_id: observation.event_id.clone(),
+        };
+        if let Some(duplicate) = self.known(person_id, &observation).await? {
+            return duplicate.map(|()| result(true));
+        }
+        // Git context inherited for the report must never grant a project attachment.
+        let project_id = self
+            .context_project(person_id, &observation.context, device_id)
+            .await?;
         // A bare project id (the CLI sends only that) still inherits the session's git context.
         let bare = WorkContext {
             project_id: None,
@@ -69,19 +81,9 @@ impl Store {
                 ..inherited
             };
         }
-        let result = |duplicate| CaptureResult {
-            accepted: true,
-            duplicate,
-            event_id: observation.event_id.clone(),
-        };
-        if let Some(duplicate) = self.known(person_id, &observation).await? {
-            return duplicate.map(|()| result(true));
-        }
-        let project_id = self
-            .context_project(person_id, &observation.context, device_id)
-            .await?;
+        let mut tx = self.pool.begin().await?;
         upsert_session(
-            &self.pool,
+            &mut *tx,
             person_id,
             &observation.session_id,
             &observation.context,
@@ -113,13 +115,16 @@ impl Store {
         .bind(&observation.content_hash)
         .bind(serde_json::to_value(&observation.context).unwrap_or_default())
         .bind((observation.expires_at - observation.captured_at) as f64)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if done.rows_affected() == 0 {
+            tx.rollback().await?;
             // Lost a race with the same event id or the same content.
             if let Some(duplicate) = self.known(person_id, &observation).await? {
                 return duplicate.map(|()| result(true));
             }
+        } else {
+            tx.commit().await?;
         }
         Ok(result(done.rows_affected() == 0))
     }
@@ -341,7 +346,7 @@ impl Store {
             serde_json::Value,
             bool,
         ) = sqlx::query_as(
-            "SELECT project_id, device_id, context, ended_at IS NOT NULL FROM sessions WHERE person_id = $1 AND session_id = $2",
+            "SELECT context->>'capture_project_id', device_id, context, ended_at IS NOT NULL FROM sessions WHERE person_id = $1 AND session_id = $2",
         )
         .bind(person_id)
         .bind(session_id)
@@ -381,7 +386,14 @@ impl Store {
                 ..work.clone()
             };
             match self
-                .save_as(person_id, note.input, &note_work, Origin::System, device)
+                .save_with_project(
+                    person_id,
+                    note.input,
+                    &note_work,
+                    Origin::System,
+                    device,
+                    session_project.as_deref(),
+                )
                 .await
             {
                 Ok(saved) => {
@@ -417,7 +429,14 @@ impl Store {
                 ..work.clone()
             };
             match self
-                .save_as(person_id, digest, &digest_work, Origin::System, device)
+                .save_with_project(
+                    person_id,
+                    digest,
+                    &digest_work,
+                    Origin::System,
+                    device,
+                    session_project.as_deref(),
+                )
                 .await
             {
                 Ok(saved) => {
@@ -719,8 +738,8 @@ struct SessionTouch<'a> {
     device_id: Option<&'a str>,
 }
 
-async fn upsert_session(
-    pool: &sqlx::PgPool,
+async fn upsert_session<'e>(
+    executor: impl PgExecutor<'e>,
     person_id: &str,
     session_id: &str,
     work: &WorkContext,
@@ -752,13 +771,23 @@ async fn upsert_session(
         context.insert("origin".into(), origin.into());
     }
     let context = (!context.is_empty()).then_some(serde_json::Value::Object(context));
+    // A project is safe for distillation only if every accepted capture resolved to it. An
+    // existing observation without this metadata predates tracking and is indeterminate.
     sqlx::query(
         "INSERT INTO sessions (person_id, session_id, project_id, context, pending_since, device_id)
-         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb), CASE WHEN $5 THEN now() END, $6)
+         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb) || CASE WHEN $5 THEN jsonb_build_object('capture_project_id', $3::text) ELSE '{}'::jsonb END,
+                 CASE WHEN $5 THEN now() END, $6)
          ON CONFLICT (person_id, session_id) DO UPDATE
             SET project_id = COALESCE(EXCLUDED.project_id, sessions.project_id),
                 device_id = COALESCE(EXCLUDED.device_id, sessions.device_id),
-                context = sessions.context || COALESCE($4::jsonb, '{}'::jsonb),
+                context = sessions.context || COALESCE($4::jsonb, '{}'::jsonb) || CASE
+                    WHEN NOT $5 THEN '{}'::jsonb
+                    WHEN sessions.context->>'capture_project_id' = $3::text OR (
+                        NOT (sessions.context ? 'capture_project_id') AND NOT EXISTS (
+                            SELECT 1 FROM observations WHERE person_id = $1 AND session_id = $2
+                        )
+                    ) THEN jsonb_build_object('capture_project_id', $3::text)
+                    ELSE '{\"capture_project_id\":null}'::jsonb END,
                 ended_at = CASE WHEN $5 THEN NULL ELSE sessions.ended_at END,
                 pending_since = CASE WHEN $5 THEN COALESCE(sessions.pending_since, now()) ELSE sessions.pending_since END",
     )
@@ -768,7 +797,7 @@ async fn upsert_session(
     .bind(context)
     .bind(pending)
     .bind(device_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

@@ -710,3 +710,30 @@ async fn device_fixes_scoped() {
     }
     app.finish().await;
 }
+#[tokio::test]
+async fn personal_observation_in_a_project_session_is_distilled_personally() {
+    let Some(app) = App::new().await else { return };
+    let web = app.admin("mixed-capture").await;
+    let device = app.device(&web, "agent").await;
+    let project = app.project(&device, "example.test/mixed-capture").await;
+    for (event, context, expected) in [
+        ("project", json!({"project_id": project}), "attached"),
+        ("personal", json!({}), "personal"),
+    ] {
+        let reply = app.post("observe", json!({
+            "event_id":event,"session_id":"mixed","kind":"prompt","context":context,
+            "content":format!("Decision: keep the {event} note private\nReason: mixed capture contexts")
+        }), &device).await;
+        assert_eq!(reply["project_attachment"]["status"], expected);
+    }
+    app.post("session/end", json!({"session_id":"mixed"}), &device)
+        .await;
+    app.settle().await;
+    let scopes: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT scope, project_id FROM memories WHERE kind = 'decision'")
+            .fetch_all(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(scopes, vec![("personal".to_owned(), None); 2]);
+    app.finish().await;
+}

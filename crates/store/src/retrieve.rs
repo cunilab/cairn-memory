@@ -1,6 +1,8 @@
 use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
-use crate::memory::{MEMORY_COLUMNS, MEMORY_SELECT, memory_from_row, searchable, visible};
+use crate::memory::{
+    MEMORY_COLUMNS, MEMORY_SELECT, collection_memory, memory_from_row, searchable, visible,
+};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Fields, Kind, Memory, Status};
@@ -517,12 +519,19 @@ impl Store {
         .bind(projects)
         .fetch_all(&self.pool)
         .await?;
-        let mut memories = rows
+        let (sources, mut memories): (Vec<_>, Vec<_>) = rows
             .iter()
-            .map(memory_from_row)
-            .collect::<Result<Vec<_>>>()?;
+            .filter_map(|row| {
+                collection_memory(row)
+                    .map(|memory| memory.map(|memory| (row, memory)))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .unzip();
         self.attach(person_id, &mut memories).await?;
-        rows.iter()
+        sources
+            .into_iter()
             .zip(memories)
             .map(|(row, memory)| {
                 Ok(Candidate {

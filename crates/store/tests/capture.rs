@@ -107,6 +107,72 @@ async fn bare_project_context_inherits_the_session_context() {
 }
 
 #[tokio::test]
+async fn mixed_capture_sessions_distill_personally_after_end_and_replay() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let me = db.person("me").await;
+    let (a, _) = db
+        .store
+        .init_project(&me, "example.test/a", None)
+        .await
+        .unwrap();
+    let (b, _) = db
+        .store
+        .init_project(&me, "example.test/b", None)
+        .await
+        .unwrap();
+    for (session, first, second) in [
+        ("project-to-personal", Some(a.project_id.as_str()), None),
+        ("personal-to-project", None, Some(a.project_id.as_str())),
+        (
+            "project-to-project",
+            Some(a.project_id.as_str()),
+            Some(b.project_id.as_str()),
+        ),
+    ] {
+        for (turn, project_id) in [("first", first), ("second", second)] {
+            let mut input = prompt(
+                &format!("{session}-{turn}"),
+                session,
+                &format!(
+                    "Decision: keep {session} {turn} isolated\nReason: ownership of capture context"
+                ),
+            );
+            input.context = WorkContext {
+                project_id: project_id.map(str::to_owned),
+                ..WorkContext::default()
+            };
+            assert!(
+                !db.store
+                    .capture(&me, input.clone())
+                    .await
+                    .unwrap()
+                    .duplicate
+            );
+            if turn == "first" {
+                assert!(db.store.end_session(&me, session).await.unwrap());
+            }
+            assert!(db.store.capture(&me, input).await.unwrap().duplicate);
+        }
+        assert!(db.store.end_session(&me, session).await.unwrap());
+        assert_eq!(
+            db.store.distill_session(&me, session).await.unwrap().notes,
+            2
+        );
+    }
+    let scopes: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT scope, project_id FROM memories WHERE owner_id = $1 AND kind = 'decision'",
+    )
+    .bind(&me)
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(scopes, vec![("personal".to_owned(), None); 6]);
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn ending_a_session_queues_distill_and_distill_writes_notes_and_one_handoff() {
     let Some(db) = TestDb::new().await else {
         return;

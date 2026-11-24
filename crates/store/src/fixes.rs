@@ -200,19 +200,28 @@ async fn detect_candidates(
         }
     }
     if scope.is_none_or(|(detector, _, _, _)| detector == "F9") {
-        let rows = sqlx::query("WITH RECURSIVE chain(id) AS (SELECT $1::text WHERE $1::text IS NOT NULL UNION SELECT CASE WHEN l.source_id=c.id THEN l.target_id ELSE l.source_id END FROM links l JOIN chain c ON l.source_id=c.id OR l.target_id=c.id WHERE l.relation='supersedes') SELECT memory_id,title,summary,reason,fields FROM memories WHERE status IN ('active','stale','superseded') AND scope <> 'global' AND origin <> 'system' AND ($1::text IS NULL OR memory_id IN (SELECT id FROM chain)) ORDER BY memory_id").bind(scope.map(|(_, subject, _, _)| subject)).fetch_all(&mut **tx).await?;
+        use cairn_core::memory::validate::{REASON_MAX, SUMMARY_MAX, TITLE_MAX};
+        let rows = sqlx::query("WITH RECURSIVE chain(id) AS (SELECT $1::text WHERE $1::text IS NOT NULL UNION SELECT CASE WHEN l.source_id=c.id THEN l.target_id ELSE l.source_id END FROM links l JOIN chain c ON l.source_id=c.id OR l.target_id=c.id WHERE l.relation='supersedes') SELECT memory_id,kind,title,summary,reason,fields FROM memories WHERE status IN ('active','stale','superseded') AND scope <> 'global' AND origin <> 'system' AND ($1::text IS NULL OR memory_id IN (SELECT id FROM chain)) ORDER BY memory_id").bind(scope.map(|(_, subject, _, _)| subject)).fetch_all(&mut **tx).await?;
         let mut chain_fixes = std::collections::BTreeMap::<String, Candidate>::new();
         for row in rows {
             let id: String = row.try_get("memory_id")?;
-            for field in ["title", "summary", "reason", "fields"] {
+            for (field, limit) in [
+                ("title", TITLE_MAX),
+                ("summary", SUMMARY_MAX),
+                ("reason", REASON_MAX),
+                ("fields", 0),
+            ] {
                 let (text, redacted) = if field == "fields" {
-                    let mut value: serde_json::Value = row.try_get("fields")?;
-                    let original = value.to_string();
-                    redact_json(&mut value, "");
-                    (original, value.to_string())
+                    let value: serde_json::Value = row.try_get("fields")?;
+                    let kind = row
+                        .try_get::<String, _>("kind")?
+                        .parse()
+                        .map_err(crate::StoreError::Validation)?;
+                    let redacted = redact_fields(kind, &value)?;
+                    (value.to_string(), redacted.to_string())
                 } else {
                     let text: String = row.try_get(field)?;
-                    let redacted = cairn_core::capture::redact_sensitive_content(&text);
+                    let redacted = redact_text(&text, limit);
                     (text, redacted)
                 };
                 if text == redacted {
@@ -732,9 +741,7 @@ async fn redact_versions(
     fields: &[&str],
 ) -> Result<usize> {
     use cairn_core::capture::redact_sensitive_content as redact;
-    use cairn_core::memory::validate::{
-        ALIAS_MAX_CHARS, FIELDS_MAX_BYTES, REASON_MAX, SUMMARY_MAX, TITLE_MAX,
-    };
+    use cairn_core::memory::validate::{ALIAS_MAX_CHARS, REASON_MAX, SUMMARY_MAX, TITLE_MAX};
     use cairn_core::memory::{Kind, identity::identity_hash};
     let rows = sqlx::query("WITH RECURSIVE chain(id) AS (SELECT $1::text UNION SELECT CASE WHEN l.source_id=c.id THEN l.target_id ELSE l.source_id END FROM links l JOIN chain c ON l.source_id=c.id OR l.target_id=c.id WHERE l.relation='supersedes') SELECT m.memory_id,m.kind,m.title,m.summary,m.reason,m.fields,m.status FROM memories m JOIN chain c ON c.id=m.memory_id ORDER BY (m.status IN ('active','stale')),m.memory_id FOR UPDATE OF m")
         .bind(head).fetch_all(&mut **tx).await?;
@@ -751,19 +758,16 @@ async fn redact_versions(
         let mut data: serde_json::Value = row.try_get("fields")?;
         let original = (title.clone(), summary.clone(), reason.clone(), data.clone());
         if fields.contains(&"title") {
-            title = trim_redacted(&redact(&title), TITLE_MAX);
+            title = redact_text(&title, TITLE_MAX);
         }
         if fields.contains(&"summary") {
-            summary = trim_redacted(&redact(&summary), SUMMARY_MAX);
+            summary = redact_text(&summary, SUMMARY_MAX);
         }
         if fields.contains(&"reason") {
-            reason = trim_redacted(&redact(&reason), REASON_MAX);
+            reason = redact_text(&reason, REASON_MAX);
         }
         if fields.contains(&"fields") {
-            redact_json(&mut data, "");
-            if data.to_string().len() > FIELDS_MAX_BYTES {
-                data = serde_json::json!({"redacted": true});
-            }
+            data = redact_fields(kind, &data)?;
         }
         let entities = sqlx::query("SELECT kind,name FROM entities WHERE memory_id=$1 FOR UPDATE")
             .bind(&id)
@@ -791,7 +795,7 @@ async fn redact_versions(
                 .await?;
         for alias in aliases {
             let text: String = alias.try_get("text")?;
-            let redacted = trim_redacted(&redact(&text), ALIAS_MAX_CHARS);
+            let redacted = redact_text(&text, ALIAS_MAX_CHARS);
             if redacted != text {
                 sqlx::query("UPDATE memory_aliases SET text=$3,embedding=NULL,embedding_source=NULL WHERE memory_id=$1 AND ord=$2")
                     .bind(&id).bind(alias.try_get::<i16,_>("ord")?).bind(redacted).execute(&mut **tx).await?;
@@ -822,55 +826,70 @@ async fn redact_versions(
     Ok(entities_removed)
 }
 
-fn trim_redacted(text: &str, limit: usize) -> String {
-    use cairn_core::capture::REDACTED;
-    if text.chars().count() <= limit {
-        return text.to_owned();
+fn redact_text(text: &str, limit: usize) -> String {
+    use cairn_core::capture::{REDACTED, redact_sensitive_content};
+    let redacted = redact_sensitive_content(text);
+    if redacted.chars().count() > limit {
+        return redacted.replace(REDACTED, "*");
     }
-    let markers = text.matches(REDACTED).count();
-    let marker_chars = markers * REDACTED.len();
-    if marker_chars >= limit {
-        return REDACTED.to_owned();
-    }
-    let mut budget = limit - 1 - marker_chars;
-    let mut result = String::new();
-    for (index, part) in text.split(REDACTED).enumerate() {
-        if index > 0 {
-            result.push_str(REDACTED);
-        }
-        let take = part.chars().count().min(budget);
-        result.extend(part.chars().take(take));
-        budget -= take;
-    }
-    result.push('…');
-    result
+    redacted
 }
 
-fn redact_json(value: &mut serde_json::Value, key: &str) {
+fn redact_fields(
+    kind: cairn_core::memory::Kind,
+    original: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use cairn_core::memory::{Fields, validate::validate_fields};
+    let mut redacted = original.clone();
+    redact_json(&mut redacted, "", false);
+    if redacted == *original {
+        return Ok(redacted);
+    }
+    // Preserve legacy data whose shape was already invalid, including redacted unknown keys.
+    if let Ok(before) = Fields::parse(kind, Some(original.clone())) {
+        let after = Fields::parse(kind, Some(redacted.clone()))?;
+        if validate_fields(&after).is_err() {
+            redacted = original.clone();
+            redact_json(&mut redacted, "", true);
+            let after = Fields::parse(kind, Some(redacted.clone()))?;
+            if validate_fields(&before).is_ok() {
+                validate_fields(&after)?;
+            }
+        }
+    }
+    Ok(redacted)
+}
+
+fn redact_json(value: &mut serde_json::Value, key: &str, compact: bool) {
+    use cairn_core::capture::{REDACTED, redact_sensitive_content};
     match value {
         serde_json::Value::String(text) => {
-            if key.contains('=') {
-                *text = cairn_core::capture::redact_sensitive_content(text);
-                return;
-            }
-            let prefix = format!("{key}=");
-            let redacted =
-                cairn_core::capture::redact_sensitive_content(&format!("{prefix}{text}"));
-            *text = redacted
-                .strip_prefix(&prefix)
-                .unwrap_or(&redacted)
-                .to_owned();
+            let redacted = if key.contains('=') {
+                redact_sensitive_content(text)
+            } else {
+                let prefix = format!("{key}=");
+                let redacted = redact_sensitive_content(&format!("{prefix}{text}"));
+                redacted
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&redacted)
+                    .to_owned()
+            };
+            *text = if compact && redacted != *text {
+                redacted.replace(REDACTED, "*")
+            } else {
+                redacted
+            };
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                redact_json(item, key);
+                redact_json(item, key, compact);
             }
         }
         serde_json::Value::Object(items) => {
             let original = std::mem::take(items);
             for (name, mut item) in original {
-                redact_json(&mut item, &name);
-                let redacted = cairn_core::capture::redact_sensitive_content(&name);
+                redact_json(&mut item, &name, compact);
+                let redacted = redact_sensitive_content(&name);
                 let mut unique = redacted.clone();
                 let mut suffix = 2;
                 while items.contains_key(&unique) {

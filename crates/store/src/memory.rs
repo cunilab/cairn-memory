@@ -129,6 +129,18 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
     })
 }
 
+pub(crate) fn collection_memory(row: &PgRow) -> Result<Option<Memory>> {
+    match memory_from_row(row) {
+        Ok(memory) => Ok(Some(memory)),
+        Err(StoreError::Validation(_)) => {
+            let id: &str = row.try_get("memory_id")?;
+            eprintln!("cairn: skipped malformed memory {id}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Which project a request attaches to, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectResolution {
@@ -216,6 +228,26 @@ impl Store {
         device_id: Option<&str>,
     ) -> Result<Saved> {
         let project_id = self.context_project(person_id, work, device_id).await?;
+        self.save_with_project(
+            person_id,
+            input,
+            work,
+            origin,
+            device_id,
+            project_id.as_deref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_with_project(
+        &self,
+        person_id: &str,
+        input: SaveInput,
+        work: &WorkContext,
+        origin: Origin,
+        device_id: Option<&str>,
+        project_id: Option<&str>,
+    ) -> Result<Saved> {
         let mut input = input;
         input.aliases = input
             .aliases
@@ -225,15 +257,7 @@ impl Store {
         let aliases = input.aliases.clone();
         let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
         let mut tx = self.pool.begin().await?;
-        let saved = insert_memory(
-            &mut tx,
-            person_id,
-            project_id.as_deref(),
-            &new,
-            None,
-            device_id,
-        )
-        .await?;
+        let saved = insert_memory(&mut tx, person_id, project_id, &new, None, device_id).await?;
         if !saved.deduplicated {
             insert_agent_aliases(&mut tx, &saved.id, &aliases).await?;
         }
@@ -413,7 +437,7 @@ impl Store {
         };
         let mut memories = rows
             .iter()
-            .map(memory_from_row)
+            .filter_map(|row| collection_memory(row).transpose())
             .collect::<Result<Vec<_>>>()?;
         self.attach(person_id, &mut memories).await?;
         Ok(Page {

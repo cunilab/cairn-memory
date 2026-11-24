@@ -122,7 +122,7 @@ pub fn tools_list() -> Value {
 }
 
 /// Runs one tool against the server and returns the server's JSON result. The work context
-/// comes from git unless the caller sent one.
+/// comes from the checkout unless the caller sent one.
 pub fn call(client: &Client, tool: &Tool, mut args: Map<String, Value>) -> Result<Value, Error> {
     let schema = (tool.schema)();
     for key in schema["required"]
@@ -143,7 +143,7 @@ pub fn call(client: &Client, tool: &Tool, mut args: Map<String, Value>) -> Resul
     }
     if !args.contains_key("context")
         && let Ok(cwd) = std::env::current_dir()
-        && let Some(context) = git_context(&cwd)
+        && let Some(context) = checkout_context(&cwd)
     {
         args.insert("context".to_owned(), context);
     }
@@ -153,9 +153,9 @@ pub fn call(client: &Client, tool: &Tool, mut args: Map<String, Value>) -> Resul
     )
 }
 
-/// Repository, branch, worktree, commit and project id for `dir`; `None` outside git.
-fn git_context(dir: &Path) -> Option<Value> {
-    let top = project::toplevel(dir)?;
+/// Repository, branch, worktree, commit and project id for an initialized folder or checkout.
+fn checkout_context(dir: &Path) -> Option<Value> {
+    let top = project::toplevel(dir).or_else(|| project::find_root(dir))?;
     let mut context = Map::new();
     context.insert(
         "repository".to_owned(),
@@ -362,7 +362,7 @@ mod tests {
         .unwrap();
         let sub = dir.join("src");
         std::fs::create_dir_all(&sub).unwrap();
-        let context = git_context(&sub).unwrap();
+        let context = checkout_context(&sub).unwrap();
         assert_eq!(context["repository"], "example.test/acme/cairn");
         assert_eq!(context["branch"], "main");
         assert_eq!(context["project_id"], "proj_x");
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn git_context_without_commits_still_names_the_branch() {
         let dir = git_repo("empty");
-        let context = git_context(&dir).unwrap();
+        let context = checkout_context(&dir).unwrap();
         assert_eq!(context["branch"], "main");
         assert!(context.get("commit").is_none(), "{context}");
         assert!(
@@ -390,7 +390,7 @@ mod tests {
         let dir = git_repo("detached");
         git_in(&dir, &["commit", "-q", "--allow-empty", "-m", "first"]);
         git_in(&dir, &["checkout", "-q", "--detach"]);
-        let context = git_context(&dir).unwrap();
+        let context = checkout_context(&dir).unwrap();
         assert!(context.get("branch").is_none(), "{context}");
         assert_eq!(context["commit"].as_str().unwrap().len(), 40);
     }
@@ -401,7 +401,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A temp dir can sit inside a checkout on some machines; only assert when it does not.
         if project::toplevel(&dir).is_none() {
-            assert!(git_context(&dir).is_none());
+            assert!(checkout_context(&dir).is_none());
         }
     }
 

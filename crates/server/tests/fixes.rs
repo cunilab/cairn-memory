@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_core::memory::{Fields, Kind, validate::validate_fields};
 use common::App;
 use serde_json::json;
 
@@ -817,14 +818,13 @@ async fn f9_redacts_maximum_length_title() {
         .await
         .unwrap();
     assert!(title.chars().count() <= 80);
-    assert!(title.contains("[REDACTED]"));
-    assert!(title.ends_with('…'));
+    assert_eq!(title, format!("password=* {}", "a".repeat(69)));
     assert!(!title.contains("password=x"));
     app.finish().await;
 }
 
 #[tokio::test]
-async fn f9_many_markers_fit_as_one() {
+async fn f9_many_markers_fit_without_dropping_text() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
@@ -849,17 +849,27 @@ async fn f9_many_markers_fit_as_one() {
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
-    assert_eq!(title, "[REDACTED]");
+    assert_eq!(title, "pwd=* ".repeat(11));
     app.finish().await;
 }
 
 #[tokio::test]
-async fn f9_oversized_json_replaces_whole_field() {
+async fn f9_near_limit_postimage_is_readable_by_get_list_search_and_export() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
-    let id = fact(&app, &device, "Large secret fixture").await;
-    let original = json!({"source":"password=x ".repeat(300)});
+    let title = "Large redaction fixture";
+    let id = app
+        .save(
+            &device,
+            json!({"kind":"decision", "scope":"personal", "title":title,
+        "summary":"A useful decision for this test", "reason":"Verified test evidence"}),
+        )
+        .await;
+    let near_limit =
+        |limit: usize| format!("{}keep provenance", "password=x ".repeat((limit - 15) / 11));
+    let original = json!({"context":near_limit(1_000), "alternatives":vec![near_limit(291); 7], "consequences":near_limit(1_000)});
+    validate_fields(&Fields::parse(Kind::Decision, Some(original.clone())).unwrap()).unwrap();
     sqlx::query("UPDATE memories SET fields=$2 WHERE memory_id=$1")
         .bind(&id)
         .bind(&original)
@@ -876,13 +886,108 @@ async fn f9_oversized_json_replaces_whole_field() {
         )
         .await;
     assert_eq!(response["status"], "done");
-    let stored: serde_json::Value =
-        sqlx::query_scalar("SELECT fields FROM memories WHERE memory_id=$1")
-            .bind(id)
-            .fetch_one(app.db.store.pool())
-            .await
-            .unwrap();
-    assert_eq!(stored, json!({"redacted": true}));
+    let view = app.get(&format!("memories/{id}"), &device).await;
+    let postimage = Fields::parse(Kind::Decision, Some(view["fields"].clone())).unwrap();
+    validate_fields(&postimage).unwrap();
+    assert_eq!(postimage.text().matches("keep provenance").count(), 9);
+    assert!(!postimage.text().contains("password=x"));
+    let list = app.get("memories", &admin).await;
+    assert_eq!(list[0]["id"], id);
+    let search = app.post("search", json!({"query":title}), &device).await;
+    assert_eq!(search["results"][0]["id"], id);
+    let export = app.get("memories/export", &admin).await;
+    assert_eq!(export["memories"][0]["fields"], view["fields"]);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn f9_preserves_valid_fields_at_limits_for_every_kind() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let mut cases = Vec::new();
+    for pad in ['a', 'é'] {
+        let text = |limit: usize| format!("password=x {} tail", pad.to_string().repeat(limit - 16));
+        let field = text(1_000);
+        let item = text(300);
+        for (kind, fields) in [
+            (
+                Kind::Decision,
+                json!({"context":field,"alternatives":[item]}),
+            ),
+            (Kind::Rule, json!({"exceptions":field})),
+            (Kind::Gotcha, json!({"symptom":field,"fix":item})),
+            (Kind::Procedure, json!({"steps":[item, "File the receipt"]})),
+            (Kind::Fact, json!({"source":field})),
+            (Kind::Preference, json!({"example":field})),
+            (Kind::Note, json!({})),
+            (Kind::Handoff, json!({"next_steps":[item]})),
+        ] {
+            let id = fact(
+                &app,
+                &device,
+                &format!("Redaction limit fixture {kind:?} {pad}"),
+            )
+            .await;
+            let original = Fields::parse(kind, Some(fields.clone())).unwrap();
+            validate_fields(&original).unwrap();
+            sqlx::query("UPDATE memories SET kind=$2,title=$3,fields=$4 WHERE memory_id=$1")
+                .bind(&id)
+                .bind(kind.as_str())
+                .bind(text(80))
+                .bind(fields)
+                .execute(app.db.store.pool())
+                .await
+                .unwrap();
+            cases.push((id, kind, !original.is_empty()));
+        }
+    }
+    app.db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    for (id, kind, has_fields) in cases {
+        let (fix, fingerprint): (String, String) = sqlx::query_as("SELECT fix_id,fingerprint FROM fixes WHERE detector='F9' AND subject_id=$1 AND status='pending'")
+            .bind(&id).fetch_one(app.db.store.pool()).await.unwrap();
+        let response = app
+            .post(
+                &format!("admin/fixes/{fix}/apply"),
+                json!({"fingerprint":fingerprint}),
+                &admin,
+            )
+            .await;
+        assert_eq!(response["status"], "done");
+        let view = app.get(&format!("memories/{id}"), &device).await;
+        let fields = Fields::parse(kind, Some(view["fields"].clone())).unwrap();
+        validate_fields(&fields).unwrap();
+        assert!(!fields.text().contains("password=x"));
+        assert_eq!(fields.text().contains(" tail"), has_fields);
+        assert!(view["title"].as_str().unwrap().ends_with(" tail"));
+    }
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn malformed_legacy_memory_does_not_hide_valid_list_or_search_results() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let good = fact(&app, &device, "Workspace legacy fixture valid").await;
+    let bad = fact(&app, &device, "Workspace legacy fixture invalid").await;
+    sqlx::query("UPDATE memories SET fields='{\"redacted\":true}'::jsonb WHERE memory_id=$1")
+        .bind(&bad)
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    let (list, search) = tokio::join!(
+        app.send("GET", "memories", json!(null), Some(&admin)),
+        app.send(
+            "POST",
+            "search",
+            json!({"query":"workspace legacy fixture"}),
+            Some(&device)
+        ),
+    );
+    assert_eq!((list.0, search.0), (200, 200));
+    assert_eq!(list.1[0]["id"], good);
+    assert_eq!(search.1["results"][0]["id"], good);
     app.finish().await;
 }
 

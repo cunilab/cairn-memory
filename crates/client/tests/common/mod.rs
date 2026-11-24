@@ -78,6 +78,16 @@ impl Server {
             .usage
             .fetched
     }
+
+    pub fn distill(&self, person_id: &str, session: &str) {
+        assert_eq!(
+            self.handle
+                .block_on(self.store.distill_session(person_id, session))
+                .unwrap()
+                .notes,
+            2
+        );
+    }
 }
 
 impl Drop for Server {
