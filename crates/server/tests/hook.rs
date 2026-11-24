@@ -166,10 +166,9 @@ impl Env {
     }
 
     fn run(&self, event: &str, payload: &Value, envs: &[(&str, &str)]) -> Output {
-        let mut path = std::env::current_exe().unwrap();
-        path.pop();
-        path.pop();
-        path.push("cairn");
+        // The workspace builds both binaries in Cargo's final artifact directory.
+        let path = std::path::Path::new(env!("CARGO_BIN_EXE_cairn-server"))
+            .with_file_name(format!("cairn{}", std::env::consts::EXE_SUFFIX));
         let mut command = Command::new(&path);
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("CAIRN_") {
