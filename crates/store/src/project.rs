@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 const PROJECT_COLUMNS: &str = "project_id, owner_id, repository, name, default_branch,
     EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
-    EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at";
+    EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at,
+    EXTRACT(EPOCH FROM archived_at)::bigint AS archived_at";
 
 fn project_from_row(row: &PgRow) -> Result<Project> {
     Ok(Project {
@@ -19,7 +20,50 @@ fn project_from_row(row: &PgRow) -> Result<Project> {
         default_branch: row.try_get("default_branch")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        archived_at: row.try_get("archived_at")?,
     })
+}
+
+fn archived_error(name: &str) -> StoreError {
+    StoreError::Conflict(format!(
+        "project {name} is archived; restore it in the web console"
+    ))
+}
+
+fn require_active(project: &Project) -> Result<()> {
+    if project.archived_at.is_some() {
+        return Err(archived_error(&project.name));
+    }
+    Ok(())
+}
+
+/// Hold the archive state stable through a transaction that writes project memories.
+pub(crate) async fn lock_active_project(tx: &mut PgConnection, project_id: &str) -> Result<()> {
+    let state: Option<(String, bool)> = sqlx::query_as(
+        "SELECT name, archived_at IS NOT NULL FROM projects WHERE project_id = $1 FOR SHARE",
+    )
+    .bind(project_id)
+    .fetch_optional(tx)
+    .await?;
+    if let Some((name, true)) = state {
+        return Err(archived_error(&name));
+    }
+    Ok(())
+}
+
+pub(crate) async fn lock_memory_projects(tx: &mut PgConnection, memory_ids: &[&str]) -> Result<()> {
+    let states: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT p.name, p.archived_at IS NOT NULL FROM projects p
+          WHERE p.project_id IN (SELECT project_id FROM memories WHERE scope = 'project' AND memory_id = ANY($1))
+          ORDER BY p.project_id FOR SHARE",
+    )
+    .bind(memory_ids)
+    .fetch_all(tx)
+    .await?;
+    if let Some((name, _)) = states.iter().find(|(_, archived)| *archived) {
+        return Err(archived_error(name));
+    }
+    Ok(())
 }
 
 /// The latest handoff the reader may see for a branch: where work stopped.
@@ -53,6 +97,7 @@ pub struct BranchSummary {
 pub struct ProjectCounts {
     /// Live project memories (active or stale), including candidates.
     pub memories: i64,
+    pub archive_memory_count: i64,
     /// Of `memories`, how many are still rank `candidate`.
     pub candidates: i64,
     pub stale: i64,
@@ -152,7 +197,7 @@ impl Store {
         let existing = sqlx::query(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects WHERE owner_id = $1 AND repository = $2
              AND repository NOT LIKE 'local:%'
-             ORDER BY created_at, project_id LIMIT 1"
+             ORDER BY created_at, project_id LIMIT 1 FOR SHARE"
         ))
         .bind(person_id)
         .bind(repository)
@@ -176,6 +221,7 @@ impl Store {
             join_member(&mut tx, person_id, &project.project_id).await?;
             (project, true)
         };
+        require_active(&project)?;
         if name.is_some_and(|n| n != project.name) {
             return Err(StoreError::Validation(
                 "project name differs from the server; rename it in the web console".into(),
@@ -233,15 +279,17 @@ impl Store {
         .await?
         .rows_affected()
             == 1;
-        join_member(&mut tx, person_id, project_id).await?;
         let row = sqlx::query(&format!(
-            "SELECT {PROJECT_COLUMNS} FROM projects WHERE project_id = $1"
+            "SELECT {PROJECT_COLUMNS} FROM projects WHERE project_id = $1 FOR SHARE"
         ))
         .bind(project_id)
         .fetch_one(&mut *tx)
         .await?;
+        let project = project_from_row(&row)?;
+        require_active(&project)?;
+        join_member(&mut tx, person_id, project_id).await?;
         tx.commit().await?;
-        Ok((project_from_row(&row)?, created))
+        Ok((project, created))
     }
 
     /// Membership through the committed project file; the server name is authoritative.
@@ -271,6 +319,7 @@ impl Store {
         .await?
         .ok_or_else(|| StoreError::NotFound("project".into()))?;
         let project = project_from_row(&row)?;
+        require_active(&project)?;
         let (_, inserted) = join_member(&mut tx, person_id, project_id).await?;
         if inserted {
             crate::account::audit_tx(&mut tx, person_id, device_id, "project_auto_joined", Some(project_id), serde_json::json!({"project_id":project_id,"person":person_id,"device":device_id,"source":"init"})).await?;
@@ -302,6 +351,56 @@ impl Store {
                 "account does not own the project".into(),
             )),
         }
+    }
+
+    /// Archive and restore are idempotent. The project transition and audit record commit together.
+    pub async fn set_project_archived(
+        &self,
+        actor_id: &str,
+        actor_is_admin: bool,
+        project_id: &str,
+        archived: bool,
+    ) -> Result<Project> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects WHERE project_id = $1 FOR UPDATE"
+        ))
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("project".into()))?;
+        let mut project = project_from_row(&row)?;
+        if project.owner_id != actor_id && !actor_is_admin {
+            return Err(StoreError::Forbidden(
+                "account does not own the project".into(),
+            ));
+        }
+        if project.archived_at.is_some() != archived {
+            let row = sqlx::query(&format!(
+                "UPDATE projects SET archived_at = CASE WHEN $2 THEN now() END, updated_at = now()
+                 WHERE project_id = $1 RETURNING {PROJECT_COLUMNS}"
+            ))
+            .bind(project_id)
+            .bind(archived)
+            .fetch_one(&mut *tx)
+            .await?;
+            project = project_from_row(&row)?;
+            crate::account::audit_tx(
+                &mut tx,
+                actor_id,
+                None,
+                if archived {
+                    "project_archived"
+                } else {
+                    "project_restored"
+                },
+                Some(project_id),
+                serde_json::json!({"name": project.name}),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(project)
     }
 
     /// The owner, or an admin, hands the project to an existing member.
@@ -417,7 +516,13 @@ impl Store {
         &self,
         person_id: &str,
         project_id: &str,
+        include_archived: bool,
     ) -> Result<Vec<BranchSummary>> {
+        let active = if include_archived {
+            "TRUE".into()
+        } else {
+            crate::memory::active_project_memory("m")
+        };
         self.require_member(person_id, project_id).await?;
         let rows = sqlx::query(&format!(
             "SELECT m.repo_branch AS branch, count(*) FILTER (WHERE m.kind <> 'handoff') AS memories,
@@ -425,7 +530,7 @@ impl Store {
                FROM memories m
               WHERE m.project_id = $1 AND m.repo_branch IS NOT NULL
                 AND (m.scope = 'project' OR (m.kind = 'handoff' AND m.owner_id = $2))
-                AND m.status <> 'forgotten'
+                AND m.status <> 'forgotten' AND {active}
               GROUP BY m.repo_branch ORDER BY max(m.updated_at) DESC, m.repo_branch",
             epoch!("m.updated_at")
         ))
@@ -441,7 +546,7 @@ impl Store {
               WHERE m.project_id = $2 AND m.kind = 'handoff' AND m.repo_branch IS NOT NULL AND {}
               ORDER BY m.repo_branch, m.updated_at DESC, m.memory_id DESC",
             epoch!("m.updated_at"),
-            crate::memory::visible("m", "$1")
+            crate::memory::visible_with_archive("m", "$1", include_archived)
         ))
         .bind(person_id)
         .bind(project_id)
@@ -483,6 +588,8 @@ impl Store {
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
                         AND m.status IN ('active','stale')) AS memories,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
+                        AND m.status <> 'forgotten') AS archive_memory_count,
+                    (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
                         AND m.rank = 'candidate'
                         AND m.status IN ('active','stale')) AS candidates,
                     (SELECT count(*) FROM memories m WHERE m.project_id = p.project_id AND m.scope = 'project'
@@ -503,6 +610,7 @@ impl Store {
                     r.try_get("project_id")?,
                     ProjectCounts {
                         memories: r.try_get("memories")?,
+                        archive_memory_count: r.try_get("archive_memory_count")?,
                         candidates: r.try_get("candidates")?,
                         stale: r.try_get("stale")?,
                         members: r.try_get("members")?,
@@ -518,19 +626,25 @@ impl Store {
         &self,
         person_id: &str,
         project_id: &str,
+        include_archived: bool,
     ) -> Result<Vec<Conflict>> {
         self.require_member(person_id, project_id).await?;
-        let rows = sqlx::query(
+        let active = if include_archived {
+            "TRUE".into()
+        } else {
+            crate::memory::active_project_memory("s")
+        };
+        let rows = sqlx::query(&format!(
             "SELECT l.source_id, l.target_id
                FROM links l
                JOIN memories s ON s.memory_id = l.source_id
                JOIN memories t ON t.memory_id = l.target_id
               WHERE l.relation = 'contradicts'
                 AND s.project_id = $1 AND t.project_id = $1
-                AND s.scope = 'project' AND t.scope = 'project'
+                AND s.scope = 'project' AND t.scope = 'project' AND {active}
                 AND s.status IN ('active','stale') AND t.status IN ('active','stale')
-              ORDER BY l.created_at, l.source_id",
-        )
+              ORDER BY l.created_at, l.source_id"
+        ))
         .bind(project_id)
         .fetch_all(&self.pool)
         .await?;

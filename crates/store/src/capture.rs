@@ -1,5 +1,5 @@
 use crate::jobs::enqueue_tx;
-use crate::memory::insert_memory;
+use crate::memory::{insert_memory, save_in_tx};
 use crate::usage::RETRIEVAL_RETENTION_DAYS;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
@@ -354,6 +354,7 @@ impl Store {
                 "session has no retained observations: {session_id}"
             )));
         };
+        let mut tx = self.pool.begin().await?;
         let (session_project, session_device, session_context, session_ended): (
             Option<String>,
             Option<String>,
@@ -364,9 +365,12 @@ impl Store {
         )
         .bind(person_id)
         .bind(session_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .unwrap_or_default();
+        if let Some(project_id) = &session_project {
+            crate::project::lock_active_project(&mut tx, project_id).await?;
+        }
         let automated = session_context
             .get("origin")
             .and_then(|value| value.as_str())
@@ -399,16 +403,16 @@ impl Store {
                 files: note.files,
                 ..work.clone()
             };
-            match self
-                .save_with_project(
-                    person_id,
-                    note.input,
-                    &note_work,
-                    Origin::System,
-                    device,
-                    session_project.as_deref(),
-                )
-                .await
+            match save_in_tx(
+                &mut tx,
+                person_id,
+                note.input,
+                &note_work,
+                Origin::System,
+                device,
+                session_project.as_deref(),
+            )
+            .await
             {
                 Ok(saved) => {
                     report.notes += 1;
@@ -442,16 +446,16 @@ impl Store {
                 files,
                 ..work.clone()
             };
-            match self
-                .save_with_project(
-                    person_id,
-                    digest,
-                    &digest_work,
-                    Origin::System,
-                    device,
-                    session_project.as_deref(),
-                )
-                .await
+            match save_in_tx(
+                &mut tx,
+                person_id,
+                digest,
+                &digest_work,
+                Origin::System,
+                device,
+                session_project.as_deref(),
+            )
+            .await
             {
                 Ok(saved) => {
                     written.push(saved.id);
@@ -477,7 +481,6 @@ impl Store {
             )?;
             // Each handoff is its own row. The previous one of this checkout (same person, repo,
             // branch, worktree and project) is superseded and linked newer → older.
-            let mut tx = self.pool.begin().await?;
             let previous = sqlx::query(
                 "SELECT memory_id, status, fields FROM memories
                   WHERE owner_id = $1 AND kind = 'handoff'
@@ -558,7 +561,6 @@ impl Store {
                 }
                 Err(error) => Err(error),
             }?;
-            tx.commit().await?;
         }
         let handoff_outcome: Option<&str> = if session_ended {
             if automated {
@@ -620,7 +622,7 @@ impl Store {
         .bind(digest_written)
         .bind(handoff_outcome)
         .bind(why_none.as_deref())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE sessions SET pending_since = NULL WHERE person_id = $1 AND session_id = $2
@@ -630,12 +632,13 @@ impl Store {
         .bind(person_id)
         .bind(session_id)
         .bind(started)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if report.handoff || report.notes > 0 || report.handoff_kept {
             let recorded = handoff_written.clone().or(kept_id);
             let ids: Vec<&String> = recorded.iter().chain(&written).collect();
-            self.record_audit(
+            crate::account::audit_tx(
+                &mut tx,
                 person_id,
                 None,
                 "session_distilled",
@@ -652,6 +655,7 @@ impl Store {
             )
             .await?;
         }
+        tx.commit().await?;
         Ok(report)
     }
 

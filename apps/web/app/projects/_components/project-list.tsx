@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
+import { toast } from "sonner";
 import { FolderGitIcon } from "lucide-react";
 import { RoleBadge } from "@/components/badges";
 import { CopyButton } from "@/components/copy-button";
@@ -18,13 +19,21 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
+import { announceMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import type { Project } from "@/lib/generated/Project";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 
 export function ProjectList() {
   const router = useRouter();
+  const account = useAccount();
+  const [tab, setTab] = useState("active");
+  const [restoring, setRestoring] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -55,6 +64,21 @@ export function ProjectList() {
       cancelled = true;
     };
   }, [router, attempt]);
+
+  const restore = useCallback(async (projectId: string) => {
+    setRestoring(projectId);
+    try {
+      const updated = await cairn<Project>(`projects/${encodeURIComponent(projectId)}/restore`, { method: "POST" });
+      setProjects((current) => current?.map((p) => p.project_id === projectId ? { ...p, ...updated } : p) ?? null);
+      announceMemoriesChanged();
+      toast.success("Project restored");
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+      else toast.error(cause instanceof Error ? cause.message : "Could not restore the project.");
+    } finally {
+      setRestoring(null);
+    }
+  }, [router]);
 
   const columns = useMemo<ColumnDef<ProjectView>[]>(() => {
     const cols: ColumnDef<ProjectView>[] = [
@@ -104,37 +128,57 @@ export function ProjectList() {
       ),
       meta: { className: "hidden md:table-cell" },
     });
+    if (tab === "archived") cols.push({
+      id: "restore",
+      header: () => <span className="sr-only">Actions</span>,
+      enableSorting: false,
+      cell: ({ row }) => (row.original.role === "owner" || account?.is_admin) ? (
+        <Button size="sm" variant="outline" disabled={restoring !== null} onClick={() => void restore(row.original.project_id)}>
+          {restoring === row.original.project_id ? "Restoring…" : "Restore"}
+        </Button>
+      ) : null,
+    });
     return cols;
-  }, []);
+  }, [account?.is_admin, restore, restoring, tab]);
 
   if (error) {
     return <ErrorAlert message={error} onRetry={() => { setError(null); setProjects(null); setAttempt((n) => n + 1); }} />;
   }
   if (projects === null) return <LoadingBlock label="Loading projects…" rows={4} />;
   return (
-    <DataTable
-      label="projects"
-      data={projects}
-      columns={columns}
-      getRowId={(project) => project.project_id}
-      filterPlaceholder="Filter projects"
-      initialSort={[{ id: "updated", desc: true }]}
-      empty={
-        <Empty className="border-0 p-6">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <FolderGitIcon />
-            </EmptyMedia>
-            <EmptyTitle>No projects yet</EmptyTitle>
-            <EmptyDescription>
-              Run <code>cairn init</code> in a repository to register it.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <CopyButton text="cairn init" label="Copy command" />
-          </EmptyContent>
-        </Empty>
-      }
-    />
+    <Tabs value={tab} onValueChange={setTab} className="gap-4">
+      <TabsList>
+        <TabsTrigger value="active">Active</TabsTrigger>
+        <TabsTrigger value="archived">Archived</TabsTrigger>
+      </TabsList>
+      <TabsContent value={tab}>
+        <DataTable
+          label="projects"
+          data={projects.filter((project) => (project.archived_at != null) === (tab === "archived"))}
+          columns={columns}
+          getRowId={(project) => project.project_id}
+          filterPlaceholder="Filter projects"
+          initialSort={[{ id: "updated", desc: true }]}
+          empty={tab === "archived" || projects.length > 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">{tab === "archived" ? "No archived projects." : "No active projects."}</p>
+          ) : (
+            <Empty className="border-0 p-6">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <FolderGitIcon />
+                </EmptyMedia>
+                <EmptyTitle>No projects yet</EmptyTitle>
+                <EmptyDescription>
+                  Run <code>cairn init</code> in a repository to register it.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <CopyButton text="cairn init" label="Copy command" />
+              </EmptyContent>
+            </Empty>
+          )}
+        />
+      </TabsContent>
+    </Tabs>
   );
 }

@@ -76,6 +76,14 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/projects", get(project::list))
         .route("/cairn-memory/projects/init", post(project::init))
         .route(
+            "/cairn-memory/projects/{project_id}/archive",
+            post(project::archive),
+        )
+        .route(
+            "/cairn-memory/projects/{project_id}/restore",
+            post(project::restore),
+        )
+        .route(
             "/cairn-memory/projects/{project_id}/rename",
             post(project::rename),
         )

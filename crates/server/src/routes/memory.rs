@@ -215,9 +215,10 @@ async fn save_item(
 /// Newest update first. The next cursor, when there is one, is in the `x-next-cursor` header.
 pub async fn list(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
+    let account = caller.account;
     let status = query.status.as_deref().filter(|status| !status.is_empty());
     let statuses = match status {
         None => Vec::new(),
@@ -237,6 +238,7 @@ pub async fn list(
                 branch: query.branch.filter(|b| !b.is_empty()),
                 q: query.q,
                 see_forgotten: account.is_admin && status == Some("forgotten"),
+                include_archived: caller.device_id.is_none(),
             },
         )
         .await?;
@@ -256,10 +258,14 @@ pub async fn list(
 /// One memory for the console; never counts as a fetch.
 pub async fn get(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<MemoryView> {
-    let mut memory = state.store.get(&account.person_id, &id).await?;
+    let account = caller.account;
+    let mut memory = state
+        .store
+        .get_visible(&account.person_id, &id, caller.device_id.is_none())
+        .await?;
     let detail = (!memory.detail.is_empty()).then(|| std::mem::take(&mut memory.detail));
     let mut views = state
         .store

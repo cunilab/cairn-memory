@@ -21,3 +21,11 @@ Run `cairn init "Project name"` in a folder and commit `.cairn/project.json`; th
 A checkout with no project file still attaches when its Git remote matches exactly one project the person already belongs to. Captures and project-scoped saves in that checkout are project memories, so the other members can read them. Zero matching memberships, or more than one, stay personal. Use `.cairn/project.json` when the checkout should be shared on purpose.
 
 The project owner or an administrator can transfer ownership to an existing member using the web console. The former owner remains a member.
+
+## Archive and restore
+
+The project owner or an administrator can choose **Archive project** on the project page. The confirmation shows how many project memories will be hidden from agents. Archived projects appear under **Projects → Archived**, where members can still read their memories in read-only mode. On **Memories**, select the archived project to see its records.
+
+Archiving preserves memory IDs, content, statuses, links and membership. Project-scoped memories stop appearing in agent search, direct reads, briefings and topic notes. Project processing pauses, and project-scoped saves and `cairn init` report that the project is archived. Personal and global saves still work.
+
+Choose **Restore** under **Projects → Archived** or on the project page to make its memories available to agents again and resume queued processing.

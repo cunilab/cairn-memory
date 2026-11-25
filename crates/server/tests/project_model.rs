@@ -784,3 +784,141 @@ async fn personal_observation_in_a_project_session_is_distilled_personally() {
     assert_eq!(scopes, vec![("personal".to_owned(), None); 2]);
     app.finish().await;
 }
+
+#[tokio::test]
+async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restore() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("archive-admin").await;
+    let owner = app.member(&admin, "archive-owner").await;
+    let member = app.member(&admin, "archive-member").await;
+    let device = app.device(&owner, "archive-laptop").await;
+    let repository = "github.com/acme/e2e-archive";
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": repository, "name": "E2E Archive"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let init = json!({"project_id": pid, "repository": repository});
+    app.post("projects/init", init.clone(), &member).await;
+    let archive = format!("projects/{pid}/archive");
+    let restore = format!("projects/{pid}/restore");
+    let context = json!({"project_id": pid, "repository": repository, "branch": "main", "files": ["src/archive.rs"]});
+    let note = json!({"kind": "rule", "scope": "project", "title": "Preserve blueprints",
+        "summary": "Keep the blueprints for the archive.", "reason": "They allow exact restoration.",
+        "context": context, "detail": "Detailed blueprint."});
+    let memory = app.save(&device, note.clone()).await;
+    let get_body = json!({"ids": [memory], "detail": true});
+    let search_body = json!({"query": "preserve blueprints", "context": context});
+    let brief_body = json!({"session_id": "e2e-archive", "context": context});
+    let topic_body = json!({"path": "src/archive.rs", "context": context});
+    assert!(ids(&app.post("search", search_body.clone(), &device).await).contains(&memory));
+    let before = app.post("get", get_body.clone(), &device).await;
+    assert_eq!(before["memories"][0]["detail"], "Detailed blueprint.");
+    assert!(
+        app.post("session/brief", brief_body.clone(), &device).await["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    assert_eq!(
+        app.post("session/topic", topic_body.clone(), &device).await["notes"][0]["id"],
+        memory
+    );
+
+    assert_eq!(
+        app.send("POST", &archive, json!(null), Some(&member))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        app.send("POST", &archive, json!(null), Some(&device))
+            .await
+            .0,
+        401
+    );
+    let archived = app.post(&archive, json!(null), &owner).await;
+    assert!(archived["archived_at"].is_number());
+    assert_eq!(app.post(&archive, json!(null), &owner).await, archived);
+    assert_eq!(
+        app.send("POST", &restore, json!(null), Some(&member))
+            .await
+            .0,
+        403
+    );
+
+    assert!(ids(&app.post("search", search_body.clone(), &device).await).is_empty());
+    assert_eq!(
+        app.post("get", get_body.clone(), &device).await,
+        json!({"memories": [], "missing": [memory]})
+    );
+    let brief = app.post("session/brief", brief_body.clone(), &device).await;
+    assert!(
+        !brief["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    assert!(brief.get("check").is_none());
+    assert_eq!(
+        app.post("session/topic", topic_body, &device).await["notes"],
+        json!([])
+    );
+    let graph = app.get(&format!("graph?projectId={pid}"), &device).await;
+    assert_eq!(graph["nodes"], json!([]));
+    assert_eq!(graph["edges"], json!([]));
+
+    let detail = format!("memories/{memory}");
+    let scoped = format!("memories?projectId={pid}");
+    assert_eq!(
+        app.send("GET", &detail, json!(null), Some(&device)).await.0,
+        404
+    );
+    assert_eq!(app.get(&scoped, &device).await, json!([]));
+    assert_eq!(app.get("memories", &member).await, json!([]));
+    assert_eq!(app.get(&scoped, &member).await[0]["id"], memory);
+    assert_eq!(app.get(&detail, &member).await["project_archived"], true);
+    assert_eq!(
+        app.get(&detail, &member).await["detail"],
+        "Detailed blueprint."
+    );
+    let (status, _) = app
+        .send("POST", "forget", json!({"id": memory}), Some(&owner))
+        .await;
+    assert_eq!(status, 409);
+
+    let message = "project E2E Archive is archived; restore it in the web console";
+    for (path, body) in [
+        ("remember", note.clone()),
+        ("projects/init", init),
+        ("projects/init", json!({"repository": repository})),
+    ] {
+        let (status, body) = app.send("POST", path, body, Some(&device)).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"], message);
+    }
+    for scope in ["personal", "global"] {
+        let mut allowed = note.clone();
+        allowed["scope"] = json!(scope);
+        app.save(&device, allowed).await;
+    }
+
+    // Admin can restore even without project membership.
+    assert!(app.post(&restore, json!(null), &admin).await["archived_at"].is_null());
+    assert_eq!(app.post("get", get_body, &device).await, before);
+    assert!(ids(&app.post("search", search_body, &device).await).contains(&memory));
+    assert!(
+        app.post("session/brief", brief_body, &device).await["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_events WHERE subject_id = $1 AND action IN ('project_archived', 'project_restored') ORDER BY created_at"
+    ).bind(pid).fetch_all(app.db.store.pool()).await.unwrap();
+    assert_eq!(events, ["project_archived", "project_restored"]);
+    app.finish().await;
+}

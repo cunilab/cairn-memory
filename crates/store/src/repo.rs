@@ -86,11 +86,12 @@ impl Store {
         project_id: &str,
         branch: &str,
     ) -> Result<Option<BriefCheck>> {
-        let default_branch: Option<Option<String>> =
-            sqlx::query_scalar("SELECT default_branch FROM projects WHERE project_id = $1")
-                .bind(project_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let default_branch: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT default_branch FROM projects WHERE project_id = $1 AND archived_at IS NULL",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(default_branch) = default_branch else {
             return Ok(None);
         };
@@ -99,13 +100,14 @@ impl Store {
         {
             return Ok(None);
         }
+        let active = crate::memory::active_project_memory("m");
         let on_default = default_names(default_branch.as_deref());
         let mut lists = Vec::new();
         for (kind, limit) in [("file", CHECK_FILES_MAX), ("symbol", CHECK_SYMBOLS_MAX)] {
             // Never checked first, then the oldest check, then by name.
             let names: Vec<String> = sqlx::query_scalar(&format!(
                 "SELECT e.name FROM entities e JOIN memories m ON m.memory_id = e.memory_id
-                  WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind = $2 AND {IN_REPO}
+                  WHERE m.project_id = $1 AND m.scope = 'project' AND e.kind = $2 AND {IN_REPO} AND {active}
                     AND (m.repo_branch IS NULL OR m.repo_branch = ANY($3))
                     AND (m.status = 'active' OR (m.status = 'stale' AND m.stale_cause = 'missing'))
                   GROUP BY e.name
@@ -179,6 +181,7 @@ impl Store {
         .map(String::as_str)
         .collect();
         let mut tx = self.pool.begin().await?;
+        crate::project::lock_active_project(&mut tx, &state.project_id).await?;
         // Only memories that cite a reported name are read and locked, with all their entities.
         let rows = sqlx::query(&format!(
             "SELECT m.memory_id, m.status, e.kind, e.name

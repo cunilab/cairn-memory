@@ -23,6 +23,8 @@ pub struct Listed {
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     memories: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
+    archive_memory_count: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     stale: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     members: i64,
@@ -86,8 +88,12 @@ pub struct Paging {
     cursor: Option<String>,
 }
 
-pub async fn list(State(state): State<AppState>, Agent(account): Agent) -> ApiResult<Vec<Listed>> {
-    let projects = state.store.list_projects(&account.person_id).await?;
+pub async fn list(State(state): State<AppState>, caller: Caller) -> ApiResult<Vec<Listed>> {
+    let account = caller.account;
+    let mut projects = state.store.list_projects(&account.person_id).await?;
+    if caller.device_id.is_some() {
+        projects.retain(|project| project.archived_at.is_none());
+    }
     let ids: Vec<String> = projects.iter().map(|p| p.project_id.clone()).collect();
     let mut counts = state.store.project_counts(&ids).await?;
     Ok(Json(
@@ -102,6 +108,7 @@ pub async fn list(State(state): State<AppState>, Agent(account): Agent) -> ApiRe
                         "member"
                     },
                     memories: c.memories,
+                    archive_memory_count: c.archive_memory_count,
                     stale: c.stale,
                     members: c.members,
                     last_activity_at: c.last_activity_at,
@@ -197,6 +204,32 @@ pub async fn rename(
     Ok(Json(project))
 }
 
+pub async fn archive(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Path(project_id): Path<String>,
+) -> ApiResult<Project> {
+    Ok(Json(
+        state
+            .store
+            .set_project_archived(&account.person_id, account.is_admin, &project_id, true)
+            .await?,
+    ))
+}
+
+pub async fn restore(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Path(project_id): Path<String>,
+) -> ApiResult<Project> {
+    Ok(Json(
+        state
+            .store
+            .set_project_archived(&account.person_id, account.is_admin, &project_id, false)
+            .await?,
+    ))
+}
+
 pub async fn transfer(
     State(state): State<AppState>,
     Web(account): Web,
@@ -229,10 +262,11 @@ pub async fn transfer(
 /// is one, is in the `x-next-cursor` header so the body stays a plain list.
 pub async fn memories(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Path(project_id): Path<String>,
     Query(paging): Query<Paging>,
 ) -> Result<Response, ApiError> {
+    let account = caller.account;
     if !state
         .store
         .is_member(&account.person_id, &project_id)
@@ -250,6 +284,7 @@ pub async fn memories(
                 statuses: vec![Status::Active, Status::Stale, Status::Superseded],
                 limit: paging.limit,
                 cursor: paging.cursor,
+                include_archived: caller.device_id.is_none(),
                 ..ListFilter::default()
             },
         )
@@ -292,26 +327,34 @@ pub async fn members(
 
 pub async fn branches(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Path(project_id): Path<String>,
 ) -> ApiResult<Vec<BranchSummary>> {
     Ok(Json(
         state
             .store
-            .project_branches(&account.person_id, &project_id)
+            .project_branches(
+                &caller.account.person_id,
+                &project_id,
+                caller.device_id.is_none(),
+            )
             .await?,
     ))
 }
 
 pub async fn conflicts(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Path(project_id): Path<String>,
 ) -> ApiResult<Vec<Conflict>> {
     Ok(Json(
         state
             .store
-            .project_conflicts(&account.person_id, &project_id)
+            .project_conflicts(
+                &caller.account.person_id,
+                &project_id,
+                caller.device_id.is_none(),
+            )
             .await?,
     ))
 }

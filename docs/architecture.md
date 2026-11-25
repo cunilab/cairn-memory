@@ -62,6 +62,7 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 
 - Project owners rename in the web console. Joining uses the project ID even if the file has an old name; `cairn init` updates that name, and session-start notices remind teammates to update and commit the file.
 - A matching Git remote attaches only an existing single membership and shares that checkout's writes. It does not grant membership. Mixed capture cohorts stay personal.
+- Project archive is a timestamp on the project. The shared store visibility rule hides its project-scoped memories from agent reads, and the console can still read them for members. Writes and background processing check the project state. Restore clears the timestamp and preserves all memory rows and their history. Archive and restore are audited with the state change.
 
 - **Server-authoritative PostgreSQL:** one store and one authorization boundary keep shared state consistent; pgvector supports local semantic retrieval.
 - **Self-hosted accounts:** the first account is the administrator; password and device credentials are stored as hashes. Humans manage devices in the web console.

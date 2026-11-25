@@ -289,10 +289,10 @@ export function MemorySheet() {
   // A result for another id is stale: show loading until the current one lands.
   const current = loaded && loaded.id === id ? loaded : null;
   const memory = current?.memory ?? null;
-  const canForget = memory?.owner_is_me === true;
+  const canForget = memory?.owner_is_me === true && !memory.project_archived;
 
   async function forget() {
-    if (!memory) return;
+    if (!canForget || !memory) return;
     setPending(true);
     try {
       await cairn("forget", { method: "POST", body: JSON.stringify({ id: memory.id }) });
@@ -312,7 +312,7 @@ export function MemorySheet() {
   }
 
   async function rewrite() {
-    if (!id) return;
+    if (!id || memory?.project_archived) return;
     setPending(true);
     try {
       const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
@@ -392,13 +392,13 @@ export function MemorySheet() {
           {memory ? (
             <>
               <Body memory={memory} open={(next) => set({ memory: next }, "push")} />
-              {account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
+              {account?.is_admin && !memory.project_archived && editing ? <div className="space-y-3 px-4 pb-4">
                 <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
                 <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
                 <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
                 <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>
                 <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
-              </div> : account?.is_admin ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
+              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
               {canForget ? (
                 <div className="mt-auto px-4 pb-4">
                   <Button type="button" variant="outline" onClick={() => setConfirming(true)}>

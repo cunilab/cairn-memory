@@ -150,7 +150,7 @@ impl Store {
             .iter()
             .map(memory_from_row)
             .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, false).await?;
         Ok(memories)
     }
 
@@ -350,7 +350,7 @@ impl Store {
             .iter()
             .map(memory_from_row)
             .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, false).await?;
         Ok(memories)
     }
 
@@ -532,7 +532,7 @@ impl Store {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .unzip();
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, false).await?;
         sources
             .into_iter()
             .zip(memories)
@@ -735,7 +735,7 @@ impl Store {
                 memories.push(chosen);
             }
         }
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, false).await?;
         Ok(session_brief(
             &memories,
             context,

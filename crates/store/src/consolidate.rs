@@ -65,6 +65,7 @@ impl Store {
         // One consolidation per cohort at a time: two jobs on a mutual near-duplicate pair each
         // update the other's row and would deadlock.
         lock_cohort(&mut tx, memory_id).await?;
+        crate::project::lock_memory_projects(&mut tx, &[memory_id]).await?;
         let subject = sqlx::query(
             "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary,
                     embedding::text AS embedding
@@ -236,8 +237,9 @@ impl Store {
         )
         .execute(&mut *lock)
         .await?;
+        let active = crate::memory::active_project_memory("m");
         let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id = $1 AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
+            "{MEMORY_SELECT} WHERE m.memory_id = $1 AND {active} AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
                 AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL"
         ))
         .bind(memory_id)
@@ -254,15 +256,15 @@ impl Store {
                 .await?;
         // The same shape as the retrieval vector channel (a materialised CTE ordered by a bound
         // vector, with iterative scan on) so the filters never run over the index's first hits only.
-        let twin_id: Option<String> = sqlx::query_scalar(
+        let twin_id: Option<String> = sqlx::query_scalar(&format!(
             "WITH c AS MATERIALIZED (
                  SELECT m.memory_id, m.embedding <=> $1::vector AS dist
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.scope = 'project' AND m.project_id <> $2
-                    AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent'
+                    AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent' AND {active}
                   ORDER BY m.embedding <=> $1::vector LIMIT 5)
-             SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1",
-        )
+             SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1"
+        ))
         .bind(&vector)
         .bind(&project)
         .bind(source.kind.as_str())
@@ -274,6 +276,7 @@ impl Store {
         };
         // Only a memory with a twin takes the lock, and only against promotions of its own kind.
         lock_promotion(&mut lock, source.kind.as_str()).await?;
+        crate::project::lock_memory_projects(&mut lock, &[memory_id, &twin_id]).await?;
         let twin = memory_from_row(
             &sqlx::query(&format!("{MEMORY_SELECT} WHERE m.memory_id = $1"))
                 .bind(&twin_id)

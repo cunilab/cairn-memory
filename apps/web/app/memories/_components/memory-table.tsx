@@ -158,7 +158,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
   const rows = page?.items ?? [];
 
   const active = [projectId ? "" : project, kind, status, branch, q].filter(Boolean).length;
-  const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.name }));
+  const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.archived_at != null ? `${p.name} (archived)` : p.name }));
   const branchOptions = (branches.project === project ? branches.rows : []).map((b) => ({ value: b.branch, label: b.branch }));
 
   const columns = useMemo<ColumnDef<MemoryView>[]>(

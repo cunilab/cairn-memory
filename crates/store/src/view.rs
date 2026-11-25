@@ -62,6 +62,7 @@ pub struct MemoryView {
     /// Files and symbols the last check found gone: the "why stale" detail.
     pub missing_entities: Vec<String>,
     pub links: Vec<LinkView>,
+    pub project_archived: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
@@ -69,6 +70,7 @@ pub struct MemoryView {
 
 struct Extra {
     project_name: Option<String>,
+    project_archived: bool,
     device_name: Option<String>,
     checked_at: Option<i64>,
     status_changed_at: i64,
@@ -89,6 +91,7 @@ impl Store {
         let mut extras: HashMap<String, Extra> = HashMap::new();
         for row in sqlx::query(&format!(
             "SELECT m.memory_id, p.name AS project_name,
+                    (m.scope = 'project' AND p.archived_at IS NOT NULL) AS project_archived,
                     CASE WHEN m.owner_id = $2 THEN d.name END AS device_name,
                     {} AS checked_at, {} AS status_changed_at, m.missing_entities
                FROM memories m
@@ -107,6 +110,7 @@ impl Store {
                 row.try_get("memory_id")?,
                 Extra {
                     project_name: row.try_get("project_name")?,
+                    project_archived: row.try_get("project_archived")?,
                     device_name: row.try_get("device_name")?,
                     checked_at: row.try_get("checked_at")?,
                     status_changed_at: row.try_get("status_changed_at")?,
@@ -171,20 +175,23 @@ impl Store {
                     memory.owner.clear();
                 }
                 let extra = extras.remove(&memory.id);
-                let (project_name, device_name, checked_at, changed, missing) = match extra {
-                    Some(e) => (
-                        e.project_name,
-                        e.device_name,
-                        e.checked_at,
-                        e.status_changed_at,
-                        e.missing,
-                    ),
-                    None => (None, None, None, memory.updated_at, Vec::new()),
-                };
+                let (project_name, project_archived, device_name, checked_at, changed, missing) =
+                    match extra {
+                        Some(e) => (
+                            e.project_name,
+                            e.project_archived,
+                            e.device_name,
+                            e.checked_at,
+                            e.status_changed_at,
+                            e.missing,
+                        ),
+                        None => (None, false, None, None, memory.updated_at, Vec::new()),
+                    };
                 MemoryView {
                     origin: memory.origin,
                     owner_is_me,
                     project_name,
+                    project_archived,
                     device_name,
                     checked_at,
                     status_changed_at: changed,

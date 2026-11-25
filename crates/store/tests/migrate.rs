@@ -31,6 +31,7 @@ async fn migrate_twice_is_a_no_op() {
             "0013_link_origin_system",
             "0014_memory_owner_project_created",
             "0015_memory_detail",
+            "0016_project_archive",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1003,6 +1004,7 @@ async fn fixes_migration_additive() {
     store.migrate().await.unwrap();
     versions.push("0011_fixes".into());
     versions.push("0015_memory_detail".into());
+    versions.push("0016_project_archive".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1010,6 +1012,12 @@ async fn fixes_migration_additive() {
             .await
             .unwrap();
     assert_eq!(versions, after_versions);
+    let project_is_active: bool =
+        sqlx::query_scalar("SELECT archived_at IS NULL FROM projects WHERE project_id = 'pr'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(project_is_active);
     for (table, expected) in tables.into_iter().zip(before) {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(store.pool())

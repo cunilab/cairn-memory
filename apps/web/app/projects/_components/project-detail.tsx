@@ -13,6 +13,11 @@ import { FormDialog } from "@/components/form-dialog";
 import { PageHeader } from "@/components/page-header";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
@@ -22,6 +27,7 @@ import { useAccount } from "@/hooks/use-account";
 import { useOpenMemory, useTabParam } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { ApiError, cairn } from "@/lib/cairn";
+import { announceMemoriesChanged } from "@/lib/memory-events";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { BranchSummary } from "@/lib/generated/BranchSummary";
 import type { MemoryView } from "@/lib/generated/MemoryView";
@@ -55,6 +61,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const [notFound, setNotFound] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [renaming, setRenaming] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archivePending, setArchivePending] = useState(false);
   const [transfer, setTransfer] = useState<ProjectMember | null>(null);
   const path = `projects/${encodeURIComponent(projectId)}`;
 
@@ -78,6 +86,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     setError(null);
     setNotFound(false);
     setRenaming(false);
+    setConfirmArchive(false);
     setTransfer(null);
   });
 
@@ -142,7 +151,26 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
     [fetchProject, router],
   );
 
+  async function changeArchive(archived: boolean) {
+    setArchivePending(true);
+    try {
+      await submit(
+        () => cairn(`${path}/${archived ? "archive" : "restore"}`, { method: "POST" }),
+        archived ? "Project archived" : "Project restored",
+      );
+      announceMemoriesChanged();
+      setConfirmArchive(false);
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+      else toast.error(cause instanceof Error ? cause.message : "Could not change the project archive.");
+    } finally {
+      setArchivePending(false);
+    }
+  }
+
   const owner = data?.project.role === "owner";
+  const archived = data?.project.archived_at != null;
+  const archiveCount = data?.project.archive_memory_count ?? 0;
   const canTransfer = owner || account?.is_admin === true;
   const crumbs = [{ label: "Projects", href: "/projects" }, { label: data?.project.name ?? "Project" }];
 
@@ -177,7 +205,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         ) : null,
     });
     return cols;
-  }, [canTransfer]);
+  }, [canTransfer, setTransfer]);
 
   const staleColumns = useMemo<ColumnDef<MemoryView>[]>(
     () => [
@@ -231,7 +259,12 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   return (
     <ConsoleShell crumbs={crumbs}>
       <PageHeader
-        title={data?.project.name ?? "Project"}
+        title={
+          <span className="flex flex-wrap items-center gap-2">
+            {data?.project.name ?? "Project"}
+            {archived ? <Badge variant="secondary">Archived</Badge> : null}
+          </span>
+        }
         description={
           data ? (
             <>
@@ -244,10 +277,15 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           )
         }
         actions={
-          owner ? (
-            <Button type="button" variant="outline" onClick={() => setRenaming(true)}>
-              Rename
-            </Button>
+          data && canTransfer ? (
+            <>
+              {owner ? <Button type="button" variant="outline" onClick={() => setRenaming(true)}>Rename</Button> : null}
+              {archived ? (
+                <Button type="button" variant="outline" disabled={archivePending} onClick={() => void changeArchive(false)}>Restore</Button>
+              ) : (
+                <Button type="button" variant="outline" disabled={archivePending} onClick={() => setConfirmArchive(true)}>Archive project</Button>
+              )}
+            </>
           ) : null
         }
       />
@@ -300,6 +338,21 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           </TabsContent>
         </Tabs>
       ) : null}
+      <AlertDialog open={confirmArchive} onOpenChange={(open) => !archivePending && setConfirmArchive(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive {data?.project.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Cairn will hide {archiveCount.toLocaleString()} {archiveCount === 1 ? "memory" : "memories"} from agents.
+              The memories stay readable here. Restore the project to make them available to agents again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={archivePending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction disabled={archivePending} onClick={() => void changeArchive(true)}>Archive project</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <FormDialog
         open={renaming}
         onOpenChange={setRenaming}

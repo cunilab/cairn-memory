@@ -1,7 +1,7 @@
 //! Moving a person's own memories out and back in: the console's Export and Import. Import goes
 //! through the normal agent save (quality checks, redaction, dedupe by identity hash).
 
-use crate::memory::{MEMORY_SELECT_WITH_DETAIL, visible};
+use crate::memory::{MEMORY_SELECT_WITH_DETAIL, visible_with_archive};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::now_seconds;
@@ -72,7 +72,7 @@ impl Store {
             "{MEMORY_SELECT_WITH_DETAIL}
              WHERE m.owner_id = $1 AND {} AND m.kind <> 'handoff'
              ORDER BY m.created_at, m.memory_id",
-            visible("m", "$1")
+            visible_with_archive("m", "$1", true)
         ))
         .bind(person_id)
         .fetch_all(&self.pool)
@@ -81,7 +81,7 @@ impl Store {
             .iter()
             .map(crate::memory::memory_from_row)
             .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, true).await?;
         Ok(OwnedExport {
             version: 1,
             exported_at: now_seconds(),

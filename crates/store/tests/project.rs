@@ -140,7 +140,7 @@ async fn branches_and_conflicts_are_derived_from_memories() {
         .unwrap();
 
     let branches = store
-        .project_branches(&owner, &project.project_id)
+        .project_branches(&owner, &project.project_id, false)
         .await
         .unwrap();
     let main = branches.iter().find(|b| b.branch == "main").expect("main");
@@ -152,7 +152,7 @@ async fn branches_and_conflicts_are_derived_from_memories() {
     );
 
     let conflicts = store
-        .project_conflicts(&owner, &project.project_id)
+        .project_conflicts(&owner, &project.project_id, false)
         .await
         .unwrap();
     assert_eq!(conflicts.len(), 1);
@@ -160,7 +160,7 @@ async fn branches_and_conflicts_are_derived_from_memories() {
     store.forget(&owner, &a.id).await.unwrap();
     assert!(
         store
-            .project_conflicts(&owner, &project.project_id)
+            .project_conflicts(&owner, &project.project_id, false)
             .await
             .unwrap()
             .is_empty()
@@ -224,5 +224,150 @@ async fn remote_alone_never_joins() {
     .await
     .unwrap();
     assert_eq!(count, 0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn archive_preserves_memory_rows_and_pauses_project_jobs() {
+    use cairn_core::memory::Scope;
+    use cairn_core::process::jobs::JobKind;
+    use cairn_store::repo::RepoState;
+    use serde_json::{Value, json};
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let owner = db.person("archive-owner").await;
+    let (project, _) = store
+        .init_project(
+            &owner,
+            "github.com/acme/e2e-archive-jobs",
+            Some("E2E Archive Jobs"),
+        )
+        .await
+        .unwrap();
+    let pid = &project.project_id;
+    let work = WorkContext {
+        project_id: Some(pid.clone()),
+        branch: Some("main".into()),
+        files: vec!["src/archive.rs".into()],
+        ..WorkContext::default()
+    };
+    let first = store
+        .save(&owner, rule("Keep archived project blueprints"), &work)
+        .await
+        .unwrap()
+        .id;
+    let mut next = rule("Keep archived project schematics");
+    next.supersedes = Some(first.clone());
+    let second = store.save(&owner, next.clone(), &work).await.unwrap().id;
+    let mut personal = rule("Keep personal schematics");
+    personal.scope = Some(Scope::Personal);
+    personal.contradicts = Some(second.clone());
+    let personal = store.save(&owner, personal, &work).await.unwrap().id;
+    assert_eq!(
+        store.get(&owner, &personal).await.unwrap().links[0].target,
+        second
+    );
+    let contents = || async {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_agg(to_jsonb(m) ORDER BY memory_id) FROM memories m WHERE m.project_id = $1 AND m.scope = 'project'"
+        ).bind(pid).fetch_one(store.pool()).await.unwrap()
+    };
+    let before = contents().await;
+    let mut observation = json!({"event_id": "archive-observation", "session_id": "archive-session",
+        "kind": "assistant", "content": "Decision: Keep paper copies of schematics\nReason: offline access",
+        "context": work});
+    observation["context"]["worktree"] = json!("e2e-archive");
+    store
+        .capture(&owner, serde_json::from_value(observation).unwrap())
+        .await
+        .unwrap();
+    store.end_session(&owner, "archive-session").await.unwrap();
+    store
+        .enqueue_job(JobKind::Consolidate, &second)
+        .await
+        .unwrap();
+
+    store
+        .set_project_archived(&owner, false, pid, true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.get(&owner, &first).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(
+        matches!(store.save(&owner, next, &work).await, Err(StoreError::Conflict(message)) if message.contains("E2E Archive Jobs is archived"))
+    );
+    assert!(store.get(&owner, &personal).await.unwrap().links.is_empty());
+    assert!(
+        store
+            .brief_check(&owner, pid, "main")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .repo_state(
+                &owner,
+                &RepoState {
+                    project_id: pid.clone(),
+                    branch: "main".into(),
+                    files_missing: work.files.clone(),
+                    ..RepoState::default()
+                }
+            )
+            .await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.distill_session(&owner, "archive-session").await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.consolidate_memory(&second).await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert!(matches!(
+        store.link_memory(&second).await,
+        Err(StoreError::Conflict(_))
+    ));
+    for kind in [
+        JobKind::Distill,
+        JobKind::Consolidate,
+        JobKind::Link,
+        JobKind::Embed,
+    ] {
+        for job in store.claim_jobs(kind, 50).await.unwrap() {
+            assert_eq!(job.key, personal);
+        }
+    }
+    assert_eq!(contents().await, before);
+
+    store
+        .set_project_archived(&owner, false, pid, false)
+        .await
+        .unwrap();
+    assert_eq!(contents().await, before);
+    let restored = store.get(&owner, &second).await.unwrap();
+    assert!(restored.links.iter().any(|link| link.target == first));
+    assert_eq!(
+        store.get(&owner, &personal).await.unwrap().links[0].target,
+        second
+    );
+    for kind in [
+        JobKind::Distill,
+        JobKind::Consolidate,
+        JobKind::Link,
+        JobKind::Embed,
+    ] {
+        assert!(
+            !store.claim_jobs(kind, 50).await.unwrap().is_empty(),
+            "{kind:?}"
+        );
+    }
     db.finish().await;
 }
