@@ -46,8 +46,8 @@ branch, worktree, commit, `project_id`) from git when available; it is in no sch
 | Tool | Route | Arguments |
 | --- | --- | --- |
 | `memory_search` | `POST /search` | `query`; `kind` (the 7 kinds or `handoff`); `limit` 1–20, default 5 |
-| `memory_get` | `POST /get` | `ids` 1–10 (duplicates answered once) |
-| `memory_save` | `POST /remember` | `kind`, `title` ≤80, `summary` ≤240; `reason`, `fields`, `evidence[]`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` |
+| `memory_get` | `POST /get` | `ids` 1–10 (duplicates answered once), `detail` (boolean, false by default, only for one id) |
+| `memory_save` | `POST /remember` | `kind`, `title` ≤80, `summary` ≤240; `reason`, `detail` ≤8,000, `fields`, `evidence[]`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` |
 | `memory_feedback` | `POST /feedback` | `id`, `vote` = `helpful` \| `wrong` |
 | `memory_forget` | `POST /forget` | `id` |
 
@@ -83,10 +83,10 @@ A tool checks its required keys before the request; malformed JSON-RPC and unkno
 
 `memory_get` → `{"memories":[Record],"missing":[id]}` in request order; hidden and unknown ids go to
 `missing`. `Record` is `{id, kind, scope, status, title, summary, reason?, fields?, evidence?, links?, branch?, updated_at}`
-with empty values omitted. Only this call and search count a memory as fetched.
+with empty values omitted. A record with long detail includes `detail_chars`. Pass `detail: true` with one id to read the full `detail` if the summary and reason are insufficient. Only get and search count a memory as fetched.
 
 `memory_save` → `{"id","status","deduplicated"}` for a single save; `items` accepts up to three notes and returns per-item results. An identical save from the same owner returns the
-existing id with `deduplicated:true` and merges new evidence; a save that matches a forgotten memory is an
+existing id with `deduplicated:true` and merges new evidence. Detail is optional and does not affect identity. A duplicate can fill empty detail. An explicit correction can update detail without changing the id. A save that matches a forgotten memory is an
 error. `memory_feedback` → `{"id","status"}`: `wrong` votes from two different people, or one from the owner, make it `stale`; a repeat vote by the same person changes nothing.
 `memory_forget` → `{"id","status":"forgotten"}`.
 
@@ -98,7 +98,7 @@ model API is used. Record shape and visibility: [projects](projects.md#memory-sc
 ```
 cairn setup <url> [--agent claude|codex|opencode] [--remove]   cairn init [name] [--yes]
 cairn fixes [apply [id]]     cairn doctor     cairn mcp     cairn update [--check]     cairn hook <Event> …     cairn --version
-cairn search <query> [--kind k] [--limit n]     cairn get <id>...     cairn save [<json>|-]
+cairn search <query> [--kind k] [--limit n]     cairn get <id>... [--detail]     cairn save [<json>|-]
 cairn feedback <id> helpful|wrong               cairn forget <id>
 ```
 

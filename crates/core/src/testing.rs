@@ -14,6 +14,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         title: format!("title {id}"),
         summary: format!("summary {id}"),
         reason: String::new(),
+        detail: String::new(),
         fields: Fields::Note(fields::Note {}),
         evidence: Vec::new(),
         evidence_count: 0,

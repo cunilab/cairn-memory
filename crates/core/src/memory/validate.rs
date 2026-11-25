@@ -6,6 +6,7 @@ use serde_json::Value;
 pub const TITLE_MAX: usize = 80;
 pub const SUMMARY_MAX: usize = 240;
 pub const REASON_MAX: usize = 1_000;
+pub const DETAIL_MAX: usize = 8_000;
 pub const FIELD_TEXT_MAX: usize = 1_000;
 pub const LIST_MAX_ITEMS: usize = 20;
 pub const LIST_ITEM_MAX: usize = 300;
@@ -36,6 +37,13 @@ pub fn validate_save(input: &SaveInput, fields: &Fields, allow_handoff: bool) ->
     }
     if chars(&input.reason) > REASON_MAX {
         return bad(format!("reason must be at most {REASON_MAX} characters"));
+    }
+    if input
+        .detail
+        .as_ref()
+        .is_some_and(|detail| chars(detail) > DETAIL_MAX)
+    {
+        return bad(format!("detail must be at most {DETAIL_MAX} characters"));
     }
     if input.kind != Kind::Note && input.reason.trim().is_empty() {
         return bad(format!(

@@ -44,6 +44,8 @@ pub struct Feedback {
 #[derive(Deserialize)]
 pub struct GetMany {
     ids: Vec<String>,
+    #[serde(default)]
+    detail: bool,
 }
 
 /// `missing` holds ids that do not exist or that the person cannot see.
@@ -257,12 +259,15 @@ pub async fn get(
     Agent(account): Agent,
     Path(id): Path<String>,
 ) -> ApiResult<MemoryView> {
-    let memory = state.store.get(&account.person_id, &id).await?;
+    let mut memory = state.store.get(&account.person_id, &id).await?;
+    let detail = (!memory.detail.is_empty()).then(|| std::mem::take(&mut memory.detail));
     let mut views = state
         .store
         .memory_views(&account.person_id, vec![memory])
         .await?;
-    Ok(Json(views.remove(0)))
+    let mut view = views.remove(0);
+    view.detail = detail;
+    Ok(Json(view))
 }
 
 /// The agent read: up to 10 records in request order, each counted as a fetch.
@@ -275,6 +280,9 @@ pub async fn get_many(
         return Err(ApiError::invalid(
             "ids: 1 to 10 ids of at most 128 characters",
         ));
+    }
+    if body.detail && body.ids.len() != 1 {
+        return Err(ApiError::invalid("request detail for one memory at a time"));
     }
     let mut found: HashMap<String, Memory> = state
         .store
@@ -290,7 +298,13 @@ pub async fn get_many(
             continue;
         }
         match found.remove(&id) {
-            Some(memory) => memories.push(Record::from(&memory)),
+            Some(memory) => {
+                let mut record = Record::from(&memory);
+                if body.detail {
+                    record.detail = Some(memory.detail);
+                }
+                memories.push(record);
+            }
             None => missing.push(id),
         }
     }

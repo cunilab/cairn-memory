@@ -35,9 +35,13 @@
    "name": "memory_search"
   },
   {
-   "description": "Full records (fields, evidence, links) for ids from memory_search.",
+   "description": "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
    "inputSchema": {
     "properties": {
+     "detail": {
+      "default": false,
+      "type": "boolean"
+     },
      "ids": {
       "items": {
        "type": "string"
@@ -69,6 +73,10 @@
      "contradicts": {
       "type": "string"
      },
+     "detail": {
+      "maxLength": 8000,
+      "type": "string"
+     },
      "evidence": {
       "description": "paths, commands, commits",
       "items": {
@@ -91,6 +99,10 @@
          "type": "array"
         },
         "contradicts": {
+         "type": "string"
+        },
+        "detail": {
+         "maxLength": 8000,
          "type": "string"
         },
         "evidence": {

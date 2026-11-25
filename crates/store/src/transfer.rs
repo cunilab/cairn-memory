@@ -1,7 +1,7 @@
 //! Moving a person's own memories out and back in: the console's Export and Import. Import goes
 //! through the normal agent save (quality checks, redaction, dedupe by identity hash).
 
-use crate::memory::{MEMORY_SELECT, visible};
+use crate::memory::{MEMORY_SELECT_WITH_DETAIL, visible};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::now_seconds;
@@ -23,6 +23,8 @@ pub struct ExportedMemory {
     pub title: String,
     pub summary: String,
     pub reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub fields: Fields,
     pub evidence: Vec<String>,
     pub links: Vec<Link>,
@@ -57,8 +59,8 @@ pub struct ImportReport {
 }
 
 /// The keys an export carries that a save takes; the rest (id, status, links, times) are ignored.
-const SAVE_KEYS: [&str; 7] = [
-    "kind", "title", "summary", "reason", "fields", "evidence", "scope",
+const SAVE_KEYS: [&str; 8] = [
+    "kind", "title", "summary", "reason", "detail", "fields", "evidence", "scope",
 ];
 
 impl Store {
@@ -67,7 +69,7 @@ impl Store {
     /// the person can see.
     pub async fn export_owned(&self, person_id: &str) -> Result<OwnedExport> {
         let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT}
+            "{MEMORY_SELECT_WITH_DETAIL}
              WHERE m.owner_id = $1 AND {} AND m.kind <> 'handoff'
              ORDER BY m.created_at, m.memory_id",
             visible("m", "$1")
@@ -93,6 +95,7 @@ impl Store {
                     title: m.title,
                     summary: m.summary,
                     reason: m.reason,
+                    detail: m.detail,
                     fields: m.fields,
                     evidence: m.evidence,
                     links: m.links,

@@ -70,5 +70,6 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 - Hooks and agent tools send the same opaque worktree ID derived from the canonical checkout path. This lets explicit search find personal handoffs captured in that checkout.
 - **Small agent surface:** five MCP tools, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
 - Setup and client updates allow the Cairn MCP server's tools in Claude Code and Codex so headless sessions can use them. The approval settings are scoped to the Cairn server.
+- Long memory detail is limited to 8,000 characters and excluded from identity and embedding text. An additive column and a partial GIN expression index support lowest-weight lexical search on detailed rows while keeping the existing vector and index. Agent reads return the length by default and require a single-memory opt-in for the text.
 
 See the [release process](release.md) for release and update decisions, and the [user guide](user-guide.md) for operation.

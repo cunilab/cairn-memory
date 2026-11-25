@@ -587,6 +587,7 @@ async fn export_owned_memories_and_import_with_dry_run() {
     let personal = {
         let mut body = rule("Alice personal rule");
         body["scope"] = json!("personal");
+        body["detail"] = json!("Expanded context from Alice's personal archive.");
         app.save(&alice_d, body).await
     };
     let global = {
@@ -639,6 +640,16 @@ async fn export_owned_memories_and_import_with_dry_run() {
         "owned only, nothing forgotten"
     );
     let first = &export["memories"][0];
+    let exported = export["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == personal)
+        .unwrap();
+    assert_eq!(
+        exported["detail"],
+        "Expanded context from Alice's personal archive."
+    );
     for key in [
         "id",
         "kind",
@@ -721,6 +732,20 @@ async fn export_owned_memories_and_import_with_dry_run() {
         .filter(|m| m["owner_is_me"] == true)
         .count();
     assert_eq!(mine, 2, "imported rows are carol's own new memories");
+    let imported = carols
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["title"] == "Alice personal rule")
+        .unwrap();
+    assert!(imported.get("detail").is_none());
+    let detail = app
+        .get(
+            &format!("memories/{}", imported["id"].as_str().unwrap()),
+            &carol,
+        )
+        .await;
+    assert_eq!(detail["detail"], exported["detail"]);
     assert!(
         ids(&carols).contains(&global),
         "alice's global rule is visible to everyone"

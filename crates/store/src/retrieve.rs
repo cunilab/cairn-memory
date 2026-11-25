@@ -1,7 +1,8 @@
 use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
 use crate::memory::{
-    MEMORY_COLUMNS, MEMORY_SELECT, collection_memory, memory_from_row, searchable, visible,
+    MEMORY_COLUMNS, MEMORY_SELECT, MEMORY_SELECT_WITH_DETAIL, SEARCH_VECTOR, collection_memory,
+    memory_from_row, search_matches, searchable, visible,
 };
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
@@ -265,6 +266,8 @@ impl Store {
 pub fn lexical_sql(narrow: &Narrow) -> String {
     let scope = searchable("m", "$1", "$3");
     let narrowed = narrow.sql("m", 5);
+    let all = search_matches("q.all_terms");
+    let any = search_matches("q.any_term");
     format!(
         "WITH q AS (
            SELECT w AS all_terms,
@@ -273,11 +276,11 @@ pub fn lexical_sql(narrow: &Narrow) -> String {
              FROM websearch_to_tsquery('english', $2) AS w),
          hit AS MATERIALIZED (
            (SELECT m.memory_id FROM memories m, q
-             WHERE m.search_tsv @@ q.all_terms AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP})
+             WHERE {all} AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP})
            UNION
            (SELECT m.memory_id FROM memories m, q
-             WHERE m.search_tsv @@ q.any_term AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP}))
-         SELECT m.memory_id, ts_rank_cd(m.search_tsv, q.any_term, 32)::float4 AS score
+             WHERE {any} AND {scope}{narrowed} LIMIT {LEXICAL_MATCH_CAP}))
+         SELECT m.memory_id, ts_rank_cd({SEARCH_VECTOR}, q.any_term, 32)::float4 AS score
            FROM hit JOIN memories m USING (memory_id), q
           ORDER BY score DESC, m.created_at DESC, m.memory_id LIMIT $4"
     )
@@ -336,7 +339,7 @@ impl Store {
     /// Visible memories by id, with entities and links. Unknown and hidden ids are absent.
     pub async fn memories_by_ids(&self, person_id: &str, ids: &[String]) -> Result<Vec<Memory>> {
         let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id = ANY($2) AND {}",
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id = ANY($2) AND {}",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -506,7 +509,7 @@ impl Store {
              {MEMORY_COLUMNS},
                     {cosine} AS cosine,
                     CASE WHEN cardinality(q.lx) = 0 THEN 0::float4 ELSE
-                      ((SELECT count(*) FROM unnest(m.search_tsv) t WHERE t.lexeme = ANY(q.lx))::float4
+                      ((SELECT count(*) FROM unnest({SEARCH_VECTOR}) t WHERE t.lexeme = ANY(q.lx))::float4
                         / cardinality(q.lx))::float4 END AS coverage
                FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id, q
               WHERE m.memory_id = ANY($2) AND {}",

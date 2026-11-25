@@ -30,6 +30,7 @@ async fn migrate_twice_is_a_no_op() {
             "0012_always_active",
             "0013_link_origin_system",
             "0014_memory_owner_project_created",
+            "0015_memory_detail",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1001,6 +1002,7 @@ async fn fixes_migration_additive() {
     store.migrate().await.unwrap();
     store.migrate().await.unwrap();
     versions.push("0011_fixes".into());
+    versions.push("0015_memory_detail".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1021,6 +1023,11 @@ async fn fixes_migration_additive() {
             .await
             .unwrap();
     assert_eq!(ids, after);
+    let details: Vec<String> = sqlx::query_scalar("SELECT detail FROM memories ORDER BY memory_id")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(details, ["", ""]);
     let version: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version='0011_fixes')",
     )

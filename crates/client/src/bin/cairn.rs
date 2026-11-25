@@ -21,7 +21,7 @@ const USAGE: &str = "Usage:
   cairn update [--check]        (install the latest release; --check only reports)
   cairn --version
   cairn search <query> [--kind <kind>] [--limit <n>]
-  cairn get <id>...
+  cairn get <id>... [--detail]
   cairn save [JSON-record|-]    (SaveInput JSON; stdin when absent or -)
   cairn feedback <id> helpful|wrong
   cairn forget <id>
@@ -68,6 +68,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
         let allowed = (index == 0 && value == "--version")
             || (index == 1 && args[0] == "update" && value == "--check")
             || (args[0] == "init" && value == "--yes")
+            || (args[0] == "get" && index + 1 == args.len() && value == "--detail")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
         if value.starts_with('-') && value != "-" && !allowed {
@@ -361,6 +362,14 @@ fn tool_arguments(tool: &Tool, args: &[String]) -> Result<Map<String, Value>, Er
             }
         }
         "get" => {
+            let args = if let Some((flag, ids)) = args.split_last()
+                && flag == "--detail"
+            {
+                arguments.insert("detail".to_owned(), json!(true));
+                ids
+            } else {
+                args
+            };
             arguments.insert("ids".to_owned(), json!(args));
         }
         "save" => {

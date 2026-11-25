@@ -69,6 +69,9 @@ pub struct SaveInput {
     /// Required (non-empty) unless `kind` is `note`.
     #[serde(default)]
     pub reason: String,
+    /// Optional long context, up to 8,000 characters.
+    #[serde(default)]
+    pub detail: Option<String>,
     /// Parsed by `Fields::parse(kind, ..)`.
     #[serde(default)]
     pub fields: Option<serde_json::Value>,
@@ -99,6 +102,8 @@ pub struct Memory {
     pub summary: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    #[serde(skip)]
+    pub detail: String,
     /// Serialized as the bare per-kind object.
     pub fields: Fields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -166,6 +171,12 @@ pub struct Record {
     pub summary: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Fields::is_empty")]
     pub fields: Fields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -189,6 +200,8 @@ impl From<&Memory> for Record {
             title: m.title.clone(),
             summary: m.summary.clone(),
             reason: m.reason.clone(),
+            detail_chars: (!m.detail.is_empty()).then(|| m.detail.chars().count()),
+            detail: None,
             fields: m.fields.clone(),
             evidence: m.evidence.clone(),
             links: m.links.clone(),

@@ -32,12 +32,13 @@ pub const TOOLS: [Tool; 5] = [
     },
     Tool {
         name: "memory_get",
-        description: "Full records (fields, evidence, links) for ids from memory_search.",
+        description: "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
         cli: "get",
         route: "/get",
         schema: || {
             json!({"type":"object","properties":{
-                "ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10}},
+                "ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10},
+                "detail":{"type":"boolean","default":false}},
               "required":["ids"]})
         },
     },
@@ -52,6 +53,7 @@ pub const TOOLS: [Tool; 5] = [
                 "title":{"type":"string","maxLength":80},
                 "summary":{"type":"string","maxLength":240},
                 "reason":{"type":"string"},
+                "detail":{"type":"string","maxLength":8000},
                 "fields":{"type":"object"},
                 "evidence":{"type":"array","items":{"type":"string"},"description":"paths, commands, commits"},
                 "supersedes":{"type":"string"},
@@ -63,6 +65,7 @@ pub const TOOLS: [Tool; 5] = [
                     "title":{"type":"string","maxLength":80},
                     "summary":{"type":"string","maxLength":240},
                     "reason":{"type":"string"},
+                    "detail":{"type":"string","maxLength":8000},
                     "fields":{"type":"object"},
                     "evidence":{"type":"array","items":{"type":"string"}},
                     "supersedes":{"type":"string"},
@@ -270,12 +273,19 @@ mod tests {
 
     #[test]
     fn memory_save_alias_schema_stays_within_budget() {
-        let schema = (find("memory_save").unwrap().schema)().to_string();
-        // Compact `memory_save` inputSchema before aliases (the item 03 schema).
-        const BEFORE_ALIASES: usize = 918;
-        let grown = schema.len() - BEFORE_ALIASES;
-        assert!(grown <= 200, "alias schema grew by {grown}: {schema}");
-        assert!(schema.contains("\"maxItems\":5"), "{schema}");
+        let mut schema = (find("memory_save").unwrap().schema)();
+        let with_aliases = schema.to_string();
+        schema["properties"]["items"]["items"]["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("aliases");
+        schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("aliases");
+        let grown = with_aliases.len() - schema.to_string().len();
+        assert!(grown <= 200, "aliases add {grown} bytes: {with_aliases}");
+        assert!(with_aliases.contains("\"maxItems\":5"), "{with_aliases}");
         assert!(find("memory_save").unwrap().description.contains(
             "aliases: up to 5 short questions a future agent might ask that this answers."
         ));

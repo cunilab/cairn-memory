@@ -62,6 +62,9 @@ pub struct MemoryView {
     /// Files and symbols the last check found gone: the "why stale" detail.
     pub missing_entities: Vec<String>,
     pub links: Vec<LinkView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail: Option<String>,
 }
 
 struct Extra {
@@ -195,6 +198,7 @@ impl Store {
                     missing_entities: missing,
                     links: memory.links.iter().map(|l| link_view(&memory, l)).collect(),
                     memory,
+                    detail: None,
                 }
             })
             .collect())

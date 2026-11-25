@@ -45,6 +45,7 @@ pub struct NewMemory {
     pub title: String,
     pub summary: String,
     pub reason: String,
+    pub detail: Option<String>,
     pub fields: Fields,
     pub evidence: Vec<String>,
     pub evidence_hash: String,
@@ -72,6 +73,7 @@ pub fn prepare_save(
         title: redact(&input.title),
         summary: redact(&input.summary),
         reason: redact(&input.reason),
+        detail: input.detail.as_deref().map(redact_sensitive_content),
         evidence: input.evidence.iter().map(|e| redact(e)).collect(),
         ..input
     };
@@ -104,6 +106,7 @@ pub fn prepare_save(
         title: input.title,
         summary: input.summary,
         reason: input.reason,
+        detail: input.detail,
         fields,
         evidence,
         context: Context {

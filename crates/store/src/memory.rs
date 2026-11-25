@@ -54,9 +54,10 @@ pub(crate) fn visible_even_if_expired(alias: &str, me: &str) -> String {
 }
 
 macro_rules! memory_columns {
-    () => {
-        "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
-    m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
+    ($detail:literal) => {
+        concat!(
+            "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
+    m.title, m.summary, m.reason, ", $detail, " AS detail, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
@@ -66,16 +67,30 @@ macro_rules! memory_columns {
     EXTRACT(EPOCH FROM m.updated_at)::bigint AS updated_at,
     to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts,
     COALESCE(u.fetched, 0) AS fetched, COALESCE(u.helpful, 0) AS helpful,
-    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at"
+    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at")
     };
 }
 
 /// The columns of `memory_from_row`, for a caller that adds its own columns and joins.
-pub(crate) const MEMORY_COLUMNS: &str = memory_columns!();
+pub(crate) const MEMORY_COLUMNS: &str = memory_columns!("''");
 pub(crate) const MEMORY_SELECT: &str = concat!(
-    memory_columns!(),
+    memory_columns!("''"),
     " FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id"
 );
+pub(crate) const MEMORY_SELECT_WITH_DETAIL: &str = concat!(
+    memory_columns!("m.detail"),
+    " FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id"
+);
+
+pub(crate) const SEARCH_VECTOR: &str = "(m.search_tsv || to_tsvector('english', m.detail))";
+
+/// Uses the original GIN for old rows and the partial GIN for detail-bearing rows.
+pub(crate) fn search_matches(terms: &str) -> String {
+    format!(
+        "((m.detail = '' AND m.search_tsv @@ {terms})
+           OR (m.detail <> '' AND {SEARCH_VECTOR} @@ {terms}))"
+    )
+}
 
 fn parse<T: std::str::FromStr<Err = String>>(row: &PgRow, column: &str) -> Result<T> {
     row.try_get::<String, _>(column)?
@@ -96,6 +111,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         title: row.try_get("title")?,
         summary: row.try_get("summary")?,
         reason: row.try_get("reason")?,
+        detail: row.try_get("detail")?,
         fields,
         evidence: row.try_get("evidence")?,
         evidence_count: row.try_get::<i32, _>("evidence_count")?.max(0) as u32,
@@ -184,7 +200,7 @@ pub struct ListFilter {
     pub cursor: Option<String>,
     /// The branch the memory was saved on.
     pub branch: Option<String>,
-    /// A web search over title, summary, reason and fields. Never counts a fetch.
+    /// A web search over title, summary, reason, fields and detail. Never counts a fetch.
     pub q: Option<String>,
     /// An admin listing `forgotten` rows. Everyone else stays on `visible`.
     pub see_forgotten: bool,
@@ -338,7 +354,7 @@ impl Store {
 
     pub async fn get(&self, person_id: &str, memory_id: &str) -> Result<Memory> {
         let row = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id = $2 AND {}",
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id = $2 AND {}",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -394,6 +410,7 @@ impl Store {
             visible("m", "$1")
         };
         let q = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        let matches = search_matches("websearch_to_tsquery('english', $10)");
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
              WHERE {scope} AND ($2::text IS NULL OR m.project_id = $2)
@@ -401,7 +418,7 @@ impl Store {
                AND (cardinality($5::text[]) = 0 OR m.status = ANY($5))
                AND ($6::text IS NULL OR (m.updated_at, m.memory_id) < ($6::timestamptz, $7::text))
                AND ($9::text IS NULL OR m.repo_branch = $9)
-               AND ($10::text IS NULL OR m.search_tsv @@ websearch_to_tsquery('english', $10))
+               AND ($10::text IS NULL OR {matches})
              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8"
         ))
         .bind(person_id)
@@ -750,8 +767,8 @@ pub(crate) async fn insert_memory(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank, detail)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21, $22)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -776,6 +793,7 @@ pub(crate) async fn insert_memory(
     .bind(new.origin.as_str())
     .bind(device_id)
     .bind(rank.as_str())
+    .bind(new.detail.as_deref().unwrap_or_default())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
@@ -802,12 +820,18 @@ pub(crate) async fn insert_memory(
                 .execute(&mut *tx)
                 .await?;
         }
-        // Identity ignores the reason, so a correction that only changes it dedupes onto its own
-        // target: keep the new reason and skip the self-link.
+        // A correction to non-identifying text dedupes onto its own target.
         if new.supersedes.as_deref() == Some(id.as_str()) {
-            sqlx::query("UPDATE memories SET reason = $2, updated_at = now() WHERE memory_id = $1")
+            sqlx::query("UPDATE memories SET reason = $2, detail = coalesce($3, detail), updated_at = now() WHERE memory_id = $1")
                 .bind(&id)
                 .bind(&new.reason)
+                .bind(&new.detail)
+                .execute(&mut *tx)
+                .await?;
+        } else if let Some(detail) = new.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            sqlx::query("UPDATE memories SET detail = $2 WHERE memory_id = $1 AND detail = ''")
+                .bind(&id)
+                .bind(detail)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -897,7 +921,7 @@ impl Store {
     ) -> Result<String> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id=$1 FOR UPDATE OF m"
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
         ))
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -925,6 +949,7 @@ impl Store {
             title,
             summary,
             reason,
+            detail: Some(old.detail),
             fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
             evidence: old.evidence.clone(),
             supersedes: Some(id.to_owned()),

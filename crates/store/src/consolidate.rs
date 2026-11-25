@@ -355,6 +355,7 @@ fn global_copy(a: &Memory, b: &Memory) -> SaveInput {
         title: newer.title.clone(),
         summary: newer.summary.clone(),
         reason: newer.reason.clone(),
+        detail: None,
         fields: Some(newer.fields.to_json()),
         evidence: Vec::new(),
         supersedes: None,

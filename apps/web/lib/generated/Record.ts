@@ -12,4 +12,4 @@ export type Record = { id: string, kind: Kind, scope: Scope, status: Status,
 /**
  * Why a stale record is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
  */
-stale_cause?: string | null, title: string, summary: string, reason?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, };
+stale_cause?: string | null, title: string, summary: string, reason?: string, detail_chars?: number, detail?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, };

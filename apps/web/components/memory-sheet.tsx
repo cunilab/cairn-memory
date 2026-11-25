@@ -131,6 +131,12 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
           <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.reason}</p>
         </div>
       ) : null}
+      {memory.detail ? (
+        <details className="flex flex-col gap-2 text-sm">
+          <summary className="cursor-pointer font-medium">Full detail</summary>
+          <p className="mt-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.detail}</p>
+        </details>
+      ) : null}
       {fields.length > 0 ? (
         <dl className="flex flex-col gap-2 text-sm">
           {fields.map(([key, value]) => (
