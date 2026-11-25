@@ -2,6 +2,8 @@ export const AGENTS = [
   { value: "claude", label: "Claude" },
   { value: "codex", label: "Codex" },
   { value: "opencode", label: "OpenCode" },
+  { value: "grok", label: "Grok Build" },
+  { value: "antigravity", label: "Antigravity CLI" },
 ] as const;
 export type Agent = (typeof AGENTS)[number]["value"];
 

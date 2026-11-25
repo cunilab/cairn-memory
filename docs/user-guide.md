@@ -21,7 +21,7 @@ cairn setup https://your-server.example --agent claude
 cairn doctor
 ```
 
-Setup reads the token from stdin; choose `claude`, `codex` or `opencode`. Codex and OpenCode need their native CLI installed. See [hook setup](reference/hook.md#setup).
+Setup reads the token from stdin. Choose `claude`, `codex`, `opencode`, `grok` or `antigravity`. Codex and OpenCode setup need their native CLI installed. For an already configured device, run `cairn setup <agent>`. See [hook setup](reference/hook.md#setup).
 
 ## Projects
 

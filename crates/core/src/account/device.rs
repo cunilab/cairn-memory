@@ -37,7 +37,7 @@ pub struct Device {
     pub created_at: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub last_seen_at: i64,
-    /// `claude`, `codex` or `opencode`, from the client's user agent.
+    /// The host agent, from the client's user agent.
     pub agent: Option<String>,
     pub client_version: Option<String>,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
@@ -159,7 +159,7 @@ impl ClientKind {
     }
 }
 
-pub const AGENTS: [&str; 3] = ["claude", "codex", "opencode"];
+pub const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "grok", "antigravity"];
 
 pub fn client_user_agent(version: &str, agent: &str, kind: ClientKind) -> String {
     if AGENTS.contains(&agent) {
@@ -256,12 +256,14 @@ mod tests {
 
     #[test]
     fn user_agents_round_trip() {
-        let hook =
-            parse_user_agent(&client_user_agent("0.1.6", "claude", ClientKind::Hook)).unwrap();
-        assert_eq!(
-            (hook.version.as_deref(), hook.agent.as_deref(), hook.kind),
-            (Some("0.1.6"), Some("claude"), Some(ClientKind::Hook))
-        );
+        for agent in AGENTS {
+            let hook =
+                parse_user_agent(&client_user_agent("0.1.6", agent, ClientKind::Hook)).unwrap();
+            assert_eq!(
+                (hook.version.as_deref(), hook.agent.as_deref(), hook.kind),
+                (Some("0.1.6"), Some(agent), Some(ClientKind::Hook))
+            );
+        }
         let mcp = parse_user_agent(&client_user_agent("0.1.6", "", ClientKind::Mcp)).unwrap();
         assert_eq!((mcp.agent, mcp.kind), (None, Some(ClientKind::Mcp)));
         assert!(parse_user_agent("Python-urllib/3.12").unwrap().legacy);

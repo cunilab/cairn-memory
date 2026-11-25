@@ -118,6 +118,12 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let mut child = setup.spawn().unwrap();
     writeln!(child.stdin.take().unwrap(), "test-device").unwrap();
     assert!(child.wait().unwrap().success());
+    for agent in ["grok", "antigravity"] {
+        let mut setup = cairn();
+        setup_env(&mut setup);
+        let output = setup.args(["setup", agent]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
     let settings_path = home.join(".claude/settings.json");
     let mut settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
@@ -164,6 +170,27 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
         stdout.contains("Updated cairn") && stdout.contains("Cairn claude integration installed"),
         "{stdout}"
     );
+    for (agent, hooks, mcp) in [
+        ("grok", ".grok/hooks/cairn.json", ".grok/config.toml"),
+        (
+            "antigravity",
+            ".gemini/config/hooks.json",
+            ".gemini/config/mcp_config.json",
+        ),
+    ] {
+        assert!(
+            stdout.contains(&format!("Cairn {agent} integration installed")),
+            "{stdout}"
+        );
+        let hooks = std::fs::read_to_string(home.join(hooks)).unwrap();
+        assert!(hooks.contains(&format!(
+            "{} hook SessionStart --agent {agent}",
+            copy.display()
+        )));
+        let mcp = std::fs::read_to_string(home.join(mcp)).unwrap();
+        assert!(mcp.contains(copy.to_str().unwrap()));
+        assert!(!mcp.contains(env!("CARGO_BIN_EXE_cairn")));
+    }
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(settings_path).unwrap()).unwrap();

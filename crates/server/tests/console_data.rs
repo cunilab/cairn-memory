@@ -375,7 +375,16 @@ async fn devices_report_client_health() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let mut tokens = Vec::new();
-    for name in ["never", "working", "old", "legacy", "quiet", "mcp"] {
+    for name in [
+        "never",
+        "working",
+        "old",
+        "legacy",
+        "quiet",
+        "mcp",
+        "grok",
+        "antigravity",
+    ] {
         tokens.push((name, app.device(&admin, name).await));
     }
     let token = |name: &str| tokens.iter().find(|(n, _)| *n == name).unwrap().1.clone();
@@ -399,6 +408,9 @@ async fn devices_report_client_health() {
     hook("legacy", "Python-urllib/3.12").await;
     hook("quiet", &current("opencode; hook")).await;
     hook("mcp", &current("mcp")).await;
+    for agent in ["grok", "antigravity"] {
+        hook(agent, &current(&format!("{agent}; hook"))).await;
+    }
     sql(
         &app,
         "UPDATE devices SET last_hook_at = now() - interval '8 days' WHERE name = 'quiet'",
@@ -428,6 +440,11 @@ async fn devices_report_client_health() {
         (Some("working"), Some("codex"))
     );
     assert_eq!(working["client_version"], SERVER_VERSION);
+    for agent in ["grok", "antigravity"] {
+        let device = by(agent);
+        assert_eq!(device["agent"], agent);
+        assert_eq!(device["health"], "working");
+    }
     assert!(working["last_hook_at"].is_i64());
     assert!(working["fix_command"].is_null() && working["health_reason"].is_null());
     let old = by("old");

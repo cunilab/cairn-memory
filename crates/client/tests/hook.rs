@@ -346,6 +346,140 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn grok_hooks_capture_native_payloads_and_deliver_one_deferred_brief() {
+    let fake = fake();
+    let env = Env::new("grok-native-hook", &fake.url);
+    let setup = command(&env.home).args(["setup", "grok"]).output().unwrap();
+    assert!(setup.status.success(), "{setup:?}");
+    let invoke = |event, extra: Value| {
+        let mut payload = json!({"sessionId": "grok-session", "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "grok"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        out
+    };
+    assert!(invoke("SessionStart", json!({})).stdout.is_empty());
+    assert!(fake.to("brief").is_empty());
+    let imported = with_stdin(
+        command(&env.home)
+            .env("GROK_HOOK_EVENT", "user_prompt_submit")
+            .args([
+                "hook",
+                "UserPromptSubmit",
+                "--agent",
+                "claude",
+                "--cairn-managed",
+            ]),
+        &json!({"sessionId": "grok-session", "cwd": env.repo, "prompt": "Run the tests"})
+            .to_string(),
+    );
+    assert!(imported.status.success(), "{imported:?}");
+    assert!(fake.observed().is_empty());
+    invoke("UserPromptSubmit", json!({"prompt": "Run the tests"}));
+    let tool = json!({
+        "toolName": "run_terminal_command",
+        "toolUseId": "grok-tool-1",
+        "toolInput": {"command": "cargo test"},
+        "toolResult": {"exit_code": 101, "stderr": "first error\nand other output"},
+    });
+    assert_eq!(
+        injected(&invoke("PostToolUse", tool.clone())).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
+    assert!(invoke("PostToolUse", tool).stdout.is_empty());
+    let observed = fake.observed();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["content"], "Run the tests");
+    assert_eq!(observed[1]["content"], "cargo test\nexit 101: first error");
+    assert_eq!(observed[1]["session_id"], "grok-session");
+    assert_eq!(fake.to("brief").len(), 1);
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(grok; hook)"))
+    );
+    invoke("PreCompact", json!({}));
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    invoke("SessionEnd", json!({}));
+    assert!(!fake.to("end").is_empty());
+}
+
+#[test]
+fn antigravity_hooks_capture_native_payloads_and_checkpoint_on_stop() {
+    let fake = fake();
+    let env = Env::new("antigravity-native-hook", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload =
+            json!({"conversationId": "agy-conversation", "workspacePaths": [env.repo]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).current_dir(&env.home).args([
+                "hook",
+                event,
+                "--agent",
+                "antigravity",
+            ]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null)
+    };
+    let start = invoke("SessionStart", json!({}));
+    assert_eq!(
+        start["injectSteps"][0]["systemMessage"]["systemMessage"],
+        brief_and_hint()
+    );
+    for invocation in 0..2 {
+        invoke(
+            "PreInvocation",
+            json!({"invocationNum": invocation, "lastUserInput": "Edit the file"}),
+        );
+    }
+    let edit = json!({
+        "toolCall": {"name": "multi_replace_file_content", "args": {
+            "TargetFile": env.repo.join("src.rs"),
+            "ReplacementChunks": [{"ReplacementContent": "first"}, {"ReplacementContent": "second"}]
+        }}
+    });
+    assert_eq!(invoke("PostToolUse", edit), json!({}));
+    invoke(
+        "PostToolUse",
+        json!({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "cargo test"}},
+            "error": "exit status 1",
+        }),
+    );
+    let out = invoke(
+        "Stop",
+        json!({"fullyIdle": true, "terminationReason": "model_stop"}),
+    );
+    assert_eq!(out, json!({"decision": "stop"}));
+    let observed = fake.observed();
+    assert_eq!(observed.len(), 4, "{observed:?}");
+    assert_eq!(observed[0]["content"], "Edit the file");
+    assert_eq!(observed[1]["content"], "MultiEdit src.rs\nfirst\nsecond");
+    assert_eq!(observed[2]["content"], "cargo test\nfailed: exit status 1");
+    assert_eq!(observed[2]["session_id"], "agy-conversation");
+    assert_eq!(observed[3]["content"], "changed files\nsrc.rs");
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    assert!(fake.to("topic").is_empty());
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(antigravity; hook)"))
+    );
+}
+
 fn injected(output: &Output) -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {

@@ -51,10 +51,25 @@ impl Payload {
 
     pub fn session_id(&self) -> Option<&str> {
         self.text("session_id")
+            .or_else(|| self.text("sessionId"))
+            .or_else(|| self.text("conversationId"))
+    }
+
+    pub fn tool_use_id(&self) -> Option<&str> {
+        self.text("tool_use_id").or_else(|| self.text("toolUseId"))
     }
 
     pub fn cwd(&self) -> Option<&str> {
         self.text("cwd")
+            .or_else(|| self.text("workspaceRoot"))
+            .or_else(|| {
+                self.0
+                    .get("workspacePaths")?
+                    .as_array()?
+                    .first()?
+                    .as_str()
+                    .filter(|path| !path.trim().is_empty())
+            })
     }
 
     /// A boolean field the host sent, such as the Stop hook's `stop_hook_active`.
@@ -63,17 +78,38 @@ impl Payload {
     }
 
     pub fn tool(&self) -> Option<Tool<'_>> {
-        let name = self.text("tool_name")?;
+        let call = self.0.get("toolCall");
+        let name = self
+            .text("tool_name")
+            .or_else(|| self.text("toolName"))
+            .or_else(|| call?.get("name")?.as_str())?;
+        let name = name
+            .strip_prefix("cairn__")
+            .or_else(|| name.strip_prefix("mcp_cairn_"))
+            .map_or_else(
+                || canonical_tool(name),
+                |tool| format!("mcp__cairn__{tool}"),
+            );
         Some(Tool {
-            name: canonical_tool(name),
-            input: self.0.get("tool_input").and_then(Value::as_object),
-            response: self.0.get("tool_response"),
+            name,
+            input: self
+                .0
+                .get("tool_input")
+                .or_else(|| self.0.get("toolInput"))
+                .or_else(|| call?.get("args"))
+                .and_then(Value::as_object),
+            response: self
+                .0
+                .get("tool_response")
+                .or_else(|| self.0.get("toolResult")),
+            antigravity_ok: call.map(|_| self.text("error").is_none()),
+            antigravity_error: call.and_then(|_| self.text("error")),
         })
     }
 
     /// `kind=prompt`: the redacted prompt, clipped to 8 KiB.
     pub fn prompt(&self) -> Option<Capture> {
-        let prompt = self.text("prompt")?;
+        let prompt = self.text("prompt").or_else(|| self.text("lastUserInput"))?;
         Some(Capture::new(
             CaptureKind::Prompt,
             text_of(prompt, PROMPT_MAX_BYTES),
@@ -82,7 +118,9 @@ impl Payload {
 
     /// `kind=assistant`; the caller decides whether `CAIRN_CAPTURE_ASSISTANT` allows it.
     pub fn assistant(&self) -> Option<Capture> {
-        let message = self.text("last_assistant_message")?;
+        let message = self
+            .text("last_assistant_message")
+            .or_else(|| self.text("lastAssistantMessage"))?;
         Some(Capture::new(
             CaptureKind::Assistant,
             text_of(message, PROMPT_MAX_BYTES),
@@ -153,6 +191,8 @@ pub struct Tool<'a> {
     pub name: String,
     input: Option<&'a Map<String, Value>>,
     response: Option<&'a Value>,
+    antigravity_ok: Option<bool>,
+    antigravity_error: Option<&'a str>,
 }
 
 impl Tool<'_> {
@@ -263,6 +303,7 @@ impl Tool<'_> {
     fn command_text(&self) -> Option<&str> {
         self.input_text("command")
             .or_else(|| self.input_text("cmd"))
+            .or_else(|| self.input_text("CommandLine"))
     }
 
     /// The shell command of a `Bash` call, as sent.
@@ -291,9 +332,15 @@ impl Tool<'_> {
 
     /// The structured path argument; the file itself is never read.
     fn file_path(&self) -> Option<&str> {
-        ["file_path", "filePath", "path"]
-            .iter()
-            .find_map(|key| self.input_text(key))
+        [
+            "file_path",
+            "filePath",
+            "path",
+            "TargetFile",
+            "AbsolutePath",
+        ]
+        .iter()
+        .find_map(|key| self.input_text(key))
     }
 
     /// Every edited file with its new text: the structured path, else the `*** Add|Update|Delete
@@ -310,10 +357,18 @@ impl Tool<'_> {
     }
 
     fn new_text(&self) -> String {
-        match self.input.and_then(|input| input.get("edits")) {
+        match self.input.and_then(|input| {
+            input
+                .get("edits")
+                .or_else(|| input.get("ReplacementChunks"))
+        }) {
             Some(Value::Array(edits)) => edits
                 .iter()
-                .filter_map(|edit| edit.get("new_string")?.as_str())
+                .filter_map(|edit| {
+                    edit.get("new_string")
+                        .or_else(|| edit.get("ReplacementContent"))?
+                        .as_str()
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => [
@@ -321,6 +376,8 @@ impl Tool<'_> {
                 "newString",
                 "new_str",
                 "content",
+                "CodeContent",
+                "ReplacementContent",
                 "patch",
                 "patchText",
                 "input",
@@ -386,7 +443,7 @@ impl Tool<'_> {
         }
         let flags = ["is_error", "interrupted"].map(|key| self.response_field(key));
         if flags.iter().all(Option::is_none) {
-            return None;
+            return self.antigravity_ok;
         }
         Some(flags.iter().all(|flag| *flag != Some(&Value::Bool(true))))
     }
@@ -396,6 +453,7 @@ impl Tool<'_> {
             .iter()
             .filter_map(|key| self.response_field(key)?.as_str())
             .chain(self.response.and_then(Value::as_str))
+            .chain(self.antigravity_error)
             .find_map(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
             .map(|line| truncate(&redact_sensitive_content(line), ERROR_LINE_MAX_BYTES).to_owned())
     }

@@ -1,10 +1,12 @@
 //! `cairn setup --agent`: installs or removes Cairn's MCP entry, permissions, instructions and
-//! hooks in Claude Code, Codex and OpenCode (docs/reference/hook.md#setup). Cairn marks its own
+//! hooks in supported agents (docs/reference/hook.md#setup). Cairn marks its own
 //! MCP registrations and hooks. Setup checks for conflicts before running a native MCP command
 //! and applying the file edits. Credentials stay in the Cairn config.
 
+pub(crate) mod antigravity;
 mod claude;
 mod codex;
+pub(crate) mod grok;
 mod jsonc;
 mod opencode;
 
@@ -16,8 +18,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io};
 
-pub const AGENTS: [&str; 3] = ["claude", "codex", "opencode"];
+pub use cairn_core::account::AGENTS;
 const MARKER: &str = "CAIRN_SETUP_MANAGED";
+// The host can rewrite its config. Keep grant ownership with the marked MCP registration.
+const APPROVAL_MARKER: &str = "CAIRN_SETUP_APPROVAL";
 const MANAGED_FLAG: &str = "--cairn-managed";
 pub(crate) const KEEP_NATIVE_MEMORY: &str = "--keep-native-memory";
 pub(crate) const UNMARKED: &str =
@@ -186,7 +190,7 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
             let handler =
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
             let mut group = json!({"hooks": [handler]});
-            if event == "PostToolUse" {
+            if event == "PostToolUse" && ctx.agent != "grok" {
                 group["matcher"] = json!(
                     "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
                 );
@@ -379,7 +383,9 @@ fn plan(ctx: &Ctx) -> R<Plan> {
         "claude" => claude::plan(ctx),
         "codex" => codex::plan(ctx),
         "opencode" => opencode::plan(ctx),
-        _ => Err("agent must be claude, codex or opencode".into()),
+        "grok" => grok::plan(ctx),
+        "antigravity" => antigravity::plan(ctx),
+        _ => Err(format!("agent must be one of {}", AGENTS.join(", "))),
     }
 }
 
@@ -461,7 +467,7 @@ pub fn install(agent: &str, keep_native_memory: bool) -> Result<String, Error> {
 }
 
 /// Where each agent keeps the file that proves a Cairn hook is installed.
-pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
+pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); AGENTS.len()] {
     let dir = |var: &str, default: PathBuf| {
         env::var_os(var)
             .filter(|v| !v.is_empty())
@@ -480,6 +486,8 @@ pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
             "opencode",
             dir("XDG_CONFIG_HOME", home.join(".config")).join("opencode/plugins/cairn/index.js"),
         ),
+        ("grok", grok::hook_file(home)),
+        ("antigravity", antigravity::hook_file(home)),
     ]
 }
 
@@ -520,7 +528,7 @@ pub fn retire_python(config_dir: &Path) {
     if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         for (agent, file) in hook_files(Path::new(&home)) {
             let Ok(before) = read(&file) else { continue };
-            if agent == "opencode" || !before.contains("run-hook") {
+            if !matches!(agent, "claude" | "codex") || !before.contains("run-hook") {
                 continue;
             }
             let written = edit_hooks(&file, &legacy_run_hook, &|_| None).and_then(|body| {

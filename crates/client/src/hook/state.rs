@@ -35,6 +35,9 @@ pub struct SessionState {
     /// Paths already dirty at SessionStart (`git status --porcelain`), at most 200.
     #[serde(default)]
     pub baseline_dirty: Vec<String>,
+    /// Grok can deliver the brief through PostToolUse only.
+    #[serde(default)]
+    pub grok_brief_shown: bool,
     /// Edits outside the project root. A count only; the paths are not stored.
     #[serde(default)]
     pub outside_edits: u32,

@@ -60,16 +60,22 @@ The bounded outbox in the configuration directory (or `CAIRN_OUTBOX`) is bound t
 
 ## Setup
 
-Run `cairn setup <url> --agent claude|codex|opencode` and supply the device token on stdin. Setup writes managed hook and MCP entries and adds a marked instruction block. Upgrades refresh installed integrations. Passing `--remove` removes the block and managed entries while keeping user text. Codex and OpenCode setup need their native CLI on `PATH`. Codex also requires trusting the hooks. `cairn doctor` checks the configuration.
+Run `cairn setup <url> --agent claude|codex|opencode|grok|antigravity` and supply the device token on stdin. On an already configured device, run `cairn setup <agent>`. Setup writes managed hook and MCP entries and adds a marked instruction block. Upgrades refresh installed integrations. Run `cairn setup <agent> --remove` to remove the integration while keeping the device configuration. Codex and OpenCode setup need their native CLI on `PATH`. Codex also requires trusting the hooks. `cairn doctor` checks the configuration.
 
 | Agent | Global instruction file |
 | --- | --- |
 | Claude Code | `${CLAUDE_CONFIG_DIR:-~/.claude}/CLAUDE.md` |
 | Codex | `${CODEX_HOME:-~/.codex}/AGENTS.md` |
 | OpenCode | `${XDG_CONFIG_HOME:-~/.config}/opencode/AGENTS.md` |
+| Grok Build | `${GROK_HOME:-~/.grok}/AGENTS.md` |
+| Antigravity CLI | `~/.gemini/config/AGENTS.md` |
 
 Codex reads a nonempty global `AGENTS.override.md` before `AGENTS.md`. [Codex instruction discovery](https://developers.openai.com/codex/guides/agents-md)
 
 Claude Code setup installs a `PreToolUse` guard matching the four file-writing tools. The guard returns the documented `deny` decision for native memory paths and exits silently for other paths. It uses the filesystem without contacting Cairn. Use `cairn setup <url> --agent claude --keep-native-memory` to omit the guard across updates. This affects the guard only. [Claude Code hook decisions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
 
 Claude Code setup and update refresh add `mcp__cairn` to `permissions.allow` in `settings.json` when neither server-wide rule exists. Removal deletes the bare rule, including a user-added one, and keeps the wildcard rule and permission containers. Codex setup and refresh set `default_tools_approval_mode = "approve"` on `mcp_servers.cairn` in `config.toml`, which also enables Cairn MCP calls in `codex exec`. [Codex configuration reference](https://developers.openai.com/codex/config-reference)
+
+Grok Build registers `mcp_servers.cairn` and grants `MCPTool(cairn__*)` in `config.toml`. The Cairn hooks live in `hooks/cairn.json` under Grok's config directory. SessionStart records the checkout baseline, and the first PostToolUse delivers the brief because Grok ignores SessionStart output. Grok also runs prompt capture, Stop, PreCompact and SessionEnd. When both integrations are installed, Cairn captures Grok activity through its native hooks once. Use `grok inspect` to check discovery. [Grok MCP](https://docs.x.ai/build/features/mcp-servers), [Grok permissions](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/22-permissions-and-safety.md), [Grok hooks](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md), [Grok rules](https://docs.x.ai/build/features/project-rules)
+
+Antigravity CLI registers Cairn in `~/.gemini/config/mcp_config.json` and grants `mcp(cairn/*)` in `~/.gemini/antigravity-cli/settings.json`. Explicit ask and deny rules still apply. Its named Cairn group in `~/.gemini/config/hooks.json` injects the brief on SessionStart, captures the last user input through PreInvocation, captures tool activity on PostToolUse and checkpoints on Stop. The hook API has no compact or session-end event, and PostToolUse supplies neither topic injection nor MCP result contents. Use `agy mcp list` to check the registration. [Antigravity discovery](https://antigravity.google/docs/customization-discovery/), [Antigravity permissions](https://antigravity.google/docs/agent-permissions), [Antigravity hooks](https://antigravity.google/docs/hooks)

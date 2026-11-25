@@ -32,6 +32,7 @@ async fn migrate_twice_is_a_no_op() {
             "0014_memory_owner_project_created",
             "0015_memory_detail",
             "0016_project_archive",
+            "0017_device_agents",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -946,7 +947,7 @@ async fn fixes_migration_additive() {
     }
     sqlx::raw_sql("INSERT INTO accounts (person_id,email,password_hash) VALUES ('p','a@a','x');
         INSERT INTO web_sessions (session_id,person_id,token_hash,expires_at) VALUES ('w','p','hash',now());
-        INSERT INTO devices (device_id,person_id,name,token_hash) VALUES ('d','p','device','hash');
+        INSERT INTO devices (device_id,person_id,name,token_hash,agent) VALUES ('d','p','device','hash','claude');
         INSERT INTO audit_events (audit_id,person_id,action) VALUES ('a','p','test');
         INSERT INTO projects (project_id,owner_id,repository,name) VALUES ('pr','p','repo','project');
         INSERT INTO project_members (project_id,person_id) VALUES ('pr','p');
@@ -1005,6 +1006,7 @@ async fn fixes_migration_additive() {
     versions.push("0011_fixes".into());
     versions.push("0015_memory_detail".into());
     versions.push("0016_project_archive".into());
+    versions.push("0017_device_agents".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1025,6 +1027,29 @@ async fn fixes_migration_additive() {
             .unwrap();
         assert_eq!(count, expected, "{table}");
     }
+    let device: (String, String, String, String) = sqlx::query_as(
+        "SELECT person_id, name, token_hash, agent FROM devices WHERE device_id = 'd'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        device,
+        ("p".into(), "device".into(), "hash".into(), "claude".into())
+    );
+    for agent in ["grok", "antigravity"] {
+        sqlx::query("INSERT INTO devices (device_id,person_id,name,token_hash,agent) VALUES ($1,'p',$1,$1,$1)")
+            .bind(agent)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    assert!(
+        sqlx::query("UPDATE devices SET agent = 'unknown' WHERE device_id = 'd'")
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
     let after: Vec<String> =
         sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
             .fetch_all(store.pool())

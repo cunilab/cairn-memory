@@ -299,7 +299,7 @@ impl Client {
 
     /// A client that says who it is on every request, `User-Agent: cairn/<version> (<agent>;
     /// <kind>)`, so the console can show each device's client version and check-ins. `agent` is
-    /// `claude`, `codex` or `opencode` when the caller knows its host, else empty.
+    /// The host agent when the caller knows it, else empty.
     pub fn identified(config: Config, timeout: Duration, agent: &str, kind: ClientKind) -> Self {
         let mut builder = ureq::Agent::config_builder()
             .user_agent(client_user_agent(env!("CARGO_PKG_VERSION"), agent, kind))

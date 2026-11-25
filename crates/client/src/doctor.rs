@@ -138,6 +138,8 @@ fn agent_checks(home: &Path) -> Vec<Check> {
     };
     let codex = dir("CODEX_HOME", home.join(".codex"));
     let opencode = dir("XDG_CONFIG_HOME", home.join(".config")).join("opencode");
+    let grok = crate::setup::grok::config_dir(home);
+    let antigravity = crate::setup::antigravity::config_dir(home);
     // (agent, config dir, file holding the MCP entry, files holding the hook command)
     let agents = [
         (
@@ -160,6 +162,18 @@ fn agent_checks(home: &Path) -> Vec<Check> {
                 opencode.join("opencode.jsonc"),
             ],
             vec![opencode.join("plugins/cairn/index.js")],
+        ),
+        (
+            "grok",
+            grok.clone(),
+            vec![grok.join("config.toml")],
+            vec![crate::setup::grok::hook_file(home)],
+        ),
+        (
+            "antigravity",
+            antigravity.clone(),
+            vec![antigravity.join("mcp_config.json")],
+            vec![crate::setup::antigravity::hook_file(home)],
         ),
     ];
     let has = |files: &[PathBuf], marker: &str| {

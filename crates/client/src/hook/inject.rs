@@ -63,11 +63,23 @@ pub fn card(card: &str) -> String {
 }
 
 /// The host's reply: context to inject, or for `Stop` a block whose reason is the next turn.
-pub fn output(event: &str, text: &str) -> Value {
-    if event == "Stop" {
-        return json!({"decision": "block", "reason": text});
+pub fn output(agent: &str, event: &str, text: Option<&str>) -> Option<Value> {
+    if agent == "antigravity" {
+        return match (event, text) {
+            ("SessionStart", Some(text)) => {
+                Some(json!({"injectSteps": [{"systemMessage": {"systemMessage": text}}]}))
+            }
+            ("Stop", Some(text)) => Some(json!({"decision": "continue", "reason": text})),
+            ("Stop", None) => Some(json!({"decision": "stop"})),
+            ("PostToolUse", _) => Some(json!({})),
+            _ => None,
+        };
     }
-    json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+    let text = text?;
+    if event == "Stop" {
+        return Some(json!({"decision": "block", "reason": text}));
+    }
+    Some(json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
 }
 
 #[cfg(test)]
@@ -116,10 +128,10 @@ mod tests {
 
     #[test]
     fn stop_replies_block_with_the_reason() {
-        let reply = output("Stop", "why");
+        let reply = output("claude", "Stop", Some("why")).unwrap();
         assert_eq!(reply, json!({"decision": "block", "reason": "why"}));
         assert_eq!(
-            output("SessionStart", "t")["hookSpecificOutput"]["additionalContext"],
+            output("claude", "SessionStart", Some("t")).unwrap()["hookSpecificOutput"]["additionalContext"],
             "t"
         );
     }

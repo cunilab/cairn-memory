@@ -28,6 +28,8 @@ Web console              ──web session───▶       │
 | Claude Code | `--agent claude` | Hooks and MCP |
 | Codex | `--agent codex` | Hooks and MCP; trust hooks in Codex |
 | OpenCode | `--agent opencode` | Plugin hooks and MCP; no continuing Stop reminder |
+| Grok Build | `--agent grok` | Hooks and MCP with a brief on the first tool result |
+| Antigravity CLI | `--agent antigravity` | Hooks and MCP with checkpoints on Stop |
 
 ## Set up Cairn
 
@@ -135,7 +137,7 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex` or `opencode` for those agents. Their native CLIs must be on `PATH`. Codex also requires trusting the installed hooks. Setup manages the hooks, MCP entries, and a block in the agent's global instructions while preserving user text. See [hook setup](docs/reference/hook.md#setup).
+Use `codex`, `opencode`, `grok` or `antigravity` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
 
 In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
 
@@ -147,7 +149,7 @@ In the project folder on the first device run `cairn init "Project name"` and co
 
 ### 4. Update
 
-Back up PostgreSQL and upgrade the server and clients together; migrations run at server startup. Run `cairn update --check` or `cairn update` on each device, then rerun `cairn setup <server-url> --agent <agent>` with the device token on stdin to refresh the integration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.9.md) before upgrading. There is no database downgrade path.
+Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.9.md) before upgrading. There is no database downgrade path.
 
 ## Use Cairn
 

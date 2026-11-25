@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::process;
 
 const USAGE: &str = "Usage:
-  cairn setup <server-url> [--agent claude|codex|opencode] [--remove|--keep-native-memory]
+  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity] [--remove|--keep-native-memory]
+  cairn setup <agent> [--remove]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
   cairn import claude-memory [--yes]
   cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
@@ -74,6 +75,9 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             || (index == 2 && args[0] == "import" && value == "--yes")
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent")
+                    || (index == 2
+                        && value == "--remove"
+                        && setup::AGENTS.contains(&args[1].as_str()))
                     || (index == 4
                         && matches!(value.as_str(), "--remove" | "--keep-native-memory"))));
         if value.starts_with('-') && value != "-" && !allowed {
@@ -161,20 +165,25 @@ fn main() {
 
 fn setup(args: &[String]) -> Result<(), Error> {
     let (url, agent, option) = match args {
-        [url] => (url, None, None),
-        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), None),
+        [agent] if setup::AGENTS.contains(&agent.as_str()) => (None, Some(agent.as_str()), None),
+        [agent, flag] if flag == "--remove" && setup::AGENTS.contains(&agent.as_str()) => {
+            (None, Some(agent.as_str()), Some(flag.as_str()))
+        }
+        [url] => (Some(url), None, None),
+        [url, flag, agent] if flag == "--agent" => (Some(url), Some(agent.as_str()), None),
         [url, flag, agent, option]
             if flag == "--agent"
                 && matches!(option.as_str(), "--remove" | "--keep-native-memory") =>
         {
-            (url, Some(agent.as_str()), Some(option.as_str()))
+            (Some(url), Some(agent.as_str()), Some(option.as_str()))
         }
         _ => usage(),
     };
     if agent.is_some_and(|a| !setup::AGENTS.contains(&a)) {
-        return Err(Error::Input(
-            "agent must be claude, codex or opencode".into(),
-        ));
+        return Err(Error::Input(format!(
+            "agent must be one of {}",
+            setup::AGENTS.join(", ")
+        )));
     }
     let keep_native_memory = option == Some("--keep-native-memory");
     if keep_native_memory && agent != Some("claude") {
@@ -190,13 +199,22 @@ fn setup(args: &[String]) -> Result<(), Error> {
         return Ok(());
     }
     warn_ignored_legacy_config();
-    let path = selected_config_path()?;
-    let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
-    config.save(&path)?;
-    println!("Cairn configured for {} ({})", config.url(), path.display());
-    setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
+    if let Some(url) = url {
+        let path = selected_config_path()?;
+        let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
+        config.save(&path)?;
+        println!("Cairn configured for {} ({})", config.url(), path.display());
+        setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
+    } else {
+        Config::load()?;
+    }
     if let Some(agent) = agent {
-        println!("{}", setup::install(agent, keep_native_memory)?);
+        let done = if url.is_some() {
+            setup::install(agent, keep_native_memory)?
+        } else {
+            setup::configure(agent, false)?
+        };
+        println!("{done}");
         if agent == "codex" {
             println!("Review and trust the installed hooks with /hooks in Codex before they run.");
         }

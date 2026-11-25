@@ -118,6 +118,14 @@ impl Options {
 /// Returns the exit code. `args` is everything after `hook`.
 pub fn run(args: &[String]) -> Result<i32, Error> {
     let options = Options::parse(args)?;
+    // Grok imports Claude's hooks. Its native Cairn hooks own capture when installed.
+    if options.agent == "claude"
+        && options.managed
+        && std::env::var_os("GROK_HOOK_EVENT").is_some()
+        && std::env::home_dir().is_some_and(|home| crate::setup::grok::hooks_installed(&home))
+    {
+        return Ok(0);
+    }
     let handle = match (options.event.as_str(), options.agent.as_str()) {
         ("PreToolUse", "claude") => guard_native_memory(),
         ("PreToolUse", _) => Ok(()),
@@ -203,8 +211,9 @@ fn session(options: &Options) -> Result<(), String> {
         check: OnceCell::new(),
         payload,
     };
-    if let Some(text) = hook.handle()? {
-        println!("{}", inject::output(hook.event, &text));
+    let text = hook.handle()?;
+    if let Some(reply) = inject::output(hook.agent, hook.event, text.as_deref()) {
+        println!("{reply}");
     }
     hook.report_repo_state();
     Ok(())
@@ -212,7 +221,7 @@ fn session(options: &Options) -> Result<(), String> {
 
 struct Hook<'a> {
     event: &'a str,
-    /// `claude`, `codex` or `opencode`: sent in the user agent so the console knows the device.
+    /// Sent in the user agent so the console knows the device's host.
     agent: &'a str,
     config: Config,
     config_dir: PathBuf,
@@ -233,7 +242,7 @@ impl Hook<'_> {
         self.note_automation();
         match self.event {
             "SessionStart" => Ok(self.start()),
-            "UserPromptSubmit" => {
+            "UserPromptSubmit" | "PreInvocation" => {
                 let prompt = self.payload.prompt();
                 if let Some(capture) = &prompt {
                     if has_typed_line(&capture.content) {
@@ -243,7 +252,19 @@ impl Hook<'_> {
                 }
                 self.capture(prompt).map(|()| None)
             }
-            "PostToolUse" => self.tool(),
+            "PostToolUse" => {
+                let brief = (self.agent == "grok"
+                    && self
+                        .with_state(|s| !std::mem::replace(&mut s.grok_brief_shown, true))
+                        .unwrap_or(false))
+                .then(|| self.brief())
+                .flatten();
+                let topic = self.tool()?;
+                Ok(match (brief, topic) {
+                    (Some(brief), Some(topic)) => Some(format!("{brief}\n{topic}")),
+                    (brief, topic) => brief.or(topic),
+                })
+            }
             "Stop" | "SubagentStop" => {
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
@@ -356,7 +377,14 @@ impl Hook<'_> {
     fn start(&self) -> Option<String> {
         state::sweep(&self.state_dir());
         let dirty = git::dirty_files(&self.cwd, BASELINE_MAX);
-        self.with_state(|state| state.baseline_dirty = dirty);
+        self.with_state(|state| {
+            state.baseline_dirty = dirty;
+            state.grok_brief_shown = false;
+        });
+        (self.agent != "grok").then(|| self.brief()).flatten()
+    }
+
+    fn brief(&self) -> Option<String> {
         let body = json!({
             "session_id": self.session_id,
             "context": self.work_context(),
@@ -494,6 +522,7 @@ impl Hook<'_> {
         self.session_automated()
             || self.payload.text("agent_id").is_some()
             || self.payload.text("agent_type").is_some()
+            || self.payload.text("subagentType").is_some()
             || self.event == "SubagentStop"
     }
 
@@ -518,6 +547,13 @@ impl Hook<'_> {
     /// subagent session, not for OpenCode, and not when the stop text is `off`.
     fn stop_nudge(&self) -> Option<String> {
         if self.payload.flag("stop_hook_active")
+            || self.payload.flag("stopHookActive")
+            || (self.agent == "grok"
+                && matches!(
+                    self.payload.text("reason"),
+                    Some("channel_closed" | "shutdown")
+                ))
+            || (self.agent == "antigravity" && !self.payload.flag("fullyIdle"))
             || self.automated()
             || self.agent == "opencode"
             || !self.nudging()
@@ -594,6 +630,9 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        if self.agent == "antigravity" && tool.is_file_tool() && tool.ok() == Some(false) {
+            return Ok(None);
+        }
         if let Some(mut lookup) = tool.lookup() {
             lookup["session_id"] = json!(self.session_id);
             let _ = self.post("/cairn-memory/session/lookup", &lookup);
@@ -651,6 +690,9 @@ impl Hook<'_> {
 
     /// The note text for the first edit of `path`, within the per-session caps.
     fn topic(&self, path: &str) -> Option<String> {
+        if self.agent == "antigravity" {
+            return None; // The host discards context returned from PostToolUse.
+        }
         // The lookup is reserved before the request, so a failing server is not asked without end.
         let wanted = self.with_state(|s| {
             let wanted = !s.topics.iter().any(|seen| seen == path)
@@ -746,7 +788,7 @@ impl Hook<'_> {
         };
         let (event_id, hash) = if capture.kind == CaptureKind::Command {
             // A repeat execution has a new tool id. The outbox retains the id assigned here.
-            let event_id = self.payload.text("tool_use_id").map_or_else(
+            let event_id = self.payload.tool_use_id().map_or_else(
                 || new_id("hk"),
                 |id| {
                     format!(
@@ -857,7 +899,8 @@ impl Hook<'_> {
         let automated = locked.state.automated
             || Self::env_automated()
             || self.payload.text("agent_id").is_some()
-            || self.payload.text("agent_type").is_some();
+            || self.payload.text("agent_type").is_some()
+            || self.payload.text("subagentType").is_some();
         drop(locked);
         if worked {
             self.capture_changed_files();

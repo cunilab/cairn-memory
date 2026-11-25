@@ -96,7 +96,8 @@ model API is used. Record shape and visibility: [projects](projects.md#memory-sc
 ## CLI
 
 ```
-cairn setup <url> [--agent claude|codex|opencode] [--remove|--keep-native-memory]   cairn init [name] [--yes]
+cairn setup <url> [--agent claude|codex|opencode|grok|antigravity] [--remove|--keep-native-memory]
+cairn setup <agent> [--remove]                           cairn init [name] [--yes]
 cairn import claude-memory [--yes]
 cairn fixes [apply [id]]     cairn doctor     cairn mcp     cairn update [--check]     cairn hook <Event> …     cairn --version
 cairn search <query> [--kind k] [--limit n]     cairn get <id>... [--detail]     cairn save [<json>|-]

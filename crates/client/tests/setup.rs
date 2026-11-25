@@ -133,6 +133,190 @@ fn expected(event: &str, agent: &str, home: &Home) -> String {
 }
 
 #[test]
+fn grok_setup_round_trips_config_hooks_and_instructions() {
+    let home = Home::new("grok", false);
+    let original = concat!(
+        "# Keep this comment\n",
+        "[permission]\nallow = [\"Read\"]\ndeny = [\"Bash(rm *)\"]\n",
+        "[mcp_servers.other]\ncommand = \"user-mcp\"\n",
+    );
+    let config = home.write(".grok/config.toml", original);
+    let hooks = home.write(".grok/hooks/user.json", r#"{"hooks":{"Stop":[]}}"#);
+    let instructions = home.write(".grok/AGENTS.md", "Grok user instructions\n");
+    home.ok("grok", false);
+
+    let read_config = || fs::read_to_string(&config).unwrap();
+    let installed = read_config().parse::<toml_edit::DocumentMut>().unwrap();
+    let server = &installed["mcp_servers"]["cairn"];
+    assert_eq!(server["command"].as_str(), Some(EXE));
+    assert_eq!(server["args"][0].as_str(), Some("mcp"));
+    assert_eq!(server["env"]["CAIRN_SETUP_MANAGED"].as_str(), Some("1"));
+    assert_eq!(
+        server["env"]["XDG_CONFIG_HOME"].as_str(),
+        home.dir.join(".config").to_str()
+    );
+    let allow = installed["permission"]["allow"].as_array().unwrap();
+    assert_eq!(
+        allow
+            .iter()
+            .filter_map(toml_edit::Value::as_str)
+            .collect::<Vec<_>>(),
+        ["Read", "MCPTool(cairn__*)"]
+    );
+    let installed = home.json(".grok/hooks/cairn.json");
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PostToolUse",
+        "Stop",
+        "PreCompact",
+        "SessionEnd",
+    ] {
+        assert_eq!(
+            command_of(&installed["hooks"][event][0]),
+            expected(event, "grok", &home)
+        );
+    }
+    assert!(
+        fs::read_to_string(&instructions)
+            .unwrap()
+            .contains(cairn_client::tools::instructions())
+    );
+    check_existing_setup(&home, "grok", ".grok");
+    assert_eq!(read_config().trim_end(), original.trim_end());
+    assert_eq!(
+        fs::read_to_string(hooks).unwrap(),
+        r#"{"hooks":{"Stop":[]}}"#
+    );
+    assert_eq!(
+        fs::read_to_string(instructions).unwrap(),
+        "Grok user instructions\n"
+    );
+    assert!(home.json(".grok/hooks/cairn.json").get("hooks").is_none());
+}
+
+#[test]
+fn antigravity_setup_round_trips_config_hooks_and_instructions() {
+    let home = Home::new("antigravity", false);
+    let mcp = ".gemini/config/mcp_config.json";
+    let hooks = ".gemini/config/hooks.json";
+    let settings = ".gemini/antigravity-cli/settings.json";
+    let user_mcp = json!({"mcpServers": {"other": {"command": "user-mcp", "disabled": true}}});
+    let user_hooks = json!({"user-hook": {"Stop": [{"command": "user-hook"}]}});
+    let user_settings = json!({"toolPermission": "request-review", "permissions": {
+        "allow": ["mcp(other/*)"], "deny": ["mcp(cairn/memory_forget)"]
+    }});
+    home.write(mcp, &user_mcp.to_string());
+    home.write(hooks, &user_hooks.to_string());
+    home.write(settings, &user_settings.to_string());
+    let rules = home.write(
+        ".gemini/config/AGENTS.md",
+        "Antigravity user instructions\n",
+    );
+    home.ok("antigravity", false);
+
+    let server = &home.json(mcp)["mcpServers"]["cairn"];
+    assert_eq!(server["command"], EXE);
+    assert_eq!(server["args"], json!(["mcp"]));
+    assert_eq!(server["env"]["CAIRN_SETUP_MANAGED"], "1");
+    assert_eq!(
+        server["env"]["XDG_CONFIG_HOME"],
+        json!(home.dir.join(".config"))
+    );
+    assert_eq!(
+        home.json(settings)["permissions"],
+        json!({
+            "allow": ["mcp(other/*)", "mcp(cairn/*)"], "deny": ["mcp(cairn/memory_forget)"]
+        })
+    );
+    let installed = home.json(hooks);
+    for event in ["SessionStart", "PreInvocation", "Stop"] {
+        assert_eq!(
+            installed["cairn"][event][0]["command"],
+            expected(event, "antigravity", &home)
+        );
+    }
+    assert_eq!(
+        command_of(&installed["cairn"]["PostToolUse"][0]),
+        expected("PostToolUse", "antigravity", &home)
+    );
+    assert!(
+        fs::read_to_string(&rules)
+            .unwrap()
+            .contains(cairn_client::tools::instructions())
+    );
+    check_existing_setup(&home, "antigravity", ".gemini");
+    assert_eq!(home.json(mcp), user_mcp);
+    assert_eq!(home.json(hooks), user_hooks);
+    assert_eq!(home.json(settings), user_settings);
+    assert_eq!(
+        fs::read_to_string(rules).unwrap(),
+        "Antigravity user instructions\n"
+    );
+}
+
+fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
+    let command = || {
+        let mut cmd = command(&home.dir.join(".config"));
+        cmd.env("HOME", &home.dir).env("USERPROFILE", &home.dir);
+        cmd
+    };
+    let before = home.snapshot(folder);
+    assert!(
+        command()
+            .args(["setup", agent])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(home.snapshot(folder), before);
+    let doctor = command().arg("doctor").output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        doctor.contains(&format!("{agent} MCP entry present")),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains(&format!("{agent} hook present")),
+        "{doctor}"
+    );
+    let removed = command()
+        .args(["setup", agent, "--remove"])
+        .output()
+        .unwrap();
+    assert!(removed.status.success(), "{removed:?}");
+}
+
+#[test]
+fn new_hosts_keep_preexisting_grants_and_refuse_unmarked_servers() {
+    let grok = Home::new("grok-existing", false);
+    let agy = Home::new("antigravity-existing", false);
+    let allow = "[permission]\nallow = [\"MCPTool(cairn__*)\"]\n";
+    let toml = grok.write(".grok/config.toml", allow);
+    let permissions = r#"{"permissions":{"allow":["mcp(cairn/*)"]}}"#;
+    let agy_settings = agy.write(".gemini/antigravity-cli/settings.json", permissions);
+    for (home, agent) in [(&grok, "grok"), (&agy, "antigravity")] {
+        home.ok(agent, false);
+        home.ok(agent, true);
+    }
+    assert_eq!(
+        fs::read_to_string(&toml).unwrap().trim_end(),
+        allow.trim_end()
+    );
+    assert_eq!(fs::read_to_string(agy_settings).unwrap(), permissions);
+
+    let other_grok = "[mcp_servers.cairn]\ncommand = \"user-mcp\"\n";
+    fs::write(&toml, other_grok).unwrap();
+    let other_agy = r#"{"mcpServers":{"cairn":{"command":"user-mcp"}}}"#;
+    let mcp = agy.write(".gemini/config/mcp_config.json", other_agy);
+    grok.err("grok", "unmarked cairn MCP entry");
+    agy.err("antigravity", "unmarked cairn MCP entry");
+    assert_eq!(fs::read_to_string(toml).unwrap(), other_grok);
+    assert_eq!(fs::read_to_string(mcp).unwrap(), other_agy);
+}
+
+#[test]
 fn claude_install_remove_keeps_others() {
     let home = Home::new("claude", false);
     let instructions = "User's Claude instructions.\n";
