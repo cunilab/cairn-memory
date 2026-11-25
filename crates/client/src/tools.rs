@@ -172,7 +172,11 @@ fn checkout_context(dir: &Path) -> Option<Value> {
     if let Some(commit) = project::git(&top, &["rev-parse", "--verify", "-q", "HEAD"]) {
         context.insert("commit".to_owned(), json!(commit));
     }
-    context.insert("worktree".to_owned(), json!(top.to_string_lossy()));
+    let canonical_top = top.canonicalize().unwrap_or(top);
+    context.insert(
+        "worktree".to_owned(),
+        json!(project::worktree_id(&canonical_top)),
+    );
     Some(Value::Object(context))
 }
 
@@ -367,7 +371,7 @@ mod tests {
         assert_eq!(context["branch"], "main");
         assert_eq!(context["project_id"], "proj_x");
         assert_eq!(context["commit"].as_str().unwrap().len(), 40);
-        assert_eq!(context["worktree"], dir.to_string_lossy().as_ref());
+        assert_eq!(context["worktree"], project::worktree_id(&dir));
     }
 
     #[test]

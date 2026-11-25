@@ -67,6 +67,7 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 - **Self-hosted accounts:** the first account is the administrator; password and device credentials are stored as hashes. Humans manage devices in the web console.
 - **Linked corrections:** a replacement links to the previous record, preserving provenance and making both searchable.
 - **Scopes and hybrid recall:** personal, project and global scopes set visibility; text, entities, links and local embeddings improve retrieval without broadening access.
+- Hooks and agent tools send the same opaque worktree ID derived from the canonical checkout path. This lets explicit search find personal handoffs captured in that checkout.
 - **Small agent surface:** five MCP tools, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
 - Setup and client updates allow the Cairn MCP server's tools in Claude Code and Codex so headless sessions can use them. The approval settings are scoped to the Cairn server.
 

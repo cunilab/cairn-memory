@@ -1,8 +1,8 @@
 //! Repository facts for the hook, read with `git`: work context, recent files, repo-relative
 //! paths and the `.cairnignore` marker. Failure of any call just leaves the fact out.
 
+use crate::project::worktree_id;
 use cairn_core::capture::WorkContext;
-use cairn_core::id::sha256_hex;
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -107,12 +107,11 @@ pub fn work_context(cwd: &Path, top: Option<&Path>) -> WorkContext {
     let origin = git(cwd, &["config", "--get", "remote.origin.url"]).unwrap_or_default();
     let branch = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
         .filter(|branch| !branch.is_empty() && branch != "HEAD");
-    let hash = sha256_hex(&[&top.to_string_lossy()]);
     WorkContext {
         project_id: project_id(top),
         repository: Some(repository_name(&origin, top)),
         branch,
-        worktree: Some(format!("wt-{}", &hash[..16])),
+        worktree: Some(worktree_id(top)),
         ..WorkContext::default()
     }
 }

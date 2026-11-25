@@ -1604,6 +1604,61 @@ fn a_hanging_git_does_not_hold_the_hook() {
 // ---- real server ------------------------------------------------------------------------
 
 #[test]
+fn mcp_search_finds_a_checkpoint_note_and_handoff_in_the_same_checkout() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-recall");
+    let dir = checkout("hook-recall");
+    let init = team.owner.run_in(&dir, &["init", "E2E Hook Recall"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+
+    let run = |event, session, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        assert_eq!(stderr(&output), "", "{event}");
+        output
+    };
+    run(
+        "UserPromptSubmit",
+        "recall",
+        json!({"prompt": "Decision: bound queue concurrency\nReason: protect the worker pool\nTODO: verify exponential backoff"}),
+    );
+    run(
+        "PostToolUse",
+        "recall",
+        edit_call("src/queue.rs", "fn run() {}", "edit"),
+    );
+    run("Stop", "recall", json!({}));
+    assert_eq!(server.distill(&team.owner_id, "recall"), 1);
+    run("SessionEnd", "recall", json!({}));
+    server.distill(&team.owner_id, "recall");
+
+    let brief = injected(&run("SessionStart", "next-session", json!({}))).unwrap();
+    assert!(brief.contains("verify exponential backoff"), "{brief}");
+    assert!(!brief.contains("bound queue concurrency"), "{brief}");
+
+    let mut mcp = team.owner.mcp_in(&dir);
+    let note = mcp.ok("memory_search", json!({"query": "bound queue concurrency"}));
+    assert_eq!(note["results"][0]["kind"], "decision", "{note}");
+    let handoff = mcp.ok(
+        "memory_search",
+        json!({"query": "verify exponential backoff"}),
+    );
+    assert_eq!(handoff["results"][0]["kind"], "handoff", "{handoff}");
+}
+
+#[test]
 fn real_hook_switches_context_within_one_session_without_sharing_notes() {
     let Some(server) = Server::start() else {
         return;
