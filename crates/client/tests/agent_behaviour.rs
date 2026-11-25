@@ -93,6 +93,15 @@ fn save_with_a_reason() {
     let text = refused["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("reason") && !text.contains('\n'), "{text}");
 
+    let mut body = decision();
+    body["summary"] = json!("x".repeat(263));
+    let refused = mcp.tool("memory_save", body);
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["content"][0]["text"],
+        "HTTP 400: summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail"
+    );
+
     let first = mcp.ok("memory_save", decision());
     assert_eq!(first["status"], "active");
     assert_eq!(first["deduplicated"], false);

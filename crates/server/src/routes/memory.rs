@@ -168,8 +168,10 @@ async fn save_items(
         return Err(ApiError::invalid("items: at most 3 notes"));
     }
     let mut results = Vec::with_capacity(items.len());
-    for item in items {
-        results.push(save_item(state, person_id, device_id, context, item).await);
+    for (index, item) in items.iter().enumerate() {
+        let mut result = save_item(state, person_id, device_id, context, item).await;
+        result.error = result.error.map(|error| format!("items[{index}]: {error}"));
+        results.push(result);
     }
     Ok(Json(ItemResults { results }).into_response())
 }

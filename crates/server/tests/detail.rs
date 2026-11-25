@@ -25,11 +25,9 @@ async fn detail_is_saved_and_searchable_but_requires_an_explicit_single_get() {
         .send("POST", "remember", body.clone(), Some(&device))
         .await;
     assert_eq!(status, 400);
-    assert!(
-        invalid["error"]
-            .as_str()
-            .unwrap()
-            .contains("detail must be at most 8000")
+    assert_eq!(
+        invalid["error"],
+        "detail is 8001 characters, limit 8000: cut 1"
     );
     body["detail"] = json!(detail);
     let dedup = app.post("remember", body.clone(), &device).await;

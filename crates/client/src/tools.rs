@@ -44,7 +44,7 @@ pub const TOOLS: [Tool; 5] = [
     },
     Tool {
         name: "memory_save",
-        description: "Save verified, reusable knowledge. reason: why it is true or was chosen (required except note). fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. Correct a memory by saving the new version with supersedes=<old id> (your own memory, or a project memory of the same project). contradicts=<id> when it conflicts with a memory you cannot replace. scope defaults: project in an initialized repo, personal otherwise and for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions a future agent might ask that this answers.",
+        description: "Save verified, reusable knowledge. Per note: title <=10 words (80 chars max); summary one sentence, <=30 words (240 chars max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. Put longer background in detail. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
         cli: "save",
         route: "/remember",
         schema: || {
@@ -290,9 +290,12 @@ mod tests {
         let grown = with_aliases.len() - schema.to_string().len();
         assert!(grown <= 200, "aliases add {grown} bytes: {with_aliases}");
         assert!(with_aliases.contains("\"maxItems\":5"), "{with_aliases}");
-        assert!(find("memory_save").unwrap().description.contains(
-            "aliases: up to 5 short questions a future agent might ask that this answers."
-        ));
+        assert!(
+            find("memory_save")
+                .unwrap()
+                .description
+                .contains("aliases: up to 5 short questions this answers.")
+        );
     }
 
     /// An items-only save must be valid in the published schema. Hosts that

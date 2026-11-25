@@ -81,7 +81,7 @@ async fn save_items_partial_success() {
             "remember",
             json!({"items": [
                 note("fact", "Second compact note", "Another compact note is stored on its own."),
-                {"kind": "fact", "title": "x", "summary": "y", "reason": "z"},
+                note("fact", "Too long summary", &"x".repeat(263)),
                 {
                     "kind": "rule",
                     "title": "Second full save note",
@@ -98,9 +98,9 @@ async fn save_items_partial_success() {
     assert_eq!(statuses(&mixed), ["saved", "error", "saved"]);
     let error = &mixed["results"][1];
     assert!(error.get("id").is_none() || error["id"].is_null());
-    assert!(
-        error["error"].as_str().is_some_and(|text| !text.is_empty()),
-        "{error}"
+    assert_eq!(
+        error["error"],
+        "items[1]: validation error: summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail"
     );
     assert_eq!(rows(&device).await, 5);
 

@@ -52,7 +52,7 @@ branch, worktree, commit, `project_id`) from git when available; it is in no sch
 | `memory_forget` | `POST /forget` | `id` |
 
 `reason` is required for every kind except `note`; the server answers the one-line error
-`reason: required for <kind>`. A correction is a save with `supersedes=<old id>`, allowed on the
+`reason must not be empty for kind <kind>`. A correction is a save with `supersedes=<old id>`, allowed on the
 caller's own memory or a project memory of the same project; a declared contradiction, for a memory
 the caller cannot replace, is `contradicts=<id>`. Nothing infers either. `memory_forget` hides a memory the caller
 owns from normal recall and is described in its own schema only, not in the instruction text.
