@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
-use cairn_store::memory::{ListFilter, Vote};
+use cairn_store::memory::{ListFilter, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
 use cairn_store::view::MemoryView;
@@ -20,6 +20,23 @@ pub struct Receipt {
     id: String,
     status: Status,
     deduplicated: bool,
+    #[serde(flatten)]
+    coaching: Option<Coaching>,
+}
+
+#[derive(Serialize)]
+struct Coaching {
+    hints: Vec<String>,
+    improve: String,
+}
+
+impl Coaching {
+    fn from_saved(saved: &mut Saved) -> Option<Self> {
+        (!saved.hints.is_empty()).then(|| Self {
+            hints: std::mem::take(&mut saved.hints),
+            improve: format!("Improve it: save again with supersedes={}.", saved.id),
+        })
+    }
 }
 
 /// An id, under any of the names the console, the CLI and the hook use.
@@ -86,6 +103,8 @@ struct ItemResult {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(flatten)]
+    coaching: Option<Coaching>,
 }
 
 #[derive(Serialize)]
@@ -123,7 +142,7 @@ pub async fn remember(
     }
     let input: SaveInput =
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
-    let saved = state
+    let mut saved = state
         .store
         .save_from(
             &account.person_id,
@@ -133,6 +152,7 @@ pub async fn remember(
         )
         .await?;
     Ok(Json(Receipt {
+        coaching: Coaching::from_saved(&mut saved),
         id: saved.id,
         status: saved.status,
         deduplicated: saved.deduplicated,
@@ -190,6 +210,7 @@ async fn save_item(
                 id: None,
                 status: "error",
                 error: Some(error.to_string()),
+                coaching: None,
             };
         }
     };
@@ -198,7 +219,8 @@ async fn save_item(
         .save_from(person_id, input, context, device_id)
         .await
     {
-        Ok(saved) => ItemResult {
+        Ok(mut saved) => ItemResult {
+            coaching: Coaching::from_saved(&mut saved),
             id: Some(saved.id),
             status: if saved.deduplicated {
                 "duplicate"
@@ -211,6 +233,7 @@ async fn save_item(
             id: None,
             status: "error",
             error: Some(error.to_string()),
+            coaching: None,
         },
     }
 }

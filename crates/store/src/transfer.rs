@@ -191,9 +191,7 @@ impl Store {
             .and_then(Value::as_str)
             .map(str::to_owned);
         if !dry_run {
-            let saved = self
-                .save_as(person_id, input, &work, Origin::Agent, None)
-                .await?;
+            let saved = self.save(person_id, input, &work).await?;
             return Ok(!saved.deduplicated);
         }
         let new = prepare_save(input, &work, wants_project, Origin::Agent, now_seconds())?;

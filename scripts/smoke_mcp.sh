@@ -86,7 +86,7 @@ try:
         return json.loads(result["content"][0]["text"])
 
 
-    record = {"scope":"global", "kind":"procedure", "title":"Scoped record", "summary":"Typed RPC record for the smoke test", "reason":"Round trip verification", "fields":{"steps":["one", "two"], "when":"testing"}}
+    record = {"scope":"global", "kind":"procedure", "title":"Save a scoped record", "summary":"Typed RPC record for the smoke test", "reason":"Round trip verification", "fields":{"steps":["one", "two"], "when":"testing"}}
     for index, field in enumerate(["kind", "title", "summary", "reason"]):
         missing = dict(record)
         del missing[field]
@@ -118,7 +118,7 @@ try:
     by_kind = result_json(call(16, "tools/call", {"name": "memory_search", "arguments": {"query": "scoped record typed RPC", "kind": "rule"}}))
     assert by_kind["results"] == []
 
-    newer = dict(record, title="Scoped record v2", summary="Typed RPC record, replaced", supersedes=saved["id"])
+    newer = dict(record, title="Scoped record v2", summary="This typed RPC record replaces the previous version.", supersedes=saved["id"])
     newer_id = result_json(call(32, "tools/call", {"name":"memory_save", "arguments":newer}))["id"]
     rows = result_json(call(7, "tools/call", {"name": "memory_search", "arguments": {"query": "scoped record typed RPC", "limit": 5}}))["results"]
     ids = [m["id"] for m in rows]

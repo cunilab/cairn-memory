@@ -3,12 +3,14 @@ use crate::project::join_member;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::{new_id, now_seconds};
+use cairn_core::memory::coaching::save_hints;
 use cairn_core::memory::model::Rank;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
     TrustLevel, Usage,
 };
 use cairn_core::process::jobs::JobKind;
+use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
@@ -195,6 +197,14 @@ pub struct Saved {
     pub status: Status,
     /// True when an identical memory already existed; nothing new was written.
     pub deduplicated: bool,
+    pub hints: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum SaveSource {
+    Agent,
+    StrictAgent,
+    System,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,17 +241,18 @@ pub struct Page {
 }
 
 impl Store {
-    /// An agent's save. Project membership comes from the work context's project id.
+    /// A strictly validated agent save. Project membership comes from the work context.
     pub async fn save(
         &self,
         person_id: &str,
         input: SaveInput,
         work: &WorkContext,
     ) -> Result<Saved> {
-        self.save_from(person_id, input, work, None).await
+        self.save_as(person_id, input, work, SaveSource::StrictAgent, None)
+            .await
     }
 
-    /// `save`, remembering which of the person's devices made it (the console shows its name).
+    /// Explicit agent save with advisory coaching and optional device provenance.
     pub async fn save_from(
         &self,
         person_id: &str,
@@ -249,7 +260,7 @@ impl Store {
         work: &WorkContext,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        self.save_as(person_id, input, work, Origin::Agent, device_id)
+        self.save_as(person_id, input, work, SaveSource::Agent, device_id)
             .await
     }
 
@@ -258,33 +269,19 @@ impl Store {
         person_id: &str,
         input: SaveInput,
         work: &WorkContext,
-        origin: Origin,
+        source: SaveSource,
         device_id: Option<&str>,
     ) -> Result<Saved> {
         let project_id = self.context_project(person_id, work, device_id).await?;
-        self.save_with_project(
+        let mut tx = self.pool.begin().await?;
+        let saved = save_in_tx(
+            &mut tx,
             person_id,
             input,
             work,
-            origin,
+            source,
             device_id,
             project_id.as_deref(),
-        )
-        .await
-    }
-
-    pub(crate) async fn save_with_project(
-        &self,
-        person_id: &str,
-        input: SaveInput,
-        work: &WorkContext,
-        origin: Origin,
-        device_id: Option<&str>,
-        project_id: Option<&str>,
-    ) -> Result<Saved> {
-        let mut tx = self.pool.begin().await?;
-        let saved = save_in_tx(
-            &mut tx, person_id, input, work, origin, device_id, project_id,
         )
         .await?;
         tx.commit().await?;
@@ -417,7 +414,7 @@ impl Store {
         .bind(i32::from(detail))
         .execute(&mut *tx)
         .await?;
-        promote_candidates(&mut *tx, memory_ids).await?;
+        promote_candidates(&mut *tx, memory_ids, false).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -661,7 +658,7 @@ impl Store {
         }
         if vote == Vote::Helpful {
             let ids = [memory_id.to_owned()];
-            promote_candidates(&mut *tx, &ids).await?;
+            promote_candidates(&mut *tx, &ids, true).await?;
         }
         tx.commit().await?;
         Ok(new_status)
@@ -780,18 +777,21 @@ pub(crate) async fn link_tx(
     Ok(())
 }
 
-/// A fetch, a helpful vote, a duplicate save, or a consolidate re-statement confirms a candidate.
+/// A read confirms system candidates. Agent candidates need a correction or a helpful vote.
 pub(crate) async fn promote_candidates<'e>(
     db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     memory_ids: &[String],
+    include_agent: bool,
 ) -> Result<()> {
     if memory_ids.is_empty() {
         return Ok(());
     }
     sqlx::query(
-        "UPDATE memories SET rank = 'normal' WHERE memory_id = ANY($1) AND rank = 'candidate'",
+        "UPDATE memories SET rank = 'normal'
+          WHERE memory_id = ANY($1) AND rank = 'candidate' AND ($2 OR origin = 'system')",
     )
     .bind(memory_ids)
+    .bind(include_agent)
     .execute(db)
     .await?;
     Ok(())
@@ -802,7 +802,7 @@ pub(crate) async fn save_in_tx(
     person_id: &str,
     mut input: SaveInput,
     work: &WorkContext,
-    origin: Origin,
+    source: SaveSource,
     device_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Result<Saved> {
@@ -812,8 +812,35 @@ pub(crate) async fn save_in_tx(
         .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
         .collect();
     input.aliases = aliases.clone();
-    let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
-    let saved = insert_memory(tx, person_id, project_id, &new, None, device_id).await?;
+    let new = match source {
+        SaveSource::Agent => {
+            prepare_coached_save(input, work, project_id.is_some(), now_seconds())?
+        }
+        SaveSource::StrictAgent => prepare_save(
+            input,
+            work,
+            project_id.is_some(),
+            Origin::Agent,
+            now_seconds(),
+        )?,
+        SaveSource::System => prepare_save(
+            input,
+            work,
+            project_id.is_some(),
+            Origin::System,
+            now_seconds(),
+        )?,
+    };
+    let saved = insert_memory(
+        tx,
+        person_id,
+        project_id,
+        &new,
+        None,
+        device_id,
+        matches!(source, SaveSource::Agent),
+    )
+    .await?;
     if !saved.deduplicated {
         insert_agent_aliases(tx, &saved.id, &aliases).await?;
     }
@@ -843,6 +870,7 @@ pub(crate) async fn insert_memory(
     new: &NewMemory,
     fixed_id: Option<&str>,
     device_id: Option<&str>,
+    coach: bool,
 ) -> Result<Saved> {
     lock_project_memory(tx, new.scope, project_id).await?;
     let project_id = if new.scope == Scope::Global {
@@ -851,10 +879,22 @@ pub(crate) async fn insert_memory(
         project_id
     };
     let id = fixed_id.map_or_else(|| new_id("mem"), str::to_owned);
-    // A distilled note starts low. Handoffs and promoted global copies stay at the normal rank.
-    let rank = if new.origin == Origin::System
-        && new.kind != Kind::Handoff
-        && new.scope != Scope::Global
+    let mut hints = if coach && new.kind != Kind::Handoff {
+        let duplicate = crate::consolidate::save_duplicate(tx, person_id, project_id, new).await?;
+        save_hints(
+            &new.title,
+            &new.summary,
+            &new.reason,
+            &new.fields,
+            duplicate
+                .as_ref()
+                .map(|(id, title)| (id.as_str(), title.as_str())),
+        )
+    } else {
+        Vec::new()
+    };
+    let rank = if !hints.is_empty()
+        || (new.origin == Origin::System && new.kind != Kind::Handoff && new.scope != Scope::Global)
     {
         Rank::Candidate
     } else {
@@ -894,7 +934,7 @@ pub(crate) async fn insert_memory(
     .await?;
     let Some(id) = inserted else {
         let existing = sqlx::query(
-            "SELECT memory_id, status FROM memories
+            "SELECT memory_id, status, origin, rank FROM memories
               WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '') AND identity_hash = $4",
         )
         .bind(person_id)
@@ -908,16 +948,20 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
-        if new.origin != Origin::System {
-            // Saving the same note again confirms it and counts as another sighting.
-            promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
+        let coached = parse::<Origin>(&existing, "origin")? == Origin::Agent
+            && parse::<Rank>(&existing, "rank")? == Rank::Candidate;
+        let self_correction = new.supersedes.as_deref() == Some(id.as_str());
+        if new.origin != Origin::System
+            && (!coached || (self_correction && coach && hints.is_empty()))
+        {
+            promote_candidates(&mut *tx, std::slice::from_ref(&id), true).await?;
             sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
                 .bind(&id)
                 .execute(&mut *tx)
                 .await?;
         }
         // A correction to non-identifying text dedupes onto its own target.
-        if new.supersedes.as_deref() == Some(id.as_str()) {
+        if self_correction {
             sqlx::query("UPDATE memories SET reason = $2, detail = coalesce($3, detail), updated_at = now() WHERE memory_id = $1")
                 .bind(&id)
                 .bind(&new.reason)
@@ -931,11 +975,15 @@ pub(crate) async fn insert_memory(
                 .execute(&mut *tx)
                 .await?;
         }
+        if !coached {
+            hints.clear();
+        }
         save_links(tx, person_id, &id, project_id, new).await?;
         return Ok(Saved {
             id,
             status,
             deduplicated: true,
+            hints,
         });
     };
     let (kinds, names): (Vec<&str>, Vec<&str>) = new
@@ -962,6 +1010,7 @@ pub(crate) async fn insert_memory(
         id,
         status: Status::Active,
         deduplicated: false,
+        hints,
     })
 }
 
@@ -1072,6 +1121,7 @@ impl Store {
             &prepared,
             None,
             None,
+            false,
         )
         .await?;
         if saved.deduplicated {

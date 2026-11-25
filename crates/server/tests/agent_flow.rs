@@ -44,6 +44,135 @@ fn statuses(body: &Value) -> Vec<&str> {
 }
 
 #[tokio::test]
+async fn coaches_each_save_and_clean_supersede_replaces_candidate() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("quality").await;
+    let device = app.device(&admin, "quality-laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "github.com/acme/save-coaching", "name": "E2E Batch coaching"}),
+            &device,
+        )
+        .await;
+    let context = json!({"project_id": project["project_id"]});
+    let weak = note("fact", "Fix", "A short summary");
+    let mut thin = note(
+        "decision",
+        "Keep the import review window",
+        "Reviewers need time to check imported notes.",
+    );
+    thin["reason"] = json!("Verified.");
+    let batch = app
+        .post(
+            "remember",
+            json!({
+                "context": context,
+                "items": [weak, thin, compact_note()]
+            }),
+            &device,
+        )
+        .await;
+    assert_eq!(statuses(&batch), ["saved", "saved", "saved"]);
+    let [first, second, third] = batch["results"].as_array().unwrap().as_slice() else {
+        panic!("{batch}");
+    };
+    assert_eq!(
+        first["hints"],
+        json!([
+            "Use at least three specific words in the title to name the lesson.",
+            "Write a summary of at least five words that adds to the title."
+        ])
+    );
+    assert_eq!(
+        second["hints"],
+        json!([
+            "Reason should explain why this is true or was chosen in at least 20 characters.",
+            "Add decision context or list the alternatives you considered."
+        ])
+    );
+    assert!(
+        third.get("hints").is_none() && third.get("improve").is_none(),
+        "{third}"
+    );
+    for item in [first, second] {
+        let id = item["id"].as_str().unwrap();
+        assert_eq!(
+            item["improve"],
+            format!("Improve it: save again with supersedes={id}.")
+        );
+        let rank: String = sqlx::query_scalar("SELECT rank FROM memories WHERE memory_id = $1")
+            .bind(id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(rank, "candidate");
+    }
+
+    let mut correction = note(
+        "fact",
+        "Retain receipts for reconciliation",
+        "Reconciliation reads the receipts retained by the import.",
+    );
+    correction["context"] = context;
+    correction["supersedes"] = first["id"].clone();
+    let saved = app.post("remember", correction, &device).await;
+    assert_eq!(
+        saved,
+        json!({"id": saved["id"], "status": "active", "deduplicated": false})
+    );
+    assert_ne!(saved["id"], first["id"]);
+    let got = app
+        .post("get", json!({"ids": [first["id"], saved["id"]]}), &device)
+        .await;
+    assert_eq!(got["memories"][0]["status"], "superseded");
+    assert_eq!(got["memories"][1]["trust"], "normal");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn duplicate_hints_only_consider_active_memories_in_the_same_owner_and_scope() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("duplicate-owner").await;
+    let owner = app.device(&admin, "owner-laptop").await;
+    let member = app.member(&admin, "duplicate-member").await;
+    let teammate = app.device(&member, "member-laptop").await;
+    let project = app.post("projects/init", json!({
+        "repository": "github.com/acme/coaching-duplicates", "name": "E2E Duplicate coaching"
+    }), &owner).await;
+    let context = json!({"project_id": project["project_id"]});
+    let mut first = note(
+        "fact",
+        "Webhook handlers suppress repeat deliveries",
+        "An event ID table prevents double billing.",
+    );
+    first["context"] = context.clone();
+    let original = app.post("remember", first.clone(), &owner).await;
+    assert!(original.get("hints").is_none(), "{original}");
+
+    // These notes have identical lexeme sets and different identities.
+    let mut different_owner = first.clone();
+    different_owner["summary"] = json!("The event ID table prevents double billing.");
+    let saved = app.post("remember", different_owner, &teammate).await;
+    assert!(saved.get("hints").is_none(), "{saved}");
+    let mut different_scope = first.clone();
+    different_scope["scope"] = json!("personal");
+    different_scope["summary"] = json!("An event ID table prevents double billing!");
+    let saved = app.post("remember", different_scope, &owner).await;
+    assert!(saved.get("hints").is_none(), "{saved}");
+    app.post(
+        "feedback",
+        json!({"id": original["id"], "vote": "wrong"}),
+        &owner,
+    )
+    .await;
+    first["summary"] = json!("The event ID table prevents double billing!");
+    let saved = app.post("remember", first, &owner).await;
+    assert!(saved.get("hints").is_none(), "{saved}");
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn save_items_partial_success() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;

@@ -358,8 +358,8 @@ async fn bad_save_input_is_a_400_with_a_message() {
             "project",
         ),
         (
-            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r"}),
-            "title: use 8-80",
+            json!({"kind": "rule", "title": " ", "summary": "A summary that says what is true.", "reason": "a stated reason"}),
+            "title must not be empty",
         ),
     ] {
         let (status, reply) = app.send("POST", "remember", body, Some(&device)).await;
@@ -467,22 +467,18 @@ async fn account_errors_use_the_texts_the_console_expects() {
 }
 
 #[tokio::test]
-async fn quality_error_is_400_quality_one_line() {
+async fn missing_gotcha_fields_return_one_line_of_coaching() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "d").await;
-    let thin = json!({"kind": "gotcha", "title": "Pool timeouts", "summary": "Requests hang when the pool is exhausted.", "reason": "Seen in production."});
-    let (status, reply) = app
-        .send("POST", "remember", thin.clone(), Some(&device))
-        .await;
-    assert_eq!(status, 400, "{reply}");
-    assert_eq!(reply["code"], "quality");
-    assert_eq!(reply["error"], "fields.fix: say how the gotcha was fixed");
-    assert!(!reply["error"].as_str().unwrap().contains('\n'));
-    let mut fixed = thin;
-    fixed["fields"] = json!({"fix": "Raise the pool size and add a timeout."});
-    let (status, reply) = app.send("POST", "remember", fixed, Some(&device)).await;
+    let thin = json!({"kind": "gotcha", "title": "Requests stall on pool exhaustion", "summary": "Requests hang when the pool is exhausted.", "reason": "Observed in production when all connections were busy."});
+    let (status, reply) = app.send("POST", "remember", thin, Some(&device)).await;
     assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["status"], "active");
+    assert_eq!(
+        reply["hints"],
+        json!(["Fill in the gotcha's symptom, cause and fix."])
+    );
     app.finish().await;
 }
 
@@ -806,7 +802,7 @@ async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restor
     let archive = format!("projects/{pid}/archive");
     let restore = format!("projects/{pid}/restore");
     let context = json!({"project_id": pid, "repository": repository, "branch": "main", "files": ["src/archive.rs"]});
-    let note = json!({"kind": "rule", "scope": "project", "title": "Preserve blueprints",
+    let note = json!({"kind": "rule", "scope": "project", "title": "Preserve blueprints for restoration",
         "summary": "Keep the blueprints for the archive.", "reason": "They allow exact restoration.",
         "context": context, "detail": "Detailed blueprint."});
     let memory = app.save(&device, note.clone()).await;

@@ -1,5 +1,5 @@
 use crate::jobs::enqueue_tx;
-use crate::memory::{insert_memory, save_in_tx};
+use crate::memory::{SaveSource, insert_memory, save_in_tx};
 use crate::usage::RETRIEVAL_RETENTION_DAYS;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
@@ -408,7 +408,7 @@ impl Store {
                 person_id,
                 note.input,
                 &note_work,
-                Origin::System,
+                SaveSource::System,
                 device,
                 session_project.as_deref(),
             )
@@ -451,7 +451,7 @@ impl Store {
                 person_id,
                 digest,
                 &digest_work,
-                Origin::System,
+                SaveSource::System,
                 device,
                 session_project.as_deref(),
             )
@@ -515,6 +515,7 @@ impl Store {
                 &new,
                 None,
                 device,
+                false,
             )
             .await
             {

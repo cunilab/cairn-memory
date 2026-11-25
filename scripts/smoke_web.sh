@@ -543,7 +543,7 @@ owner_ok() {
     exit 1
   fi
 }
-owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Decision saved from the web console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
+owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Preserve console branch history\",\"summary\":\"Display memories under their save branch in the console\",\"reason\":\"Web smoke verification\",\"fields\":{\"context\":\"Project branch history\"},\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
 console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$workdir/owner-post.body")"
 memories_url="${web}/api/cairn/memories?projectId=${project_id}&scope=project&branch=feature-merge"
 normal_body="$workdir/normal.body"

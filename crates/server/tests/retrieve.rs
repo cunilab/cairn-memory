@@ -179,9 +179,19 @@ async fn brief_shows_the_caller_their_own_rules_only() {
     let context = json!({"project_id": id, "repository": "brief-repo", "branch": "feature"});
     let device = app.device(&admin, "brief").await;
     for (title, scope, kind, owner) in [
-        ("personal-visible", "personal", "preference", &admin),
-        ("private-hidden", "personal", "preference", &other),
-        ("project-visible", "project", "rule", &admin),
+        (
+            "Keep personal-visible preference",
+            "personal",
+            "preference",
+            &admin,
+        ),
+        (
+            "Keep private-hidden preference",
+            "personal",
+            "preference",
+            &other,
+        ),
+        ("Keep project-visible rule", "project", "rule", &admin),
     ] {
         // Saving with a project context joins the project (as `init` would), so the other
         // person saves without one and stays a non-member.
@@ -798,7 +808,7 @@ async fn hook_replies_count_shown_and_agent_search_and_get_count_used() {
     let id = save(
         &app,
         &device,
-        json!({"kind": "preference", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
+        json!({"kind": "preference", "scope": "personal", "title": "Track usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
                "detail": "Ledger audit history.", "context": {"files": ["src/usage.rs"]}}),
     )
     .await;

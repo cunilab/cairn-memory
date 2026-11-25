@@ -1,6 +1,6 @@
 //! The memory model: kinds, scopes, per-kind fields, validation, identity and kind policy.
-//! Depends on nothing else in this crate except `error`.
 
+pub mod coaching;
 pub mod fields;
 pub mod identity;
 pub mod kind;

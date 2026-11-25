@@ -57,12 +57,7 @@ caller's own memory or a project memory of the same project; a declared contradi
 the caller cannot replace, is `contradicts=<id>`. Nothing infers either. `memory_forget` hides a memory the caller
 owns from normal recall and is described in its own schema only, not in the instruction text.
 
-**Quality.** An agent save that is too thin to keep is refused with `400 {code: "quality", error: <one line>}`;
-the agent fixes its own save and retries. First failing rule wins: `title: use 8-80 characters that name the
-knowledge`; `summary: use 20-240 characters saying what is true`; `summary: repeats the title; say what is true in
-1-3 sentences`; `reason: say why this is true or was chosen (10+ characters)` (every kind but `note`);
-`fields.fix: say how the gotcha was fixed`; `fields.steps: list at least 2 ordered steps`. System saves
-(distillation, promotion) are built to pass and skip the check.
+**Quality.** A valid save that needs work is accepted with trust `new`. Supply a title of at least three specific words, a summary of at least five words that adds to it, and a reason of at least 20 characters that explains why. An optional reason for a `note` can be omitted. Include the symptom, cause and fix for a gotcha, context or alternatives for a decision, and ordered steps for a procedure. Cairn can also flag similar active memories you own in the same scope and project. System handoffs skip coaching. Web JSON import still applies its existing quality validation.
 
 **Default scope** (server-chosen when `scope` is omitted): `preference` and `note` are `personal`; every other
 kind is `project` when the request context names a project the person belongs to, else `personal`; `global`
@@ -85,7 +80,7 @@ A tool checks its required keys before the request; malformed JSON-RPC and unkno
 `missing`. `Record` is `{id, kind, scope, status, title, summary, trust, reason?, fields?, evidence?, links?, branch?, updated_at}`
 with empty values omitted. A record with long detail includes `detail_chars`. Pass `detail: true` with one id to read the full `detail` if the summary and reason are insufficient. Both tools include a compact trust reason based on the record and counters at the time of the read.
 
-`memory_save` → `{"id","status","deduplicated"}` for a single save; `items` accepts up to three notes and returns per-item results. An identical save from the same owner returns the
+`memory_save` → `{"id","status","deduplicated"}` for a single save. `items` accepts up to three notes and returns per-item results. A coached result adds up to four `hints` and an `improve` line explaining how to correct the saved note with `supersedes`. A clean correction is saved at normal rank. An identical save from the same owner returns the
 existing id with `deduplicated:true` and merges new evidence. Detail is optional and does not affect identity. A duplicate can fill empty detail. An explicit correction can update detail without changing the id. A save that matches a forgotten memory is an
 error. `memory_feedback` → `{"id","status"}`: `wrong` votes from two different people, or one from the owner, make it `stale`; a repeat vote by the same person changes nothing.
 `memory_forget` → `{"id","status":"forgotten"}`.
@@ -120,5 +115,5 @@ Run `cairn import claude-memory` from the project to preview the files, scopes, 
 | `project` | `note` | Project when `.cairn/project.json` exists, otherwise personal |
 | `reference` | `fact` | Personal |
 
-The import lists possible-secret files it skips. The normal save API deduplicates reruns. Cairn stores the body in `detail`, uses the `**Why:**` line or the first 1,000 body characters as the reason, and keeps the source path as evidence. It lists bodies clipped to the 8,000-character detail limit and includes a pointer to the full text for each. Once every eligible file saves, Cairn backs up the old `MEMORY.md` as `MEMORY.md.pre-cairn` and writes the pointer. The original note files stay on disk. If a save fails, fix the reported file and rerun. Any files already saved will deduplicate.
+The import lists possible-secret files it skips and prints any coaching hints for saved files. The normal save API deduplicates reruns. Cairn stores the body in `detail`, uses the `**Why:**` line or the first 1,000 body characters as the reason, and keeps the source path as evidence. It lists bodies clipped to the 8,000-character detail limit and includes a pointer to the full text for each. Once every eligible file saves, Cairn backs up the old `MEMORY.md` as `MEMORY.md.pre-cairn` and writes the pointer. The original note files stay on disk. If a save fails, fix the reported file and rerun. Any files already saved will deduplicate.
 

@@ -1,12 +1,12 @@
 use crate::link::insert_link;
-use crate::memory::{MEMORY_SELECT, memory_from_row};
+use crate::memory::{MEMORY_SELECT, SaveSource, memory_from_row, visible};
 use crate::{Result, Store};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::identity::evidence_hash;
 use cairn_core::memory::validate::LIST_MAX_ITEMS;
 use cairn_core::memory::{Memory, Relation, SaveInput, Scope};
-use cairn_core::process::Origin;
 use cairn_core::process::consolidate::{Band, CANDIDATES, SUPERSEDE_AT, Side, band, guard};
+use cairn_core::process::{NewMemory, Origin};
 use sqlx::{PgConnection, Row};
 
 /// What one consolidation changed.
@@ -24,6 +24,75 @@ pub struct Consolidated {
 const PROMOTE_AT: f32 = SUPERSEDE_AT;
 /// The owner of every promoted copy: no person wrote it.
 pub(crate) const SYSTEM_OWNER: &str = "system";
+
+/// Save coaching runs before the embedding job. Compare the same English lexemes as retrieval
+/// and use consolidation's high threshold and guards for a suggestion to replace a memory.
+pub(crate) async fn save_duplicate(
+    tx: &mut PgConnection,
+    person_id: &str,
+    project_id: Option<&str>,
+    new: &NewMemory,
+) -> Result<Option<(String, String)>> {
+    let text = format!("{} {}", new.title, new.summary);
+    let visible = visible("m", "$1");
+    let matches = sqlx::query(&format!(
+        "WITH input AS (
+             SELECT tsvector_to_array(to_tsvector('english', $4)) AS words,
+                    replace(plainto_tsquery('english', $4)::text, ' & ', ' | ')::tsquery AS terms
+         ), matches AS (
+             SELECT m.memory_id, m.repo_branch, m.title, m.summary,
+                    n.shared::float4 / NULLIF(cardinality(input.words) + cardinality(other.words) - n.shared, 0) AS score
+               FROM input CROSS JOIN memories m
+               CROSS JOIN LATERAL (
+                   SELECT tsvector_to_array(to_tsvector('english', m.title || ' ' || m.summary)) AS words
+               ) other
+               CROSS JOIN LATERAL (
+                   SELECT count(*) AS shared FROM unnest(other.words) AS w WHERE w = ANY(input.words)
+               ) n
+              WHERE m.owner_id = $1 AND m.scope = $2 AND m.project_id IS NOT DISTINCT FROM $3
+                AND m.status = 'active' AND {visible} AND m.kind <> 'handoff'
+                AND m.identity_hash <> $5 AND m.memory_id <> ALL($6)
+                AND cardinality(input.words) >= 5 AND m.search_tsv @@ input.terms
+         )
+         SELECT memory_id, repo_branch, title, summary FROM matches
+          WHERE score >= $7 ORDER BY score DESC, memory_id LIMIT $8"
+    ))
+    .bind(person_id)
+    .bind(new.scope.as_str())
+    .bind(project_id)
+    .bind(&text)
+    .bind(&new.identity_hash)
+    .bind(new.supersedes.iter().chain(&new.contradicts).map(String::as_str).collect::<Vec<_>>())
+    .bind(SUPERSEDE_AT)
+    .bind(CANDIDATES as i64)
+    .fetch_all(tx)
+    .await?;
+    for row in matches {
+        let title: String = row.try_get("title")?;
+        let summary: String = row.try_get("summary")?;
+        let branch: Option<String> = row.try_get("repo_branch")?;
+        let newer = Side {
+            branch: new.context.branch.as_deref(),
+            origin: Origin::Agent,
+        };
+        // Owner and visibility were checked above. For an agent source the origin guard cannot fire.
+        let older = Side {
+            branch: branch.as_deref(),
+            origin: Origin::Agent,
+        };
+        if guard(
+            Band::Supersede,
+            newer,
+            older,
+            &text,
+            &format!("{title} {summary}"),
+        ) == Band::Supersede
+        {
+            return Ok(Some((row.try_get("memory_id")?, title)));
+        }
+    }
+    Ok(None)
+}
 
 pub(crate) async fn lock_cohort(tx: &mut PgConnection, memory_id: &str) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(concat_ws('|', current_schema(), owner_id, scope, coalesce(project_id, ''), kind), 0)) FROM memories WHERE memory_id=$1")
@@ -69,7 +138,8 @@ impl Store {
         let subject = sqlx::query(
             "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary,
                     embedding::text AS embedding
-               FROM memories WHERE memory_id = $1 AND embedding IS NOT NULL FOR UPDATE",
+               FROM memories WHERE memory_id = $1 AND embedding IS NOT NULL
+                AND (origin <> 'agent' OR rank <> 'candidate') FOR UPDATE",
         )
         .bind(memory_id)
         .fetch_optional(&mut *tx)
@@ -100,7 +170,8 @@ impl Store {
                  SELECT m.memory_id, m.created_at, m.embedding, m.repo_branch, m.origin, m.title, m.summary
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
-                    AND m.memory_id <> $6 AND m.status IN ('active','stale'))
+                    AND m.memory_id <> $6 AND m.status IN ('active','stale')
+                    AND (m.origin <> 'agent' OR m.rank <> 'candidate'))
              SELECT c.memory_id, c.repo_branch, c.origin, c.title, c.summary,
                     1 - (c.embedding <=> $1::vector) AS cosine,
                     (c.created_at, c.memory_id) > (s.created_at, s.memory_id) AS neighbour_newer
@@ -240,7 +311,7 @@ impl Store {
         let active = crate::memory::active_project_memory("m");
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT} WHERE m.memory_id = $1 AND {active} AND m.scope = 'project' AND m.kind IN ('rule','gotcha')
-                AND m.origin = 'agent' AND m.status = 'active' AND m.embedding IS NOT NULL"
+                AND m.origin = 'agent' AND m.rank <> 'candidate' AND m.status = 'active' AND m.embedding IS NOT NULL"
         ))
         .bind(memory_id)
         .fetch_all(&mut *lock)
@@ -261,7 +332,7 @@ impl Store {
                  SELECT m.memory_id, m.embedding <=> $1::vector AS dist
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.scope = 'project' AND m.project_id <> $2
-                    AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent' AND {active}
+                    AND m.kind = $3 AND m.status = 'active' AND m.origin = 'agent' AND m.rank <> 'candidate' AND {active}
                   ORDER BY m.embedding <=> $1::vector LIMIT 5)
              SELECT memory_id FROM c WHERE 1 - dist >= $4 ORDER BY dist, memory_id LIMIT 1"
         ))
@@ -310,7 +381,7 @@ impl Store {
                     SYSTEM_OWNER,
                     input,
                     &WorkContext::default(),
-                    Origin::System,
+                    SaveSource::System,
                     None,
                 )
                 .await?
@@ -429,6 +500,6 @@ async fn supersede(tx: &mut PgConnection, newer: &str, older: &str) -> Result<()
     .await?;
     // The newer side restates the older one, which confirms it.
     let confirmed = [newer.to_owned()];
-    crate::memory::promote_candidates(&mut *tx, &confirmed).await?;
+    crate::memory::promote_candidates(&mut *tx, &confirmed, false).await?;
     Ok(())
 }

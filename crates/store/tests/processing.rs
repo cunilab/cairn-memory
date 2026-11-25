@@ -1342,7 +1342,7 @@ async fn using_a_candidate_promotes_it() {
 }
 
 #[tokio::test]
-async fn restatement_promotes_a_candidate() {
+async fn restatement_promotes_a_system_candidate() {
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -1379,8 +1379,9 @@ async fn restatement_promotes_a_candidate() {
         )
         .await
         .unwrap();
-    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+    sqlx::query("UPDATE memories SET origin = 'system', rank = CASE WHEN memory_id = $1 THEN 'candidate' ELSE rank END WHERE memory_id IN ($1, $2)")
         .bind(&newer)
+        .bind(&older)
         .execute(store.pool())
         .await
         .unwrap();
@@ -1413,7 +1414,7 @@ async fn duplicate_saves_count_proofs() {
     let work = WorkContext::default();
     let first = store.save(&person, input.clone(), &work).await.unwrap();
     assert!(!first.deduplicated);
-    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+    sqlx::query("UPDATE memories SET rank = 'candidate', origin = 'system' WHERE memory_id = $1")
         .bind(&first.id)
         .execute(store.pool())
         .await
@@ -1436,6 +1437,62 @@ async fn duplicate_saves_count_proofs() {
     let cards = pack(&[Hit { memory, score: 1.0 }], 5, 1200);
     let json = serde_json::to_value(&cards).unwrap();
     assert_eq!(json["results"][0]["seen"], 3);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn coached_candidates_cannot_automatically_merge() {
+    use cairn_core::memory::Status;
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("coached").await;
+    let (project, _) = store
+        .init_project(
+            &person,
+            "github.com/acme/coaching",
+            Some("E2E Candidate consolidations"),
+        )
+        .await
+        .unwrap();
+    let work = in_project(&project.project_id, &[]);
+    let existing = store
+        .save(&person, rule("Queue claims use leases"), &work)
+        .await
+        .unwrap();
+    let mut weak = rule("Queue claims still use leases");
+    weak.reason = "Seen.".into();
+    let coached = store.save_from(&person, weak, &work, None).await.unwrap();
+    assert!(!coached.hints.is_empty());
+    for id in [&existing.id, &coached.id] {
+        store
+            .upsert_embedding(
+                id,
+                &current_embedding_hash(store, id).await,
+                &tilted(1.0, 1),
+            )
+            .await
+            .unwrap();
+    }
+    for id in [&existing.id, &coached.id] {
+        let out = store.consolidate_memory(id).await.unwrap();
+        assert!(
+            out.superseded.is_empty() && out.related.is_empty(),
+            "{out:?}"
+        );
+        assert_eq!(store.get(&person, id).await.unwrap().status, Status::Active);
+    }
+    assert_eq!(column_rank(store, &coached.id).await, "candidate");
+    assert_eq!(column_rank(store, &existing.id).await, "normal");
+    assert!(links(&db).await.is_empty());
+    let mut retry = rule("Queue claims use leases");
+    retry.reason = "Seen.".into();
+    let saved = store.save_from(&person, retry, &work, None).await.unwrap();
+    assert!(saved.deduplicated && saved.hints.is_empty());
+    assert_eq!(saved.id, existing.id);
+    assert_eq!(column_rank(store, &existing.id).await, "normal");
     db.finish().await;
 }
 

@@ -6,8 +6,7 @@ use crate::memory::kind::{expires_at, resolve_scope};
 use crate::memory::validate::{validate_quality, validate_save};
 use crate::memory::{Context, Entity, Fields, Kind, SaveInput, Scope};
 
-/// Who is saving. The system path (distill, promotion) may write a handoff and skips the quality
-/// rules (its outputs are built to pass them); an agent may not and does not.
+/// Who is saving. Only the system path may write a handoff.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,14 +56,41 @@ pub struct NewMemory {
     pub contradicts: Option<String>,
 }
 
-/// Everything in §2.2 that needs no IO: redact, validate, apply the kind policy, hash, derive.
-/// `has_project` is true when the person is a member of the request's project.
+/// Preparation for system saves and callers that still enforce the legacy quality gate.
 pub fn prepare_save(
     input: SaveInput,
     work: &WorkContext,
     has_project: bool,
     origin: Origin,
     now: i64,
+) -> Result<NewMemory, Error> {
+    prepare(
+        input,
+        work,
+        has_project,
+        origin,
+        now,
+        origin == Origin::Agent,
+    )
+}
+
+/// Prepare an explicit agent save for advisory coaching after normal validation.
+pub fn prepare_coached_save(
+    input: SaveInput,
+    work: &WorkContext,
+    has_project: bool,
+    now: i64,
+) -> Result<NewMemory, Error> {
+    prepare(input, work, has_project, Origin::Agent, now, false)
+}
+
+fn prepare(
+    input: SaveInput,
+    work: &WorkContext,
+    has_project: bool,
+    origin: Origin,
+    now: i64,
+    strict_quality: bool,
 ) -> Result<NewMemory, Error> {
     let redact = |text: &str| redact_sensitive_content(text.trim());
     let fields =
@@ -78,7 +104,7 @@ pub fn prepare_save(
         ..input
     };
     validate_save(&input, &fields, origin == Origin::System)?;
-    if origin == Origin::Agent {
+    if strict_quality {
         validate_quality(&input, &fields)?;
     }
     if input.supersedes.is_some() && input.supersedes == input.contradicts {
@@ -249,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_saves_are_quality_checked_and_system_saves_are_not() {
+    fn legacy_agent_quality_gate_does_not_apply_to_coached_or_system_saves() {
         let thin = json!({"kind":"gotcha","title":"t","summary":"s","reason":"r"});
         let agent = prepare_save(
             input(thin.clone()),
@@ -259,6 +285,9 @@ mod tests {
             0,
         );
         assert!(matches!(agent, Err(Error::Quality(m)) if m.starts_with("title:")));
+        assert!(
+            prepare_coached_save(input(thin.clone()), &WorkContext::default(), false, 0).is_ok()
+        );
         let system = prepare_save(
             input(thin),
             &WorkContext::default(),

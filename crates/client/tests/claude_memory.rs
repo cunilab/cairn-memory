@@ -99,11 +99,18 @@ fn import_preserves_sources_and_deduplicates_across_retries() {
             "",
         ),
         (
-            "rejected.md",
+            "thin.md",
             "Release checklist",
             "short",
             "reference",
             "The release notes cite change identifiers.",
+        ),
+        (
+            "invalid.md",
+            "Invalid empty summary",
+            "",
+            "reference",
+            "The source is missing its description.",
         ),
         (
             "secret.md",
@@ -145,26 +152,30 @@ fn import_preserves_sources_and_deduplicates_across_retries() {
     assert!(!partial.status.success());
     let error = String::from_utf8(partial.stderr).unwrap();
     assert!(
-        error.contains("rejected.md") && error.contains("summary: use 20-240"),
+        error.contains("invalid.md") && error.contains("summary must not be empty"),
         "{error}"
     );
     assert_eq!(fs::read(&index).unwrap(), INDEX.as_bytes());
     assert!(!backup.exists());
-    assert_eq!(memories().len(), 4);
+    let stdout = String::from_utf8(partial.stdout).unwrap();
+    assert!(stdout.contains("Saved \"thin.md\""));
+    assert!(stdout.contains("Write a summary of at least five words"));
+    assert!(stdout.contains("Improve it: save again with supersedes="));
+    let read = memories();
+    assert_eq!(read.len(), 5);
+    let thin = read
+        .iter()
+        .find(|row| row["title"] == "Release checklist")
+        .unwrap();
+    assert_eq!(thin["trust_level"], "new");
 
-    note(
-        "rejected.md",
-        "Release checklist",
-        "The release notes record change identifiers for review.",
-        "reference",
-        "The release notes cite change identifiers.",
-    );
+    fs::remove_file(folder.join("invalid.md")).unwrap();
     let applied = success(with_stdin(&mut native_import(), "yes"));
     assert!(applied.contains("Skipped \"secret.md\" (possible secret)"));
     assert!(applied.contains("Clipped detail in \"feedback.md\""));
     assert!(!applied.contains("Clipped detail in \"project.md\""));
     assert!(!applied.contains(SOURCE_SECRET));
-    assert_eq!(applied.matches("Already saved").count(), 4);
+    assert_eq!(applied.matches("Already saved").count(), 5);
     let pointer = fs::read_to_string(&index).unwrap();
     assert!(pointer.contains("memory_search and memory_save"));
     assert_eq!(fs::read(&backup).unwrap(), INDEX.as_bytes());

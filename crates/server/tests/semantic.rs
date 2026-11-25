@@ -124,6 +124,16 @@ async fn consolidate_supersedes_near_duplicates_and_links_related() {
         .as_str()
         .unwrap()
         .to_owned();
+    // Confirm the lexical near-duplicate before exercising automatic consolidation of normal notes.
+    let owner_id = app.get("auth/me", &owner).await["person_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.db
+        .store
+        .feedback(&owner_id, &new, cairn_store::memory::Vote::Helpful)
+        .await
+        .unwrap();
     let related = save(
         "Keep money as integer cents in the database",
         "Amounts are persisted as whole cents, never as floating point numbers.",

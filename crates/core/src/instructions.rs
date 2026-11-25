@@ -9,7 +9,7 @@ pub const MAX_INSTRUCTION_BYTES: usize = 600;
 pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is the only memory. Do not read or write built-in memory files. Call memory_search before deciding, debugging or acting on a name, tool, model, person or convention you do not know from this conversation. Call memory_save with a reason after decisions, fixes or corrections.";
 
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
-pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop.";
+pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints.";
 
 /// Appended to the Stop reminder, or sent alone, when the user corrected the agent.
 /// `{correction}` is the quoted line. The text around that quote is at most 90 bytes.
@@ -77,7 +77,7 @@ mod tests {
     fn stop_text_fits_budget() {
         assert_eq!(
             DEFAULT_STOP_NUDGE,
-            "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop."
+            "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints."
         );
         assert!(
             DEFAULT_STOP_NUDGE.len() <= 170,

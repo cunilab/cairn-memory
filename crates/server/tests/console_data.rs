@@ -722,6 +722,10 @@ async fn export_owned_memories_and_import_with_dry_run() {
         .as_array_mut()
         .unwrap()
         .push(json!({"kind": "rule", "scope": "personal", "title": "No summary here"}));
+    file["memories"].as_array_mut().unwrap().push(json!({
+        "kind": "fact", "scope": "personal", "title": "Very short summary",
+        "summary": "Too brief.", "reason": "The JSON import still applies the original rules."
+    }));
     let (status, dry) = app
         .send(
             "POST",
@@ -734,7 +738,11 @@ async fn export_owned_memories_and_import_with_dry_run() {
     assert_eq!(dry["new"], 2, "{dry}");
     assert_eq!(dry["duplicate"], 0);
     let invalid = dry["invalid"].as_array().unwrap();
-    assert_eq!(invalid.len(), 3, "{dry}");
+    assert_eq!(invalid.len(), 4, "{dry}");
+    assert_eq!(
+        invalid[3]["error"],
+        "summary: use 20-240 characters saying what is true"
+    );
     assert!(
         invalid
             .iter()
@@ -758,6 +766,7 @@ async fn export_owned_memories_and_import_with_dry_run() {
         (done["new"].as_i64(), done["duplicate"].as_i64()),
         (Some(2), Some(0))
     );
+    assert_eq!(done["invalid"], dry["invalid"]);
     assert_eq!(count(&app).await, 2);
     let again = app.post("memories/import", file.clone(), &carol).await;
     assert_eq!(

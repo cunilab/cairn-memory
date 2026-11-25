@@ -415,6 +415,17 @@ pub fn import(yes: bool) -> Result<(), Error> {
                         "Saved"
                     };
                     println!("{verb} {label:?}");
+                    for hint in reply["hints"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        println!("  {}", redact(hint));
+                    }
+                    if let Some(improve) = reply["improve"].as_str() {
+                        println!("  {}", redact(improve));
+                    }
                 }
                 Ok(_) => {
                     eprintln!("{label:?}: invalid save receipt");
