@@ -28,10 +28,11 @@ import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectMember } from "@/lib/generated/ProjectMember";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 import type { SessionReport } from "@/lib/generated/SessionReport";
+import { MemoryTable } from "../../memories/_components/memory-table";
 import { ProjectBranches } from "./project-branches";
 import { ProjectSessions } from "./project-sessions";
 
-const TABS = ["branches", "stale", "members", "instructions"] as const;
+const TABS = ["branches", "memories", "stale", "members", "instructions"] as const;
 
 type Loaded = {
   project: ProjectView;
@@ -256,8 +257,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       {data === null && !error ? <LoadingBlock label="Loading project…" rows={4} /> : null}
       {data ? (
         <Tabs value={tab} onValueChange={(value) => setTab(value as (typeof TABS)[number])}>
-          <TabsList>
+          <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-7">
             <TabsTrigger value="branches">Branches</TabsTrigger>
+            <TabsTrigger value="memories">Memories</TabsTrigger>
             <TabsTrigger value="stale">Stale ({data.stale.length})</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
             <TabsTrigger value="instructions">Agent instructions</TabsTrigger>
@@ -265,6 +267,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           <TabsContent value="branches" className="space-y-6">
             <ProjectBranches branches={data.branches} />
             {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
+          </TabsContent>
+          <TabsContent value="memories">
+            <MemoryTable projectId={projectId} />
           </TabsContent>
           <TabsContent value="stale">
             <DataTable

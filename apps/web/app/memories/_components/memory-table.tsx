@@ -40,7 +40,7 @@ const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
 
 type Page = { key: string; items: MemoryView[]; next: string | null; error: string | null };
 
-export function MemoryTable() {
+export function MemoryTable({ projectId }: { projectId?: string }) {
   const router = useRouter();
   const mobile = useIsMobile();
   const openMemory = useOpenMemory();
@@ -49,7 +49,7 @@ export function MemoryTable() {
     ? [...STATUSES, { value: "forgotten", label: "Forgotten" }]
     : STATUSES;
   const [params, set] = useQueryParams();
-  const project = params.get("project") ?? "";
+  const project = projectId ?? params.get("project") ?? "";
   const kind = params.get("kind") ?? "";
   const status = params.get("status") ?? "";
   const branch = params.get("branch") ?? "";
@@ -65,12 +65,13 @@ export function MemoryTable() {
   const serverQuery = useMemo(() => {
     const query = new URLSearchParams({ limit: String(PAGE) });
     if (project) query.set("projectId", project);
+    if (projectId) query.set("scope", "project");
     if (kind) query.set("kind", kind);
     if (status) query.set("status", status);
     if (branch) query.set("branch", branch);
     if (q.trim()) query.set("q", q.trim());
     return query.toString();
-  }, [project, kind, status, branch, q]);
+  }, [project, projectId, kind, status, branch, q]);
   const key = `${serverQuery}#${attempt}`;
   useResetOnHide(() => {
     setPage(null);
@@ -82,6 +83,7 @@ export function MemoryTable() {
   const requireSignIn = useCallback(() => router.replace(LOGIN_PATH), [router]);
 
   useEffect(() => {
+    if (projectId) return;
     let cancelled = false;
     cairn<ProjectView[]>("projects")
       .then((rows) => !cancelled && setProjects(rows))
@@ -91,7 +93,7 @@ export function MemoryTable() {
     return () => {
       cancelled = true;
     };
-  }, [requireSignIn]);
+  }, [projectId, requireSignIn]);
 
   useEffect(() => {
     if (!project) return;
@@ -155,7 +157,7 @@ export function MemoryTable() {
 
   const rows = page?.items ?? [];
 
-  const active = [project, kind, status, branch, q].filter(Boolean).length;
+  const active = [projectId ? "" : project, kind, status, branch, q].filter(Boolean).length;
   const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.name }));
   const branchOptions = (branches.project === project ? branches.rows : []).map((b) => ({ value: b.branch, label: b.branch }));
 
@@ -243,8 +245,10 @@ export function MemoryTable() {
   );
 
   const controls = (
-    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-      <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(v) => set({ project: v, branch: null })} />
+    <div className={`grid gap-2 sm:grid-cols-2 ${projectId ? "lg:grid-cols-3" : "lg:grid-cols-4"}`}>
+      {!projectId ? (
+        <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(v) => set({ project: v, branch: null })} />
+      ) : null}
       <FilterSelect label="Kind" value={kind} allLabel="All kinds" options={KIND_OPTIONS} onChange={(v) => set({ kind: v })} />
       <FilterSelect label="Status" value={status} allLabel="All statuses" options={statuses} onChange={(v) => set({ status: v })} />
       <FilterSelect label="Branch" value={branch} allLabel={project ? "All branches" : "Choose a project first"} options={branchOptions} disabled={!project} onChange={(v) => set({ branch: v })} />
