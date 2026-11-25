@@ -6,7 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
+use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
 use cairn_store::memory::{ListFilter, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
@@ -66,6 +66,7 @@ pub struct ListQuery {
     project_id: Option<String>,
     /// A memory status. `forgotten` is listed only for an admin.
     status: Option<String>,
+    trust: Option<TrustLevel>,
     branch: Option<String>,
     /// A web search over title, summary, reason and fields.
     q: Option<String>,
@@ -233,6 +234,7 @@ pub async fn list(
                 scope: query.scope,
                 kind: query.kind,
                 statuses,
+                trust: query.trust,
                 limit: query.limit,
                 cursor: query.cursor,
                 branch: query.branch.filter(|b| !b.is_empty()),
@@ -315,7 +317,7 @@ pub async fn get_many(
         }
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
-    state.store.mark_fetched(&fetched).await?;
+    state.store.mark_agent_read(&fetched, body.detail).await?;
     let reply = Got { memories, missing };
     let bytes = serde_json::to_string(&reply).map_or(0, |text| text.len());
     state
@@ -325,6 +327,7 @@ pub async fn get_many(
             Lookup::Get,
             bytes,
             !reply.memories.is_empty(),
+            &[],
         )
         .await
         .unwrap_or_else(|error| eprintln!("retrieval usage not recorded: {error}"));

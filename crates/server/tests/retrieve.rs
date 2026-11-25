@@ -287,7 +287,7 @@ async fn search_ranks_filters_and_never_leaks() {
         .await;
     assert_eq!(ids(&found), vec![queue.clone()]);
     let keys: Vec<_> = found["results"][0].as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["id", "kind", "score", "summary", "title"]);
+    assert_eq!(keys, ["id", "kind", "score", "summary", "title", "trust"]);
     let got = app.post("get", json!({"ids": [&queue]}), &bob_device).await;
     assert_eq!(got["memories"][0]["fields"]["alternatives"][0], "Redis");
     assert!(got["memories"][0].get("usage").is_none());
@@ -518,6 +518,7 @@ async fn get_returns_requested_records_and_names_the_rest() {
             "status",
             "summary",
             "title",
+            "trust",
             "updated_at"
         ]
     );
@@ -790,43 +791,63 @@ async fn search_budget_caps_bytes_and_kind_filters() {
 }
 
 #[tokio::test]
-async fn only_search_and_get_count_usage() {
+async fn hook_replies_count_shown_and_agent_search_and_get_count_used() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
-               "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": {"files": ["src/usage.rs"]}}),
+        json!({"kind": "preference", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
+               "detail": "Ledger audit history.", "context": {"files": ["src/usage.rs"]}}),
     )
     .await;
-    let fetched = || async {
-        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
-            .fetch_one(app.db.store.pool())
-            .await
-            .unwrap()
-    };
-    app.post(
-        "session/topic",
-        json!({"path": "src/usage.rs", "context": {}}),
-        &device,
-    )
-    .await;
-    app.post(
-        "session/brief",
-        json!({"session_id": "s1", "context": {}, "recent_files": ["src/usage.rs"]}),
-        &device,
-    )
-    .await;
+    let usage = || async { app.get(&format!("memories/{id}"), &admin).await["usage"].clone() };
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "s1", "context": {}, "recent_files": ["src/usage.rs"]}),
+            &device,
+        )
+        .await;
+    assert!(brief["brief"].as_str().unwrap().contains(&id));
+    let after_brief = usage().await;
+    assert_eq!(after_brief["shown"], 1);
+    assert_eq!(after_brief["fetched"], 0);
+    assert!(after_brief["last_shown_at"].is_number());
+    assert!(after_brief["last_used_at"].is_null());
+    let topic = app
+        .post(
+            "session/topic",
+            json!({"path": "src/usage.rs", "context": {}}),
+            &device,
+        )
+        .await;
+    assert_eq!(topic["notes"][0]["id"], id);
     app.get("memories", &admin).await;
     app.get("graph", &admin).await;
-    assert_eq!(fetched().await, 0, "topic, brief and web reads never count");
-    app.post("search", json!({"query": "ledger audit"}), &device)
+    let after_topic = usage().await;
+    assert_eq!(after_topic["shown"], 2);
+    assert_eq!(after_topic["fetched"], 0);
+    let search = app
+        .post("search", json!({"query": "ledger audit"}), &device)
         .await;
-    assert_eq!(fetched().await, 1);
-    app.post("get", json!({"ids": [&id]}), &device).await;
-    assert_eq!(fetched().await, 2);
+    assert_eq!(search["results"][0]["trust"], "normal");
+    let after_search = usage().await;
+    assert_eq!(after_search["shown"], 2);
+    assert_eq!(after_search["fetched"], 1);
+    let get = app.post("get", json!({"ids": [&id]}), &device).await;
+    assert_eq!(get["memories"][0]["trust"], "normal · used 1×");
+    let after_get = usage().await;
+    assert_eq!(after_get["fetched"], 2);
+    assert_eq!(after_get["detail_opened"], 0);
+    app.post("get", json!({"ids": [&id], "detail": true}), &device)
+        .await;
+    let after_detail = usage().await;
+    assert_eq!(after_detail["shown"], 2);
+    assert_eq!(after_detail["fetched"], 3);
+    assert_eq!(after_detail["detail_opened"], 1);
+    assert!(after_detail["last_used_at"].is_number());
     app.finish().await;
 }
 

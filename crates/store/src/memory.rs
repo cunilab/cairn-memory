@@ -6,7 +6,7 @@ use cairn_core::id::{new_id, now_seconds};
 use cairn_core::memory::model::Rank;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
-    Usage,
+    TrustLevel, Usage,
 };
 use cairn_core::process::jobs::JobKind;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
@@ -77,7 +77,9 @@ macro_rules! memory_columns {
     EXTRACT(EPOCH FROM m.updated_at)::bigint AS updated_at,
     to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts,
     COALESCE(u.fetched, 0) AS fetched, COALESCE(u.helpful, 0) AS helpful,
-    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at")
+    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at,
+    COALESCE(u.shown, 0) AS shown, COALESCE(u.detail_opened, 0) AS detail_opened,
+    EXTRACT(EPOCH FROM u.last_shown_at)::bigint AS last_shown_at")
     };
 }
 
@@ -148,9 +150,12 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         identity_hash: row.try_get("identity_hash")?,
         usage: Usage {
             fetched: row.try_get::<i32, _>("fetched")?.max(0) as u32,
+            shown: row.try_get::<i32, _>("shown")?.max(0) as u32,
+            detail_opened: row.try_get::<i32, _>("detail_opened")?.max(0) as u32,
             helpful: row.try_get::<i32, _>("helpful")?.max(0) as u32,
             wrong: row.try_get::<i32, _>("wrong")?.max(0) as u32,
             last_used_at: row.try_get("last_used_at")?,
+            last_shown_at: row.try_get("last_shown_at")?,
         },
     })
 }
@@ -205,6 +210,7 @@ pub struct ListFilter {
     pub kind: Option<Kind>,
     /// Empty means every visible status.
     pub statuses: Vec<Status>,
+    pub trust: Option<TrustLevel>,
     /// 1..=500, default 100.
     pub limit: Option<i64>,
     pub cursor: Option<String>,
@@ -381,8 +387,13 @@ impl Store {
         Ok(memories.remove(0))
     }
 
-    /// Counts an explicit fetch by an agent (`get` or search). Internal usage; never shown.
+    /// Counts an explicit fetch by an agent (`get` or search).
     pub async fn mark_fetched(&self, memory_ids: &[String]) -> Result<()> {
+        self.mark_agent_read(memory_ids, false).await
+    }
+
+    /// A full-detail get is also a fetch. Count both in the same transaction.
+    pub async fn mark_agent_read(&self, memory_ids: &[String], detail: bool) -> Result<()> {
         if memory_ids.is_empty() {
             return Ok(());
         }
@@ -397,11 +408,13 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO usage (memory_id, fetched, last_used_at)
-             SELECT id, 1, now() FROM unnest($1::text[]) AS id WHERE EXISTS (SELECT 1 FROM memories WHERE memory_id = id)
-             ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now()",
+            "INSERT INTO usage (memory_id, fetched, last_used_at, detail_opened)
+             SELECT memory_id, 1, now(), $2 FROM memories WHERE memory_id = ANY($1) ORDER BY memory_id
+             ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now(),
+                 detail_opened = usage.detail_opened + EXCLUDED.detail_opened",
         )
         .bind(memory_ids)
+        .bind(i32::from(detail))
         .execute(&mut *tx)
         .await?;
         promote_candidates(&mut *tx, memory_ids).await?;
@@ -439,6 +452,13 @@ impl Store {
         };
         let q = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
         let matches = search_matches("websearch_to_tsquery('english', $10)");
+        // Match Memory::trust before LIMIT so the filter covers every page.
+        let trust = "CASE
+            WHEN m.status = 'stale' OR u.wrong > 0 THEN 'doubted'
+            WHEN m.rank = 'candidate' THEN 'new'
+            WHEN u.helpful >= 2 OR m.proof_count >= 3 THEN 'proven'
+            ELSE 'normal'
+        END";
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
              WHERE {scope} AND ($2::text IS NULL OR m.project_id = $2)
@@ -447,6 +467,7 @@ impl Store {
                AND ($6::text IS NULL OR (m.updated_at, m.memory_id) < ($6::timestamptz, $7::text))
                AND ($9::text IS NULL OR m.repo_branch = $9)
                AND ($10::text IS NULL OR {matches})
+               AND ($11::text IS NULL OR ({trust}) = $11)
              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8"
         ))
         .bind(person_id)
@@ -459,6 +480,7 @@ impl Store {
         .bind(limit + 1)
         .bind(&filter.branch)
         .bind(q)
+        .bind(filter.trust.map(TrustLevel::as_str))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| match &error {

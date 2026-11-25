@@ -193,18 +193,16 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
       ) : null}
       <Section title="Details">
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <>
-              <dt className="text-muted-foreground">Usage</dt>
-              <dd className="tabular-nums">
-                Fetched {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong}
-                {memory.usage.last_used_at ? (
-                  <>
-                    {" "}
-                    · last used <Time value={memory.usage.last_used_at} />
-                  </>
-                ) : null}
-              </dd>
-            </>
+          <dt className="text-muted-foreground">Trust</dt>
+          <dd>{memory.trust}</dd>
+          <dt className="text-muted-foreground">Usage</dt>
+          <dd className="tabular-nums">
+            Shown {memory.usage.shown} · used {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong} · detail opened {memory.usage.detail_opened}
+          </dd>
+          <dt className="text-muted-foreground">Last shown</dt>
+          <dd><Time value={memory.usage.last_shown_at} /></dd>
+          <dt className="text-muted-foreground">Last used</dt>
+          <dd><Time value={memory.usage.last_used_at} /></dd>
           <dt className="text-muted-foreground">Created</dt>
           <dd>
             <Time value={memory.created_at} />

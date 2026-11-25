@@ -2,7 +2,7 @@
 //! why it is stale and what it is linked to. Agents never see this shape (`Record` is theirs).
 
 use crate::{Result, Store, epoch};
-use cairn_core::memory::{Link, Memory, Relation};
+use cairn_core::memory::{Link, Memory, Relation, TrustLevel};
 use cairn_core::process::Origin;
 use serde::Serialize;
 use sqlx::Row;
@@ -12,10 +12,14 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageView {
     pub fetched: u32,
+    pub shown: u32,
+    pub detail_opened: u32,
     pub helpful: u32,
     pub wrong: u32,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_used_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub last_shown_at: Option<i64>,
 }
 
 /// The memory at the other end of a link, as far as the reader may know it.
@@ -66,6 +70,8 @@ pub struct MemoryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
+    pub trust_level: TrustLevel,
+    pub trust: String,
 }
 
 struct Extra {
@@ -187,6 +193,7 @@ impl Store {
                         ),
                         None => (None, false, None, None, memory.updated_at, Vec::new()),
                     };
+                let (trust_level, trust) = memory.trust();
                 MemoryView {
                     origin: memory.origin,
                     owner_is_me,
@@ -196,11 +203,16 @@ impl Store {
                     checked_at,
                     status_changed_at: changed,
                     fetched: memory.usage.fetched,
+                    trust_level,
+                    trust,
                     usage: UsageView {
                         fetched: memory.usage.fetched,
+                        shown: memory.usage.shown,
+                        detail_opened: memory.usage.detail_opened,
                         helpful: memory.usage.helpful,
                         wrong: memory.usage.wrong,
                         last_used_at: memory.usage.last_used_at,
+                        last_shown_at: memory.usage.last_shown_at,
                     },
                     missing_entities: missing,
                     links: memory.links.iter().map(|l| link_view(&memory, l)).collect(),

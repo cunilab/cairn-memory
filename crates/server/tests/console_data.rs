@@ -92,6 +92,30 @@ async fn memory_list_filters_q_branch_and_expired() {
     let default = ids(&app.get("memories", &admin).await);
     assert!(default.contains(&c), "an old expires_at stays in the list");
     assert_eq!(default.len(), 4);
+
+    sql(
+        &app,
+        &format!("UPDATE memories SET proof_count = 3 WHERE memory_id IN ('{a}', '{b}', '{d}')"),
+    )
+    .await;
+    sql(
+        &app,
+        &format!("UPDATE memories SET rank = 'candidate' WHERE memory_id IN ('{b}', '{d}')"),
+    )
+    .await;
+    for (level, id, line) in [
+        ("proven", &a, "proven · saved 3×"),
+        ("new", &b, "new · awaiting confirmation"),
+        ("normal", &c, "normal"),
+        ("doubted", &d, "doubted · stale"),
+    ] {
+        let list = app
+            .get(&format!("memories?trust={level}&limit=1"), &admin)
+            .await;
+        assert_eq!(ids(&list), [id.as_str()]);
+        assert_eq!(list[0]["trust_level"], level);
+        assert_eq!(list[0]["trust"], line);
+    }
     let (status, body) = app
         .send(
             "GET",

@@ -227,7 +227,7 @@ curl -fsS -H 'content-type: application/json' \
 
 project_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"repository":"cairn-demo","name":"Cairn Demo"}' \
+  -d '{"repository":"cairn-demo","name":"E2E Cairn Demo"}' \
   "${api}/cairn-memory/projects/init")"
 project_id="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project_id"])')"
 
@@ -450,7 +450,7 @@ projects = json.load(open(os.environ["PROJECTS_BODY"], encoding="utf-8"))
 match = [item for item in projects if item["project_id"] == os.environ["PROJECT_ID"]]
 assert len(match) == 1
 assert match[0]["role"] == "owner"
-assert match[0]["name"] == "Cairn Demo"
+assert match[0]["name"] == "E2E Cairn Demo"
 PY
 
 # The member list the Team & sharing tab reads: owner first, then members who joined by capturing.
@@ -545,6 +545,20 @@ owner_ok() {
 }
 owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Decision saved from the web console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
 console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$workdir/owner-post.body")"
+memories_url="${web}/api/cairn/memories?projectId=${project_id}&scope=project&branch=feature-merge"
+normal_body="$workdir/normal.body"
+doubted_body="$workdir/doubted.body"
+curl -fsS -o "$normal_body" -b "$owner_jar" "${memories_url}&trust=normal"
+curl -fsS -o "$doubted_body" -b "$owner_jar" "${memories_url}&trust=doubted"
+python3 - "$normal_body" "$doubted_body" "$console_promoted" <<'PY'
+import json, sys
+normal, doubted = [json.load(open(path)) for path in sys.argv[1:3]]
+assert [row["id"] for row in normal] == [sys.argv[3]], normal
+assert normal[0]["trust"] == normal[0]["trust_level"] == "normal"
+assert normal[0]["usage"] == dict(fetched=0, shown=0, helpful=0, wrong=0,
+                                  detail_opened=0, last_used_at=None, last_shown_at=None)
+assert doubted == [], doubted
+PY
 branches_body="$workdir/branches.body"
 curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
 BRANCHES="$branches_body" python3 - <<'PY'

@@ -255,7 +255,8 @@ async fn brief_keeps_handoff_preferences_and_file_rules_under_newer_rules() {
     let brief = store
         .brief(&me, &ctx, &["src/jobs/queue.rs".to_owned()])
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     for (what, id) in [
         ("handoff", &handoff),
         ("preference", &preference),

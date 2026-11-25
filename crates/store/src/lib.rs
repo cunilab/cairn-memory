@@ -95,6 +95,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_device_agents",
         include_str!("../../../migrations/0017_device_agents.sql"),
     ),
+    (
+        "0018_memory_usage",
+        include_str!("../../../migrations/0018_memory_usage.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

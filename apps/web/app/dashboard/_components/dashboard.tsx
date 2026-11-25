@@ -244,9 +244,9 @@ export function Dashboard() {
         </Section>
         <Section title="Usage" description="Your usage in the last 30 days, whatever range is selected. Counts memories, not requests.">
           <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-sm tabular-nums">
-            <dt>Different memories fetched</dt><dd>{stats.usage.fetched_30d.toLocaleString()}</dd>
+            <dt>Different memories used</dt><dd>{stats.usage.fetched_30d.toLocaleString()}</dd>
             <dt>Marked helpful</dt><dd>{stats.usage.helpful_30d.toLocaleString()}</dd>
-            <dt>Durable memories never fetched</dt>
+            <dt>Durable memories never used</dt>
             <dd>{stats.usage.never_fetched.toLocaleString()}</dd>
           </dl>
           {stats.usage.top.length > 0 ? (

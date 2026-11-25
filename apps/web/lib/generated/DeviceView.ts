@@ -7,6 +7,6 @@ import type { DeviceStatus } from "./DeviceStatus";
  */
 export type DeviceView = { health: DeviceHealth | null, health_reason: string | null, fix_command: string | null, device_id: string, person_id: string, name: string, status: DeviceStatus, created_at: number, last_seen_at: number, 
 /**
- * `claude`, `codex` or `opencode`, from the client's user agent.
+ * The host agent, from the client's user agent.
  */
 agent: string | null, client_version: string | null, last_hook_at: number | null, };

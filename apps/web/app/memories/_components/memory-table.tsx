@@ -10,6 +10,7 @@ import { DataTable } from "@/components/data-table";
 import { FilterSelect, type FilterOption } from "@/components/filter-select";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
@@ -25,6 +26,7 @@ import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 import type { BranchSummary } from "@/lib/generated/BranchSummary";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectView } from "@/lib/generated/ProjectView";
+import type { TrustLevel } from "@/lib/generated/TrustLevel";
 
 const PAGE = 50;
 const KINDS = ["decision", "rule", "gotcha", "procedure", "fact", "preference", "note", "handoff"];
@@ -37,6 +39,11 @@ const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
   value: kind,
   label: kind.charAt(0).toUpperCase() + kind.slice(1),
 }));
+const TRUST_LABELS = { proven: "Proven", normal: "Normal", new: "New", doubted: "Doubted" } satisfies Record<TrustLevel, string>;
+const TRUST_OPTIONS: FilterOption[] = Object.entries(TRUST_LABELS).map(([value, label]) => ({ value, label }));
+const USAGE_COLUMNS = [
+  ["shown", "Shown"], ["fetched", "Used"], ["helpful", "Helpful"], ["wrong", "Wrong"],
+] as const;
 
 type Page = { key: string; items: MemoryView[]; next: string | null; error: string | null };
 
@@ -52,6 +59,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
   const project = projectId ?? params.get("project") ?? "";
   const kind = params.get("kind") ?? "";
   const status = params.get("status") ?? "";
+  const trust = params.get("trust") ?? "";
   const branch = params.get("branch") ?? "";
   const q = params.get("q") ?? "";
   const [search, setSearch] = useState(q);
@@ -68,10 +76,11 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
     if (projectId) query.set("scope", "project");
     if (kind) query.set("kind", kind);
     if (status) query.set("status", status);
+    if (trust) query.set("trust", trust);
     if (branch) query.set("branch", branch);
     if (q.trim()) query.set("q", q.trim());
     return query.toString();
-  }, [project, projectId, kind, status, branch, q]);
+  }, [project, projectId, kind, status, trust, branch, q]);
   const key = `${serverQuery}#${attempt}`;
   useResetOnHide(() => {
     setPage(null);
@@ -157,7 +166,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
 
   const rows = page?.items ?? [];
 
-  const active = [projectId ? "" : project, kind, status, branch, q].filter(Boolean).length;
+  const active = [projectId ? "" : project, kind, status, trust, branch, q].filter(Boolean).length;
   const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.archived_at != null ? `${p.name} (archived)` : p.name }));
   const branchOptions = (branches.project === project ? branches.rows : []).map((b) => ({ value: b.branch, label: b.branch }));
 
@@ -229,9 +238,30 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
         },
       },
       {
-        accessorKey: "fetched",
-        header: "Used",
-        cell: ({ row }) => <span className="text-sm tabular-nums">{row.original.fetched.toLocaleString()}</span>,
+        accessorKey: "trust_level",
+        header: "Trust",
+        cell: ({ row }) => {
+          const { trust_level, trust } = row.original;
+          return (
+            <Badge title={trust} variant={trust_level === "proven" ? "success" : trust_level === "doubted" ? "destructive" : trust_level === "new" ? "secondary" : "outline"}>
+              {TRUST_LABELS[trust_level]}
+            </Badge>
+          );
+        },
+      },
+      ...USAGE_COLUMNS.map(([id, header]): ColumnDef<MemoryView> => ({
+        id,
+        header,
+        accessorFn: (m) => m.usage[id],
+        cell: ({ row }) => <span className="text-sm tabular-nums">{row.original.usage[id].toLocaleString()}</span>,
+        meta: { className: "hidden md:table-cell" },
+      })),
+      {
+        id: "last_used_at",
+        header: "Last used",
+        accessorFn: (m) => m.usage.last_used_at ?? undefined,
+        sortUndefined: "last",
+        cell: ({ row }) => <Time value={row.original.usage.last_used_at} className="text-xs whitespace-nowrap text-muted-foreground" />,
         meta: { className: "hidden md:table-cell" },
       },
       {
@@ -245,12 +275,13 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
   );
 
   const controls = (
-    <div className={`grid gap-2 sm:grid-cols-2 ${projectId ? "lg:grid-cols-3" : "lg:grid-cols-4"}`}>
+    <div className={`grid gap-2 sm:grid-cols-2 ${projectId ? "lg:grid-cols-4" : "lg:grid-cols-5"}`}>
       {!projectId ? (
         <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(v) => set({ project: v, branch: null })} />
       ) : null}
       <FilterSelect label="Kind" value={kind} allLabel="All kinds" options={KIND_OPTIONS} onChange={(v) => set({ kind: v })} />
       <FilterSelect label="Status" value={status} allLabel="All statuses" options={statuses} onChange={(v) => set({ status: v })} />
+      <FilterSelect label="Trust" value={trust} allLabel="All trust levels" options={TRUST_OPTIONS} onChange={(v) => set({ trust: v })} />
       <FilterSelect label="Branch" value={branch} allLabel={project ? "All branches" : "Choose a project first"} options={branchOptions} disabled={!project} onChange={(v) => set({ branch: v })} />
     </div>
   );
@@ -306,7 +337,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
             size="sm"
             onClick={() => {
               setSearch("");
-              set({ project: null, kind: null, status: null, branch: null, q: null });
+              set({ project: null, kind: null, status: null, trust: null, branch: null, q: null });
             }}
           >
             <XIcon />
@@ -346,7 +377,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
                     variant="outline"
                     onClick={() => {
                       setSearch("");
-                      set({ project: null, kind: null, status: null, branch: null, q: null });
+                      set({ project: null, kind: null, status: null, trust: null, branch: null, q: null });
                     }}
                   >
                     Clear filters

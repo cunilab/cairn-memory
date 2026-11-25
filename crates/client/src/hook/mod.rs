@@ -713,13 +713,13 @@ impl Hook<'_> {
                 return None;
             }
         };
-        let notes: Vec<(String, String)> = reply["notes"]
+        let notes: Vec<(&str, &str)> = reply["notes"]
             .as_array()
             .map(|notes| {
                 notes
                     .iter()
                     .filter_map(|note| {
-                        let text = |key: &str| note[key].as_str().unwrap_or_default().to_owned();
+                        let text = |key: &str| note[key].as_str().unwrap_or_default();
                         Some((text("title"), text("summary")))
                             .filter(|(title, _)| !title.is_empty())
                     })
@@ -728,7 +728,7 @@ impl Hook<'_> {
             .unwrap_or_default();
         let text = match reply["card"].as_str().filter(|card| !card.is_empty()) {
             Some(card) => inject::card(card),
-            None => inject::topic(path, &notes),
+            None => inject::topic(path, &notes).0,
         };
         let keep = self.with_state(|s| {
             // A parallel hook of this session may have answered first: one note per path.

@@ -782,7 +782,9 @@ async fn visibility_matrix_for_all_four_channels() {
 }
 
 #[tokio::test]
-async fn search_counts_usage_but_topic_and_brief_do_not() {
+async fn hook_context_counts_shown_and_search_counts_fetched() {
+    use cairn_store::usage::Lookup;
+
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -793,20 +795,41 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
         ..WorkContext::default()
     };
     let id = store
-        .save(&me, save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Usage probe words","summary":"ledger audit trail is a summary of the test","reason":"r and the test says why"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"preference","scope":"personal","title":"Usage probe words","summary":"ledger audit trail is a summary of the test","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
-    let fetched = || async {
-        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
-            .fetch_one(store.pool())
-            .await
-            .unwrap()
+    let usage = || async {
+        sqlx::query_as::<_, (i32, i32, bool, bool)>(
+            "SELECT shown, fetched, last_shown_at IS NOT NULL, last_used_at IS NOT NULL
+             FROM usage WHERE memory_id = $1",
+        )
+        .bind(&id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
     };
-    assert_eq!(fetched().await, 0);
-    store.topic(&me, "src/usage.rs", &work).await.unwrap();
-    store.brief(&me, &work, &[]).await.unwrap();
-    assert_eq!(fetched().await, 0, "topic and brief never count");
+    assert_eq!(usage().await, (0, 0, false, false));
+    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    assert_eq!(brief.memory_ids, std::slice::from_ref(&id));
+    store
+        .record_retrieval(
+            &me,
+            Lookup::Brief,
+            brief.text.len(),
+            true,
+            &brief.memory_ids,
+        )
+        .await
+        .unwrap();
+    assert_eq!(usage().await, (1, 0, true, false));
+    let topic = store.topic(&me, "src/usage.rs", &work).await.unwrap();
+    assert_eq!(topic.memory_ids, std::slice::from_ref(&id));
+    store
+        .record_retrieval(&me, Lookup::Topic, 100, true, &topic.memory_ids)
+        .await
+        .unwrap();
+    assert_eq!(usage().await, (2, 0, true, false));
     let cards = store
         .search(
             &me,
@@ -819,7 +842,7 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
         .await
         .unwrap();
     assert_eq!(cards.results.first().map(|c| &c.id), Some(&id));
-    assert_eq!(fetched().await, 1, "search counts the returned card");
+    assert_eq!(usage().await, (2, 1, true, true));
     db.finish().await;
 }
 
@@ -1225,7 +1248,7 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    let brief = store.brief(&me, &work, &[]).await.unwrap().text;
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1563,7 +1586,7 @@ async fn brief_skips_candidates() {
         .execute(store.pool())
         .await
         .unwrap();
-    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    let brief = store.brief(&me, &work, &[]).await.unwrap().text;
     assert!(brief.contains("Keep this rule visible"), "{brief}");
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
@@ -1663,7 +1686,8 @@ async fn digest_searchable_not_in_brief() {
     let brief = store
         .brief(&person, &work, &["LedControls".into()])
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(!brief.contains("LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
@@ -1946,7 +1970,8 @@ async fn forget_keeps_content_but_hides() {
         .store
         .brief(&me, &WorkContext::default(), &[])
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(!brief.contains("Forget keeps this rule"), "{brief}");
     db.finish().await;
 }
@@ -1991,7 +2016,8 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
             &[],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(
         brief.contains("chain_rich"),
         "brief shows the newest rich handoff: {brief}"
@@ -2038,7 +2064,7 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap();
+    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap().text;
     assert!(
         brief.contains("nongit_handoff"),
         "non-git brief must show the handoff: {brief}"
@@ -2052,7 +2078,7 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap();
+    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap().text;
     assert!(
         !git_brief.contains("nongit_handoff"),
         "git brief must only show matching branch's handoff: {git_brief}"

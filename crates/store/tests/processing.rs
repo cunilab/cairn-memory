@@ -2069,7 +2069,7 @@ async fn handoffs_form_a_chain_and_brief_shows_latest() {
         worktree: Some("wt-1".into()),
         ..WorkContext::default()
     };
-    let brief = store.brief(&person, &work, &[]).await.unwrap();
+    let brief = store.brief(&person, &work, &[]).await.unwrap().text;
     assert!(
         brief.contains(&rows[1].0),
         "brief shows the richer handoff: {brief}"
@@ -2151,7 +2151,7 @@ async fn system_redistill_does_not_confirm_candidate_or_increment_proof_count() 
         worktree: Some("wt-1".into()),
         ..WorkContext::default()
     };
-    let brief = store.brief(&person, &work, &[]).await.unwrap();
+    let brief = store.brief(&person, &work, &[]).await.unwrap().text;
     assert!(
         !brief.contains(&gotcha.id),
         "candidate gotcha must not be in the team brief: {brief}"

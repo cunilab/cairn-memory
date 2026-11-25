@@ -75,15 +75,15 @@ no wrapper keys. A failed call, including a server 4xx, is `{"isError":true,"con
 A tool checks its required keys before the request; malformed JSON-RPC and unknown tools use JSON-RPC errors.
 
 `memory_search` → `{"results":[Card],"more":n}`, `more` omitted at 0. `Card` is
-`{id, kind, title, summary, score}`, plus `status`, `stale_cause` and `label` on stale or replaced memories, and `seen` (proof count) when it is 2 or more. Scores are absolute and capped at 1.0.
+`{id, kind, title, summary, score, trust}`, plus `status`, `stale_cause` and `label` on stale or replaced memories, and `seen` (proof count) when it is 2 or more. Scores are absolute and capped at 1.0.
 
 ```json
-{"results":[{"id":"mem_…","kind":"decision","title":"Use Postgres SKIP LOCKED for the job queue","summary":"Background jobs run …","score":1.0}],"more":3}
+{"results":[{"id":"mem_…","kind":"decision","title":"Use Postgres SKIP LOCKED for the job queue","summary":"Background jobs run …","score":1.0,"trust":"proven · 4 helpful · used 12×"}],"more":3}
 ```
 
 `memory_get` → `{"memories":[Record],"missing":[id]}` in request order; hidden and unknown ids go to
-`missing`. `Record` is `{id, kind, scope, status, title, summary, reason?, fields?, evidence?, links?, branch?, updated_at}`
-with empty values omitted. A record with long detail includes `detail_chars`. Pass `detail: true` with one id to read the full `detail` if the summary and reason are insufficient. Only get and search count a memory as fetched.
+`missing`. `Record` is `{id, kind, scope, status, title, summary, trust, reason?, fields?, evidence?, links?, branch?, updated_at}`
+with empty values omitted. A record with long detail includes `detail_chars`. Pass `detail: true` with one id to read the full `detail` if the summary and reason are insufficient. Both tools include a compact trust reason based on the record and counters at the time of the read.
 
 `memory_save` → `{"id","status","deduplicated"}` for a single save; `items` accepts up to three notes and returns per-item results. An identical save from the same owner returns the
 existing id with `deduplicated:true` and merges new evidence. Detail is optional and does not affect identity. A duplicate can fill empty detail. An explicit correction can update detail without changing the id. A save that matches a forgotten memory is an

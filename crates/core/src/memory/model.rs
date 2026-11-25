@@ -37,6 +37,7 @@ text_enum!(Status {
     Active => "active", Stale => "stale", Superseded => "superseded", Forgotten => "forgotten",
 });
 text_enum!(Rank { Candidate => "candidate", Normal => "normal" });
+text_enum!(TrustLevel { Doubted => "doubted", New => "new", Proven => "proven", Normal => "normal" });
 text_enum!(Relation {
     Relates => "relates", Causes => "causes", Fixes => "fixes", DependsOn => "depends_on",
     Supersedes => "supersedes", Contradicts => "contradicts",
@@ -156,7 +157,7 @@ fn proof_once(n: &u32) -> bool {
     *n < 2
 }
 
-/// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.
+/// What an agent sees of a stored memory (`memory_get`), including its trust reason.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Record {
@@ -169,6 +170,7 @@ pub struct Record {
     pub stale_cause: Option<String>,
     pub title: String,
     pub summary: String,
+    pub trust: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,6 +201,7 @@ impl From<&Memory> for Record {
             stale_cause: m.stale_cause.clone(),
             title: m.title.clone(),
             summary: m.summary.clone(),
+            trust: m.trust().1,
             reason: m.reason.clone(),
             detail_chars: (!m.detail.is_empty()).then(|| m.detail.chars().count()),
             detail: None,
@@ -230,7 +233,10 @@ pub struct Link {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
     pub fetched: u32,
+    pub shown: u32,
+    pub detail_opened: u32,
     pub helpful: u32,
     pub wrong: u32,
     pub last_used_at: Option<i64>,
+    pub last_shown_at: Option<i64>,
 }

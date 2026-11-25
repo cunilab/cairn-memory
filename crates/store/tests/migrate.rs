@@ -33,6 +33,7 @@ async fn migrate_twice_is_a_no_op() {
             "0015_memory_detail",
             "0016_project_archive",
             "0017_device_agents",
+            "0018_memory_usage",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -956,7 +957,7 @@ async fn fixes_migration_additive() {
         INSERT INTO memory_aliases(memory_id,ord,source,text) VALUES ('m1',1,'agent','one');
         INSERT INTO entities(memory_id,kind,name) VALUES ('m1','term','one');
         INSERT INTO links(source_id,target_id,relation,origin) VALUES ('m1','m2','relates','agent');
-        INSERT INTO usage(memory_id) VALUES ('m1');
+        INSERT INTO usage(memory_id,fetched,helpful,wrong,last_used_at) VALUES ('m1',7,2,1,now());
         INSERT INTO usage_votes(memory_id,person_id,vote) VALUES ('m1','p','helpful');
         INSERT INTO sessions(person_id,session_id) VALUES ('p','s');
         INSERT INTO observations(person_id,event_id,session_id,role,source,content,content_hash,expires_at) VALUES ('p','e','s','user','hook','text','h',now());
@@ -1007,6 +1008,7 @@ async fn fixes_migration_additive() {
     versions.push("0015_memory_detail".into());
     versions.push("0016_project_archive".into());
     versions.push("0017_device_agents".into());
+    versions.push("0018_memory_usage".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1020,6 +1022,14 @@ async fn fixes_migration_additive() {
             .await
             .unwrap();
     assert!(project_is_active);
+    let usage: (i32, i32, i32, bool, i32, i32, bool) = sqlx::query_as(
+        "SELECT fetched, helpful, wrong, last_used_at IS NOT NULL, shown, detail_opened,
+                last_shown_at IS NULL FROM usage WHERE memory_id = 'm1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(usage, (7, 2, 1, true, 0, 0, true));
     for (table, expected) in tables.into_iter().zip(before) {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(store.pool())

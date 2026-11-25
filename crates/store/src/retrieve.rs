@@ -10,7 +10,7 @@ use cairn_core::memory::{Fields, Kind, Memory, Status};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
-use cairn_core::retrieve::brief::{session_brief, topic_card};
+use cairn_core::retrieve::brief::{SessionBrief, session_brief, topic_card, topic_notes};
 use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
@@ -132,6 +132,8 @@ pub struct Topic {
     pub notes: Vec<TopicNote>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<String>,
+    #[serde(skip)]
+    pub memory_ids: Vec<String>,
 }
 
 /// Candidate channels for hybrid search. Each returns `(memory_id, score)` for memories the
@@ -618,7 +620,7 @@ impl Store {
         person_id: &str,
         context: &WorkContext,
         recent_files: &[String],
-    ) -> Result<String> {
+    ) -> Result<SessionBrief> {
         let recent: Vec<String> = recent_files
             .iter()
             .take(RECENT_FILES_MAX)
@@ -791,12 +793,19 @@ impl Store {
                 .copied()
                 .zip(titles.iter().map(String::as_str))
                 .collect();
+            let (card, shown) = topic_card(path, total as usize, &first);
+            let memory_ids = rows
+                .iter()
+                .take(shown)
+                .map(|row| row.try_get("memory_id"))
+                .collect::<std::result::Result<_, _>>()?;
             return Ok(Topic {
                 notes: Vec::new(),
-                card: Some(topic_card(path, total as usize, &first)),
+                card: Some(card),
+                memory_ids,
             });
         }
-        let notes = rows
+        let notes: Vec<_> = rows
             .iter()
             .map(|r| {
                 Ok(TopicNote {
@@ -806,7 +815,22 @@ impl Store {
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(Topic { notes, card: None })
+        let visible: Vec<_> = notes.iter().filter(|note| !note.title.is_empty()).collect();
+        let text: Vec<_> = visible
+            .iter()
+            .map(|note| (note.title.as_str(), note.summary.as_str()))
+            .collect();
+        let (_, shown) = topic_notes(path, &text);
+        let memory_ids = visible
+            .into_iter()
+            .take(shown)
+            .map(|note| note.id.clone())
+            .collect();
+        Ok(Topic {
+            notes,
+            card: None,
+            memory_ids,
+        })
     }
 
     /// Nodes are the memories the person can see; edges are the links between them.

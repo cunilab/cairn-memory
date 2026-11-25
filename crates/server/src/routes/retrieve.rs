@@ -108,6 +108,7 @@ pub async fn search(
         Lookup::Search,
         &reply,
         !cards.results.is_empty(),
+        &[],
     )
     .await;
     Ok(Json(reply))
@@ -115,11 +116,18 @@ pub async fn search(
 
 /// Counts one lookup for the dashboard: how big the answer was and whether it found anything.
 /// A failure to count never fails the lookup.
-async fn record(state: &AppState, person_id: &str, lookup: Lookup, reply: &Value, hit: bool) {
+async fn record(
+    state: &AppState,
+    person_id: &str,
+    lookup: Lookup,
+    reply: &Value,
+    hit: bool,
+    shown: &[String],
+) {
     let bytes = reply.to_string().len();
     if let Err(error) = state
         .store
-        .record_retrieval(person_id, lookup, bytes, hit)
+        .record_retrieval(person_id, lookup, bytes, hit, shown)
         .await
     {
         eprintln!("retrieval usage not recorded: {error}");
@@ -164,7 +172,7 @@ pub async fn brief(
         .effective_instructions(&account.person_id, context.project_id.as_deref())
         .await?;
     let mut reply = json!({
-        "brief": brief,
+        "brief": brief.text,
         "max_bytes": SESSION_BRIEF_MAX_BYTES,
         "instructions": {
             "session_instruction": instructions.session_instruction.text,
@@ -189,7 +197,8 @@ pub async fn brief(
         &account.person_id,
         Lookup::Brief,
         &reply,
-        !brief.trim().is_empty(),
+        !brief.text.trim().is_empty(),
+        &brief.memory_ids,
     )
     .await;
     Ok(Json(reply))
@@ -220,6 +229,7 @@ pub async fn topic(
         Lookup::Topic,
         &reply,
         !topic.notes.is_empty() || topic.card.is_some(),
+        &topic.memory_ids,
     )
     .await;
     Ok(Json(reply))

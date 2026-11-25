@@ -817,6 +817,7 @@ async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restor
     assert!(ids(&app.post("search", search_body.clone(), &device).await).contains(&memory));
     let before = app.post("get", get_body.clone(), &device).await;
     assert_eq!(before["memories"][0]["detail"], "Detailed blueprint.");
+    assert_eq!(before["memories"][0]["trust"], "normal · used 1×");
     assert!(
         app.post("session/brief", brief_body.clone(), &device).await["brief"]
             .as_str()
@@ -880,11 +881,11 @@ async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restor
     assert_eq!(app.get(&scoped, &device).await, json!([]));
     assert_eq!(app.get("memories", &member).await, json!([]));
     assert_eq!(app.get(&scoped, &member).await[0]["id"], memory);
-    assert_eq!(app.get(&detail, &member).await["project_archived"], true);
-    assert_eq!(
-        app.get(&detail, &member).await["detail"],
-        "Detailed blueprint."
-    );
+    let view = app.get(&detail, &member).await;
+    assert_eq!(view["project_archived"], true);
+    assert_eq!(view["detail"], "Detailed blueprint.");
+    assert_eq!(view["usage"]["shown"], 2);
+    assert_eq!(view["usage"]["detail_opened"], 1);
     let (status, _) = app
         .send("POST", "forget", json!({"id": memory}), Some(&owner))
         .await;
@@ -908,7 +909,9 @@ async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restor
 
     // Admin can restore even without project membership.
     assert!(app.post(&restore, json!(null), &admin).await["archived_at"].is_null());
-    assert_eq!(app.post("get", get_body, &device).await, before);
+    let mut expected = before;
+    expected["memories"][0]["trust"] = json!("normal · used 2×");
+    assert_eq!(app.post("get", get_body, &device).await, expected);
     assert!(ids(&app.post("search", search_body, &device).await).contains(&memory));
     assert!(
         app.post("session/brief", brief_body, &device).await["brief"]
