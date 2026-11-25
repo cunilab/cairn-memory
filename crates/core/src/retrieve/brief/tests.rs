@@ -18,7 +18,7 @@ fn renders_independent_byte_budgets_and_only_records_shown_ids() {
     };
     let pins = make("pin", Some(1));
     let essentials = make("essential", None);
-    let brief = session_brief(&pins, &essentials, 3 * 86_400, 8);
+    let brief = session_brief(&pins, &essentials, 3 * 86_400, 8, BriefBudget::Extended);
     let (identity, essential) = brief.text.split_once("\"L1 Essential\"").unwrap();
     assert!(identity.len() <= IDENTITY_MAX_BYTES);
     assert!(essential.len() + "\"L1 Essential\"".len() <= ESSENTIAL_MAX_BYTES);
@@ -54,8 +54,15 @@ fn renders_independent_byte_budgets_and_only_records_shown_ids() {
             .collect::<Vec<_>>()
     );
     assert_eq!(&brief.memory_ids, &[shown_pins, shown_essentials].concat());
-    assert_eq!(session_brief(&pins, &essentials, 0, 1).memory_ids, ["pin0"]);
-    assert!(session_brief(&[], &[], 0, 8).text.is_empty());
+    assert_eq!(
+        session_brief(&pins, &essentials, 0, 1, BriefBudget::Extended).memory_ids,
+        ["pin0"]
+    );
+    assert!(
+        session_brief(&[], &[], 0, 8, BriefBudget::Extended)
+            .text
+            .is_empty()
+    );
 }
 
 #[test]

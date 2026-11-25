@@ -11,7 +11,9 @@ use cairn_core::memory::{Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Sta
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
-use cairn_core::retrieve::brief::{SessionBrief, card_age, session_brief, topic_card, topic_notes};
+use cairn_core::retrieve::brief::{
+    BriefBudget, SessionBrief, card_age, session_brief, topic_card, topic_notes,
+};
 use cairn_core::retrieve::command::{error_tail, first_error_line};
 use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
@@ -802,6 +804,7 @@ impl Store {
         person_id: &str,
         context: &WorkContext,
         session_id: Option<&str>,
+        budget: BriefBudget,
     ) -> Result<SessionBrief> {
         let mut tx = self.pool.begin().await?;
         let mut shown = already_shown(&mut tx, person_id, session_id).await?;
@@ -883,7 +886,13 @@ impl Store {
             .iter()
             .map(memory_from_row)
             .collect::<Result<Vec<_>>>()?;
-        let brief = session_brief(&pins, &essentials, cairn_core::id::now_seconds(), limit);
+        let brief = session_brief(
+            &pins,
+            &essentials,
+            cairn_core::id::now_seconds(),
+            limit,
+            budget,
+        );
         finish_push(
             tx,
             person_id,

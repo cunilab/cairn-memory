@@ -661,6 +661,7 @@ fn start_injects_brief_only_and_end_after_work() {
     assert_eq!(brief.body["session_id"], "s1");
     assert_eq!(brief.body["context"]["repository"], "local:repo");
     assert_eq!(brief.body["recent_files"], json!([]));
+    assert_eq!(brief.body["extended_brief"], true);
 
     // No work: SessionEnd closes nothing on the server and removes the state.
     env.run("SessionEnd", &env.payload("s1", json!({})));
@@ -1020,6 +1021,7 @@ fn mcp_initialize_falls_back_to_static_instructions_on_brief_timeout() {
     let requests = server.to("brief");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["session_id"], "timeout");
+    assert_eq!(requests[0].body["extended_brief"], true);
     assert_eq!(requests[0].body["context"]["repository"], "local:repo");
 }
 

@@ -1,6 +1,7 @@
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Scope, Status};
 use cairn_core::process::jobs::JobKind;
+use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::hybrid::fuse;
 use cairn_store::retrieve::{ALIASES_IN_SEARCH, Narrow};
 use cairn_store::testing::{TestDb, rule, save_input};
@@ -808,7 +809,10 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         .unwrap()
     };
     assert_eq!(usage().await, (0, 0, false, false));
-    let brief = store.brief(&me, &work, Some("s1")).await.unwrap();
+    let brief = store
+        .brief(&me, &work, Some("s1"), BriefBudget::Extended)
+        .await
+        .unwrap();
     assert_eq!(brief.memory_ids, std::slice::from_ref(&id));
     assert!(
         brief.text.contains(r#""why":"personal preference""#),
@@ -816,7 +820,10 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         brief.text
     );
     assert_eq!(usage().await, (1, 0, true, false));
-    let repeat = store.brief(&me, &work, Some("s1")).await.unwrap();
+    let repeat = store
+        .brief(&me, &work, Some("s1"), BriefBudget::Extended)
+        .await
+        .unwrap();
     assert!(repeat.text.is_empty());
     let topic = store
         .topic(&me, "src/usage.rs", &work, Some("s1"))
@@ -1270,7 +1277,11 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work, None).await.unwrap().text;
+    let brief = store
+        .brief(&me, &work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1668,7 +1679,11 @@ async fn brief_skips_candidates() {
         .execute(store.pool())
         .await
         .unwrap();
-    let brief = store.brief(&me, &work, None).await.unwrap().text;
+    let brief = store
+        .brief(&me, &work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(brief.contains("Keep this rule visible"), "{brief}");
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
@@ -1765,7 +1780,11 @@ async fn digest_searchable_not_in_brief() {
         worktree: Some("wt-1".into()),
         ..WorkContext::default()
     };
-    let brief = store.brief(&person, &work, None).await.unwrap().text;
+    let brief = store
+        .brief(&person, &work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(!brief.contains("LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
@@ -2046,7 +2065,7 @@ async fn forget_keeps_content_but_hides() {
     assert_eq!(admin.memories[0].status, Status::Forgotten);
     let brief = db
         .store
-        .brief(&me, &WorkContext::default(), None)
+        .brief(&me, &WorkContext::default(), None, BriefBudget::Extended)
         .await
         .unwrap()
         .text;
@@ -2092,6 +2111,7 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
                 ..WorkContext::default()
             },
             None,
+            BriefBudget::Extended,
         )
         .await
         .unwrap()
@@ -2142,7 +2162,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let brief = db.store.brief(&me, &non_git_work, None).await.unwrap().text;
+    let brief = db
+        .store
+        .brief(&me, &non_git_work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(
         brief.contains("nongit_handoff"),
         "non-git brief must show the handoff: {brief}"
@@ -2156,7 +2181,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let git_brief = db.store.brief(&me, &git_work, None).await.unwrap().text;
+    let git_brief = db
+        .store
+        .brief(&me, &git_work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(
         !git_brief.contains("nongit_handoff"),
         "git brief must only show matching branch's handoff: {git_brief}"

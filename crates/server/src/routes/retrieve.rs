@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use cairn_core::capture::{WorkContext, redact_sensitive_content};
 use cairn_core::memory::{Kind, Relation, Scope};
-use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
+use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::command::ERROR_TAIL_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
@@ -47,6 +47,8 @@ pub struct Brief {
     context: Option<WorkContext>,
     #[serde(default)]
     recent_files: Vec<String>,
+    #[serde(default)]
+    extended_brief: bool,
 }
 
 #[derive(Deserialize)]
@@ -170,8 +172,13 @@ pub async fn brief(
         .store
         .effective_instructions(&account.person_id, context.project_id.as_deref())
         .await?;
+    let budget = if body.extended_brief {
+        BriefBudget::Extended
+    } else {
+        BriefBudget::Legacy
+    };
     let mut reply = json!({
-        "max_bytes": SESSION_BRIEF_MAX_BYTES,
+        "max_bytes": budget.max_bytes(),
         "instructions": {
             "session_instruction": instructions.session_instruction.text,
             "stop_nudge": instructions.stop_nudge.text,
@@ -196,7 +203,7 @@ pub async fn brief(
     }
     let brief = state
         .store
-        .brief(&account.person_id, &brief_context, session_id)
+        .brief(&account.person_id, &brief_context, session_id, budget)
         .await?;
     let hit = !brief.text.is_empty();
     reply["brief"] = json!(brief.text);

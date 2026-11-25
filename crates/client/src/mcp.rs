@@ -201,6 +201,7 @@ impl McpServer {
             "session_id": session_id,
             "context": git::work_context(&cwd, top.as_deref()),
             "recent_files": git::recent_files(&cwd),
+            "extended_brief": true,
         });
         let client = Client::identified(self.config.clone(), BRIEF_TIMEOUT, "", ClientKind::Mcp);
         let reply = client.post("/cairn-memory/session/brief", &body).ok()?;

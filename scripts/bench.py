@@ -205,7 +205,7 @@ def check_recall_latency(http, device, context, repo, env, exe, config, out, sem
     path = "src/jobs/queue.rs"
     tool = {"tool_name": "Bash", "tool_input": {"command": command}}
     routes = {
-        "brief": ("session/brief", {"context": context}, "brief"),
+        "brief": ("session/brief", {"context": context, "extended_brief": True}, "brief"),
         "topic": ("session/topic", {"context": context, "path": path}, "notes"),
         "warning": ("session/command-recall", {"project_id": context["project_id"], "command": command}, "text"),
         "failure": ("session/command-recall", {"project_id": context["project_id"], "command": command, "error_tail": error}, "text"),

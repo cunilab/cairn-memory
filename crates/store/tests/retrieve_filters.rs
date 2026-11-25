@@ -4,6 +4,7 @@
 
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::Kind;
+use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::filter::Filter;
 use cairn_store::testing::{TestDb, save_input};
 
@@ -257,7 +258,11 @@ async fn brief_keeps_proven_essentials_ahead_of_hundreds_of_newer_rules() {
     )
     .await;
 
-    let brief = store.brief(&me, &ctx, None).await.unwrap().text;
+    let brief = store
+        .brief(&me, &ctx, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     for (what, id) in [
         ("handoff", &handoff),
         ("preference", &preference),

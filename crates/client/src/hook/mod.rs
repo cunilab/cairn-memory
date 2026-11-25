@@ -456,6 +456,7 @@ impl Hook<'_> {
             "session_id": self.session_id,
             "context": self.work_context(),
             "recent_files": git::recent_files(&self.cwd),
+            "extended_brief": true,
         });
         let reply = match self.post("/cairn-memory/session/brief", &body) {
             Ok(reply) => reply,

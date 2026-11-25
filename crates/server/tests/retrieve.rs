@@ -739,11 +739,11 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         .await;
     assert!(
         brief["brief"].as_str().unwrap().len()
-            <= cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+            <= cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
     );
     assert_eq!(
         brief["max_bytes"],
-        cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+        cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
     );
     let files: serde_json::Value =
         sqlx::query_scalar("SELECT context->'recent_files' FROM sessions WHERE session_id = 's9'")
@@ -765,7 +765,7 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         .await;
     assert_eq!(
         untracked["max_bytes"],
-        cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+        cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
     );
     app.finish().await;
 }
@@ -1622,5 +1622,78 @@ async fn pins_are_web_only_and_both_brief_layers_deduplicate_automatic_recall() 
         !unpinned["brief"].as_str().unwrap().contains(&pin),
         "{unpinned}"
     );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn legacy_brief_keeps_identity_and_packs_essentials_within_1200_bytes() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("brief-compat").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:e2e-brief-compat", "name": "E2E Brief compatibility"}),
+            &device,
+        )
+        .await;
+    let project_id = project["project_id"].as_str().unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'brief_' || n, p.owner_id, p.project_id, 'project', 'rule', 'Brief card ' || n,
+                repeat('é', 120), 'e', 'brief_' || n, CASE WHEN n <= 2 THEN now() END
+           FROM projects p CROSS JOIN generate_series(1, 8) n WHERE p.project_id = $1",
+    )
+    .bind(project_id)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+
+    let body = json!({"session_id": "legacy-brief", "context": {"project_id": project_id}});
+    let legacy = app.post("session/brief", body.clone(), &device).await;
+    let mut extended_body = body;
+    extended_body["session_id"] = json!("extended-brief");
+    extended_body["extended_brief"] = json!(true);
+    let extended = app.post("session/brief", extended_body, &device).await;
+    assert!(extended["brief"].as_str().unwrap().len() > 1200);
+
+    let decode = |reply: &serde_json::Value, max_bytes| -> serde_json::Value {
+        assert_eq!(reply["max_bytes"], max_bytes);
+        let text = reply["brief"].as_str().unwrap();
+        assert!(text.len() <= max_bytes, "{text}");
+        serde_json::from_str(
+            text.split_once("```json\n")
+                .unwrap()
+                .1
+                .strip_suffix("\n```")
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let legacy = decode(&legacy, 1200);
+    let extended = decode(&extended, 1800);
+    assert_eq!(legacy["L0 Identity"], extended["L0 Identity"]);
+    assert_eq!(legacy["L0 Identity"][0]["id"], "brief_1");
+    assert_eq!(legacy["L0 Identity"][1]["id"], "brief_2");
+    let legacy_essentials = legacy["L1 Essential"].as_array().unwrap();
+    let extended_essentials = extended["L1 Essential"].as_array().unwrap();
+    assert!(!legacy_essentials.is_empty() && legacy_essentials.len() < extended_essentials.len());
+
+    let shown: Vec<String> = sqlx::query_scalar(
+        "SELECT memory_id FROM session_shown WHERE session_id = 'legacy-brief' ORDER BY memory_id",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    let mut rendered: Vec<&str> = legacy["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(legacy_essentials)
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    rendered.sort_unstable();
+    assert_eq!(shown, rendered);
     app.finish().await;
 }

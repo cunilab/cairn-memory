@@ -7,6 +7,23 @@ use serde_json::json;
 pub const IDENTITY_MAX_BYTES: usize = 600;
 pub const ESSENTIAL_MAX_BYTES: usize = 1200;
 pub const SESSION_BRIEF_MAX_BYTES: usize = IDENTITY_MAX_BYTES + ESSENTIAL_MAX_BYTES;
+pub const LEGACY_SESSION_BRIEF_MAX_BYTES: usize = 1200;
+
+#[derive(Clone, Copy)]
+pub enum BriefBudget {
+    Legacy,
+    Extended,
+}
+
+impl BriefBudget {
+    pub const fn max_bytes(self) -> usize {
+        match self {
+            Self::Legacy => LEGACY_SESSION_BRIEF_MAX_BYTES,
+            Self::Extended => SESSION_BRIEF_MAX_BYTES,
+        }
+    }
+}
+
 pub const TOPIC_MAX_BYTES: usize = 300;
 
 fn bounded(text: &str, bytes: usize) -> &str {
@@ -106,6 +123,7 @@ pub fn session_brief(
     essentials: &[Memory],
     now: i64,
     limit: usize,
+    budget: BriefBudget,
 ) -> SessionBrief {
     let mut memory_ids = Vec::new();
     let mut text = String::from(
@@ -121,7 +139,7 @@ pub fn session_brief(
     );
     text.push_str("],\n");
 
-    let ceiling = text.len() + ESSENTIAL_MAX_BYTES;
+    let ceiling = (text.len() + ESSENTIAL_MAX_BYTES).min(budget.max_bytes());
     text.push_str("\"L1 Essential\":[");
     render_layer(
         &mut text,

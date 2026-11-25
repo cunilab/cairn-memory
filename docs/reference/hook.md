@@ -29,7 +29,7 @@ The default start instruction tells agents to use Cairn as their only memory, ca
 
 ## Injection budget
 
-The server allows eight pushed memories per person and session ID across briefs, topics, command recall and prompt recall. The brief fits within 1,800 bytes. Hooks request up to 16 file topics and can inject up to four topic replies of 300 bytes each. The session instruction and the Stop text are each limited to 600 bytes, globally and per project. See [automatic recall](recall.md#automatic-recall).
+The server allows eight pushed memories per person and session ID across briefs, topics, command recall and prompt recall. Current hooks request a brief of up to 1,800 bytes. The server caps older clients’ briefs at 1,200 bytes. Hooks request up to 16 file topics and can inject up to four topic replies of 300 bytes each. The session instruction and the Stop text are each limited to 600 bytes, globally and per project. See [automatic recall](recall.md#automatic-recall).
 
 The stdio MCP server also requests the brief for its working directory and appends it to the initialize instructions. The HTTP request has a one-second timeout. An unavailable or empty brief leaves the static instructions in place. A host can supply its hook session ID via `initialize.params._meta.sessionId` to share the eight-memory budget. Standard stdio initialization carries no host session ID, so a client that omits this field can receive the same memory through MCP and a hook. [MCP initialization](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
 
