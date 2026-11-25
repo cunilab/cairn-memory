@@ -128,8 +128,9 @@ pub(crate) async fn join_member(
 }
 
 impl Store {
-    /// `cairn init`: the person's project for the repository, created (with the owner as a member)
-    /// when there is none. The flag is true when it is new.
+    /// `cairn init` without a project id: reuse the person's remote project, or create one
+    /// (with the owner as a member). Local folder names always create a new project.
+    /// The flag is true when it is new.
     pub async fn init_project(
         &self,
         person_id: &str,
@@ -150,6 +151,7 @@ impl Store {
             .await?;
         let existing = sqlx::query(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects WHERE owner_id = $1 AND repository = $2
+             AND repository NOT LIKE 'local:%'
              ORDER BY created_at, project_id LIMIT 1"
         ))
         .bind(person_id)

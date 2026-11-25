@@ -224,6 +224,53 @@ async fn shared_project_model() {
 }
 
 #[tokio::test]
+async fn local_repository_names_do_not_identify_projects() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let first = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo"}),
+            &device,
+        )
+        .await;
+    let second = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo"}),
+            &device,
+        )
+        .await;
+    assert_eq!(first["created"], true);
+    assert_eq!(second["created"], true);
+    assert_ne!(first["project_id"], second["project_id"]);
+
+    let named = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo", "name": "Other"}),
+            &device,
+        )
+        .await;
+    assert_eq!(named["created"], true);
+    assert_eq!(named["name"], "Other");
+    assert_ne!(named["project_id"], first["project_id"]);
+    assert_ne!(named["project_id"], second["project_id"]);
+
+    let again = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo", "project_id": first["project_id"]}),
+            &device,
+        )
+        .await;
+    assert_eq!(again["created"], false);
+    assert_eq!(again["project_id"], first["project_id"]);
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn init_registers_a_committed_project_the_server_lost() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;

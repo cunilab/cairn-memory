@@ -180,7 +180,8 @@ fn setup(args: &[String]) -> Result<(), Error> {
 
 /// Creates (or finds) the caller's project for this folder and writes
 /// `.cairn/project.json`. Inside git the root is the checkout; otherwise it is the working
-/// folder and the repository is `local:<folder name>`. This never stages or commits.
+/// folder and the repository is `local:<folder name>`. Without a remote or project file,
+/// creates a new project. This never stages or commits.
 fn init(args: &[String]) -> Result<(), Error> {
     let yes = args.iter().any(|arg| arg == "--yes");
     let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();

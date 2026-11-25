@@ -549,6 +549,41 @@ fn non_git_project_saves_attach_from_root_and_child_for_cli_and_mcp() {
 }
 
 #[test]
+fn init_keeps_same_named_no_remote_folders_separate() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "local-collision");
+    let first = checkout("local-collision-first");
+    let second = checkout("local-collision-second");
+    let identity = |dir: &std::path::Path| -> Value {
+        serde_json::from_slice(&std::fs::read(dir.join(".cairn/project.json")).unwrap()).unwrap()
+    };
+    for dir in [&first, &second] {
+        let output = team.owner.run_in(dir, &["init"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let first_file = identity(&first);
+    let second_file = identity(&second);
+    assert_eq!(first_file["repository"], "local:repo");
+    assert_eq!(second_file["repository"], "local:repo");
+    assert_ne!(first_file["project_id"], second_file["project_id"]);
+    for (dir, original) in [(&first, &first_file), (&second, &second_file)] {
+        let output = team.owner.run_in(dir, &["init"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(&identity(dir), original);
+    }
+}
+
+#[test]
 fn init_registers_a_committed_project_again_after_a_server_wipe() {
     let Some(server) = Server::start() else {
         return;
