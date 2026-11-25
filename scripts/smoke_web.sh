@@ -560,6 +560,12 @@ assert normal[0]["usage"] == dict(fetched=0, shown=0, pushed=0, push_used=0,
                                   last_used_at=None, last_shown_at=None)
 assert doubted == [], doubted
 PY
+owner_ok "pin memory" "memories/${console_promoted}/pin" '{"pinned":true}'
+python3 -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1]))["pinned_at"], int)' "$workdir/owner-post.body"
+curl -fsS -b "$owner_jar" "$memories_url" \
+  | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[0]["pinned_at"], int)'
+owner_ok "unpin memory" "memories/${console_promoted}/pin" '{"pinned":false}'
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["pinned_at"] is None' "$workdir/owner-post.body"
 branches_body="$workdir/branches.body"
 curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
 BRANCHES="$branches_body" python3 - <<'PY'

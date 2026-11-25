@@ -69,6 +69,8 @@ pub struct MemoryView {
     pub missing_entities: Vec<String>,
     pub links: Vec<LinkView>,
     pub project_archived: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub pinned_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
@@ -209,6 +211,7 @@ impl Store {
                     owner_is_me,
                     project_name,
                     project_archived,
+                    pinned_at: memory.pinned_at,
                     device_name,
                     checked_at,
                     status_changed_at: changed,

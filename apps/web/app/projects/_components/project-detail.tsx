@@ -223,6 +223,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             >
               {row.original.title}
             </button>
+            {row.original.pinned_at != null ? <Badge variant="outline">Pinned</Badge> : null}
             <p className="line-clamp-2 text-sm text-muted-foreground">
               {row.original.stale_cause ?? row.original.summary}
             </p>

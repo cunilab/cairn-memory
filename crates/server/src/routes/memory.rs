@@ -400,6 +400,26 @@ pub async fn feedback(
     Ok(Json(reply))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pin {
+    pinned: bool,
+}
+
+/// Pinning is a console action, restricted to the memory's owner.
+pub async fn pin(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Path(id): Path<String>,
+    Json(body): Json<Pin>,
+) -> ApiResult<Value> {
+    let pinned_at = state
+        .store
+        .set_pinned(&account.person_id, &id, body.pinned)
+        .await?;
+    Ok(Json(json!({ "pinned_at": pinned_at })))
+}
+
 /// Forget: the owner's memory stays, hidden from search, with its text kept.
 pub async fn forget(
     State(state): State<AppState>,

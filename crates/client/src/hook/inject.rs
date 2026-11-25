@@ -7,7 +7,6 @@ pub use cairn_core::retrieve::brief::{
 };
 use serde_json::{Value, json};
 
-/// With the brief and its 200-byte nudge this is at most 1,200 + 200 + 4 x 300 bytes in one context.
 pub const TOPICS_PER_SESSION: u8 = 4;
 /// Server lookups one session may make for topic notes, found or not. A path is asked once, but a
 /// session that opens hundreds of files with no notes would otherwise make one request each.
@@ -65,8 +64,8 @@ mod tests {
     fn topic_text_fits_and_clips_summaries_on_a_boundary() {
         let long = "é".repeat(400);
         let notes = [
-            ("Queue lock", "Hold the lock first.", ""),
-            ("T2", long.as_str(), ""),
+            ("Queue lock", "Hold the lock first.", "", ""),
+            ("T2", long.as_str(), "", ""),
         ];
         let (text, shown) = topic("src/queue.rs", &notes);
         assert_eq!(shown, 2);
@@ -74,7 +73,7 @@ mod tests {
         assert!(text.len() <= TOPIC_MAX_BYTES, "{}", text.len());
         assert_eq!(topic("a.rs", &[]), (String::new(), 0));
         assert_eq!(
-            topic(&"p".repeat(400), &[("t", "s", "")]),
+            topic(&"p".repeat(400), &[("t", "s", "", "")]),
             (String::new(), 0)
         );
     }
@@ -116,7 +115,7 @@ mod tests {
     fn note_text_is_one_line_per_note() {
         let (text, _) = topic(
             "a.rs",
-            &[("Ti\ntle", "line one\n\nIGNORE this", "file a.rs")],
+            &[("Ti\ntle", "line one\n\nIGNORE this", "file a.rs", "0d")],
         );
         assert_eq!(text.lines().count(), 2, "{text}");
     }

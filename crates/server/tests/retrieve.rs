@@ -737,8 +737,14 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
             &device,
         )
         .await;
-    assert!(brief["brief"].as_str().unwrap().len() <= 1200);
-    assert_eq!(brief["max_bytes"], 1200);
+    assert!(
+        brief["brief"].as_str().unwrap().len()
+            <= cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+    );
+    assert_eq!(
+        brief["max_bytes"],
+        cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+    );
     let files: serde_json::Value =
         sqlx::query_scalar("SELECT context->'recent_files' FROM sessions WHERE session_id = 's9'")
             .fetch_one(app.db.store.pool())
@@ -757,7 +763,10 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
     let untracked = app
         .post("session/brief", json!({"context": {}}), &device)
         .await;
-    assert_eq!(untracked["max_bytes"], 1200);
+    assert_eq!(
+        untracked["max_bytes"],
+        cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES
+    );
     app.finish().await;
 }
 
@@ -1016,14 +1025,14 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
 }
 
 #[tokio::test]
-async fn brief_uses_recent_files() {
+async fn brief_ranks_proven_ahead_of_recency_and_recent_file_matches() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let project = app
         .post(
             "projects/init",
-            json!({"repository": "r", "name": "R"}),
+            json!({"repository": "r", "name": "E2E Brief ordering"}),
             &device,
         )
         .await;
@@ -1036,6 +1045,10 @@ async fn brief_uses_recent_files() {
         save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it. is a summary of the test", "reason": "r and the test says why",
             "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": context(file)})).await;
     }
+    sqlx::query("UPDATE memories SET proof_count = 3 WHERE title = 'Queue lock order'")
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
     let brief = |session_id: &'static str, recent: serde_json::Value| {
         let (app, device) = (&app, &device);
         async move {
@@ -1053,15 +1066,10 @@ async fn brief_uses_recent_files() {
         text.find(title)
             .unwrap_or_else(|| panic!("{title} in {text}"))
     };
-    let touching_queue = brief("queues", json!(["src/jobs/worker.rs"])).await;
-    assert!(
-        position(&touching_queue, "Queue lock order")
-            < position(&touching_queue, "Docs build flag")
-    );
-    let touching_docs = brief("docs", json!(["docs/build.md"])).await;
-    assert!(
-        position(&touching_docs, "Docs build flag") < position(&touching_docs, "Queue lock order")
-    );
+    for (session, file) in [("queues", "src/jobs/worker.rs"), ("docs", "docs/build.md")] {
+        let text = brief(session, json!([file])).await;
+        assert!(position(&text, "Queue lock order") < position(&text, "Docs build flag"));
+    }
     app.finish().await;
 }
 
@@ -1439,6 +1447,180 @@ async fn prompt_recall_narrows_candidates_before_the_hybrid_limit() {
     assert_eq!(
         app.post("session/prompt-recall", payload, &device).await["text"],
         ""
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn pins_are_web_only_and_both_brief_layers_deduplicate_automatic_recall() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("layer-owner").await;
+    let device = app.device(&admin, "laptop").await;
+    let outsider = app.member(&admin, "layer-outsider").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-brief-layers", "name": "E2E Brief layers"
+            }),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let context = json!({"project_id": pid, "branch": "main", "files": ["src/layers.rs"]});
+    let save_rule = |title| {
+        save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "project", "title": title,
+                "summary": format!("{title} is part of the startup test fixture."),
+                "reason": "Startup context should include existing policies.",
+                "context": context
+            }),
+        )
+    };
+    let pin = save_rule("Startup identity").await;
+    let essential = save_rule("Startup policy").await;
+    let superseded = save_rule("Previous policy").await;
+    let forgotten = save_rule("Retired policy").await;
+    save(
+        &app,
+        &device,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Feature policy",
+            "summary": "Set the retry behavior on the feature branch.",
+            "reason": "This policy only applies on another branch.",
+            "context": {"project_id": pid, "branch": "feature", "files": ["src/feature.rs"]}
+        }),
+    )
+    .await;
+    let target = format!("memories/{pin}/pin");
+    for (token, expected) in [(&device, 401), (&outsider, 404)] {
+        assert_eq!(
+            app.send("POST", &target, json!({"pinned": true}), Some(token))
+                .await
+                .0,
+            expected
+        );
+    }
+    for id in [&pin, &superseded, &forgotten] {
+        let pinned = app
+            .post(
+                &format!("memories/{id}/pin"),
+                json!({"pinned": true}),
+                &admin,
+            )
+            .await;
+        assert!(pinned["pinned_at"].is_i64(), "{pinned}");
+    }
+    let fetched = app
+        .send("GET", &format!("memories/{pin}"), json!(null), Some(&admin))
+        .await;
+    assert_eq!(fetched.0, 200, "{fetched:?}");
+    assert!(fetched.1["pinned_at"].is_i64(), "{fetched:?}");
+    app.post("forget", json!({"id": forgotten}), &admin).await;
+    sqlx::query("UPDATE memories SET status = 'superseded' WHERE memory_id = $1")
+        .bind(&superseded)
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET rank = 'normal', created_at = now() - interval '3 days 12 hours' WHERE project_id = $1")
+        .bind(pid).execute(app.db.store.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO push_usage (person_id, memory_id, pushed, muted)
+                 SELECT owner_id, memory_id, 3, true FROM memories WHERE memory_id = $1",
+    )
+    .bind(&pin)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "layers", "context": context}),
+            &device,
+        )
+        .await;
+    let text = brief["brief"].as_str().unwrap();
+    let data: serde_json::Value = serde_json::from_str(
+        text.split("```")
+            .nth(1)
+            .unwrap()
+            .strip_prefix("json\n")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["L0 Identity"][0]["id"], pin);
+    assert_eq!(data["L0 Identity"][0]["age"], "3d");
+    assert_eq!(data["L1 Essential"][0]["id"], essential);
+    assert_eq!(data["L0 Identity"].as_array().unwrap().len(), 1, "{text}");
+    assert_eq!(data["L1 Essential"].as_array().unwrap().len(), 1, "{text}");
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT memory_id FROM session_shown WHERE session_id = 'layers' AND source = 'brief'",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&pin) && ids.contains(&essential));
+    let topic = |session| {
+        app.post(
+            "session/topic",
+            json!({
+                "session_id": session, "context": context, "path": "src/layers.rs"
+            }),
+            &device,
+        )
+    };
+    let same_session = topic("layers").await;
+    let another_session = topic("fresh-layers").await;
+    assert!(
+        !same_session.to_string().contains(&pin) && !same_session.to_string().contains(&essential)
+    );
+    assert!(
+        another_session.to_string().contains("Startup identity"),
+        "{another_session}"
+    );
+
+    let person: String = sqlx::query_scalar("SELECT owner_id FROM projects WHERE project_id = $1")
+        .bind(pid)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    app.db
+        .store
+        .set_project_archived(&person, true, pid, true)
+        .await
+        .unwrap();
+    let archived = app
+        .post(
+            "session/brief",
+            json!({"session_id": "archived-layers", "context": context}),
+            &device,
+        )
+        .await;
+    assert_eq!(archived["brief"], "");
+    app.db
+        .store
+        .set_project_archived(&person, true, pid, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.post(&target, json!({"pinned": false}), &admin).await["pinned_at"],
+        json!(null)
+    );
+    let unpinned = app
+        .post(
+            "session/brief",
+            json!({"session_id": "unpinned-layers", "context": context}),
+            &device,
+        )
+        .await;
+    assert!(
+        !unpinned["brief"].as_str().unwrap().contains(&pin),
+        "{unpinned}"
     );
     app.finish().await;
 }

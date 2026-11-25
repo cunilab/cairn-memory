@@ -1,5 +1,6 @@
 "use client";
 
+import { Pin } from "lucide-react";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -291,6 +292,33 @@ export function MemorySheet() {
   const memory = current?.memory ?? null;
   const canForget = memory?.owner_is_me === true && !memory.project_archived;
 
+  const canPin = canForget && memory !== null && memory.scope !== "global"
+    && (memory.status !== "superseded" || memory.pinned_at != null);
+
+  async function togglePin() {
+    if (!canPin || !memory) return;
+    setPending(true);
+    try {
+      const result = await cairn<{ pinned_at: number | null }>(`memories/${encodeURIComponent(memory.id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned: memory.pinned_at == null }),
+      });
+      setLoaded((previous) => previous?.id === memory.id && previous.memory
+        ? { ...previous, memory: { ...previous.memory, pinned_at: result.pinned_at } }
+        : previous);
+      announceMemoriesChanged();
+      toast.success(result.pinned_at == null ? "Memory unpinned" : "Memory pinned");
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) {
+        router.replace(LOGIN_PATH);
+        return;
+      }
+      toast.error(cause instanceof Error ? cause.message : "Could not change the pin.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function forget() {
     if (!canForget || !memory) return;
     setPending(true);
@@ -333,6 +361,7 @@ export function MemorySheet() {
               {memory ? (
                 <>
                   <KindBadge kind={memory.kind} />
+                  {memory.pinned_at != null ? <Badge variant="outline"><Pin aria-hidden="true" />Pinned</Badge> : null}
                   <StatusBadge status={memory.status} cause={memory.stale_cause} />
                   {(() => {
                     const label = memoryLabel({
@@ -400,7 +429,13 @@ export function MemorySheet() {
                 <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
               </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
               {canForget ? (
-                <div className="mt-auto px-4 pb-4">
+                <div className="mt-auto flex flex-wrap gap-2 px-4 pb-4">
+                  {canPin ? (
+                    <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
+                      <Pin aria-hidden="true" />
+                      {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
+                    </Button>
+                  ) : null}
                   <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
                     Forget memory…
                   </Button>

@@ -13,3 +13,5 @@ pub use model::{
     Context, Entity, EntityKind, Kind, Link, Memory, Record, Relation, SaveInput, Scope, Status,
     TrustLevel, Usage,
 };
+
+pub use trust::{PROVEN_HELPFUL, PROVEN_SAVES};

@@ -37,6 +37,7 @@ async fn migrate_twice_is_a_no_op() {
             "0019_session_shown",
             "0020_device_agent_hermes",
             "0021_push_usage",
+            "0022_memory_pins",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1013,6 +1014,12 @@ async fn fixes_migration_additive() {
             .unwrap();
     store.migrate().await.unwrap();
     store.migrate().await.unwrap();
+    let pins: i64 = sqlx::query_scalar("SELECT count(*) FROM memories WHERE pinned_at IS NOT NULL")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(pins, 0, "existing memories start unpinned");
+
     versions.push("0011_fixes".into());
     versions.push("0015_memory_detail".into());
     versions.push("0016_project_archive".into());
@@ -1020,6 +1027,7 @@ async fn fixes_migration_additive() {
     versions.push("0018_memory_usage".into());
     versions.push("0020_device_agent_hermes".into());
     versions.push("0021_push_usage".into());
+    versions.push("0022_memory_pins".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")

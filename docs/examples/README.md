@@ -12,7 +12,7 @@ part of the `cairn` binary. Events, fields and limits are in the
 
 | Event | What `cairn hook` does |
 | --- | --- |
-| `SessionStart` | injects the bounded server brief (at most 1,200 B) |
+| `SessionStart` | injects the bounded server brief (at most 1,800 B) |
 | `UserPromptSubmit` | captures the prompt |
 | `PostToolUse` (`Bash`, `Edit`, `Write`, `MultiEdit`, `apply_patch`) | captures edits and non-read-only commands; the first edit of a file may inject a short note about it |
 | `Stop`, `PreCompact` | save a checkpoint after new work; assistant capture stays opt-in |

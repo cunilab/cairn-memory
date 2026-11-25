@@ -1,6 +1,9 @@
 use super::model::{Memory, Rank, Status, TrustLevel};
 use crate::process::Origin;
 
+pub const PROVEN_HELPFUL: u32 = 2;
+pub const PROVEN_SAVES: u32 = 3;
+
 impl Memory {
     /// Display trust from the current record and usage counters.
     pub fn trust(&self) -> (TrustLevel, String) {
@@ -26,9 +29,9 @@ impl Memory {
             };
             return (New, format!("new · {reason}"));
         }
-        let (level, mut line) = if usage.helpful >= 2 {
+        let (level, mut line) = if usage.helpful >= PROVEN_HELPFUL {
             (Proven, format!("proven · {} helpful", usage.helpful))
-        } else if self.proof_count >= 3 {
+        } else if self.proof_count >= PROVEN_SAVES {
             (Proven, format!("proven · saved {}×", self.proof_count))
         } else {
             (Normal, "normal".to_owned())

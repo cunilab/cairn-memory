@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { ColumnDef } from "@tanstack/react-table";
-import { BrainIcon, FilterIcon, SearchIcon, XIcon } from "lucide-react";
+import { Pin, BrainIcon, FilterIcon, SearchIcon, XIcon } from "lucide-react";
 import { KindBadge, StatusBadge } from "@/components/badges";
 import { DataTable } from "@/components/data-table";
 import { FilterSelect, type FilterOption } from "@/components/filter-select";
@@ -186,10 +186,13 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
             <button
               type="button"
               aria-haspopup="dialog"
-              className="w-fit rounded-sm text-left text-sm font-medium break-words underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="flex w-fit items-start gap-1.5 rounded-sm text-left text-sm font-medium break-words underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
               onClick={() => openMemory(row.original.id)}
             >
-              {row.original.title}
+              {row.original.pinned_at != null ? (
+                <><Pin aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" /><span className="sr-only">Pinned memory</span></>
+              ) : null}
+              <span className="min-w-0">{row.original.title}</span>
             </button>
             <p className="line-clamp-2 text-sm text-muted-foreground">{row.original.summary}</p>
           </div>

@@ -1032,6 +1032,15 @@ fn mcp_and_hermes_session_start_deduplicate_the_same_brief() {
     let dir = checkout("mcp-hermes");
     let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"preference","title":"Keep the queue visible","summary":"Show the queue when reviewing worker health.","reason":"Operators spot blocked work in that view."}"#]);
     let id = saved["id"].as_str().unwrap();
+    let pin = team.owner.json_in(&dir, &["save", r#"{"kind":"preference","title":"Show outages in local time","summary":"Put the local timezone beside each outage timestamp.","reason":"Support hands incidents off between time zones."}"#]);
+    let pin = pin["id"].as_str().unwrap();
+    team.owner_web
+        .post(
+            &format!("/cairn-memory/memories/{pin}/pin"),
+            &json!({"pinned": true}),
+        )
+        .unwrap();
+
     let initialize = |session| mcp_instructions(&team.owner.home, &dir, session);
     let hermes_start = |session| {
         let output = with_stdin(
@@ -1055,9 +1064,13 @@ fn mcp_and_hermes_session_start_deduplicate_the_same_brief() {
         brief.contains(id) && brief.contains(r#""why":"personal preference""#),
         "{text}"
     );
-    assert!(brief.len() <= 1200);
-    assert!(!hermes_start("mcp-first").contains(id));
-    assert!(hermes_start("hermes-first").contains(id));
+    assert!(brief.len() <= cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES);
+    assert!(brief.contains("L0 Identity") && brief.contains(pin));
+    assert!(brief.contains("L1 Essential"));
+    let same_session = hermes_start("mcp-first");
+    assert!(!same_session.contains(id) && !same_session.contains(pin));
+    let hermes_first = hermes_start("hermes-first");
+    assert!(hermes_first.contains(id) && hermes_first.contains(pin));
     assert_eq!(
         initialize(Some("hermes-first")),
         cairn_client::tools::instructions()

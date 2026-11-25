@@ -897,15 +897,15 @@ impl Hook<'_> {
                 return None;
             }
         };
-        let notes: Vec<(&str, &str, &str)> = reply["notes"]
+        let notes: Vec<(&str, &str, &str, &str)> = reply["notes"]
             .as_array()
             .map(|notes| {
                 notes
                     .iter()
                     .filter_map(|note| {
                         let text = |key: &str| note[key].as_str().unwrap_or_default();
-                        Some((text("title"), text("summary"), text("why")))
-                            .filter(|(title, _, _)| !title.is_empty())
+                        Some((text("title"), text("summary"), text("why"), text("age")))
+                            .filter(|(title, ..)| !title.is_empty())
                     })
                     .collect()
             })

@@ -17,6 +17,14 @@ use sqlx::postgres::PgRow;
 use sqlx::{Executor, PgConnection, Postgres, Row};
 use std::collections::{HashMap, HashSet};
 
+fn pin_limit(scope: Scope) -> Option<i64> {
+    match scope {
+        Scope::Personal => Some(5),
+        Scope::Project => Some(10),
+        Scope::Global => None,
+    }
+}
+
 fn owned(alias: &str, me: &str) -> String {
     format!(
         "({a}.owner_id = {me} OR {a}.scope = 'global'
@@ -73,6 +81,7 @@ macro_rules! memory_columns {
     m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
+    EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
     (EXTRACT(EPOCH FROM m.created_at) * 1000000)::bigint AS created_us,
@@ -164,6 +173,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         status: parse(row, "status")?,
         rank: parse(row, "rank")?,
         faded_at: row.try_get("faded_at")?,
+        pinned_at: row.try_get("pinned_at")?,
         edited_by: row.try_get("edited_by")?,
         proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
@@ -683,6 +693,85 @@ impl Store {
     /// Owner only. The row stays as `forgotten` with its text, fields, embedding, entities and
     /// links kept, so saving the same thing again is a 409. Pending jobs are cancelled. A memory
     /// this one superseded comes back unless another non-forgotten memory also supersedes it.
+    /// Toggle the owner's pin. All writers in a quota bucket share a transaction lock.
+    pub async fn set_pinned(
+        &self,
+        person_id: &str,
+        memory_id: &str,
+        pinned: bool,
+    ) -> Result<Option<i64>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT m.scope, m.project_id, m.status, EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at
+               FROM memories m WHERE m.memory_id = $1 AND m.owner_id = $2 AND m.status <> 'forgotten'
+                 AND (m.scope <> 'project' OR EXISTS (
+                     SELECT 1 FROM project_members pm
+                     WHERE pm.project_id = m.project_id AND pm.person_id = $2))
+               FOR UPDATE OF m",
+        )
+        .bind(memory_id)
+        .bind(person_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        let project_id: Option<String> = row.try_get("project_id")?;
+        let scope = parse(&row, "scope")?;
+        let limit = pin_limit(scope).ok_or_else(|| {
+            StoreError::Validation("only personal and project memories can be pinned".into())
+        })?;
+        let bucket = match scope {
+            Scope::Project => project_id
+                .as_deref()
+                .ok_or_else(|| StoreError::Validation("project memory has no project".into()))?,
+            _ => person_id,
+        };
+        lock_project_memory(&mut tx, scope, project_id.as_deref()).await?;
+        if pinned && parse::<Status>(&row, "status")? == Status::Superseded {
+            return Err(StoreError::Validation(
+                "superseded memories cannot be pinned".into(),
+            ));
+        }
+        let old: Option<i64> = row.try_get("pinned_at")?;
+        if old.is_some() == pinned {
+            return Ok(old);
+        }
+
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':pins:' || $1), hashtext($2))",
+        )
+        .bind(scope.as_str())
+        .bind(bucket)
+        .execute(&mut *tx)
+        .await?;
+        if pinned {
+            // Keep superseded pins in the quota so restoring a correction cannot exceed it.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM memories WHERE pinned_at IS NOT NULL AND scope = $1
+                   AND CASE WHEN $1 = 'project' THEN project_id = $2 ELSE owner_id = $2 END",
+            )
+            .bind(scope.as_str())
+            .bind(bucket)
+            .fetch_one(&mut *tx)
+            .await?;
+            if count >= limit {
+                return Err(StoreError::Conflict(format!(
+                    "{} pin limit of {limit} memories reached",
+                    scope.as_str()
+                )));
+            }
+        }
+        let timestamp = sqlx::query_scalar(
+            "UPDATE memories SET pinned_at = CASE WHEN $2 THEN now() END
+               WHERE memory_id = $1 RETURNING EXTRACT(EPOCH FROM pinned_at)::bigint",
+        )
+        .bind(memory_id)
+        .bind(pinned)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(timestamp)
+    }
+
     /// True when this call forgot it, false when it already was forgotten.
     pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
@@ -705,7 +794,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE memories SET status = 'forgotten', status_changed_at = now(), updated_at = now()
+            "UPDATE memories SET status = 'forgotten', pinned_at = NULL, status_changed_at = now(), updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
@@ -1163,3 +1252,6 @@ impl Store {
         Ok(saved.id)
     }
 }
+
+#[cfg(test)]
+mod tests;

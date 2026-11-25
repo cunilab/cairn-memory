@@ -133,6 +133,7 @@ pub fn router() -> Router<AppState> {
             post(memory::import).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
         .route("/cairn-memory/memories/{id}", get(memory::get))
+        .route("/cairn-memory/memories/{id}/pin", post(memory::pin))
         .route("/cairn-memory/feedback", post(memory::feedback))
         .route("/cairn-memory/forget", post(memory::forget))
         // retrieve

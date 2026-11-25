@@ -1,18 +1,17 @@
-use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
 use crate::memory::{
     MEMORY_COLUMNS, MEMORY_SELECT, MEMORY_SELECT_WITH_DETAIL, SEARCH_VECTOR, collection_memory,
-    entities_for, memory_from_row, search_matches, searchable, visible,
+    memory_from_row, search_matches, searchable, visible,
 };
 use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push, repeat_error, unmuted};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
-use cairn_core::memory::{Fields, Kind, Memory, Status, TrustLevel};
+use cairn_core::memory::{Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Status, TrustLevel};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
-use cairn_core::retrieve::brief::{SessionBrief, session_brief, topic_card, topic_notes};
+use cairn_core::retrieve::brief::{SessionBrief, card_age, session_brief, topic_card, topic_notes};
 use cairn_core::retrieve::command::{error_tail, first_error_line};
 use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
@@ -29,14 +28,20 @@ use std::collections::{HashMap, HashSet};
 
 /// Fused hits whose neighbours are added to the candidate pool.
 const NEIGHBOUR_SEEDS: usize = 32;
-/// Rules read for the brief: those on a recent file or its directory, then the newest of any.
-const BRIEF_NEAR_RULES: i32 = 100;
-const BRIEF_NEWEST_RULES: i32 = 200;
 // The normal gate admits half-coverage and cosine-only hits. A push needs stronger evidence.
 const PROMPT_RELEVANCE_MIN: f32 = 0.60;
 /// The proven and normal cases of Memory::trust, applied before any SQL limit.
 const PUSH_TRUST: &str =
     "m.status <> 'stale' AND m.rank <> 'candidate' AND coalesce(u.wrong, 0) = 0";
+
+/// L1 ranks the normal and proven cases of Memory::trust before applying the card limit.
+fn essential_order() -> String {
+    format!(
+        "ORDER BY (m.proof_count >= {PROVEN_SAVES} OR coalesce(u.helpful, 0) >= {PROVEN_HELPFUL}) DESC,
+                  (coalesce(u.fetched, 0)::bigint + coalesce(u.helpful, 0)) DESC,
+                  m.updated_at DESC, m.memory_id"
+    )
+}
 
 /// A candidate with the inputs of the relevance gate.
 #[derive(Clone, Debug)]
@@ -155,6 +160,7 @@ pub struct TopicNote {
     pub title: String,
     pub summary: String,
     pub why: String,
+    pub age: String,
 }
 
 /// The reply to `/session/topic`: notes for one or two memories, or a single card for more.
@@ -772,12 +778,13 @@ impl Store {
                     &memory.title[..memory.title.floor_char_boundary(40)],
                     &memory.summary[..memory.summary.floor_char_boundary(34)],
                     why,
+                    card_age(memory.created_at, now),
                 )
             })
             .collect();
         let notes: Vec<_> = chosen
             .iter()
-            .map(|(_, title, summary, why)| (*title, *summary, why.as_str()))
+            .map(|(_, title, summary, why, age)| (*title, *summary, why.as_str(), age.as_str()))
             .collect();
         let (text, count) = topic_notes("your prompt", &notes);
         let ids: Vec<_> = chosen
@@ -789,168 +796,94 @@ impl Store {
         Ok((text, count == remaining))
     }
 
-    /// The fenced brief a hook injects at session start: this branch's last handoff, the project's
-    /// rules, decisions and gotchas ranked by `recent_files`, branch and feedback, and the
-    /// person's preferences. Nothing is counted as fetched. Each section has its own query and
-    /// limit, so a project with hundreds of newer rules still shows its handoff and preferences,
-    /// and the rules that name a recent file (or a file beside one) are read before the newest.
+    /// The session brief reserves only the cards rendered in L0 and L1.
     pub async fn brief(
         &self,
         person_id: &str,
         context: &WorkContext,
-        recent_files: &[String],
         session_id: Option<&str>,
     ) -> Result<SessionBrief> {
-        let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
-        let shown = already_shown(&mut tx, person_id, session_id).await?;
+        let mut shown = already_shown(&mut tx, person_id, session_id).await?;
         let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
         if limit == 0 {
-            tx.commit().await?;
-            return Ok(SessionBrief {
-                text: String::new(),
-                memory_ids: Vec::new(),
-            });
+            return Ok(SessionBrief::default());
         }
 
-        let recent: Vec<String> = recent_files
-            .iter()
-            .take(RECENT_FILES_MAX)
-            .map(|f| clip(f, RECENT_FILE_MAX_BYTES))
-            .collect();
-        let default_branch: Option<String> = match &context.project_id {
-            Some(id) => {
-                sqlx::query_scalar("SELECT default_branch FROM projects WHERE project_id = $1")
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .flatten()
-            }
-            None => None,
-        };
-        let newest = "ORDER BY m.created_at DESC, m.memory_id";
-        let handoff = sqlx::query(&format!(
+        let visible = visible("m", "$1");
+        let project = "(m.scope = 'project' AND m.project_id = $2 AND EXISTS (
+            SELECT 1 FROM project_members pm WHERE pm.project_id = $2 AND pm.person_id = $1))";
+        let personal = "(m.scope = 'personal' AND m.owner_id = $1)";
+        let pins = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status <> 'forgotten' AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'handoff' AND m.owner_id = $1
-                AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
-                AND m.project_id IS NOT DISTINCT FROM $2
-              {newest} LIMIT 50",
-            visible("m", "$1")
+              WHERE {visible} AND ({personal} OR {project})
+                AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
+                AND m.memory_id <> ALL($3)
+              ORDER BY m.pinned_at, m.memory_id LIMIT $4"
         ))
         .bind(person_id)
         .bind(&context.project_id)
-        .bind(&context.repository)
-        .bind(&context.branch)
-        .bind(&context.worktree)
+        .bind(&shown)
+        .bind(limit as i64)
         .fetch_all(&mut *tx)
         .await?;
-        let preferences = sqlx::query(&format!(
+        let pins = pins
+            .iter()
+            .map(memory_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        shown.extend(pins.iter().map(|pin| pin.id.clone()));
+
+        let unmuted = unmuted("m", "$1");
+        let handoff = if context.repository.is_some() {
+            let rows = sqlx::query(&format!(
+                "{MEMORY_SELECT}
+                  WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'handoff' AND m.owner_id = $1
+                    AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
+                    AND m.project_id IS NOT DISTINCT FROM $2
+                  ORDER BY m.created_at DESC, m.memory_id LIMIT 50"
+            ))
+            .bind(person_id)
+            .bind(&context.project_id)
+            .bind(&context.repository)
+            .bind(&context.branch)
+            .bind(&context.worktree)
+            .fetch_all(&mut *tx)
+            .await?;
+            let rows = rows
+                .iter()
+                .map(memory_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            preferred_handoff(&rows)
+                .filter(|row| row.pinned_at.is_none())
+                .map(|row| row.id.clone())
+        } else {
+            None
+        };
+        let essentials = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'preference' AND m.scope = 'personal'
-                AND m.owner_id = $1 AND m.memory_id <> ALL($2)
-              {newest} LIMIT 2",
-            visible("m", "$1")
+              WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.pinned_at IS NULL AND m.memory_id <> ALL($4)
+                AND (m.memory_id = $5 OR (m.status = 'active' AND (
+                    ({personal} AND m.kind = 'preference')
+                    OR ({project} AND m.kind IN ('rule','decision','gotcha')
+                        AND (m.repo_branch IS NULL OR m.repo_branch = $3
+                             OR coalesce(m.repo_branch = (SELECT default_branch FROM projects WHERE project_id = $2),
+                                         m.repo_branch IN ('main','master')))))))
+              {} LIMIT $6",
+            essential_order()
         ))
         .bind(person_id)
+        .bind(&context.project_id)
+        .bind(&context.branch)
         .bind(&shown)
+        .bind(handoff)
+        .bind(limit as i64)
         .fetch_all(&mut *tx)
         .await?;
-        // Project items on this branch or the default branch (`NULL` branch: any), the same rule
-        // `session_brief` applies, so the limit never fills with rows it would drop.
-        let project_items = |extra: &str, order: &str, limit: i32| {
-            format!(
-                "{MEMORY_SELECT}
-                  WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.scope = 'project' AND m.project_id = $2
-                    AND m.kind IN ('rule','decision','gotcha')
-                    AND (m.repo_branch IS NULL OR m.repo_branch = $3
-                         OR CASE WHEN $4::text IS NULL THEN m.repo_branch IN ('main','master')
-                                 ELSE m.repo_branch = $4 END)
-                    AND m.memory_id <> ALL($5){extra}
-                  {order} LIMIT {limit}",
-                visible("m", "$1")
-            )
-        };
-        let mut rows = Vec::new();
-        if context.project_id.is_some() {
-            if !recent.is_empty() {
-                let dirs: Vec<String> = recent
-                    .iter()
-                    .filter_map(|f| f.rsplit_once('/').map(|(dir, _)| format!("{dir}/")))
-                    .collect();
-                rows.extend(
-                    sqlx::query(&project_items(
-                        " AND EXISTS (SELECT 1 FROM entities e
-                                       WHERE e.memory_id = m.memory_id AND e.kind = 'file'
-                                         AND (e.name = ANY($6)
-                                              OR EXISTS (SELECT 1 FROM unnest($7::text[]) d
-                                                          WHERE starts_with(e.name, d))))",
-                        "ORDER BY m.updated_at DESC, m.memory_id DESC",
-                        BRIEF_NEAR_RULES,
-                    ))
-                    .bind(person_id)
-                    .bind(&context.project_id)
-                    .bind(&context.branch)
-                    .bind(&default_branch)
-                    .bind(&shown)
-                    .bind(&recent)
-                    .bind(&dirs)
-                    .fetch_all(&mut *tx)
-                    .await?,
-                );
-            }
-            rows.extend(
-                sqlx::query(&project_items(
-                    "",
-                    "ORDER BY m.updated_at DESC, m.memory_id DESC",
-                    BRIEF_NEWEST_RULES,
-                ))
-                .bind(person_id)
-                .bind(&context.project_id)
-                .bind(&context.branch)
-                .bind(&default_branch)
-                .bind(&shown)
-                .fetch_all(&mut *tx)
-                .await?,
-            );
-        }
-        rows.extend(preferences);
-        let mut seen = HashSet::new();
-        let mut memories = Vec::new();
-        for row in &rows {
-            let memory = memory_from_row(row)?;
-            if seen.insert(memory.id.clone()) {
-                memories.push(memory);
-            }
-        }
-        let mut handoff_rows = Vec::new();
-        for row in &handoff {
-            handoff_rows.push(memory_from_row(row)?);
-        }
-        if let Some(mut chosen) = preferred_handoff(&handoff_rows)
-            .filter(|m| !shown.contains(&m.id))
-            .cloned()
-        {
-            // shortcut: session_brief only renders an active handoff; the stored row stays as it is
-            chosen.status = Status::Active;
-            if seen.insert(chosen.id.clone()) {
-                memories.push(chosen);
-            }
-        }
-        let ids: Vec<_> = memories.iter().map(|m| m.id.clone()).collect();
-        if !ids.is_empty() {
-            let mut entities = entities_for(&mut *tx, &ids).await?;
-            for memory in &mut memories {
-                memory.entities = entities.remove(&memory.id).unwrap_or_default();
-            }
-        }
-        let brief = session_brief(
-            &memories,
-            context,
-            &recent,
-            default_branch.as_deref(),
-            cairn_core::id::now_seconds(),
-            limit,
-        );
+        let essentials = essentials
+            .iter()
+            .map(memory_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        let brief = session_brief(&pins, &essentials, cairn_core::id::now_seconds(), limit);
         finish_push(
             tx,
             person_id,
@@ -1035,7 +968,7 @@ impl Store {
             format!("AND numnode({terms}) >= 5 AND {}", search_matches(terms))
         });
         let sql = format!(
-            "SELECT m.memory_id, m.kind, m.title, m.summary
+            "SELECT m.memory_id, m.kind, m.title, m.summary, EXTRACT(EPOCH FROM m.created_at)::bigint
                FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id
               WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted}
                 AND (m.scope <> 'project' OR m.project_id = $2)
@@ -1057,22 +990,28 @@ impl Store {
         } else {
             query
         };
-        let rows: Vec<(String, String, String, String)> = query.fetch_all(&mut *tx).await?;
+        let rows: Vec<(String, String, String, String, i64)> = query.fetch_all(&mut *tx).await?;
 
+        let now = cairn_core::id::now_seconds();
         let notes: Vec<_> = rows
             .iter()
-            .map(|(_, kind, title, summary)| {
+            .map(|(_, kind, title, summary, created_at)| {
                 let why = if phrase.is_some() {
                     "same error seen before".to_owned()
                 } else {
                     format!("{kind} for `{command}`")
                 };
-                (title.as_str(), summary.as_str(), why)
+                (
+                    title.as_str(),
+                    summary.as_str(),
+                    why,
+                    card_age(*created_at, now),
+                )
             })
             .collect();
         let notes: Vec<_> = notes
             .iter()
-            .map(|(t, s, why)| (*t, *s, why.as_str()))
+            .map(|(t, s, why, age)| (*t, *s, why.as_str(), age.as_str()))
             .collect();
         let label = if failure.is_some() {
             "failed command"
@@ -1111,6 +1050,7 @@ impl Store {
             .collect();
         let rows = sqlx::query(&format!(
             "SELECT m.memory_id, m.kind, m.title, m.summary, count(*) OVER () AS total,
+                    EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
                     CASE WHEN bool_or(e.kind = 'file') THEN 'file ' || $2
                          WHEN bool_or(e.kind = 'symbol') THEN 'symbol ' || min(e.name) FILTER (WHERE e.kind = 'symbol')
                          ELSE 'module ' || $4 END AS why
@@ -1143,6 +1083,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
 
+        let now = cairn_core::id::now_seconds();
         let mut notes = Vec::new();
         let mut kinds = Vec::new();
         for row in &rows {
@@ -1156,6 +1097,7 @@ impl Store {
                 title: row.try_get("title")?,
                 summary: row.try_get("summary")?,
                 why: row.try_get("why")?,
+                age: card_age(row.try_get("created_at")?, now),
             });
         }
         let total = rows
@@ -1167,7 +1109,14 @@ impl Store {
             let first: Vec<_> = kinds
                 .into_iter()
                 .zip(&notes)
-                .map(|(kind, note)| (kind, note.title.as_str(), note.why.as_str()))
+                .map(|(kind, note)| {
+                    (
+                        kind,
+                        note.title.as_str(),
+                        note.why.as_str(),
+                        note.age.as_str(),
+                    )
+                })
                 .collect();
             let (card, count) = topic_card(path, total as usize, &first);
             (Some(card), count)
@@ -1179,6 +1128,7 @@ impl Store {
                         note.title.as_str(),
                         note.summary.as_str(),
                         note.why.as_str(),
+                        note.age.as_str(),
                     )
                 })
                 .collect();
@@ -1321,3 +1271,6 @@ fn entity_names(texts: &[&str], work: &WorkContext) -> Vec<String> {
     names.dedup();
     names
 }
+
+#[cfg(test)]
+mod tests;

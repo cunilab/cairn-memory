@@ -65,8 +65,8 @@ fn should_mute(pushed: i32, used: i32, revived: bool) -> bool {
 mod tests;
 
 pub(crate) fn unmuted(memory: &str, person: &str) -> String {
-    format!("NOT EXISTS (SELECT 1 FROM push_usage pu
-                          WHERE pu.person_id = {person} AND pu.memory_id = {memory}.memory_id AND pu.muted)")
+    format!("({memory}.pinned_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM push_usage pu
+                          WHERE pu.person_id = {person} AND pu.memory_id = {memory}.memory_id AND pu.muted))")
 }
 
 async fn refresh_mutes(

@@ -180,6 +180,10 @@ pub async fn brief(
     if let Some(check) = check {
         reply["check"] = json!(check);
     }
+    let brief_context = WorkContext {
+        project_id: resolved.project_id.clone(),
+        ..context
+    };
     if let Some(project_id) = resolved.project_id {
         if let Some(name) = state
             .store
@@ -192,7 +196,7 @@ pub async fn brief(
     }
     let brief = state
         .store
-        .brief(&account.person_id, &context, &body.recent_files, session_id)
+        .brief(&account.person_id, &brief_context, session_id)
         .await?;
     let hit = !brief.text.is_empty();
     reply["brief"] = json!(brief.text);

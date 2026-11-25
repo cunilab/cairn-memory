@@ -120,6 +120,8 @@ pub struct Memory {
     pub rank: Rank,
     #[serde(skip)]
     pub faded_at: Option<i64>,
+    #[serde(skip)]
+    pub pinned_at: Option<i64>,
     /// Whether an administrator edited this memory; the editor's identity stays private.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]

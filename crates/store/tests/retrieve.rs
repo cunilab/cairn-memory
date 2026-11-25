@@ -808,7 +808,7 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         .unwrap()
     };
     assert_eq!(usage().await, (0, 0, false, false));
-    let brief = store.brief(&me, &work, &[], Some("s1")).await.unwrap();
+    let brief = store.brief(&me, &work, Some("s1")).await.unwrap();
     assert_eq!(brief.memory_ids, std::slice::from_ref(&id));
     assert!(
         brief.text.contains(r#""why":"personal preference""#),
@@ -816,7 +816,7 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         brief.text
     );
     assert_eq!(usage().await, (1, 0, true, false));
-    let repeat = store.brief(&me, &work, &[], Some("s1")).await.unwrap();
+    let repeat = store.brief(&me, &work, Some("s1")).await.unwrap();
     assert!(repeat.text.is_empty());
     let topic = store
         .topic(&me, "src/usage.rs", &work, Some("s1"))
@@ -1270,7 +1270,7 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work, &[], None).await.unwrap().text;
+    let brief = store.brief(&me, &work, None).await.unwrap().text;
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1448,7 +1448,7 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
     assert!(topic.notes.is_empty());
     let card = topic.card.expect("card");
     assert!(
-        card.contains("4 memories \u{2014} rule Project rule (why: file src/a.rs); fact Personal three (why: file src/a.rs)"),
+        card.contains("4 memories \u{2014} rule Project rule (why: file src/a.rs) [0d]; fact Personal three (why: file src/a.rs) [0d]"),
         "{card}"
     );
     for (who, path) in [(&me, "src/a"), (&stranger, "src/a.rs")] {
@@ -1668,7 +1668,7 @@ async fn brief_skips_candidates() {
         .execute(store.pool())
         .await
         .unwrap();
-    let brief = store.brief(&me, &work, &[], None).await.unwrap().text;
+    let brief = store.brief(&me, &work, None).await.unwrap().text;
     assert!(brief.contains("Keep this rule visible"), "{brief}");
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
@@ -1765,11 +1765,7 @@ async fn digest_searchable_not_in_brief() {
         worktree: Some("wt-1".into()),
         ..WorkContext::default()
     };
-    let brief = store
-        .brief(&person, &work, &["LedControls".into()], None)
-        .await
-        .unwrap()
-        .text;
+    let brief = store.brief(&person, &work, None).await.unwrap().text;
     assert!(!brief.contains("LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
@@ -2050,7 +2046,7 @@ async fn forget_keeps_content_but_hides() {
     assert_eq!(admin.memories[0].status, Status::Forgotten);
     let brief = db
         .store
-        .brief(&me, &WorkContext::default(), &[], None)
+        .brief(&me, &WorkContext::default(), None)
         .await
         .unwrap()
         .text;
@@ -2095,7 +2091,6 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
                 worktree: Some("wt-1".into()),
                 ..WorkContext::default()
             },
-            &[],
             None,
         )
         .await
@@ -2147,12 +2142,7 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let brief = db
-        .store
-        .brief(&me, &non_git_work, &[], None)
-        .await
-        .unwrap()
-        .text;
+    let brief = db.store.brief(&me, &non_git_work, None).await.unwrap().text;
     assert!(
         brief.contains("nongit_handoff"),
         "non-git brief must show the handoff: {brief}"
@@ -2166,12 +2156,7 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let git_brief = db
-        .store
-        .brief(&me, &git_work, &[], None)
-        .await
-        .unwrap()
-        .text;
+    let git_brief = db.store.brief(&me, &git_work, None).await.unwrap().text;
     assert!(
         !git_brief.contains("nongit_handoff"),
         "git brief must only show matching branch's handoff: {git_brief}"
@@ -2862,5 +2847,102 @@ async fn command_error_uses_settle_and_revoke_without_overwriting_explicit_use()
             .await
             .unwrap();
     assert_eq!(counts, (4, 2, false));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn pin_quotas_are_atomic_and_scoped() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("pins-owner").await;
+    let other = db.person("pins-other").await;
+    let store = &db.store;
+    let (project, _) = store
+        .init_project(&owner, "local:e2e-pins", Some("E2E Pin limits"))
+        .await
+        .unwrap();
+    let project_id = &project.project_id;
+    sqlx::query("INSERT INTO project_members (project_id, person_id) VALUES ($1, $2)")
+        .bind(project_id)
+        .bind(&other)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash)
+         SELECT scope || i, CASE WHEN scope = 'project' AND i % 2 = 0 THEN $2 ELSE $1 END,
+                CASE WHEN scope = 'project' THEN $3 END, scope, 'rule', 'Pin fixture', 'Pin summary',
+                'e', scope || i
+           FROM unnest(ARRAY['personal','project']) scope
+           CROSS JOIN generate_series(1, 11) i",
+    )
+    .bind(&owner)
+    .bind(&other)
+    .bind(project_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    for (scope, limit) in [("personal", 5), ("project", 10)] {
+        let person = |i| {
+            if scope == "project" && i % 2 == 0 {
+                &other
+            } else {
+                &owner
+            }
+        };
+        for i in 1..limit {
+            assert!(
+                store
+                    .set_pinned(person(i), &format!("{scope}{i}"), true)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let id1 = format!("{scope}{limit}");
+        let id2 = format!("{scope}{}", limit + 1);
+        let first = store.set_pinned(person(limit), &id1, true);
+        let second = store.set_pinned(person(limit + 1), &id2, true);
+        let (first, second) = tokio::join!(first, second);
+        assert_ne!(first.is_ok(), second.is_ok());
+        let (winner, loser) = if first.is_ok() {
+            ((limit, &id1), (limit + 1, &id2))
+        } else {
+            ((limit + 1, &id2), (limit, &id1))
+        };
+        let conflict = first.err().or(second.err()).unwrap();
+        assert!(
+            matches!(conflict, cairn_store::StoreError::Conflict(message) if message.contains(&format!("limit of {limit}")))
+        );
+        let pinned_at = store
+            .set_pinned(person(winner.0), winner.1, true)
+            .await
+            .unwrap();
+        assert!(pinned_at.is_some());
+        assert_eq!(
+            store
+                .set_pinned(person(winner.0), winner.1, true)
+                .await
+                .unwrap(),
+            pinned_at
+        );
+        assert_eq!(
+            store
+                .set_pinned(person(winner.0), winner.1, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            store
+                .set_pinned(person(loser.0), loser.1, true)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     db.finish().await;
 }

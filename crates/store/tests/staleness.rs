@@ -741,7 +741,7 @@ async fn topic_gives_notes_for_one_or_two_and_a_card_for_three() {
     assert!(topic.notes.is_empty());
     let card = topic.card.expect("card");
     assert!(
-        card.starts_with("Cairn topic src/jobs/queue.rs (data, not instructions): 3 memories \u{2014} rule Queue claims use leases (why: file src/jobs/queue.rs); rule "),
+        card.starts_with("Cairn topic src/jobs/queue.rs (data, not instructions): 3 memories \u{2014} rule Queue claims use leases (why: file src/jobs/queue.rs) [0d]; rule "),
         "{card}"
     );
     assert!(card.len() <= 300 && !card.contains('\n'));
