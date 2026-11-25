@@ -135,6 +135,8 @@ fn expected(event: &str, agent: &str, home: &Home) -> String {
 #[test]
 fn claude_install_remove_keeps_others() {
     let home = Home::new("claude", false);
+    let instructions = "User's Claude instructions.\n";
+    let global = home.write(".claude/CLAUDE.md", instructions);
     let other = json!({"matcher": "Read", "hooks": [{"type": "command", "command": "my-helper"}]});
     let permissions = json!({
         "allow": ["WebFetch", "mcp__another__*"],
@@ -158,6 +160,7 @@ fn claude_install_remove_keeps_others() {
     for event in [
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "Stop",
         "PreCompact",
         "SessionEnd",
@@ -168,6 +171,13 @@ fn claude_install_remove_keeps_others() {
             "{event}"
         );
     }
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["matcher"],
+        "Write|Edit|MultiEdit|NotebookEdit"
+    );
+    let block = fs::read_to_string(&global).unwrap();
+    assert!(block.starts_with(instructions));
+    assert!(block.contains(cairn_client::tools::instructions()));
     let post = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(post[0], other);
     assert_eq!(
@@ -191,11 +201,43 @@ fn claude_install_remove_keeps_others() {
     assert_eq!(before, home.snapshot(".claude"));
 
     home.ok("claude", true);
+    assert_eq!(fs::read_to_string(global).unwrap(), instructions);
     assert_eq!(home.json(".claude/settings.json"), original);
     assert_eq!(
         home.json(".claude/.claude.json"),
         json!({"mcpServers": {"other": {"command": "other"}}})
     );
+}
+
+#[test]
+fn claude_native_memory_opt_out_removes_only_cairns_guard() {
+    let home = Home::new("claude-keep-native", false);
+    let custom = home.dir.join("custom-claude");
+    let user = json!({"matcher": "Write", "hooks": [{"type": "command", "command": "user-hook"}]});
+    home.write(
+        "custom-claude/settings.json",
+        &json!({"hooks": {"PreToolUse": [user]}}).to_string(),
+    );
+    let setup = |option: Option<&str>| {
+        let mut cmd = home.command("claude", false);
+        cmd.env("CLAUDE_CONFIG_DIR", &custom).args(option);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+    };
+    setup(None);
+    assert_eq!(
+        home.json("custom-claude/settings.json")["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    setup(Some("--keep-native-memory"));
+    let settings = home.json("custom-claude/settings.json");
+    assert_eq!(settings["hooks"]["PreToolUse"], json!([user]));
+    assert!(command_of(&settings["hooks"]["SessionStart"][0]).ends_with(" --keep-native-memory"));
+    assert!(custom.join("CLAUDE.md").is_file());
+    assert!(!home.dir.join(".claude/CLAUDE.md").exists());
 }
 
 #[test]
@@ -449,8 +491,12 @@ fn codex_native_missing_dir() {
         "{config}"
     );
     let before = home.snapshot(".codex");
+    let block = read(&home, ".codex/AGENTS.md");
+    assert!(block.contains(cairn_client::tools::instructions()));
     home.ok("codex", false);
     assert_eq!(before, home.snapshot(".codex"));
+    let user = "User's Codex instructions.\n";
+    let global = home.write(".codex/AGENTS.md", &format!("{user}{block}"));
 
     // Reuse an existing managed server from before approval was configured.
     let other = "approval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"other\"\ndefault_tools_approval_mode = \"prompt\"\n";
@@ -464,6 +510,7 @@ fn codex_native_missing_dir() {
 
     home.ok("codex", true);
     home.ok("codex", true);
+    assert_eq!(fs::read_to_string(global).unwrap(), user);
     assert!(
         !fs::read_to_string(home.dir.join(".codex/hooks.json"))
             .unwrap()

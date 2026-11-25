@@ -729,7 +729,7 @@ fn subagent_corrections_ignored() {
     );
 }
 
-const EXPECTED_INSTRUCTION: &str = "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files.";
+const EXPECTED_INSTRUCTION: &str = "Cairn is the only memory. Do not read or write built-in memory files. Call memory_search before deciding, debugging or acting on a name, tool, model, person or convention you do not know from this conversation. Call memory_save with a reason after decisions, fixes or corrections.";
 
 fn start_text(env: &Env, session: &str) -> String {
     let output = env.run("SessionStart", &env.payload(session, json!({})), &[]);

@@ -156,7 +156,7 @@ pub struct Tool<'a> {
 }
 
 impl Tool<'_> {
-    fn input_text(&self, key: &str) -> Option<&str> {
+    pub(super) fn input_text(&self, key: &str) -> Option<&str> {
         self.input?
             .get(key)?
             .as_str()

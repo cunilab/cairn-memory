@@ -6,7 +6,7 @@
 pub const MAX_INSTRUCTION_BYTES: usize = 600;
 
 /// Appended to the session brief.
-pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files.";
+pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is the only memory. Do not read or write built-in memory files. Call memory_search before deciding, debugging or acting on a name, tool, model, person or convention you do not know from this conversation. Call memory_save with a reason after decisions, fixes or corrections.";
 
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
 pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 notes (decision/gotcha/rule/fact), each with a reason. Else stop.";
@@ -47,10 +47,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_says_source_of_truth() {
+    fn default_requires_cairn_for_recall_and_saves() {
         assert_eq!(
             DEFAULT_SESSION_INSTRUCTION,
-            "Cairn is your memory and the source of truth. Use it instead of your built-in memory files: memory_search before deciding or debugging; memory_save (with a reason) after a decision, fixed gotcha, correction or finished task. Do not write memory to local files."
+            "Cairn is the only memory. Do not read or write built-in memory files. Call memory_search before deciding, debugging or acting on a name, tool, model, person or convention you do not know from this conversation. Call memory_save with a reason after decisions, fixes or corrections."
         );
     }
 

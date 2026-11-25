@@ -1,11 +1,15 @@
-//! Claude Code: hooks and MCP permissions in `settings.json`, the MCP entry in `.claude.json`.
+//! Claude Code: hooks and MCP permissions, the MCP entry and the global `CLAUDE.md` block.
 
-use super::{Ctx, Plan, R, hooks_text, jsonc, mcp_text};
+use super::{
+    Ctx, KEEP_NATIVE_MEMORY, MANAGED_FLAG, Plan, R, hooks_text, instruction_file, jsonc, mcp_text,
+};
+use crate::claude_memory;
 use serde_json::{Value, json};
 
-pub(super) const EVENTS: [(&str, u32); 6] = [
+pub(super) const EVENTS: [(&str, u32); 7] = [
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
+    ("PreToolUse", 3),
     ("PostToolUse", 10),
     ("Stop", 10),
     ("PreCompact", 10),
@@ -13,16 +17,14 @@ pub(super) const EVENTS: [(&str, u32); 6] = [
 ];
 
 pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
-    let folder = ctx.dir("CLAUDE_CONFIG_DIR");
-    let settings = folder
-        .clone()
-        .unwrap_or_else(|| ctx.home.join(".claude"))
-        .join("settings.json");
+    let folder = claude_memory::config_dir(&ctx.home);
+    let settings = folder.join("settings.json");
     // The default `~/.claude.json` sits beside `~/.claude`; a custom config dir holds its own.
-    let mcp = folder.map_or_else(
-        || ctx.home.join(".claude.json"),
-        |dir| dir.join(".claude.json"),
-    );
+    let mcp = if ctx.dir("CLAUDE_CONFIG_DIR").is_some() {
+        folder.join(".claude.json")
+    } else {
+        ctx.home.join(".claude.json")
+    };
     let entry = json!({"type": "stdio", "command": ctx.exe, "args": ["mcp"], "env": ctx.mcp_env()});
     let settings_text = permissions_text(hooks_text(&settings, ctx, &EVENTS)?, ctx.remove)?;
     let mut files = vec![
@@ -33,11 +35,26 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     if !ctx.remove {
         files.reverse();
     }
+    files.push(instruction_file(folder.join("CLAUDE.md"), ctx.remove)?);
     Ok(Plan {
         files,
         native: None,
         after: None,
     })
+}
+
+pub(super) fn keeps_native_memory(settings: &str) -> bool {
+    let Ok(root) = serde_json::from_str::<Value>(settings) else {
+        return false;
+    };
+    root["hooks"]["SessionStart"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group["hooks"].as_array())
+        .flatten()
+        .filter_map(|handler| handler["command"].as_str())
+        .any(|command| command.ends_with(&format!(" {MANAGED_FLAG} {KEEP_NATIVE_MEMORY}")))
 }
 
 fn permissions_text(mut text: String, remove: bool) -> R<String> {

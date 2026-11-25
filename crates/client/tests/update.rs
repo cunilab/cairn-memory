@@ -107,7 +107,13 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let mut setup = cairn();
     setup_env(&mut setup);
     setup
-        .args(["setup", "http://127.0.0.1:9", "--agent", "claude"])
+        .args([
+            "setup",
+            "http://127.0.0.1:9",
+            "--agent",
+            "claude",
+            "--keep-native-memory",
+        ])
         .stdin(std::process::Stdio::piped());
     let mut child = setup.spawn().unwrap();
     writeln!(child.stdin.take().unwrap(), "test-device").unwrap();
@@ -118,6 +124,12 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     // Simulate settings written by an older client that installed only hooks.
     settings.as_object_mut().unwrap().remove("permissions");
     std::fs::write(&settings_path, settings.to_string()).unwrap();
+    let instructions = home.join(".claude/CLAUDE.md");
+    std::fs::write(
+        &instructions,
+        "User instructions\n<!-- cairn:begin -->\nOld instructions\n<!-- cairn:end -->\n",
+    )
+    .unwrap();
 
     // The same release feed offers 99.0.0; a copy of the binary updates itself.
     let name = "cairn-x86_64-unknown-linux-musl".to_owned();
@@ -158,6 +170,18 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     assert_eq!(
         settings["permissions"]["allow"],
         serde_json::json!(["mcp__cairn"])
+    );
+    assert!(settings["hooks"]["PreToolUse"].is_null());
+    let session = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(session.ends_with(" --keep-native-memory"));
+    assert_eq!(
+        std::fs::read_to_string(instructions).unwrap(),
+        format!(
+            "User instructions\n<!-- cairn:begin -->\n{}\n<!-- cairn:end -->\n",
+            cairn_client::tools::instructions()
+        )
     );
     let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()

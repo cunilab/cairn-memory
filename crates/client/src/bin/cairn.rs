@@ -1,10 +1,10 @@
-//! `cairn`: the agent CLI. Every command is one REST call authenticated with the device token
-//! in the selected config file. Humans use the web console.
+//! `cairn`: the agent CLI. REST calls authenticate with the device token in the selected
+//! config file. Humans manage the server through the web console.
 
 use cairn_client::tools::{self, Tool};
 use cairn_client::{
-    Client, Config, Error, doctor, fixes, hook, mcp, project, selected_config_path, setup, update,
-    warn_ignored_legacy_config,
+    Client, Config, Error, claude_memory, doctor, fixes, hook, mcp, project, selected_config_path,
+    setup, update, warn_ignored_legacy_config,
 };
 use serde_json::{Map, Value, json};
 use std::env;
@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::process;
 
 const USAGE: &str = "Usage:
-  cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
+  cairn setup <server-url> [--agent claude|codex|opencode] [--remove|--keep-native-memory]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
+  cairn import claude-memory [--yes]
   cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
@@ -44,6 +45,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             name,
             "init"
                 | "setup"
+                | "import"
                 | "mcp"
                 | "update"
                 | "version"
@@ -69,8 +71,11 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             || (index == 1 && args[0] == "update" && value == "--check")
             || (args[0] == "init" && value == "--yes")
             || (args[0] == "get" && index + 1 == args.len() && value == "--detail")
+            || (index == 2 && args[0] == "import" && value == "--yes")
             || (args[0] == "setup"
-                && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
+                && ((index == 2 && value == "--agent")
+                    || (index == 4
+                        && matches!(value.as_str(), "--remove" | "--keep-native-memory"))));
         if value.starts_with('-') && value != "-" && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -93,7 +98,11 @@ fn main() {
             process::exit(1);
         }
     }
-    update::remove_old_exe();
+    let pre_tool_use = args.first().is_some_and(|arg| arg == "hook")
+        && args.get(1).is_some_and(|arg| arg == "PreToolUse");
+    if !pre_tool_use && args.first().is_none_or(|arg| arg != "import") {
+        update::remove_old_exe();
+    }
     if matches!(args.first().map(String::as_str), Some("init" | "doctor")) {
         let _ = fixes::apply_automatically();
     }
@@ -106,6 +115,13 @@ fn main() {
         },
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
+        Some("import") => match &args[1..] {
+            [source] if source == "claude-memory" => claude_memory::import(false),
+            [source, flag] if source == "claude-memory" && flag == "--yes" => {
+                claude_memory::import(true)
+            }
+            _ => usage(),
+        },
         Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),
         Some("doctor") if args.len() == 1 => doctor_command(),
         Some("hook") => match hook::run(&args[1..]) {
@@ -131,10 +147,10 @@ fn main() {
     if let Err(error) = result {
         eprintln!("cairn: {error}");
     }
-    // Never on `mcp` (a protocol stream), `update` (it reports itself) or the version flag.
+    // Keep protocol, diagnostic and import commands free of background update requests.
     if !matches!(
         args.first().map(String::as_str),
-        Some("mcp" | "update" | "version" | "--version" | "doctor" | "hook")
+        Some("mcp" | "update" | "version" | "--version" | "doctor" | "hook" | "import")
     ) {
         update::notify();
     }
@@ -144,11 +160,14 @@ fn main() {
 }
 
 fn setup(args: &[String]) -> Result<(), Error> {
-    let (url, agent, remove) = match args {
-        [url] => (url, None, false),
-        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), false),
-        [url, flag, agent, remove] if flag == "--agent" && remove == "--remove" => {
-            (url, Some(agent.as_str()), true)
+    let (url, agent, option) = match args {
+        [url] => (url, None, None),
+        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), None),
+        [url, flag, agent, option]
+            if flag == "--agent"
+                && matches!(option.as_str(), "--remove" | "--keep-native-memory") =>
+        {
+            (url, Some(agent.as_str()), Some(option.as_str()))
         }
         _ => usage(),
     };
@@ -157,7 +176,13 @@ fn setup(args: &[String]) -> Result<(), Error> {
             "agent must be claude, codex or opencode".into(),
         ));
     }
-    if remove {
+    let keep_native_memory = option == Some("--keep-native-memory");
+    if keep_native_memory && agent != Some("claude") {
+        return Err(Error::Input(
+            "--keep-native-memory applies only to Claude Code".into(),
+        ));
+    }
+    if option == Some("--remove") {
         println!(
             "{}",
             setup::configure(agent.expect("remove has an agent"), true)?
@@ -171,7 +196,7 @@ fn setup(args: &[String]) -> Result<(), Error> {
     println!("Cairn configured for {} ({})", config.url(), path.display());
     setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
     if let Some(agent) = agent {
-        println!("{}", setup::configure(agent, false)?);
+        println!("{}", setup::install(agent, keep_native_memory)?);
         if agent == "codex" {
             println!("Review and trust the installed hooks with /hooks in Codex before they run.");
         }

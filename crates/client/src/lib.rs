@@ -2,6 +2,7 @@
 //! API with a device token. Humans use the web console; this crate never holds an account
 //! session and never touches a store file.
 
+pub mod claude_memory;
 pub mod doctor;
 pub mod fixes;
 pub mod hook;

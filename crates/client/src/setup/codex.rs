@@ -1,6 +1,8 @@
 //! Codex: hook commands in `hooks.json`; the MCP entry goes through `codex mcp add/remove`.
 
-use super::{After, Ctx, MARKER, Plan, R, add_args, hooks_text, native, owned, read, which};
+use super::{
+    After, Ctx, MARKER, Plan, R, add_args, hooks_text, instruction_file, native, owned, read, which,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, value};
@@ -19,11 +21,15 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         .unwrap_or_else(|| ctx.home.join(".codex"));
     let path = folder.join("hooks.json");
     let text = hooks_text(&path, ctx, &EVENTS)?;
+    let files = vec![
+        (path, text),
+        instruction_file(folder.join("AGENTS.md"), ctx.remove)?,
+    ];
     if ctx.remove && which("codex").is_none() {
         // The CLI is gone: the hook file is still cleaned, its MCP entry is not ours to reach.
         eprintln!("cairn: note: the codex CLI is not installed; its MCP entry was not removed");
         return Ok(Plan {
-            files: vec![(path, text)],
+            files,
             native: None,
             after: None,
         });
@@ -60,7 +66,7 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         }))
     };
     Ok(Plan {
-        files: vec![(path, text)],
+        files,
         native: command,
         after,
     })

@@ -22,6 +22,90 @@ const TOKEN: &str = "cdt_testtoken1234567890";
 const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 
+#[test]
+fn claude_pre_tool_use_denies_only_writes_inside_native_memory() {
+    let home = temp_dir("claude-pre-tool-use");
+    let config = home.join("custom-claude");
+    let project = config.join("projects/encoded-project");
+    let memory = project.join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    let invoke = |host: &str, name: &str, key: &str, path: &Path, custom: bool| {
+        let mut cmd = command(&home);
+        if custom {
+            cmd.env("CLAUDE_CONFIG_DIR", &config);
+        }
+        let output = with_stdin(
+            cmd.args(["hook", "PreToolUse", "--agent", host]),
+            &json!({
+                "cwd": project, "hook_event_name": "PreToolUse",
+                "tool_name": name, "tool_input": {key: path}
+            })
+            .to_string(),
+        );
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        output.stdout
+    };
+    let denied = json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "Claude memory files are replaced by Cairn; save this with memory_save instead."
+    }});
+    for (name, key) in [
+        ("Write", "file_path"),
+        ("Edit", "file_path"),
+        ("MultiEdit", "file_path"),
+        ("NotebookEdit", "notebook_path"),
+    ] {
+        assert_eq!(
+            serde_json::from_slice::<Value>(&invoke(
+                "claude",
+                name,
+                key,
+                &memory.join("note.md"),
+                true
+            ))
+            .unwrap(),
+            denied
+        );
+    }
+    for path in [
+        Path::new("memory/subdir/note.md"),
+        Path::new("memory/../memory/note.md"),
+    ] {
+        assert!(!invoke("claude", "Write", "file_path", path, true).is_empty());
+    }
+    assert!(
+        !invoke(
+            "claude",
+            "Write",
+            "file_path",
+            Path::new("~/.claude/projects/default/memory/note.md"),
+            false
+        )
+        .is_empty()
+    );
+    #[cfg(unix)]
+    {
+        let alias = project.join("alias");
+        std::os::unix::fs::symlink(&memory, &alias).unwrap();
+        assert!(!invoke("claude", "Write", "file_path", &alias.join("new.md"), true).is_empty());
+    }
+    for (host, name, path) in [
+        ("claude", "Read", "memory/note.md"),
+        ("claude", "Bash", "memory/note.md"),
+        ("claude", "Write", "memory-other/note.md"),
+        ("claude", "Write", "memory/../src/note.md"),
+        ("claude", "Write", "../../other/projects/id/memory/note.md"),
+        ("codex", "Write", "memory/note.md"),
+    ] {
+        assert!(invoke(host, name, "file_path", Path::new(path), true).is_empty());
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 fn brief_and_hint() -> String {
     format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}\n{NO_PROJECT_HINT}")
 }

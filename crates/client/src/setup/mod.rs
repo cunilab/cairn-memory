@@ -19,6 +19,7 @@ use std::{env, fs, io};
 pub const AGENTS: [&str; 3] = ["claude", "codex", "opencode"];
 const MARKER: &str = "CAIRN_SETUP_MANAGED";
 const MANAGED_FLAG: &str = "--cairn-managed";
+pub(crate) const KEEP_NATIVE_MEMORY: &str = "--keep-native-memory";
 pub(crate) const UNMARKED: &str =
     "an unmarked cairn MCP entry exists; rename or remove it explicitly";
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -40,6 +41,7 @@ pub(crate) struct Ctx<'a> {
     exe: &'a str,
     config: &'a Path,
     home: PathBuf,
+    keep_native_memory: bool,
 }
 
 impl Ctx<'_> {
@@ -66,7 +68,7 @@ impl Ctx<'_> {
     /// `<exe> hook <Event> --agent <a> --config <cfg> --cairn-managed`, shell quoted.
     fn hook_command(&self, event: &str) -> String {
         let config = self.config.to_string_lossy();
-        [
+        let mut command = [
             self.exe,
             "hook",
             event,
@@ -77,7 +79,13 @@ impl Ctx<'_> {
             MANAGED_FLAG,
         ]
         .map(quote)
-        .join(" ")
+        .join(" ");
+        // Remember the opt-out on an owned handler so refresh can preserve it.
+        if self.keep_native_memory && event == "SessionStart" {
+            command.push(' ');
+            command.push_str(KEEP_NATIVE_MEMORY);
+        }
+        command
     }
 }
 
@@ -170,7 +178,10 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 .map_or(String::new(), Value::to_string)
                 .contains(MANAGED_FLAG)
     };
-    let wanted = |event: &str| match (ctx.remove, events.iter().find(|e| e.0 == event)) {
+    let wanted = |event: &str| match (
+        ctx.remove || (ctx.keep_native_memory && event == "PreToolUse"),
+        events.iter().find(|e| e.0 == event),
+    ) {
         (false, Some((_, timeout))) => {
             let handler =
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
@@ -179,6 +190,9 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 group["matcher"] = json!(
                     "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
                 );
+            }
+            if event == "PreToolUse" {
+                group["matcher"] = json!(crate::claude_memory::WRITE_TOOLS);
             }
             Some(group)
         }
@@ -193,9 +207,10 @@ fn edit_hooks(
     ours: &dyn Fn(&Value) -> bool,
     wanted: &dyn Fn(&str) -> Option<Value>,
 ) -> R<String> {
-    const ALL: [&str; 6] = [
+    const ALL: [&str; 7] = [
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "PostToolUse",
         "Stop",
         "PreCompact",
@@ -258,7 +273,7 @@ fn edit_hooks(
 }
 
 /// The instruction block between markers; one block at most, replaced in place on re-setup.
-pub(crate) fn block(text: &str, content: &str, remove: bool) -> R<String> {
+fn block(text: &str, content: &str, remove: bool) -> R<String> {
     const BEGIN: &str = "<!-- cairn:begin -->";
     const END: &str = "<!-- cairn:end -->";
     let count = text.matches(BEGIN).count();
@@ -283,6 +298,11 @@ pub(crate) fn block(text: &str, content: &str, remove: bool) -> R<String> {
         text.push_str(&format!("{BEGIN}\n{}\n{END}\n", content.trim_end()));
     }
     Ok(text)
+}
+
+fn instruction_file(path: PathBuf, remove: bool) -> R<(PathBuf, String)> {
+    let text = block(&read(&path)?, crate::tools::instructions(), remove)?;
+    Ok((path, text))
 }
 
 /// The executable of a native agent CLI on `PATH`.
@@ -393,7 +413,13 @@ fn apply(ctx: &Ctx) -> R<String> {
     ))
 }
 
-fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Result<String, Error> {
+fn configure_with(
+    agent: &str,
+    remove: bool,
+    keep_native_memory: Option<bool>,
+    exe: &Path,
+    config: &Path,
+) -> Result<String, Error> {
     let home = env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .or_else(|| env::var_os("USERPROFILE"))
@@ -406,6 +432,11 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
         remove,
         exe: &exe,
         config: &config,
+        keep_native_memory: keep_native_memory.unwrap_or_else(|| {
+            agent == "claude"
+                && fs::read_to_string(crate::claude_memory::config_dir(&home).join("settings.json"))
+                    .is_ok_and(|text| claude::keeps_native_memory(&text))
+        }),
         home,
     };
     apply(&ctx).map_err(|e| Error::Config(format!("Cairn agent setup failed: {e}")))
@@ -414,7 +445,19 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
 /// Installs or removes one agent's integration for this executable and the selected config.
 pub fn configure(agent: &str, remove: bool) -> Result<String, Error> {
     let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
-    configure_with(agent, remove, &exe, &selected_config_path()?)
+    configure_with(agent, remove, None, &exe, &selected_config_path()?)
+}
+
+/// Installs one agent with the caller's choice about Claude's built-in memory writes.
+pub fn install(agent: &str, keep_native_memory: bool) -> Result<String, Error> {
+    let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
+    configure_with(
+        agent,
+        false,
+        Some(keep_native_memory),
+        &exe,
+        &selected_config_path()?,
+    )
 }
 
 /// Where each agent keeps the file that proves a Cairn hook is installed.
@@ -427,7 +470,7 @@ pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
     [
         (
             "claude",
-            dir("CLAUDE_CONFIG_DIR", home.join(".claude")).join("settings.json"),
+            crate::claude_memory::config_dir(home).join("settings.json"),
         ),
         (
             "codex",
@@ -457,7 +500,7 @@ pub fn refresh(exe: &Path) -> Vec<String> {
         if !fs::read_to_string(file).is_ok_and(|text| text.contains(MANAGED_FLAG)) {
             continue;
         }
-        lines.push(match configure_with(agent, false, exe, &config) {
+        lines.push(match configure_with(agent, false, None, exe, &config) {
             Ok(done) => done,
             Err(error) => format!(
                 "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"

@@ -1,7 +1,7 @@
 //! `cairn hook <Event> [--agent a] [--config p] [--cairn-managed]`: the capture and injection
 //! hook of every agent host (docs/reference/hook.md#events). The host's event arrives as JSON on stdin; stdout
-//! carries only an injection reply. A failure writes one stderr line and still exits 0, so a
-//! hook can never break the host.
+//! carries only an injection reply or a native memory write decision. A failure writes one
+//! stderr line and still exits 0.
 
 mod event;
 mod git;
@@ -10,7 +10,7 @@ mod outbox;
 mod readonly;
 mod state;
 
-use crate::{Client, Config, Error, selected_config_path, write_private};
+use crate::{Client, Config, Error, claude_memory, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
 use cairn_core::id::{new_id, now_seconds, sha256_hex};
@@ -24,7 +24,7 @@ use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
 use std::cell::OnceCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OBSERVE: &str = "/cairn-memory/observe";
@@ -97,6 +97,7 @@ impl Options {
                 "--agent" => options.agent = value()?.clone(),
                 "--config" => options.config = Some(PathBuf::from(value()?)),
                 "--cairn-managed" => options.managed = true,
+                crate::setup::KEEP_NATIVE_MEMORY if options.event == "SessionStart" => {}
                 other => return Err(Error::Input(format!("unexpected hook option {other:?}"))),
             }
         }
@@ -117,10 +118,41 @@ impl Options {
 /// Returns the exit code. `args` is everything after `hook`.
 pub fn run(args: &[String]) -> Result<i32, Error> {
     let options = Options::parse(args)?;
-    if let Err(message) = session(&options) {
+    let handle = match (options.event.as_str(), options.agent.as_str()) {
+        ("PreToolUse", "claude") => guard_native_memory(),
+        ("PreToolUse", _) => Ok(()),
+        _ => session(&options),
+    };
+    if let Err(message) = handle {
         eprintln!("cairn hook: {message}");
     }
     Ok(0)
+}
+
+fn guard_native_memory() -> Result<(), String> {
+    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
+    let payload = Payload::parse(&raw)?;
+    let key = match payload.text("tool_name") {
+        Some("Write" | "Edit" | "MultiEdit") => "file_path",
+        Some("NotebookEdit") => "notebook_path",
+        _ => return Ok(()),
+    };
+    let Some(tool) = payload.tool() else {
+        return Ok(());
+    };
+    if let Some(path) = tool.input_text(key)
+        && claude_memory::is_memory_path(Path::new(path), payload.cwd().map(Path::new))
+    {
+        println!(
+            "{}",
+            json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Claude memory files are replaced by Cairn; save this with memory_save instead."
+            }})
+        );
+    }
+    Ok(())
 }
 
 fn session(options: &Options) -> Result<(), String> {

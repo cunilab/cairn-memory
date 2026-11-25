@@ -15,7 +15,7 @@ Coding agents forget decisions and gotchas between sessions, machines and teamma
 - Capture prompts, edits and commands; distill decisions, gotchas and session handoffs.
 - Search across personal, project and global scopes with full-text, entities, links and local embeddings.
 - Inspect memories, relationships, sessions and actionable Fixes in the web console.
-- Keep existing agent memory enabled; Cairn adds its own tools and context.
+- Bring existing Claude Code memories into Cairn and keep the original files on disk.
 
 ```text
 Agent hooks / CLI / MCP  ──device token──▶  Cairn server  ──▶  PostgreSQL + pgvector
@@ -135,7 +135,9 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex` or `opencode` instead of `claude` for those agents. Their native CLIs must be on `PATH`; Codex also requires trusting the installed hooks. Setup writes managed integration entries and leaves unrelated configuration in place. See [hook setup](docs/reference/hook.md#setup).
+Use `codex` or `opencode` for those agents. Their native CLIs must be on `PATH`. Codex also requires trusting the installed hooks. Setup manages the hooks, MCP entries, and a block in the agent's global instructions while preserving user text. See [hook setup](docs/reference/hook.md#setup).
+
+In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
 
 ### 3. Add a device, agent or teammate
 

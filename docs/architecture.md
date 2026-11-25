@@ -61,7 +61,7 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 ## Decisions and why
 
 - Project owners rename in the web console. Joining uses the project ID even if the file has an old name; `cairn init` updates that name, and session-start notices remind teammates to update and commit the file.
-- A matching Git remote attaches only an existing single membership and shares that checkout's writes. It does not grant membership. Mixed capture cohorts stay personal. The source-of-truth sentence is session-start only.
+- A matching Git remote attaches only an existing single membership and shares that checkout's writes. It does not grant membership. Mixed capture cohorts stay personal.
 
 - **Server-authoritative PostgreSQL:** one store and one authorization boundary keep shared state consistent; pgvector supports local semantic retrieval.
 - **Self-hosted accounts:** the first account is the administrator; password and device credentials are stored as hashes. Humans manage devices in the web console.
@@ -71,5 +71,6 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 - **Small agent surface:** five MCP tools, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
 - Setup and client updates allow the Cairn MCP server's tools in Claude Code and Codex so headless sessions can use them. The approval settings are scoped to the Cairn server.
 - Long memory detail is limited to 8,000 characters and excluded from identity and embedding text. An additive column and a partial GIN expression index support lowest-weight lexical search on detailed rows while keeping the existing vector and index. Agent reads return the length by default and require a single-memory opt-in for the text.
+- Claude memory import uses the existing scoped save and deduplication rules. The client parses Claude's YAML frontmatter with `yaml_serde`, screens for secrets with the shared redactor, and keeps the source and original index on disk. Setup installs shared Cairn-only memory instructions and a configurable Claude write guard to prevent new notes splitting across stores.
 
 See the [release process](release.md) for release and update decisions, and the [user guide](user-guide.md) for operation.

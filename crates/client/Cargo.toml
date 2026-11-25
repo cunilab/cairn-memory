@@ -17,6 +17,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 toml_edit = "0.24"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
+yaml_serde = "0.10"
 
 [dev-dependencies]
 axum.workspace = true
