@@ -5,15 +5,19 @@
 //! `notifications/initialized`, `tools/list`, `tools/call`, and `ping`. The tool table and
 //! its REST mapping live in [`crate::tools`]; this module only speaks the protocol.
 
+use crate::hook::git;
 use crate::{Client, Config, Error};
 use crate::{present, tools};
 use cairn_core::account::ClientKind;
+use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use serde_json::{Map, Value, json};
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// A line longer than this is skipped with an error, so one message cannot fill memory.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+const BRIEF_TIMEOUT: Duration = Duration::from_secs(1);
 
 enum Line {
     Eof,
@@ -185,6 +189,23 @@ impl McpServer {
         }
     }
 
+    fn checkout_brief(&self, session_id: Option<&str>) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        let top = git::top_level(&cwd);
+        if git::ignored(&cwd, top.as_deref()) {
+            return None;
+        }
+        let body = json!({
+            "session_id": session_id,
+            "context": git::work_context(&cwd, top.as_deref()),
+            "recent_files": git::recent_files(&cwd),
+        });
+        let client = Client::identified(self.config.clone(), BRIEF_TIMEOUT, "", ClientKind::Mcp);
+        let reply = client.post("/cairn-memory/session/brief", &body).ok()?;
+        let text = reply["brief"].as_str()?;
+        (!text.is_empty() && text.len() <= SESSION_BRIEF_MAX_BYTES).then(|| text.to_owned())
+    }
+
     fn initialize(&mut self, id: Value, params: Option<Value>) -> String {
         self.initialized = true;
         let requested_version = params
@@ -192,6 +213,17 @@ impl McpServer {
             .and_then(|params| params.get("protocolVersion"))
             .and_then(Value::as_str)
             .unwrap_or(PROTOCOL_VERSION);
+
+        let session = params
+            .as_ref()
+            .and_then(|params| params.pointer("/_meta/sessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty() && id.len() <= 512 && !id.contains('\0'));
+        let mut instructions = tools::instructions().to_owned();
+        if let Some(brief) = self.checkout_brief(session) {
+            instructions.push_str("\n\n");
+            instructions.push_str(&brief);
+        }
 
         let result = json!({
             "protocolVersion": if requested_version == PROTOCOL_VERSION {
@@ -207,7 +239,7 @@ impl McpServer {
                 "title": "Cairn",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": tools::instructions()
+            "instructions": instructions
         });
         rpc_result(id, result)
     }
@@ -257,7 +289,7 @@ mod tests {
     use super::*;
 
     fn server() -> McpServer {
-        // Nothing listens here; these tests never reach the network.
+        // Nothing listens here, so initialize keeps the static instructions.
         McpServer::new(Config::new("http://127.0.0.1:1", "test-token").unwrap())
     }
 
@@ -350,7 +382,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let mut server = McpServer::new(Config::new(&url, "test-token").unwrap());
-        call(&mut server, 1, "initialize", json!({}));
+        server.initialized = true;
 
         let side_effect = json!({"jsonrpc": "2.0", "method": "tools/call",
             "params": {"name": "memory_search", "arguments": {"query": "x"}}});

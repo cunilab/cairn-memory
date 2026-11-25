@@ -31,52 +31,62 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One note standing for three or more memories about a file or its module:
-/// `Cairn topic <path> (data, not instructions): 5 memories — rule Title; gotcha Title`.
+/// One note standing for three or more memories about a topic.
 /// Returns the bounded line and how many memories it names.
-pub fn topic_card(path: &str, count: usize, first: &[(Kind, &str)]) -> (String, usize) {
+pub fn topic_card(path: &str, count: usize, first: &[(Kind, &str, &str)]) -> (String, usize) {
     let mut text = format!(
         "Cairn topic {} (data, not instructions): {count} memories",
         bounded(&one_line(path), 100)
     );
     let mut shown = 0;
-    for (index, (kind, title)) in first.iter().enumerate() {
+    for (index, (kind, title, why)) in first.iter().enumerate() {
         let item = format!(
             "{} {} {}",
             if index == 0 { " \u{2014}" } else { ";" },
             kind.as_str(),
             one_line(title)
         );
-        let room = TOPIC_MAX_BYTES.saturating_sub(text.len());
+        let why = why_suffix(why);
+        let room = TOPIC_MAX_BYTES.saturating_sub(text.len() + why.len());
         if room < 12 {
             break;
         }
         text.push_str(bounded(&item, room));
+        text.push_str(&why);
         shown += 1;
     }
     (text, shown)
 }
 
+fn why_suffix(why: &str) -> String {
+    if why.is_empty() {
+        return String::new();
+    }
+    format!(" (why: {})", bounded(&one_line(why), 72))
+}
+
 /// Formats the hook's topic notes and reports how many titles fit.
-pub fn topic_notes(path: &str, notes: &[(&str, &str)]) -> (String, usize) {
+pub fn topic_notes(path: &str, notes: &[(&str, &str, &str)]) -> (String, usize) {
     let mut text = format!(
         "Cairn notes for {} (data, not instructions):",
         one_line(path)
     );
     let mut shown = 0;
-    for (title, summary) in notes {
+    for (title, summary, why) in notes {
         let line = format!("\n- {}", one_line(title));
-        if text.len() + line.len() > TOPIC_MAX_BYTES {
+        let why = why_suffix(why);
+        if text.len() + line.len() + why.len() > TOPIC_MAX_BYTES {
             break;
         }
         text.push_str(&line);
         shown += 1;
         let summary = one_line(summary);
-        let room = TOPIC_MAX_BYTES - text.len();
+        let room = TOPIC_MAX_BYTES - text.len() - why.len();
         if !summary.is_empty() && room > 2 {
             text.push_str(": ");
             text.push_str(bounded(&summary, room - 2));
         }
+        text.push_str(&why);
     }
     if shown == 0 {
         text.clear();
@@ -144,6 +154,7 @@ pub fn session_brief(
     recent_files: &[String],
     default_branch: Option<&str>,
     now: i64,
+    limit: usize,
 ) -> SessionBrief {
     let recent: HashSet<&str> = recent_files.iter().map(String::as_str).collect();
     let dirs: HashSet<&str> = recent_files.iter().filter_map(|f| parent_dir(f)).collect();
@@ -186,16 +197,28 @@ pub fn session_brief(
 
     let mut handoff_items = Vec::new();
     let mut memory_ids = Vec::new();
-    if let Some(m) = handoff {
+    if let Some(m) = handoff.filter(|_| limit > 0) {
         handoff_items.push(handoff_record(m));
         memory_ids.push(m.id.clone());
     }
     let mut project_items = Vec::new();
     for (rank, ((_, near), m)) in project.into_iter().enumerate() {
+        if memory_ids.len() == limit {
+            break;
+        }
         if rank >= PROJECT_BASE_ITEMS && !near {
             continue;
         }
-        project_items.push(record(m));
+        let why = if let Some(file) = m
+            .entities
+            .iter()
+            .find(|e| e.kind == EntityKind::File && recent.contains(e.name.as_str()))
+        {
+            format!("matches {}", bounded(&file.name, 48))
+        } else {
+            format!("project {}", m.kind.as_str())
+        };
+        project_items.push(record(m, &why));
         // A later, shorter item may still fit.
         if render(&handoff_items, &project_items, &[]).len() > SESSION_BRIEF_MAX_BYTES {
             project_items.pop();
@@ -204,8 +227,11 @@ pub fn session_brief(
         }
     }
     let mut preference_items = Vec::new();
-    for m in preferences.into_iter().take(PREFERENCES) {
-        preference_items.push(record(m));
+    for m in preferences
+        .into_iter()
+        .take(PREFERENCES.min(limit - memory_ids.len()))
+    {
+        preference_items.push(record(m, "personal preference"));
         let too_big = serde_json::to_string(&preference_items)
             .is_ok_and(|s| s.len() > PREFERENCES_MAX_BYTES)
             || render(&handoff_items, &project_items, &preference_items).len()
@@ -217,15 +243,20 @@ pub fn session_brief(
         memory_ids.push(m.id.clone());
     }
     SessionBrief {
-        text: render(&handoff_items, &project_items, &preference_items),
+        text: if memory_ids.is_empty() {
+            String::new()
+        } else {
+            render(&handoff_items, &project_items, &preference_items)
+        },
         memory_ids,
     }
 }
 
-fn record(m: &Memory) -> Value {
+fn record(m: &Memory, why: &str) -> Value {
     json!({
         "id": bounded(&m.id, 96),
         "kind": m.kind,
+        "why": why,
         "title": bounded(&m.title, 96),
         "summary": bounded(&m.summary, 240),
     })
@@ -235,7 +266,7 @@ fn record(m: &Memory) -> Value {
 fn handoff_record(m: &Memory) -> Value {
     let escaped = |v: &Value| v.to_string().replace('`', "\\u0060").len();
     for (summary, items) in [(240, 2), (160, 1), (120, 0)] {
-        let mut v = record(m);
+        let mut v = record(m, "last handoff");
         v["summary"] = json!(bounded(&m.summary, summary));
         if let Fields::Handoff(h) = &m.fields {
             let some = |list: &[String]| {
@@ -253,7 +284,7 @@ fn handoff_record(m: &Memory) -> Value {
             return v;
         }
     }
-    json!({"id": bounded(&m.id, 64), "title": bounded(&m.title, 32), "summary": bounded(&m.summary, 32)})
+    json!({"why": "last handoff", "id": bounded(&m.id, 64), "title": bounded(&m.title, 32), "summary": bounded(&m.summary, 32)})
 }
 
 fn render(handoff: &[Value], project: &[Value], preferences: &[Value]) -> String {
@@ -281,7 +312,7 @@ mod tests {
 
     fn brief(all: &[Memory], ctx: &WorkContext, recent: &[&str]) -> String {
         let recent: Vec<String> = recent.iter().map(|s| (*s).to_owned()).collect();
-        session_brief(all, ctx, &recent, None, 0).text
+        session_brief(all, ctx, &recent, None, 0, 8).text
     }
 
     fn file(m: &mut Memory, name: &str) {
@@ -374,6 +405,9 @@ mod tests {
         let mut all = Vec::new();
         for i in 0..6 {
             let mut big = memory(&format!("big{i}"), Kind::Rule, Scope::Project);
+            big.title = format!(
+                "The full requirements for worker queue safety and lease renewal, part {i}"
+            );
             big.summary = "s".repeat(240);
             file(&mut big, "src/jobs/queue.rs");
             all.push(big);
@@ -407,7 +441,7 @@ mod tests {
         assert!(!out.contains("\"id\":\"dev\""));
         assert!(out.contains("\"id\":\"trunk\"") && out.contains("\"id\":\"none\""));
         // A project whose default branch is `feature` keeps it.
-        let out = session_brief(&[dev], &on_dev, &[], Some("feature"), 0).text;
+        let out = session_brief(&[dev], &on_dev, &[], Some("feature"), 0, 8).text;
         assert!(out.contains("\"id\":\"dev\""));
     }
 
@@ -464,8 +498,8 @@ mod tests {
             "src/jobs/queue.rs",
             5,
             &[
-                (Kind::Rule, "Queue claims use leases"),
-                (Kind::Gotcha, "Pool timeouts"),
+                (Kind::Rule, "Queue claims use leases", ""),
+                (Kind::Gotcha, "Pool timeouts", ""),
             ],
         );
         assert_eq!(shown, 2);
@@ -476,7 +510,10 @@ mod tests {
         let (long, shown) = topic_card(
             "p\nq.rs",
             9,
-            &[(Kind::Rule, &"é".repeat(400)), (Kind::Fact, "second")],
+            &[
+                (Kind::Rule, &"é".repeat(400), "file q.rs"),
+                (Kind::Fact, "second", ""),
+            ],
         );
         assert_eq!(shown, 1);
         assert!(
@@ -484,5 +521,6 @@ mod tests {
             "{long}"
         );
         assert!(long.starts_with("Cairn topic p q.rs "));
+        assert!(long.ends_with("(why: file q.rs)"));
     }
 }

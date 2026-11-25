@@ -673,7 +673,7 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock", "summary": "Hold the lock first.", "reason": "r and the test says why",
+        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock order", "summary": "Hold the queue lock before claiming jobs.", "reason": "r and the test says why",
                "fields": {"symptom": "hang", "cause": "order", "fix": "lock first"},
                "context": {"files": ["src/queue.rs"]}}),
     )
@@ -694,8 +694,8 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         ),
         (
             Some(id.as_str()),
-            Some("Queue lock"),
-            Some("Hold the lock first.")
+            Some("Queue lock order"),
+            Some("Hold the queue lock before claiming jobs.")
         )
     );
     let none = app
@@ -749,11 +749,15 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         .send(
             "POST",
             "session/brief",
-            json!({"context": {}}),
+            json!({"session_id": " ", "context": {}}),
             Some(&device),
         )
         .await;
-    assert!((400..500).contains(&status), "a brief needs a session id");
+    assert_eq!(status, 400, "an explicitly empty session ID is invalid");
+    let untracked = app
+        .post("session/brief", json!({"context": {}}), &device)
+        .await;
+    assert_eq!(untracked["max_bytes"], 1200);
     app.finish().await;
 }
 
@@ -862,6 +866,146 @@ async fn hook_replies_count_shown_and_agent_search_and_get_count_used() {
 }
 
 #[tokio::test]
+async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("push-budget").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "example.test/e2e/push", "name": "E2E Push budget"}),
+            &device,
+        )
+        .await;
+    let project_id = project["project_id"].as_str().unwrap();
+    let shared = save(&app, &device, json!({
+        "kind": "rule", "scope": "project", "title": "Shared lookup rule",
+        "summary": "Set the timeout before the request.", "reason": "Every request has a deadline.",
+        "context": {"project_id": project_id, "files": ["src/shared.rs"]}
+    })).await;
+    for (label, rank, wrong) in [
+        ("Candidate rule", "candidate", 0),
+        ("Doubted rule", "normal", 1),
+    ] {
+        let id = save(&app, &device, json!({
+            "kind": "rule", "scope": "project", "title": label,
+            "summary": "Use the service request counters.", "reason": "Counters help with incident triage.",
+            "context": {"project_id": project_id, "files": ["src/shared.rs"]}
+        })).await;
+        sqlx::query("UPDATE memories SET rank = $2 WHERE memory_id = $1")
+            .bind(&id)
+            .bind(rank)
+            .execute(app.db.store.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE usage SET wrong = $2 WHERE memory_id = $1")
+            .bind(&id)
+            .bind(wrong)
+            .execute(app.db.store.pool())
+            .await
+            .unwrap();
+    }
+    let brief_body = json!({"session_id": "shared", "context": {"project_id": project_id}});
+    let brief = app.post("session/brief", brief_body.clone(), &device).await;
+    let text = brief["brief"].as_str().unwrap();
+    assert!(
+        text.contains(&shared) && text.contains(r#""why":"project rule""#),
+        "{brief}"
+    );
+    for label in ["Candidate rule", "Doubted rule"] {
+        assert!(!text.contains(label), "{brief}");
+    }
+    assert_eq!(
+        app.post("session/brief", brief_body, &device).await["brief"],
+        ""
+    );
+    let empty = app
+        .post(
+            "session/topic",
+            json!({"session_id": "shared", "path": "src/shared.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(empty, json!({"notes": []}));
+
+    for i in 0..9 {
+        let path = format!("src/probe{i}.rs");
+        let title = format!("Working timer probe {i}");
+        save(
+            &app,
+            &device,
+            json!({
+                "kind": "fact", "scope": "personal", "title": title,
+                "summary": format!("Probe {i} measures how long the worker stays active."),
+                "reason": "Dedicated measurements cover a different path per file.",
+                "context": {"files": [path]}
+            }),
+        )
+        .await;
+    }
+    // The fixtures differ by path and index. Promote them so duplicate coaching does not
+    // influence the cap assertion.
+    sqlx::query("UPDATE memories SET rank = 'normal' WHERE kind = 'fact'")
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    let app = std::sync::Arc::new(app);
+    let mut requests = tokio::task::JoinSet::new();
+    for i in 0..9 {
+        let (app, device) = (app.clone(), device.clone());
+        requests.spawn(async move {
+            app.post(
+                "session/topic",
+                json!({
+                    "session_id": "shared", "path": format!("src/probe{i}.rs")
+                }),
+                &device,
+            )
+            .await
+        });
+    }
+    let replies = requests.join_all().await;
+    let shown: Vec<_> = replies
+        .iter()
+        .flat_map(|reply| reply["notes"].as_array().unwrap())
+        .collect();
+    assert_eq!(shown.len(), 7, "{replies:?}");
+    assert!(
+        shown
+            .iter()
+            .all(|note| note["why"].as_str().unwrap().starts_with("file src/probe"))
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_shown WHERE session_id = 'shared'")
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(remaining, 8);
+    let exhausted = app
+        .post(
+            "session/topic",
+            json!({"session_id":"shared", "path":"src/probe8.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(exhausted, json!({"notes": []}));
+    let search = app
+        .post("search", json!({"query":"Working timer probe 8"}), &device)
+        .await;
+    assert!(!ids(&search).is_empty());
+    let fresh = app
+        .post(
+            "session/topic",
+            json!({"session_id":"fresh", "path":"src/shared.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(fresh["notes"].as_array().unwrap().len(), 1, "{fresh}");
+    assert_eq!(fresh["notes"][0]["id"], shared);
+    std::sync::Arc::into_inner(app).unwrap().finish().await;
+}
+
+#[tokio::test]
 async fn brief_uses_recent_files() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
@@ -882,13 +1026,13 @@ async fn brief_uses_recent_files() {
         save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it. is a summary of the test", "reason": "r and the test says why",
             "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": context(file)})).await;
     }
-    let brief = |recent: serde_json::Value| {
+    let brief = |session_id: &'static str, recent: serde_json::Value| {
         let (app, device) = (&app, &device);
         async move {
             let reply = app
                 .post(
                     "session/brief",
-                    json!({"session_id": "s1", "context": {"project_id": pid}, "recent_files": recent}),
+                    json!({"session_id": session_id, "context": {"project_id": pid}, "recent_files": recent}),
                     device,
                 )
                 .await;
@@ -899,12 +1043,12 @@ async fn brief_uses_recent_files() {
         text.find(title)
             .unwrap_or_else(|| panic!("{title} in {text}"))
     };
-    let touching_queue = brief(json!(["src/jobs/worker.rs"])).await;
+    let touching_queue = brief("queues", json!(["src/jobs/worker.rs"])).await;
     assert!(
         position(&touching_queue, "Queue lock order")
             < position(&touching_queue, "Docs build flag")
     );
-    let touching_docs = brief(json!(["docs/build.md"])).await;
+    let touching_docs = brief("docs", json!(["docs/build.md"])).await;
     assert!(
         position(&touching_docs, "Docs build flag") < position(&touching_docs, "Queue lock order")
     );
@@ -933,7 +1077,7 @@ async fn brief_offers_a_check_and_repo_state_is_device_only_and_default_branch_o
         app.post(
             "remember",
             json!({"kind": "rule", "title": title, "summary": format!("{title}, as the team agreed."),
-                   "reason": "the review said so", "context": context("main")}),
+                   "reason": "The review identified this as a concurrency invariant.", "context": context("main")}),
             &device,
         )
         .await;

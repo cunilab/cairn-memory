@@ -14,7 +14,7 @@ use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
-use sqlx::{PgConnection, Row};
+use sqlx::{Executor, PgConnection, Postgres, Row};
 use std::collections::{HashMap, HashSet};
 
 fn owned(alias: &str, me: &str) -> String {
@@ -104,6 +104,30 @@ pub(crate) fn search_matches(terms: &str) -> String {
         "((m.detail = '' AND m.search_tsv @@ {terms})
            OR (m.detail <> '' AND {SEARCH_VECTOR} @@ {terms}))"
     )
+}
+
+pub(crate) async fn entities_for<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<Entity>>> {
+    let mut entities: HashMap<String, Vec<Entity>> = HashMap::new();
+    for row in sqlx::query(
+        "SELECT memory_id, kind, name FROM entities WHERE memory_id = ANY($1) ORDER BY kind, name",
+    )
+    .bind(ids)
+    .fetch_all(executor)
+    .await?
+    {
+        let kind: EntityKind = parse(&row, "kind")?;
+        entities
+            .entry(row.try_get("memory_id")?)
+            .or_default()
+            .push(Entity {
+                kind,
+                name: row.try_get("name")?,
+            });
+    }
+    Ok(entities)
 }
 
 fn parse<T: std::str::FromStr<Err = String>>(row: &PgRow, column: &str) -> Result<T> {
@@ -523,15 +547,7 @@ impl Store {
             return Ok(());
         }
         let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
-        let mut entities: HashMap<String, Vec<Entity>> = HashMap::new();
-        for row in sqlx::query("SELECT memory_id, kind, name FROM entities WHERE memory_id = ANY($1) ORDER BY kind, name")
-            .bind(&ids)
-            .fetch_all(&self.pool)
-            .await?
-        {
-            let kind: EntityKind = parse(&row, "kind")?;
-            entities.entry(row.try_get("memory_id")?).or_default().push(Entity { kind, name: row.try_get("name")? });
-        }
+        let mut entities = entities_for(&self.pool, &ids).await?;
         let link_rows = sqlx::query(
             "SELECT source_id, target_id, relation, origin FROM links
               WHERE source_id = ANY($1) OR target_id = ANY($1) ORDER BY created_at, source_id, target_id",

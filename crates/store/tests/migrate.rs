@@ -34,6 +34,7 @@ async fn migrate_twice_is_a_no_op() {
             "0016_project_archive",
             "0017_device_agents",
             "0018_memory_usage",
+            "0019_session_shown",
             "0020_device_agent_hermes",
         ]
     );
@@ -43,9 +44,9 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 20);
+    assert_eq!(tables, 21);
     // Everything lives in the test schema, nothing leaks into public.
-    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs')")
+    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs','session_shown')")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
@@ -1010,6 +1011,7 @@ async fn fixes_migration_additive() {
     versions.push("0016_project_archive".into());
     versions.push("0017_device_agents".into());
     versions.push("0018_memory_usage".into());
+    versions.push("0019_session_shown".into());
     versions.push("0020_device_agent_hermes".into());
     versions.sort();
     let after_versions: Vec<String> =

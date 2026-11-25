@@ -15,7 +15,7 @@ status: draft
 | `SessionStart` | Request a brief and instructions; check repository state when requested. |
 | `UserPromptSubmit` | Capture the prompt. |
 | `PreToolUse` (Claude Code) | Locally deny `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` under the Claude config directory's `projects/*/memory/`. |
-| `PostToolUse` | Capture edits and non-read-only shell commands; request topic context for edited files; recognize Cairn saves and lookups. |
+| `PostToolUse` | Capture edits and non-read-only shell commands; request topic context for read or edited files; recognize Cairn saves and lookups. |
 | `Stop` | Checkpoint work and, when appropriate, ask once to save useful notes. |
 | `PreCompact` | Checkpoint work. |
 | `SessionEnd` | End a worked session for background distillation. |
@@ -28,7 +28,9 @@ The default start instruction tells agents to use Cairn as their only memory, ca
 
 ## Injection budget
 
-The server brief is limited to 1,200 bytes. Up to four topic injections of at most 300 bytes each are allowed, with at most 16 topic lookups per session. The session instruction and the Stop text are each limited to 600 bytes, globally and per project.
+The server allows eight pushed memories per person and session ID across briefs and topics. The brief fits within 1,200 bytes. Hooks request up to 16 file topics and can inject up to four topic replies of 300 bytes each. The session instruction and the Stop text are each limited to 600 bytes, globally and per project. See [automatic recall](recall.md#automatic-recall).
+
+The stdio MCP server also requests the brief for its working directory and appends it to the initialize instructions. The HTTP request has a one-second timeout. An unavailable or empty brief leaves the static instructions in place. A host can supply its hook session ID via `initialize.params._meta.sessionId` to share the eight-memory budget. Standard stdio initialization carries no host session ID, so a client that omits this field can receive the same memory through MCP and a hook. [MCP initialization](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
 
 ## Redaction
 

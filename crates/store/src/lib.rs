@@ -100,6 +100,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../migrations/0018_memory_usage.sql"),
     ),
     (
+        "0019_session_shown",
+        include_str!("../../../migrations/0019_session_shown.sql"),
+    ),
+    (
         "0020_device_agent_hermes",
         include_str!("../../../migrations/0020_device_agent_hermes.sql"),
     ),

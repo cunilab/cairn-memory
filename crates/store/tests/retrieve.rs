@@ -783,8 +783,6 @@ async fn visibility_matrix_for_all_four_channels() {
 
 #[tokio::test]
 async fn hook_context_counts_shown_and_search_counts_fetched() {
-    use cairn_store::usage::Lookup;
-
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -810,25 +808,34 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         .unwrap()
     };
     assert_eq!(usage().await, (0, 0, false, false));
-    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    let brief = store.brief(&me, &work, &[], Some("s1")).await.unwrap();
     assert_eq!(brief.memory_ids, std::slice::from_ref(&id));
-    store
-        .record_retrieval(
-            &me,
-            Lookup::Brief,
-            brief.text.len(),
-            true,
-            &brief.memory_ids,
-        )
-        .await
-        .unwrap();
+    assert!(
+        brief.text.contains(r#""why":"personal preference""#),
+        "{}",
+        brief.text
+    );
     assert_eq!(usage().await, (1, 0, true, false));
-    let topic = store.topic(&me, "src/usage.rs", &work).await.unwrap();
-    assert_eq!(topic.memory_ids, std::slice::from_ref(&id));
-    store
-        .record_retrieval(&me, Lookup::Topic, 100, true, &topic.memory_ids)
+    let repeat = store.brief(&me, &work, &[], Some("s1")).await.unwrap();
+    assert!(repeat.text.is_empty());
+    let topic = store
+        .topic(&me, "src/usage.rs", &work, Some("s1"))
         .await
         .unwrap();
+    assert!(topic.notes.is_empty() && topic.card.is_none());
+    assert_eq!(usage().await, (1, 0, true, false));
+
+    let topic = store
+        .topic(&me, "src/usage.rs", &work, Some("s2"))
+        .await
+        .unwrap();
+    assert_eq!(topic.memory_ids, std::slice::from_ref(&id));
+    assert_eq!(topic.notes[0].why, "file src/usage.rs");
+    let repeat = store
+        .topic(&me, "src/usage.rs", &work, Some("s2"))
+        .await
+        .unwrap();
+    assert!(repeat.notes.is_empty() && repeat.card.is_none());
     assert_eq!(usage().await, (2, 0, true, false));
     let cards = store
         .search(
@@ -842,6 +849,21 @@ async fn hook_context_counts_shown_and_search_counts_fetched() {
         .await
         .unwrap();
     assert_eq!(cards.results.first().map(|c| &c.id), Some(&id));
+    assert_eq!(usage().await, (2, 1, true, true));
+    sqlx::query(
+        "UPDATE session_shown SET shown_at = now() - interval '8 days' WHERE session_id = 's1'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.sweep().await.unwrap();
+    let retained: Vec<String> =
+        sqlx::query_scalar("SELECT session_id FROM session_shown WHERE person_id = $1")
+            .bind(&me)
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(retained, ["s2"]);
     assert_eq!(usage().await, (2, 1, true, true));
     db.finish().await;
 }
@@ -1248,7 +1270,7 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work, &[]).await.unwrap().text;
+    let brief = store.brief(&me, &work, &[], None).await.unwrap().text;
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1422,15 +1444,15 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         ..WorkContext::default()
     };
     // Four memories name the file, so one card names the first two: project first, newest next.
-    let topic = store.topic(&me, "src/a.rs", &context).await.unwrap();
+    let topic = store.topic(&me, "src/a.rs", &context, None).await.unwrap();
     assert!(topic.notes.is_empty());
     let card = topic.card.expect("card");
     assert!(
-        card.contains("4 memories \u{2014} rule Project rule; fact Personal three"),
+        card.contains("4 memories \u{2014} rule Project rule (why: file src/a.rs); fact Personal three (why: file src/a.rs)"),
         "{card}"
     );
     for (who, path) in [(&me, "src/a"), (&stranger, "src/a.rs")] {
-        let topic = store.topic(who, path, &context).await.unwrap();
+        let topic = store.topic(who, path, &context, None).await.unwrap();
         assert!(topic.notes.is_empty() && topic.card.is_none());
     }
 
@@ -1446,7 +1468,7 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .await
         .unwrap();
     let topic = store
-        .topic(&me, "src/a.rs", &WorkContext::default())
+        .topic(&me, "src/a.rs", &WorkContext::default(), None)
         .await
         .unwrap();
     assert!(topic.card.is_none() && topic.notes.len() == 2);
@@ -1456,6 +1478,66 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .await
         .unwrap();
     assert_eq!(fetched, 0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn topic_ranks_kind_then_votes_then_recency_and_matches_symbols() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("topic-ranking").await;
+    let work = WorkContext {
+        symbols: vec!["queue::take_lock".into()],
+        ..WorkContext::default()
+    };
+    let mut ids = Vec::new();
+    for (title, kind) in [
+        ("Helpful queue rule", "rule"),
+        ("Older queue rule", "rule"),
+        ("Newest queue rule", "rule"),
+        ("Queue decision", "decision"),
+        ("Queue fact", "fact"),
+    ] {
+        ids.push(store.save(&me, save_input(serde_json::json!({
+            "kind":kind, "scope":"personal", "title":title, "summary":"Hold the state lock before claiming a job.",
+            "reason":"Concurrent claims share one queue.",
+            "fields": if kind == "decision" { serde_json::json!({"context": "Worker lock ordering"}) } else { serde_json::json!({}) }
+        })), &work).await.unwrap().id);
+    }
+    for id in [&ids[0], &ids[4]] {
+        store
+            .feedback(&me, id, cairn_store::memory::Vote::Helpful)
+            .await
+            .unwrap();
+    }
+    let session = Some("symbols");
+    let first = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(first.memory_ids, [ids[0].clone(), ids[2].clone()]);
+    assert!(first.card.unwrap().contains("why: symbol queue::take_lock"));
+    let second = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(second.memory_ids, [ids[1].clone(), ids[3].clone()]);
+    let third = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(third.memory_ids, [ids[4].clone()]);
+    assert_eq!(third.notes[0].why, "symbol queue::take_lock");
+    assert!(
+        store
+            .topic(&me, "src/unrelated.rs", &WorkContext::default(), None)
+            .await
+            .unwrap()
+            .notes
+            .is_empty()
+    );
     db.finish().await;
 }
 
@@ -1586,7 +1668,7 @@ async fn brief_skips_candidates() {
         .execute(store.pool())
         .await
         .unwrap();
-    let brief = store.brief(&me, &work, &[]).await.unwrap().text;
+    let brief = store.brief(&me, &work, &[], None).await.unwrap().text;
     assert!(brief.contains("Keep this rule visible"), "{brief}");
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
@@ -1684,7 +1766,7 @@ async fn digest_searchable_not_in_brief() {
         ..WorkContext::default()
     };
     let brief = store
-        .brief(&person, &work, &["LedControls".into()])
+        .brief(&person, &work, &["LedControls".into()], None)
         .await
         .unwrap()
         .text;
@@ -1968,7 +2050,7 @@ async fn forget_keeps_content_but_hides() {
     assert_eq!(admin.memories[0].status, Status::Forgotten);
     let brief = db
         .store
-        .brief(&me, &WorkContext::default(), &[])
+        .brief(&me, &WorkContext::default(), &[], None)
         .await
         .unwrap()
         .text;
@@ -2014,6 +2096,7 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
                 ..WorkContext::default()
             },
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -2064,7 +2147,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap().text;
+    let brief = db
+        .store
+        .brief(&me, &non_git_work, &[], None)
+        .await
+        .unwrap()
+        .text;
     assert!(
         brief.contains("nongit_handoff"),
         "non-git brief must show the handoff: {brief}"
@@ -2078,7 +2166,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap().text;
+    let git_brief = db
+        .store
+        .brief(&me, &git_work, &[], None)
+        .await
+        .unwrap()
+        .text;
     assert!(
         !git_brief.contains("nongit_handoff"),
         "git brief must only show matching branch's handoff: {git_brief}"

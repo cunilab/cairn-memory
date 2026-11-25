@@ -2,8 +2,9 @@ use crate::capture::{RECENT_FILE_MAX_BYTES, RECENT_FILES_MAX, clip};
 use crate::embed::vector_text;
 use crate::memory::{
     MEMORY_COLUMNS, MEMORY_SELECT, MEMORY_SELECT_WITH_DETAIL, SEARCH_VECTOR, collection_memory,
-    memory_from_row, search_matches, searchable, visible,
+    entities_for, memory_from_row, search_matches, searchable, visible,
 };
+use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Fields, Kind, Memory, Status};
@@ -28,6 +29,9 @@ const NEIGHBOUR_SEEDS: usize = 32;
 /// Rules read for the brief: those on a recent file or its directory, then the newest of any.
 const BRIEF_NEAR_RULES: i32 = 100;
 const BRIEF_NEWEST_RULES: i32 = 200;
+/// The proven and normal cases of Memory::trust, applied before any SQL limit.
+const PUSH_TRUST: &str =
+    "m.status <> 'stale' AND m.rank <> 'candidate' AND coalesce(u.wrong, 0) = 0";
 
 /// A candidate with the inputs of the relevance gate.
 #[derive(Clone, Debug)]
@@ -124,10 +128,11 @@ pub struct TopicNote {
     pub id: String,
     pub title: String,
     pub summary: String,
+    pub why: String,
 }
 
 /// The reply to `/session/topic`: notes for one or two memories, or a single card for more.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Topic {
     pub notes: Vec<TopicNote>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,7 +625,19 @@ impl Store {
         person_id: &str,
         context: &WorkContext,
         recent_files: &[String],
+        session_id: Option<&str>,
     ) -> Result<SessionBrief> {
+        let mut tx = self.pool.begin().await?;
+        let shown = already_shown(&mut tx, person_id, session_id).await?;
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
+        if limit == 0 {
+            tx.commit().await?;
+            return Ok(SessionBrief {
+                text: String::new(),
+                memory_ids: Vec::new(),
+            });
+        }
+
         let recent: Vec<String> = recent_files
             .iter()
             .take(RECENT_FILES_MAX)
@@ -630,7 +647,7 @@ impl Store {
             Some(id) => {
                 sqlx::query_scalar("SELECT default_branch FROM projects WHERE project_id = $1")
                     .bind(id)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .flatten()
             }
@@ -639,7 +656,7 @@ impl Store {
         let newest = "ORDER BY m.created_at DESC, m.memory_id";
         let handoff = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status <> 'forgotten' AND m.rank <> 'candidate' AND m.kind = 'handoff' AND m.owner_id = $1
+              WHERE {} AND m.status <> 'forgotten' AND {PUSH_TRUST} AND m.kind = 'handoff' AND m.owner_id = $1
                 AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
               {newest} LIMIT 50",
@@ -650,28 +667,30 @@ impl Store {
         .bind(&context.repository)
         .bind(&context.branch)
         .bind(&context.worktree)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
         let preferences = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.kind = 'preference' AND m.scope = 'personal'
-                AND m.owner_id = $1
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.kind = 'preference' AND m.scope = 'personal'
+                AND m.owner_id = $1 AND m.memory_id <> ALL($2)
               {newest} LIMIT 2",
             visible("m", "$1")
         ))
         .bind(person_id)
-        .fetch_all(&self.pool)
+        .bind(&shown)
+        .fetch_all(&mut *tx)
         .await?;
         // Project items on this branch or the default branch (`NULL` branch: any), the same rule
         // `session_brief` applies, so the limit never fills with rows it would drop.
         let project_items = |extra: &str, order: &str, limit: i32| {
             format!(
                 "{MEMORY_SELECT}
-                  WHERE {} AND m.status = 'active' AND m.rank <> 'candidate' AND m.scope = 'project' AND m.project_id = $2
+                  WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.scope = 'project' AND m.project_id = $2
                     AND m.kind IN ('rule','decision','gotcha')
                     AND (m.repo_branch IS NULL OR m.repo_branch = $3
                          OR CASE WHEN $4::text IS NULL THEN m.repo_branch IN ('main','master')
-                                 ELSE m.repo_branch = $4 END){extra}
+                                 ELSE m.repo_branch = $4 END)
+                    AND m.memory_id <> ALL($5){extra}
                   {order} LIMIT {limit}",
                 visible("m", "$1")
             )
@@ -687,8 +706,8 @@ impl Store {
                     sqlx::query(&project_items(
                         " AND EXISTS (SELECT 1 FROM entities e
                                        WHERE e.memory_id = m.memory_id AND e.kind = 'file'
-                                         AND (e.name = ANY($5)
-                                              OR EXISTS (SELECT 1 FROM unnest($6::text[]) d
+                                         AND (e.name = ANY($6)
+                                              OR EXISTS (SELECT 1 FROM unnest($7::text[]) d
                                                           WHERE starts_with(e.name, d))))",
                         "ORDER BY m.updated_at DESC, m.memory_id DESC",
                         BRIEF_NEAR_RULES,
@@ -697,9 +716,10 @@ impl Store {
                     .bind(&context.project_id)
                     .bind(&context.branch)
                     .bind(&default_branch)
+                    .bind(&shown)
                     .bind(&recent)
                     .bind(&dirs)
-                    .fetch_all(&self.pool)
+                    .fetch_all(&mut *tx)
                     .await?,
                 );
             }
@@ -713,7 +733,8 @@ impl Store {
                 .bind(&context.project_id)
                 .bind(&context.branch)
                 .bind(&default_branch)
-                .fetch_all(&self.pool)
+                .bind(&shown)
+                .fetch_all(&mut *tx)
                 .await?,
             );
         }
@@ -730,105 +751,142 @@ impl Store {
         for row in &handoff {
             handoff_rows.push(memory_from_row(row)?);
         }
-        if let Some(mut chosen) = preferred_handoff(&handoff_rows).cloned() {
+        if let Some(mut chosen) = preferred_handoff(&handoff_rows)
+            .filter(|m| !shown.contains(&m.id))
+            .cloned()
+        {
             // shortcut: session_brief only renders an active handoff; the stored row stays as it is
             chosen.status = Status::Active;
             if seen.insert(chosen.id.clone()) {
                 memories.push(chosen);
             }
         }
-        self.attach(person_id, &mut memories, false).await?;
-        Ok(session_brief(
+        let ids: Vec<_> = memories.iter().map(|m| m.id.clone()).collect();
+        if !ids.is_empty() {
+            let mut entities = entities_for(&mut *tx, &ids).await?;
+            for memory in &mut memories {
+                memory.entities = entities.remove(&memory.id).unwrap_or_default();
+            }
+        }
+        let brief = session_brief(
             &memories,
             context,
             &recent,
             default_branch.as_deref(),
             cairn_core::id::now_seconds(),
-        ))
+            limit,
+        );
+        finish_push(tx, person_id, session_id, Lookup::Brief, &brief.memory_ids).await?;
+        Ok(brief)
     }
 
-    /// The active, visible memories about `path`: those with a file entity exactly `path` first, then
-    /// those with the module entity of its folder; the caller's project first. Up to two come back
-    /// as notes; three or more as one card naming the first two. Handoffs are never topic notes
-    /// and nothing is counted as fetched.
-    pub async fn topic(&self, person_id: &str, path: &str, context: &WorkContext) -> Result<Topic> {
+    /// Up to two memories matching a file, its module or a symbol in the tool input.
+    /// Render a compact topic card when more than two match.
+    pub async fn topic(
+        &self,
+        person_id: &str,
+        path: &str,
+        context: &WorkContext,
+        session_id: Option<&str>,
+    ) -> Result<Topic> {
+        let mut tx = self.pool.begin().await?;
+        let shown = already_shown(&mut tx, person_id, session_id).await?;
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        if limit == 0 {
+            tx.commit().await?;
+            return Ok(Topic::default());
+        }
+        let symbols: Vec<_> = context
+            .symbols
+            .iter()
+            .take(entities::ENTITY_CAP)
+            .filter(|s| s.len() <= 200 && entities::is_symbol(s))
+            .map(String::as_str)
+            .collect();
         let rows = sqlx::query(&format!(
-            "SELECT m.memory_id, m.kind, m.title, m.summary, count(*) OVER () AS total
+            "SELECT m.memory_id, m.kind, m.title, m.summary, count(*) OVER () AS total,
+                    CASE WHEN bool_or(e.kind = 'file') THEN 'file ' || $2
+                         WHEN bool_or(e.kind = 'symbol') THEN 'symbol ' || min(e.name) FILTER (WHERE e.kind = 'symbol')
+                         ELSE 'module ' || $4 END AS why
                FROM memories m
                JOIN entities e ON e.memory_id = m.memory_id
-              WHERE {} AND m.status = 'active' AND m.kind <> 'handoff'
-                AND ((e.kind = 'file' AND e.name = $2) OR (e.kind = 'module' AND e.name = $4))
+               LEFT JOIN usage u ON u.memory_id = m.memory_id
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.kind <> 'handoff'
+                AND m.memory_id <> ALL($6)
+                AND ((e.kind = 'file' AND e.name = $2) OR (e.kind = 'module' AND e.name = $4)
+                     OR (e.kind = 'symbol' AND e.name = ANY($5)
+                         AND (m.scope <> 'project' OR m.project_id = $3)))
               GROUP BY m.memory_id
-              ORDER BY bool_or(e.kind = 'file') DESC,
+              ORDER BY CASE WHEN m.kind IN ('rule', 'gotcha') THEN 0
+                            WHEN m.kind = 'decision' THEN 1
+                            WHEN m.kind IN ('fact', 'procedure') THEN 2 ELSE 3 END,
+                       coalesce(max(u.helpful), 0) DESC, m.updated_at DESC,
+                       bool_or(e.kind = 'file') DESC,
                        (m.project_id IS NOT NULL AND m.project_id = $3) DESC,
-                       m.updated_at DESC, m.memory_id
-              LIMIT 2",
+                       m.memory_id
+              LIMIT $7",
             visible("m", "$1")
         ))
         .bind(person_id)
         .bind(path)
         .bind(&context.project_id)
         .bind(module_of(path))
-        .fetch_all(&self.pool)
+        .bind(&symbols)
+        .bind(&shown)
+        .bind(limit as i64)
+        .fetch_all(&mut *tx)
         .await?;
-        let total = match rows.first() {
-            Some(row) => row.try_get::<i64, _>("total")?,
-            None => 0,
-        };
-        if total >= 3 {
-            let kinds = rows
-                .iter()
-                .map(|r| {
-                    r.try_get::<String, _>("kind")?
-                        .parse::<Kind>()
-                        .map_err(StoreError::Validation)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let titles = rows
-                .iter()
-                .map(|r| r.try_get::<String, _>("title"))
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let first: Vec<(Kind, &str)> = kinds
-                .iter()
-                .copied()
-                .zip(titles.iter().map(String::as_str))
-                .collect();
-            let (card, shown) = topic_card(path, total as usize, &first);
-            let memory_ids = rows
-                .iter()
-                .take(shown)
-                .map(|row| row.try_get("memory_id"))
-                .collect::<std::result::Result<_, _>>()?;
-            return Ok(Topic {
-                notes: Vec::new(),
-                card: Some(card),
-                memory_ids,
+
+        let mut notes = Vec::new();
+        let mut kinds = Vec::new();
+        for row in &rows {
+            kinds.push(
+                row.try_get::<String, _>("kind")?
+                    .parse::<Kind>()
+                    .map_err(StoreError::Validation)?,
+            );
+            notes.push(TopicNote {
+                id: row.try_get("memory_id")?,
+                title: row.try_get("title")?,
+                summary: row.try_get("summary")?,
+                why: row.try_get("why")?,
             });
         }
-        let notes: Vec<_> = rows
-            .iter()
-            .map(|r| {
-                Ok(TopicNote {
-                    id: r.try_get("memory_id")?,
-                    title: r.try_get("title")?,
-                    summary: r.try_get("summary")?,
+        let total = rows
+            .first()
+            .map(|row| row.try_get::<i64, _>("total"))
+            .transpose()?
+            .unwrap_or(0);
+        let (card, count) = if total >= 3 {
+            let first: Vec<_> = kinds
+                .into_iter()
+                .zip(&notes)
+                .map(|(kind, note)| (kind, note.title.as_str(), note.why.as_str()))
+                .collect();
+            let (card, count) = topic_card(path, total as usize, &first);
+            (Some(card), count)
+        } else {
+            let text: Vec<_> = notes
+                .iter()
+                .map(|note| {
+                    (
+                        note.title.as_str(),
+                        note.summary.as_str(),
+                        note.why.as_str(),
+                    )
                 })
-            })
-            .collect::<Result<_>>()?;
-        let visible: Vec<_> = notes.iter().filter(|note| !note.title.is_empty()).collect();
-        let text: Vec<_> = visible
-            .iter()
-            .map(|note| (note.title.as_str(), note.summary.as_str()))
-            .collect();
-        let (_, shown) = topic_notes(path, &text);
-        let memory_ids = visible
-            .into_iter()
-            .take(shown)
-            .map(|note| note.id.clone())
-            .collect();
+                .collect();
+            (None, topic_notes(path, &text).1)
+        };
+        notes.truncate(count);
+        let memory_ids: Vec<_> = notes.iter().map(|note| note.id.clone()).collect();
+        finish_push(tx, person_id, session_id, Lookup::Topic, &memory_ids).await?;
+        if card.is_some() {
+            notes.clear();
+        }
         Ok(Topic {
             notes,
-            card: None,
+            card,
             memory_ids,
         })
     }

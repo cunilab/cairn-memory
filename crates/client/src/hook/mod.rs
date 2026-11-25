@@ -4,7 +4,7 @@
 //! stderr line and still exits 0.
 
 mod event;
-mod git;
+pub(crate) mod git;
 mod inject;
 mod outbox;
 mod readonly;
@@ -12,7 +12,9 @@ mod state;
 
 use crate::{Client, Config, Error, claude_memory, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
-use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
+use cairn_core::capture::{
+    CaptureKind, WorkContext, redact_sensitive_content, redact_work_context,
+};
 use cairn_core::id::{new_id, now_seconds, sha256_hex};
 use cairn_core::instructions::{
     DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
@@ -20,6 +22,7 @@ use cairn_core::instructions::{
 use cairn_core::process::distill::{
     HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
 };
+use cairn_core::process::entities::{ENTITY_CAP, is_symbol};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -657,7 +660,13 @@ impl Hook<'_> {
         // and per-session caps.
         if let Some(given) = tool.read_path() {
             let path = git::repo_relative(given, &self.cwd, self.top.as_deref());
-            return Ok(path.and_then(|path| self.topic(&path)));
+            return Ok(path.and_then(|path| {
+                let symbol = tool
+                    .input_text("symbol")
+                    .filter(|symbol| symbol.len() <= 200);
+                let text = symbol.map(redact_sensitive_content).unwrap_or_default();
+                self.topic(&path, &text)
+            }));
         }
         if tool.is_read_only() {
             return Ok(None);
@@ -686,8 +695,14 @@ impl Hook<'_> {
                     continue;
                 };
                 self.with_state(|s| s.remember_edit(&path));
-                self.capture(Some(tool.edit(&path, &new_text)))?;
-                notes.extend(self.topic(&path));
+                let capture = tool.edit(&path, &new_text);
+                let text = capture
+                    .content
+                    .split_once('\n')
+                    .map_or("", |(_, text)| text)
+                    .to_owned();
+                self.capture(Some(capture))?;
+                notes.extend(self.topic(&path, &text));
             }
             return Ok((!notes.is_empty()).then(|| notes.join("\n")));
         }
@@ -695,7 +710,7 @@ impl Hook<'_> {
     }
 
     /// The note text for the first edit of `path`, within the per-session caps.
-    fn topic(&self, path: &str) -> Option<String> {
+    fn topic(&self, path: &str, tool_text: &str) -> Option<String> {
         if matches!(self.agent, "antigravity" | "hermes") {
             return None; // The host discards context returned from PostToolUse.
         }
@@ -704,30 +719,50 @@ impl Hook<'_> {
             let wanted = !s.topics.iter().any(|seen| seen == path)
                 && s.topics_injected < inject::TOPICS_PER_SESSION
                 && s.topic_lookups < inject::TOPIC_LOOKUPS_PER_SESSION;
-            s.topic_lookups += u8::from(wanted);
+            if wanted {
+                s.topic_lookups += 1;
+                s.topics_injected += 1;
+                s.remember_topic(path);
+            }
             wanted
         })?;
         if !wanted {
             return None;
         }
-        let body = json!({"path": path, "context": self.work_context()});
+        let mut context = self.work_context();
+        for token in tool_text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':') {
+            let token = token.trim_matches(':');
+            if token.len() <= 200
+                && is_symbol(token)
+                && !context.symbols.iter().any(|symbol| symbol == token)
+            {
+                context.symbols.push(token.to_owned());
+                if context.symbols.len() == ENTITY_CAP {
+                    break;
+                }
+            }
+        }
+        let body = json!({"path": path, "session_id": self.session_id, "context": context});
         let reply = match self.post("/cairn-memory/session/topic", &body) {
             Ok(reply) => reply,
-            // Not marked seen: the next edit of this path asks again, while lookups remain.
             Err(error) => {
+                self.with_state(|s| {
+                    s.topics.retain(|seen| seen != path);
+                    s.topics_injected = s.topics_injected.saturating_sub(1);
+                });
                 self.warn("Cairn topic notes unavailable", &error);
                 return None;
             }
         };
-        let notes: Vec<(&str, &str)> = reply["notes"]
+        let notes: Vec<(&str, &str, &str)> = reply["notes"]
             .as_array()
             .map(|notes| {
                 notes
                     .iter()
                     .filter_map(|note| {
                         let text = |key: &str| note[key].as_str().unwrap_or_default();
-                        Some((text("title"), text("summary")))
-                            .filter(|(title, _)| !title.is_empty())
+                        Some((text("title"), text("summary"), text("why")))
+                            .filter(|(title, _, _)| !title.is_empty())
                     })
                     .collect()
             })
@@ -736,19 +771,11 @@ impl Hook<'_> {
             Some(card) => inject::card(card),
             None => inject::topic(path, &notes).0,
         };
-        let keep = self.with_state(|s| {
-            // A parallel hook of this session may have answered first: one note per path.
-            if s.topics.iter().any(|seen| seen == path) {
-                return false;
-            }
-            s.remember_topic(path);
-            let fits = !text.is_empty() && s.topics_injected < inject::TOPICS_PER_SESSION;
-            if fits {
-                s.topics_injected += 1;
-            }
-            fits
-        });
-        keep.unwrap_or(false).then_some(text)
+        if text.is_empty() {
+            self.with_state(|s| s.topics_injected = s.topics_injected.saturating_sub(1));
+            return None;
+        }
+        Some(text)
     }
 
     /// Sends one typed capture unless this session already sent the same content. A transient

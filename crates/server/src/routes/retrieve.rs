@@ -39,7 +39,7 @@ pub struct Search {
 
 #[derive(Deserialize)]
 pub struct Brief {
-    session_id: String,
+    session_id: Option<String>,
     #[serde(default)]
     context: Option<WorkContext>,
     #[serde(default)]
@@ -49,6 +49,7 @@ pub struct Brief {
 #[derive(Deserialize)]
 pub struct Topic {
     path: String,
+    session_id: Option<String>,
     #[serde(default)]
     context: Option<WorkContext>,
 }
@@ -108,7 +109,6 @@ pub async fn search(
         Lookup::Search,
         &reply,
         !cards.results.is_empty(),
-        &[],
     )
     .await;
     Ok(Json(reply))
@@ -116,22 +116,24 @@ pub async fn search(
 
 /// Counts one lookup for the dashboard: how big the answer was and whether it found anything.
 /// A failure to count never fails the lookup.
-async fn record(
-    state: &AppState,
-    person_id: &str,
-    lookup: Lookup,
-    reply: &Value,
-    hit: bool,
-    shown: &[String],
-) {
+async fn record(state: &AppState, person_id: &str, lookup: Lookup, reply: &Value, hit: bool) {
     let bytes = reply.to_string().len();
     if let Err(error) = state
         .store
-        .record_retrieval(person_id, lookup, bytes, hit, shown)
+        .record_retrieval(person_id, lookup, bytes, hit)
         .await
     {
         eprintln!("retrieval usage not recorded: {error}");
     }
+}
+
+fn push_session_id(id: Option<&str>) -> Result<Option<&str>, ApiError> {
+    if id.is_some_and(|id| id.trim().is_empty() || id.len() > 512 || id.contains('\0')) {
+        return Err(ApiError::invalid(
+            "session_id must be 1–512 bytes with no null bytes",
+        ));
+    }
+    Ok(id)
 }
 
 pub async fn brief(
@@ -144,19 +146,13 @@ pub async fn brief(
         .store
         .resolve_project(&account.person_id, &context)
         .await?;
-    state
-        .store
-        .record_session_files(
-            &account.person_id,
-            &body.session_id,
-            &context,
-            &body.recent_files,
-        )
-        .await?;
-    let brief = state
-        .store
-        .brief(&account.person_id, &context, &body.recent_files)
-        .await?;
+    let session_id = push_session_id(body.session_id.as_deref())?;
+    if let Some(session_id) = session_id {
+        state
+            .store
+            .record_session_files(&account.person_id, session_id, &context, &body.recent_files)
+            .await?;
+    }
     let check = match (&context.project_id, &context.branch) {
         (Some(project), Some(branch)) => {
             state
@@ -172,7 +168,6 @@ pub async fn brief(
         .effective_instructions(&account.person_id, context.project_id.as_deref())
         .await?;
     let mut reply = json!({
-        "brief": brief.text,
         "max_bytes": SESSION_BRIEF_MAX_BYTES,
         "instructions": {
             "session_instruction": instructions.session_instruction.text,
@@ -192,20 +187,17 @@ pub async fn brief(
         }
         reply["project_id"] = json!(project_id);
     }
-    record(
-        &state,
-        &account.person_id,
-        Lookup::Brief,
-        &reply,
-        !brief.text.trim().is_empty(),
-        &brief.memory_ids,
-    )
-    .await;
+    let brief = state
+        .store
+        .brief(&account.person_id, &context, &body.recent_files, session_id)
+        .await?;
+    let hit = !brief.text.is_empty();
+    reply["brief"] = json!(brief.text);
+    record(&state, &account.person_id, Lookup::Brief, &reply, hit).await;
     Ok(Json(reply))
 }
 
-/// Notes about `path` (its file, then its module): at most two, or one card for more. Never counted
-/// as a fetch.
+/// Notes matching a file, its module or a touched symbol. Never counted as a fetch.
 pub async fn topic(
     State(state): State<AppState>,
     Agent(account): Agent,
@@ -220,6 +212,7 @@ pub async fn topic(
             &account.person_id,
             &body.path,
             &body.context.unwrap_or_default(),
+            push_session_id(body.session_id.as_deref())?,
         )
         .await?;
     let reply = json!(topic);
@@ -229,7 +222,6 @@ pub async fn topic(
         Lookup::Topic,
         &reply,
         !topic.notes.is_empty() || topic.card.is_some(),
-        &topic.memory_ids,
     )
     .await;
     Ok(Json(reply))

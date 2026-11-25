@@ -910,7 +910,12 @@ async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restor
     assert_eq!(app.post("get", get_body, &device).await, expected);
     assert!(ids(&app.post("search", search_body, &device).await).contains(&memory));
     assert!(
-        app.post("session/brief", brief_body, &device).await["brief"]
+        app.post(
+            "session/brief",
+            json!({"session_id": "e2e-archive-restored", "context": context}),
+            &device
+        )
+        .await["brief"]
             .as_str()
             .unwrap()
             .contains("Preserve blueprints")

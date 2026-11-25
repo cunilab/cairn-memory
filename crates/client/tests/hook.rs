@@ -990,11 +990,87 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
     );
 }
 
+fn mcp_instructions(home: &Path, checkout: &Path, session_id: Option<&str>) -> String {
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "_meta": {"sessionId": session_id}}
+    });
+    let output = with_stdin(
+        command(home).current_dir(checkout).arg("mcp"),
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    reply["result"]["instructions"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn mcp_initialize_falls_back_to_static_instructions_on_brief_timeout() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            thread::sleep(Duration::from_secs(4));
+        }
+        default_reply(request)
+    });
+    let env = Env::new("mcp-brief-timeout", &server.url);
+    let start = Instant::now();
+    let instructions = mcp_instructions(&env.home, &env.repo, Some("timeout"));
+    assert_eq!(instructions, cairn_client::tools::instructions());
+    assert!(start.elapsed() < Duration::from_secs(3));
+    let requests = server.to("brief");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["session_id"], "timeout");
+    assert_eq!(requests[0].body["context"]["repository"], "local:repo");
+}
+
+#[test]
+fn mcp_and_hermes_session_start_deduplicate_the_same_brief() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "mcp-hermes");
+    let dir = checkout("mcp-hermes");
+    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"preference","title":"Keep the queue visible","summary":"Show the queue when reviewing worker health.","reason":"Operators spot blocked work in that view."}"#]);
+    let id = saved["id"].as_str().unwrap();
+    let initialize = |session| mcp_instructions(&team.owner.home, &dir, session);
+    let hermes_start = |session| {
+        let output = with_stdin(
+            command(&team.owner.home).current_dir(&dir).args([
+                "hook",
+                "SessionStart",
+                "--agent",
+                "hermes",
+            ]),
+            &json!({"session_id": session, "cwd": dir}).to_string(),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        injected(&output).unwrap()
+    };
+    let text = initialize(Some("mcp-first"));
+    let brief = text
+        .strip_prefix(cairn_client::tools::instructions())
+        .unwrap()
+        .trim_start();
+    assert!(
+        brief.contains(id) && brief.contains(r#""why":"personal preference""#),
+        "{text}"
+    );
+    assert!(brief.len() <= 1200);
+    assert!(!hermes_start("mcp-first").contains(id));
+    assert!(hermes_start("hermes-first").contains(id));
+    assert_eq!(
+        initialize(Some("hermes-first")),
+        cairn_client::tools::instructions()
+    );
+    assert!(initialize(None).contains(id));
+    assert!(initialize(None).contains(id));
+}
+
 #[test]
 fn topic_note_once_per_path_within_caps() {
     let server = fake_with(|_, request| notes_reply(request));
     let env = Env::new("hook-topic", &server.url);
-    let first = env.edit("s1", "src/a.rs", "x");
+    let first = env.edit("s1", "src/a.rs", "fn start_queue() { queue::take_lock(); }");
     let text = injected(&first).unwrap();
     assert!(
         text.starts_with(
@@ -1020,6 +1096,12 @@ fn topic_note_once_per_path_within_caps() {
         server.to("topic").len(),
         2 + 3,
         "no lookups once the cap is spent"
+    );
+    let request = &server.to("topic")[0].body;
+    assert_eq!(request["session_id"], "s1");
+    assert_eq!(
+        request["context"]["symbols"],
+        json!(["start_queue", "queue::take_lock"])
     );
     assert_eq!(
         server.to("topic")[0].body["context"]["repository"],
@@ -1749,12 +1831,11 @@ fn a_dead_server_costs_one_timeout_not_one_per_call() {
 
 #[test]
 fn parallel_edits_of_one_file_inject_one_note() {
-    // Neither topic request is answered before both have arrived, so both hooks passed the
-    // "first edit of this path" check before either one recorded it.
+    // Release both edits from capture together so they compete to reserve the topic lookup.
     let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
     let wait = gate.clone();
     let server = fake_with(move |_, request| {
-        if request.path.ends_with("/topic") {
+        if request.path.ends_with("/observe") {
             let (count, arrived) = &*wait;
             let mut count = count.lock().unwrap();
             *count += 1;
@@ -1778,6 +1859,7 @@ fn parallel_edits_of_one_file_inject_one_note() {
         .filter(Option::is_some)
         .count();
     assert_eq!(notes, 1, "the note is injected once");
+    assert_eq!(server.to("topic").len(), 1, "one hook reserves the lookup");
 }
 
 #[test]
@@ -2081,7 +2163,7 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     };
     let team = team(&server.url, "hook-real");
     let dir = checkout("hook-real-repo");
-    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Queue lock order","summary":"Take the queue lock before the row lock.","reason":"Deadlock otherwise.","fields":{"symptom":"hang","cause":"lock order","fix":"queue lock first"},"context":{"files":["src/queue.rs"]}}"#]);
+    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Queue lock order","summary":"Take the queue lock before the row lock.","reason":"Inverting the order can deadlock workers.","fields":{"symptom":"hang","cause":"lock order","fix":"queue lock first"},"context":{"symbols":["queue::take_lock"]}}"#]);
     assert_eq!(saved["status"], "active");
     let config = team.owner.home.join("cairn").join("config.json");
     let run = |event: &str, payload: Value| {
@@ -2106,11 +2188,15 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     run("UserPromptSubmit", base(json!({"prompt": "fix the queue"})));
     let edit = run(
         "PostToolUse",
-        base(edit_call("src/queue.rs", "fn lock() {}", "t1")),
+        base(edit_call(
+            "src/queue.rs",
+            "fn lock() { queue::take_lock(); }",
+            "t1",
+        )),
     );
     let note = injected(&edit).expect("the file note is injected");
     assert!(
-        note.contains("Queue lock order: Take the queue lock before the row lock."),
+        note.contains("Queue lock order: Take the queue lock before the row lock. (why: symbol queue::take_lock)"),
         "{note}"
     );
     assert!(

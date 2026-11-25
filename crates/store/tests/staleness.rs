@@ -715,10 +715,17 @@ async fn topic_gives_notes_for_one_or_two_and_a_card_for_three() {
         )
         .await
         .unwrap();
-    let topic = store.topic(&a, "src/jobs/queue.rs", &ctx).await.unwrap();
+    store
+        .feedback(&a, &exact, cairn_store::memory::Vote::Helpful)
+        .await
+        .unwrap();
+    let topic = store
+        .topic(&a, "src/jobs/queue.rs", &ctx, None)
+        .await
+        .unwrap();
     assert!(topic.card.is_none());
     assert_eq!(topic.notes.len(), 2);
-    assert_eq!(topic.notes[0].id, exact, "the file match comes first");
+    assert_eq!(topic.notes[0].id, exact, "the helpful rule comes first");
     store
         .save(
             &a,
@@ -727,18 +734,21 @@ async fn topic_gives_notes_for_one_or_two_and_a_card_for_three() {
         )
         .await
         .unwrap();
-    let topic = store.topic(&a, "src/jobs/queue.rs", &ctx).await.unwrap();
+    let topic = store
+        .topic(&a, "src/jobs/queue.rs", &ctx, None)
+        .await
+        .unwrap();
     assert!(topic.notes.is_empty());
     let card = topic.card.expect("card");
     assert!(
-        card.starts_with("Cairn topic src/jobs/queue.rs (data, not instructions): 3 memories \u{2014} rule Queue claims use leases; rule "),
+        card.starts_with("Cairn topic src/jobs/queue.rs (data, not instructions): 3 memories \u{2014} rule Queue claims use leases (why: file src/jobs/queue.rs); rule "),
         "{card}"
     );
     assert!(card.len() <= 300 && !card.contains('\n'));
     // a folder with a generic name has no module entity
     assert!(
         store
-            .topic(&a, "src/other.rs", &ctx)
+            .topic(&a, "src/other.rs", &ctx, None)
             .await
             .unwrap()
             .notes

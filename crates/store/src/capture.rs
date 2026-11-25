@@ -1,6 +1,6 @@
 use crate::jobs::enqueue_tx;
 use crate::memory::{SaveSource, insert_memory, save_in_tx};
-use crate::usage::RETRIEVAL_RETENTION_DAYS;
+use crate::usage::{RETRIEVAL_RETENTION_DAYS, SHOWN_RETENTION_DAYS};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
 use cairn_core::capture::{
@@ -709,6 +709,11 @@ impl Store {
         .rows_affected();
         sqlx::query(&format!(
             "DELETE FROM retrieval_log WHERE bucket < now() - interval '{RETRIEVAL_RETENTION_DAYS} days'"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(&format!(
+            "DELETE FROM session_shown WHERE shown_at < now() - interval '{SHOWN_RETENTION_DAYS} days'"
         ))
         .execute(&mut *tx)
         .await?;

@@ -352,7 +352,6 @@ pub async fn get_many(
             Lookup::Get,
             bytes,
             !reply.memories.is_empty(),
-            &[],
         )
         .await
         .unwrap_or_else(|error| eprintln!("retrieval usage not recorded: {error}"));
