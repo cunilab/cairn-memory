@@ -7,9 +7,10 @@ use super::{
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
 
-const EVENTS: [(&str, u32); 6] = [
+const EVENTS: [(&str, u32); 7] = [
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
+    ("PreToolUse", 3),
     ("PostToolUse", 10),
     ("Stop", 10),
     ("PreCompact", 10),

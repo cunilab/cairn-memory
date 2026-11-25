@@ -2157,7 +2157,7 @@ fn digest_uses_last_command_execution_even_when_its_failure_is_identical() {
 }
 
 #[test]
-fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
+fn a_real_server_accepts_every_capture_kind_and_serves_hook_recall() {
     let Some(server) = Server::start() else {
         return;
     };
@@ -2212,6 +2212,22 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
             json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"}, "tool_response": {"exit_code": 1, "stderr": "boom"}}),
         ),
     );
+    let command_note = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Stale Rust linker cache","summary":"Error: stale linker resource cache","reason":"A linker restart removes the broken cached lock.","fields":{"symptom":"The linker errors during the workspace build.","cause":"An older linker process still holds the resource.","fix":"Restart the linker and rerun the workspace tests."},"context":{"commands":["cargo test --workspace"]}}"#]);
+    assert_eq!(command_note["status"], "active", "{command_note}");
+    let shell =
+        base(json!({"tool_name": "Bash", "tool_input": {"command": "cargo test --workspace"}}));
+    let warning = injected(&run("PreToolUse", shell.clone())).expect("command warning");
+    assert!(
+        warning.contains("why: gotcha for `cargo test --workspace`"),
+        "{warning}"
+    );
+    assert!(run("PreToolUse", shell.clone()).stdout.is_empty());
+    let mut failed = shell;
+    failed["session_id"] = json!("real-2");
+    failed["error"] = json!("Exit code 1\nError: stale linker resource cache");
+    let recall = injected(&run("PostToolUseFailure", failed)).expect("failed-command recall");
+    assert!(recall.contains("why: same error seen before"), "{recall}");
+
     run("Stop", base(json!({})));
     run("SessionEnd", base(json!({})));
 }
@@ -2884,4 +2900,146 @@ fn rename_notice_marks_a_long_name_as_truncated() {
         .unwrap();
     assert!(notice.contains('…'));
     assert!(notice.len() <= 120, "{notice}");
+}
+
+#[test]
+fn command_recall_sends_only_a_redacted_error_tail_and_never_blocks() {
+    let fake = fake_with(|_, request| {
+        if request.path.ends_with("/command-recall") {
+            if request.body["command"] == "cargo test timeout" {
+                thread::sleep(Duration::from_millis(1_300));
+            }
+            return (
+                200,
+                json!({"text": "Cairn notes (why: same error seen before)"}).to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("command-recall-wire", &fake.url);
+    let call = |command: &str, fields: Value| {
+        let mut extra = json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        extra
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        env.payload("command-recall", extra)
+    };
+    let warning = env.run(
+        "PreToolUse",
+        &call("cargo   test --workspace && echo private", json!({})),
+    );
+    assert!(injected(&warning).is_some());
+    let output: Value = serde_json::from_slice(&warning.stdout).unwrap();
+    assert!(output.get("decision").is_none());
+    assert!(
+        output["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+    let timed_out = env.run("PreToolUse", &call("cargo test timeout", json!({})));
+    assert!(
+        timed_out.stdout.is_empty() && timed_out.stderr.is_empty(),
+        "{timed_out:?}"
+    );
+
+    let long = format!(
+        "Exit code 101\nfirst-output\n{}\nError: poisoned target directory\ntoken=known-test-secret",
+        "é".repeat(1_200)
+    );
+    let failed = env.run(
+        "PostToolUseFailure",
+        &call(
+            "cargo test --workspace",
+            json!({"error": long, "is_interrupt": false}),
+        ),
+    );
+    assert!(injected(&failed).is_some());
+    let requests = fake.to("command-recall");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].body["command"], "cargo test --workspace");
+    assert!(requests[0].body["error_tail"].is_null());
+    let tail = requests[2].body["error_tail"].as_str().unwrap();
+    assert!(tail.len() <= 2_048 && tail.len() >= 2_046, "{}", tail.len());
+    assert!(
+        tail.ends_with("Error: poisoned target directory\ntoken=[REDACTED]"),
+        "{tail}"
+    );
+    assert!(!tail.contains("first-output") && !tail.contains("known-test-secret"));
+    assert!(fake.observed().is_empty());
+
+    assert!(
+        env.run(
+            "PostToolUseFailure",
+            &call(
+                "cargo test --workspace",
+                json!({"error": "Error: command interrupted", "is_interrupt": true})
+            )
+        )
+        .stdout
+        .is_empty()
+    );
+    assert!(
+        env.bash(
+            "command-recall",
+            "cargo test --workspace",
+            json!({"exit_code": 0, "stdout": "Error: a fixture string"})
+        )
+        .stdout
+        .is_empty()
+    );
+    assert_eq!(fake.to("command-recall").len(), 3);
+}
+
+#[test]
+fn antigravity_command_recall_allows_the_tool_and_delivers_failures_once() {
+    let fake = fake_with(|_, request| {
+        if request.path.ends_with("/command-recall") {
+            let text = if request.body["error_tail"].is_null() {
+                "Cairn pre-command warning"
+            } else {
+                "Cairn failed-command recall"
+            };
+            return (200, json!({"text": text}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("command-recall-antigravity", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload =
+            json!({"conversationId": "antigravity-recall", "workspacePaths": [env.repo]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "antigravity"]),
+            &payload.to_string(),
+        );
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        output.stdout
+    };
+    let tool = json!({"name": "run_command", "args": {"CommandLine": "cargo test --workspace"}});
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke("PreToolUse", json!({"toolCall": tool}))).unwrap(),
+        json!({"decision": "allow", "reason": "Cairn pre-command warning"}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke(
+            "PostToolUse",
+            json!({"toolCall": tool, "error": "exit status 1"})
+        ))
+        .unwrap(),
+        json!({}),
+    );
+    assert_eq!(fake.to("command-recall")[1].body["error_tail"], "");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke("PreInvocation", json!({}))).unwrap(),
+        json!({"injectSteps": [{"systemMessage": {"systemMessage": "Cairn failed-command recall"}}]}),
+    );
+    assert!(invoke("PreInvocation", json!({})).is_empty());
+    assert_eq!(fake.to("command-recall").len(), 2);
 }

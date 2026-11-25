@@ -167,6 +167,7 @@ fn grok_setup_round_trips_config_hooks_and_instructions() {
     for event in [
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "PostToolUse",
         "Stop",
         "PreCompact",
@@ -236,9 +237,15 @@ fn antigravity_setup_round_trips_config_hooks_and_instructions() {
             expected(event, "antigravity", &home)
         );
     }
+    for event in ["PreToolUse", "PostToolUse"] {
+        assert_eq!(
+            command_of(&installed["cairn"][event][0]),
+            expected(event, "antigravity", &home)
+        );
+    }
     assert_eq!(
-        command_of(&installed["cairn"]["PostToolUse"][0]),
-        expected("PostToolUse", "antigravity", &home)
+        installed["cairn"]["PreToolUse"][0]["matcher"],
+        "^run_command$"
     );
     assert!(
         fs::read_to_string(&rules)
@@ -310,11 +317,17 @@ mcp_servers:
             .unwrap()
             .contains(EXE)
     );
-    assert!(
-        fs::read_to_string(plugin.join("plugin.yaml"))
-            .unwrap()
-            .contains("pre_llm_call")
-    );
+    let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
+    for event in ["pre_llm_call", "post_tool_call", "transform_tool_result"] {
+        assert!(manifest.contains(event), "{event}");
+        assert!(
+            fs::read_to_string(plugin.join("__init__.py"))
+                .unwrap()
+                .contains(event),
+            "{event}"
+        );
+    }
+    assert!(!manifest.contains("pre_tool_call"));
     assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
         text.windows(SECRET.len())
             .any(|part| part == SECRET.as_bytes())
@@ -461,6 +474,7 @@ fn claude_install_remove_keeps_others() {
         "SessionStart",
         "UserPromptSubmit",
         "PreToolUse",
+        "PostToolUseFailure",
         "Stop",
         "PreCompact",
         "SessionEnd",
@@ -473,7 +487,7 @@ fn claude_install_remove_keeps_others() {
     }
     assert_eq!(
         settings["hooks"]["PreToolUse"][0]["matcher"],
-        "Write|Edit|MultiEdit|NotebookEdit"
+        "Bash|Write|Edit|MultiEdit|NotebookEdit"
     );
     let block = fs::read_to_string(&global).unwrap();
     assert!(block.starts_with(instructions));
@@ -534,7 +548,9 @@ fn claude_native_memory_opt_out_removes_only_cairns_guard() {
     );
     setup(Some("--keep-native-memory"));
     let settings = home.json("custom-claude/settings.json");
-    assert_eq!(settings["hooks"]["PreToolUse"], json!([user]));
+    assert_eq!(settings["hooks"]["PreToolUse"][0], user);
+    assert_eq!(settings["hooks"]["PreToolUse"][1]["matcher"], "Bash");
+    assert!(command_of(&settings["hooks"]["PreToolUse"][1]).ends_with(" --keep-native-memory"));
     assert!(command_of(&settings["hooks"]["SessionStart"][0]).ends_with(" --keep-native-memory"));
     assert!(custom.join("CLAUDE.md").is_file());
     assert!(!home.dir.join(".claude/CLAUDE.md").exists());
@@ -772,10 +788,13 @@ fn codex_native_missing_dir() {
     assert!(!home.dir.join(".codex").exists());
     home.ok("codex", false);
     let hooks = home.json(".codex/hooks.json");
-    assert_eq!(
-        command_of(&hooks["hooks"]["Stop"][0]),
-        expected("Stop", "codex", &home)
-    );
+    for event in ["PreToolUse", "Stop"] {
+        assert_eq!(
+            command_of(&hooks["hooks"][event][0]),
+            expected(event, "codex", &home)
+        );
+    }
+    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Bash");
     assert!(
         hooks["hooks"].get("PreCompact").is_none(),
         "Codex has no PreCompact"
@@ -863,6 +882,7 @@ fn opencode_plugin_install_and_remove() {
         "CAIRN_CONFIG",
         "session.hook",
         "compaction",
+        "execute.before",
         "execute.after",
     ] {
         assert!(plugin.contains(needle), "{needle}");
@@ -1038,4 +1058,103 @@ fn setup_keeps_a_run_hook_that_is_not_the_python_wrapper() {
     home.ok("claude", false);
     assert!(home.dir.join(".config/cairn/hook/run-hook").exists());
     assert!(home.dir.join(".config/cairn/hook/README.txt").exists());
+}
+
+#[test]
+fn refresh_adds_command_hooks_to_every_existing_install() {
+    // Refresh reads the process environment. Re-enter this test with an isolated home.
+    if std::env::var_os("CAIRN_TEST_SETUP_REFRESH").is_some() {
+        let lines = cairn_client::setup::refresh(std::path::Path::new(EXE));
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.ends_with("integration installed")),
+            "{lines:?}"
+        );
+        return;
+    }
+    let home = Home::new("command-refresh", true);
+    let hooks = [
+        ("claude", ".claude/settings.json", "hooks"),
+        ("codex", ".codex/hooks.json", "hooks"),
+        ("grok", ".grok/hooks/cairn.json", "hooks"),
+        ("antigravity", ".gemini/config/hooks.json", "cairn"),
+    ];
+    for (agent, path, group) in hooks {
+        home.ok(agent, false);
+        let mut legacy = home.json(path);
+        let events = legacy[group].as_object_mut().unwrap();
+        if agent == "claude" {
+            events.get_mut("PreToolUse").unwrap()[0]["matcher"] =
+                json!("Write|Edit|MultiEdit|NotebookEdit");
+            events.remove("PostToolUseFailure");
+        } else {
+            events.remove("PreToolUse");
+        }
+        home.write(path, &legacy.to_string());
+    }
+    let plugins = [
+        (
+            "opencode",
+            ".config/opencode/plugins/cairn/index.js",
+            "execute.before",
+        ),
+        (
+            "hermes",
+            ".hermes/plugins/cairn-memory/__init__.py",
+            "transform_tool_result",
+        ),
+    ];
+    for (agent, path, _) in plugins {
+        home.ok(agent, false);
+        let marker = if agent == "opencode" {
+            "// cairn:continuity"
+        } else {
+            "# CAIRN_SETUP_MANAGED"
+        };
+        home.write(path, &format!("{marker}\n--cairn-managed\n"));
+    }
+    let mut executable = std::process::Command::new(std::env::current_exe().unwrap());
+    for (key, value) in home.command("claude", false).get_envs() {
+        match value {
+            Some(value) => executable.env(key, value),
+            None => executable.env_remove(key),
+        };
+    }
+    executable
+        .env("CLAUDE_CONFIG_DIR", home.dir.join(".claude"))
+        .env("CAIRN_TEST_SETUP_REFRESH", "1");
+    let result = executable
+        .args([
+            "--exact",
+            "refresh_adds_command_hooks_to_every_existing_install",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    for (agent, path, group) in hooks {
+        let installed = home.json(path);
+        assert_eq!(
+            command_of(&installed[group]["PreToolUse"][0]),
+            expected("PreToolUse", agent, &home)
+        );
+        if agent == "claude" {
+            assert_eq!(
+                installed[group]["PreToolUse"][0]["matcher"],
+                "Bash|Write|Edit|MultiEdit|NotebookEdit"
+            );
+            assert_eq!(
+                command_of(&installed[group]["PostToolUseFailure"][0]),
+                expected("PostToolUseFailure", agent, &home)
+            );
+        }
+    }
+    for (_, path, event) in plugins {
+        assert!(read(&home, path).contains(event), "{path}");
+    }
 }

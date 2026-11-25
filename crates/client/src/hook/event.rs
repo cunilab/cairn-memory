@@ -156,7 +156,8 @@ impl Payload {
                 .get("tool_response")
                 .or_else(|| self.0.get("toolResult")),
             antigravity_ok: call.map(|_| self.text("error").is_none()),
-            antigravity_error: call.and_then(|_| self.text("error")),
+            error: self.text("error"),
+            interrupted: self.flag("is_interrupt"),
         })
     }
 
@@ -252,7 +253,8 @@ pub struct Tool<'a> {
     input: Option<&'a Map<String, Value>>,
     response: Option<&'a Value>,
     antigravity_ok: Option<bool>,
-    antigravity_error: Option<&'a str>,
+    error: Option<&'a str>,
+    interrupted: bool,
 }
 
 impl Tool<'_> {
@@ -508,12 +510,46 @@ impl Tool<'_> {
         Some(flags.iter().all(|flag| *flag != Some(&Value::Bool(true))))
     }
 
+    /// Explicit failure signals only; arbitrary output is not evidence of a non-zero exit.
+    pub(super) fn failure_text(&self, failure_event: bool) -> Option<&str> {
+        if self.interrupted || self.response_field("interrupted") == Some(&Value::Bool(true)) {
+            return None;
+        }
+        if !failure_event
+            && self.ok() != Some(false)
+            && self.response_field("isError") != Some(&Value::Bool(true))
+            && self.response_field("is_error") != Some(&Value::Bool(true))
+        {
+            return None;
+        }
+        Some(
+            ["stderr", "stdout", "output_for_prompt", "output", "error"]
+                .iter()
+                .filter_map(|key| self.response_field(key)?.as_str())
+                .chain(self.response.and_then(Value::as_str))
+                .chain(self.error)
+                .map(|text| {
+                    let first = text.lines().next().unwrap_or_default();
+                    if ["Exit code ", "exit status "].iter().any(|prefix| {
+                        first
+                            .strip_prefix(prefix)
+                            .is_some_and(|code| code.parse::<i64>().is_ok())
+                    }) {
+                        return text.get(first.len()..).unwrap_or_default().trim_start();
+                    }
+                    text
+                })
+                .find(|text| !text.trim().is_empty())
+                .unwrap_or_default(),
+        )
+    }
+
     fn first_error_line(&self) -> Option<String> {
         ["stderr", "stdout"]
             .iter()
             .filter_map(|key| self.response_field(key)?.as_str())
             .chain(self.response.and_then(Value::as_str))
-            .chain(self.antigravity_error)
+            .chain(self.error.filter(|_| self.antigravity_ok.is_some()))
             .find_map(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
             .map(|line| truncate(&redact_sensitive_content(line), ERROR_LINE_MAX_BYTES).to_owned())
     }

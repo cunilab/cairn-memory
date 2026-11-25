@@ -1,5 +1,5 @@
-//! Per-session hook state: delivery flags, repeat hashes and injection counters, never memory
-//! text or credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
+//! Per-session hook state: delivery flags, repeat hashes and injection counters, never
+//! credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
 //! only while holding `<file>.lock` (docs/reference/hook.md).
 
 use crate::{create_private_dir, write_private};
@@ -38,6 +38,9 @@ pub struct SessionState {
     /// Grok can deliver the brief through PostToolUse only.
     #[serde(default)]
     pub grok_brief_shown: bool,
+    /// Rendered Antigravity cards held until the next model invocation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_command_recall: Vec<String>,
     /// Edits outside the project root. A count only; the paths are not stored.
     #[serde(default)]
     pub outside_edits: u32,

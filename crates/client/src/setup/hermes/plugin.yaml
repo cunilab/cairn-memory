@@ -4,8 +4,8 @@ version: 1.0.0
 description: Forward Hermes lifecycle events to Cairn Memory.
 provides_hooks:
   - pre_llm_call
-  - pre_tool_call
   - post_tool_call
+  - transform_tool_result
   - post_llm_call
   - on_session_end
   - post_compaction

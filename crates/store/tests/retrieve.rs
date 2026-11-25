@@ -2563,3 +2563,209 @@ async fn alias_matching_embed_text_keeps_its_own_vector() {
     assert!(cross > 0.5, "alias kept its own vector, cross {cross}");
     db.finish().await;
 }
+
+#[tokio::test]
+async fn command_recall_uses_strict_matches_and_the_shared_session_ledger() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("recall-owner").await;
+    let outsider = db.person("recall-outsider").await;
+    let (project, _) = store
+        .init_project(&me, "local:e2e-command-recall", Some("E2E command recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    let remember = |kind: &str, title: &str, summary: &str, command: &str| {
+        let work = WorkContext {
+            project_id: Some(project.clone()),
+            files: vec!["src/recall.rs".into()],
+            commands: vec![command.to_owned()],
+            ..WorkContext::default()
+        };
+        let fields = if kind == "gotcha" {
+            serde_json::json!({"fix": "Regenerate build artifacts before retrying"})
+        } else {
+            serde_json::json!({"steps": ["Remove the old build artifacts", "Run the build again"]})
+        };
+        let input = save_input(serde_json::json!({
+            "kind": kind, "scope": "project", "title": title, "summary": summary,
+            "reason": "A specific build failure has a reproducible recovery step", "fields": fields
+        }));
+        let me = &me;
+        async move { store.save(me, input, &work).await.unwrap().id }
+    };
+    let command = "cargo test --workspace";
+    let gotcha = remember(
+        "gotcha",
+        "Rust target cache",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    remember(
+        "procedure",
+        "Clear target directory",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    remember(
+        "procedure",
+        "Rebuild the target",
+        "Remove the build cache before retrying",
+        command,
+    )
+    .await;
+    remember(
+        "gotcha",
+        "Ignore second line",
+        "Error: unhappy network proxy",
+        command,
+    )
+    .await;
+    let candidate = remember(
+        "gotcha",
+        "Fresh suggestion",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    let doubted = remember(
+        "gotcha",
+        "Bad suggestion",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&candidate)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE usage SET wrong = 1 WHERE memory_id = $1")
+        .bind(&doubted)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let recall = async |session: &str, command: &str, failure: Option<&str>| {
+        store
+            .command_recall(&me, session, Some(&project), command, failure)
+            .await
+            .unwrap()
+    };
+    let (one, two) = tokio::join!(
+        recall("warning", "cargo  test --workspace && echo done", None),
+        recall("warning", command, None),
+    );
+    assert_ne!(one.is_empty(), two.is_empty(), "{one:?} {two:?}");
+    let warning = if one.is_empty() { two } else { one };
+    assert!(warning.contains("Rust target cache"), "{warning}");
+    assert!(
+        warning.contains("why: gotcha for `cargo test --workspace`"),
+        "{warning}"
+    );
+    assert_eq!(warning.matches("\n- ").count(), 2, "{warning}");
+    assert!(recall("warning", command, None).await.is_empty());
+    assert!(recall("prefix", "cargo test", None).await.is_empty());
+    assert!(
+        store
+            .command_recall(&outsider, "warning", Some(&project), command, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let tail = "build starting\nError: poisoned target directory\nError: unhappy network proxy";
+    let failed = recall("failed", command, Some(tail)).await;
+    assert!(
+        failed.contains(
+            "Rust target cache: Error: poisoned target directory (why: same error seen before)"
+        ),
+        "{failed}"
+    );
+    assert!(failed.contains("Clear target directory"), "{failed}");
+    for title in [
+        "Ignore second line",
+        "Rebuild the target",
+        "Fresh suggestion",
+        "Bad suggestion",
+    ] {
+        assert!(!failed.contains(title), "{failed}");
+    }
+    assert!(recall("failed", command, Some(tail)).await.is_empty());
+    assert!(
+        recall("wrong command", "npm test", Some(tail))
+            .await
+            .is_empty()
+    );
+    assert!(
+        recall(
+            "second error alone",
+            command,
+            Some("Error: unhappy network proxy")
+        )
+        .await
+        .contains("Ignore second line")
+    );
+    assert!(
+        recall("weak", command, Some("error: failed"))
+            .await
+            .is_empty()
+    );
+    assert!(
+        recall(
+            "other error",
+            command,
+            Some("Error: completely unknown failure")
+        )
+        .await
+        .is_empty()
+    );
+    assert!(
+        recall("no output", command, Some(""))
+            .await
+            .contains("Rust target cache")
+    );
+
+    let context = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    let topic = store
+        .topic(&me, "src/recall.rs", &context, Some("budget"))
+        .await
+        .unwrap();
+    assert_eq!(topic.memory_ids.len(), 2);
+    for i in 0..7 {
+        let command = format!("make check-{i}");
+        remember(
+            "procedure",
+            &format!("Check build {i}"),
+            "Regenerate dependencies before building",
+            &command,
+        )
+        .await;
+        let text = recall("budget", &command, None).await;
+        assert_eq!(text.is_empty(), i == 6, "{i}: {text}");
+    }
+    let used: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_shown WHERE person_id = $1 AND session_id = 'budget'",
+    )
+    .bind(&me)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(used, 8);
+    assert!(recall("budget", command, Some(tail)).await.is_empty());
+
+    let shown: i32 = sqlx::query_scalar("SELECT shown FROM usage WHERE memory_id = $1")
+        .bind(&gotcha)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(shown >= 3, "{shown}");
+    db.finish().await;
+}

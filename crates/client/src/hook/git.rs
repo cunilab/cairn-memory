@@ -116,7 +116,7 @@ pub fn work_context(cwd: &Path, top: Option<&Path>) -> WorkContext {
     }
 }
 
-fn project_id(top: &Path) -> Option<String> {
+pub(super) fn project_id(top: &Path) -> Option<String> {
     let warn = |reason: &str| eprintln!("Cairn warning: {reason}; capture remains personal");
     let text = match std::fs::read_to_string(top.join(".cairn").join("project.json")) {
         Ok(text) => text,

@@ -139,5 +139,9 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/search", post(retrieve::search))
         .route("/cairn-memory/session/brief", post(retrieve::brief))
         .route("/cairn-memory/session/topic", post(retrieve::topic))
+        .route(
+            "/cairn-memory/session/command-recall",
+            post(retrieve::command_recall),
+        )
         .route("/cairn-memory/graph", get(retrieve::graph))
 }

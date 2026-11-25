@@ -14,8 +14,9 @@ status: draft
 | --- | --- |
 | `SessionStart` | Request a brief and instructions; check repository state when requested. |
 | `UserPromptSubmit` | Capture the prompt. |
-| `PreToolUse` (Claude Code) | Locally deny `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` under the Claude config directory's `projects/*/memory/`. |
-| `PostToolUse` | Capture edits and non-read-only shell commands; request topic context for read or edited files; recognize Cairn saves and lookups. |
+| `PreToolUse` | Look up an exact command warning. Claude Code also checks native memory writes locally. |
+| `PostToolUse` | Capture edits and non-read-only shell commands, request file topics, recognize Cairn saves and lookups, and check failed commands for related memories. |
+| `PostToolUseFailure` (Claude Code) | Recall related memories when the shell tool fails. |
 | `Stop` | Checkpoint work and, when appropriate, ask once to save useful notes. |
 | `PreCompact` | Checkpoint work. |
 | `SessionEnd` | End a worked session for background distillation. |
@@ -28,7 +29,7 @@ The default start instruction tells agents to use Cairn as their only memory, ca
 
 ## Injection budget
 
-The server allows eight pushed memories per person and session ID across briefs and topics. The brief fits within 1,200 bytes. Hooks request up to 16 file topics and can inject up to four topic replies of 300 bytes each. The session instruction and the Stop text are each limited to 600 bytes, globally and per project. See [automatic recall](recall.md#automatic-recall).
+The server allows eight pushed memories per person and session ID across briefs, topics and command recall. The brief fits within 1,200 bytes. Hooks request up to 16 file topics and can inject up to four topic replies of 300 bytes each. The session instruction and the Stop text are each limited to 600 bytes, globally and per project. See [automatic recall](recall.md#automatic-recall).
 
 The stdio MCP server also requests the brief for its working directory and appends it to the initialize instructions. The HTTP request has a one-second timeout. An unavailable or empty brief leaves the static instructions in place. A host can supply its hook session ID via `initialize.params._meta.sessionId` to share the eight-memory budget. Standard stdio initialization carries no host session ID, so a client that omits this field can receive the same memory through MCP and a hook. [MCP initialization](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)
 
@@ -75,7 +76,7 @@ Run `cairn setup <url> --agent claude|codex|opencode|grok|antigravity|hermes` an
 
 Codex reads a nonempty global `AGENTS.override.md` before `AGENTS.md`. [Codex instruction discovery](https://developers.openai.com/codex/guides/agents-md)
 
-Claude Code setup installs a `PreToolUse` guard matching the four file-writing tools. The guard returns the documented `deny` decision for native memory paths and exits silently for other paths. It uses the filesystem without contacting Cairn. Use `cairn setup <url> --agent claude --keep-native-memory` to omit the guard across updates. This affects the guard only. [Claude Code hook decisions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
+Claude Code setup matches Bash and the four file-writing tools `Write`, `Edit`, `MultiEdit` and `NotebookEdit`. The local write guard denies those tools under the Claude config directory's `projects/*/memory/`. Use `cairn setup <url> --agent claude --keep-native-memory` to keep native writes enabled across updates while keeping the Bash warning hook. [Claude Code hook decisions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
 
 Claude Code setup and update refresh add `mcp__cairn` to `permissions.allow` in `settings.json` when neither server-wide rule exists. Removal deletes the bare rule, including a user-added one, and keeps the wildcard rule and permission containers. Codex setup and refresh set `default_tools_approval_mode = "approve"` on `mcp_servers.cairn` in `config.toml`, which also enables Cairn MCP calls in `codex exec`. [Codex configuration reference](https://developers.openai.com/codex/config-reference)
 
@@ -85,4 +86,18 @@ Antigravity CLI registers Cairn in `~/.gemini/config/mcp_config.json` and grants
 
 Hermes Agent registers `mcp_servers.cairn` in the profile's `config.yaml` with `trust: full` scoped to Cairn. Setup enables `plugins/cairn-memory/` through `plugins.enabled` and adds the marked block to `SOUL.md`. Run setup with `HERMES_HOME` pointing at your profile to target a profile other than the default. The YAML rewrite preserves unrelated settings and may change comments and formatting. Use `hermes mcp list` and `hermes plugins list` to check discovery after restarting Hermes. [Hermes profile paths](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_constants.py), [Hermes MCP](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp), [Hermes MCP trust](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/mcp_tool_registration.py), [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins), [Hermes context files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files)
 
-The plugin uses `pre_llm_call` to deliver the brief with the first user prompt and capture subsequent prompts. It forwards before and after tool calls, checkpoints at turn completion and after committed compaction, and closes on session teardown. Capture requires a working directory supplied by Hermes. The observer callbacks cannot inject per-file notes or continue the model loop with a Stop reminder. [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks), [Hermes plugin session context](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)
+The plugin uses `pre_llm_call` to deliver the brief with the first user prompt and capture subsequent prompts. It forwards after tool calls, checkpoints at turn completion and after committed compaction, and closes on session teardown. Capture requires a working directory supplied by Hermes. Per-file notes and continuing the model loop with a Stop reminder are unavailable on Hermes. [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks), [Hermes plugin session context](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)
+
+
+## Command recall by host
+
+Setup refresh adds the new managed hooks to existing installs. A pre-tool lookup may run before the tool even when the host delivers its context with the result. Recall uses a one-second client timeout.
+
+| Host | Warning lookup and delivery | Failed-command recall |
+| --- | --- | --- |
+| Claude Code | Bash `PreToolUse` returns `hookSpecificOutput.additionalContext` without a permission override. Claude delivers it alongside the tool result. | `PostToolUseFailure` adds context alongside the error. [Claude Code hooks](https://code.claude.com/docs/en/hooks#pretooluse-decision-control) |
+| Codex | Bash `PreToolUse` returns `hookSpecificOutput.additionalContext`. | `PostToolUse` can add context when its payload reports a failure. Unified exec can supply plain output without an exit status; Cairn stays silent in that case. [Codex hooks](https://developers.openai.com/codex/hooks), [Codex unified-exec source](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/context.rs) |
+| Grok Build | Bash `PreToolUse` looks up the warning before execution. Grok delivers `additionalContext` with the tool batch result. | Bash `PostToolUse` includes nonzero exits and accepts `additionalContext`. [Grok hooks](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md#posttooluse-output) |
+| Antigravity CLI | `run_command` `PreToolUse` returns `allow` with a reason and preserves default permissions. Model delivery of an allow reason is unverified. | `PostToolUse` queues matched cards for a one-time `PreInvocation.injectSteps` system message before the next model call. [Antigravity hooks](https://antigravity.google/docs/hooks#input-and-output-contract) |
+| OpenCode V2 | `ctx.tool.hook("execute.before")` runs before the shell command. Its return is void, so Cairn passes the warning through the next `ctx.session.hook("context")`. | `execute.after` supplies completed and failed results. The next model context receives matched cards. [OpenCode V2 server plugins](https://opencode.ai/docs/build/plugins/server) |
+| Hermes Agent | The `pre_tool_call` policy event has no advisory context return. Cairn looks up warnings in `post_tool_call`. | `post_tool_call` queues cards for `transform_tool_result` to attach to the terminal result. With no result transform, `pre_llm_call` can deliver them on the next user turn. [Hermes hooks](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/hooks.md#transform_tool_result) |

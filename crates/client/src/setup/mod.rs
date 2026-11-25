@@ -86,7 +86,7 @@ impl Ctx<'_> {
         .map(quote)
         .join(" ");
         // Remember the opt-out on an owned handler so refresh can preserve it.
-        if self.keep_native_memory && event == "SessionStart" {
+        if self.keep_native_memory && matches!(event, "SessionStart" | "PreToolUse") {
             command.push(' ');
             command.push_str(KEEP_NATIVE_MEMORY);
         }
@@ -183,10 +183,7 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 .map_or(String::new(), Value::to_string)
                 .contains(MANAGED_FLAG)
     };
-    let wanted = |event: &str| match (
-        ctx.remove || (ctx.keep_native_memory && event == "PreToolUse"),
-        events.iter().find(|e| e.0 == event),
-    ) {
+    let wanted = |event: &str| match (ctx.remove, events.iter().find(|e| e.0 == event)) {
         (false, Some((_, timeout))) => {
             let handler =
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
@@ -197,7 +194,14 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
                 );
             }
             if event == "PreToolUse" {
-                group["matcher"] = json!(crate::claude_memory::WRITE_TOOLS);
+                group["matcher"] = json!(match ctx.agent {
+                    "claude" if !ctx.keep_native_memory =>
+                        format!("Bash|{}", crate::claude_memory::WRITE_TOOLS),
+                    _ => "Bash".to_owned(),
+                });
+            }
+            if event == "PostToolUseFailure" {
+                group["matcher"] = json!("Bash");
             }
             Some(group)
         }
@@ -212,11 +216,12 @@ fn edit_hooks(
     ours: &dyn Fn(&Value) -> bool,
     wanted: &dyn Fn(&str) -> Option<Value>,
 ) -> R<String> {
-    const ALL: [&str; 7] = [
+    const ALL: [&str; 8] = [
         "SessionStart",
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "PreCompact",
         "SessionEnd",

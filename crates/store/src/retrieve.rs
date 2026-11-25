@@ -6,12 +6,14 @@ use crate::memory::{
 };
 use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push};
 use crate::{Result, Store, StoreError};
-use cairn_core::capture::WorkContext;
+use cairn_core::capture::{WorkContext, redact_sensitive_content};
+use cairn_core::id::sha256_hex;
 use cairn_core::memory::{Fields, Kind, Memory, Status};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
 use cairn_core::retrieve::brief::{SessionBrief, session_brief, topic_card, topic_notes};
+use cairn_core::retrieve::command::{error_tail, first_error_line};
 use cairn_core::retrieve::filter::{Filter, matches};
 use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
@@ -776,8 +778,125 @@ impl Store {
             cairn_core::id::now_seconds(),
             limit,
         );
-        finish_push(tx, person_id, session_id, Lookup::Brief, &brief.memory_ids).await?;
+        finish_push(
+            tx,
+            person_id,
+            session_id,
+            Lookup::Brief.as_str(),
+            &brief.memory_ids,
+        )
+        .await?;
         Ok(brief)
+    }
+
+    /// One exact command warning per session, or strict phrase recall on a failed command.
+    /// An empty failure tail means the host only supplied a failure status.
+    pub async fn command_recall(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        project_id: Option<&str>,
+        command: &str,
+        failure: Option<&str>,
+    ) -> Result<String> {
+        let command = entities::normalize_command(&redact_sensitive_content(command));
+        if command.is_empty() || command.contains('\0') || command.chars().count() > 200 {
+            return Ok(String::new());
+        }
+        let tail = failure.map(error_tail);
+        let phrase = match tail.as_deref() {
+            Some(tail) if !tail.is_empty() => {
+                let Some(line) = first_error_line(tail).filter(|line| !line.contains('\0')) else {
+                    return Ok(String::new());
+                };
+                Some(line)
+            }
+            _ => None,
+        };
+
+        let mut tx = self.pool.begin().await?;
+        let session = Some(session_id);
+        let shown = already_shown(&mut tx, person_id, session).await?;
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        if limit == 0 {
+            return Ok(String::new());
+        }
+        // The ledger lock covers both the once-per-command check and the card reservation.
+        let source = if failure.is_some() {
+            "recall".to_owned()
+        } else {
+            let source = format!("command:{}", sha256_hex(&[&command]));
+            let sent: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM session_shown
+                  WHERE person_id = $1 AND session_id = $2 AND source = $3)",
+            )
+            .bind(person_id)
+            .bind(session_id)
+            .bind(&source)
+            .fetch_one(&mut *tx)
+            .await?;
+            if sent {
+                return Ok(String::new());
+            }
+            source
+        };
+
+        let terms = "phraseto_tsquery('english', $6)";
+        let exact_command = "m.memory_id IN
+            (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)";
+        // Three adjacent lexemes keep generic failure lines out of automatic recall.
+        let error_match = phrase.map_or_else(String::new, |_| {
+            format!("AND numnode({terms}) >= 5 AND {}", search_matches(terms))
+        });
+        let sql = format!(
+            "SELECT m.memory_id, m.kind, m.title, m.summary
+               FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST}
+                AND (m.scope <> 'project' OR m.project_id = $2)
+                AND m.kind IN ('gotcha', 'procedure') AND m.memory_id <> ALL($4)
+                AND {exact_command} {error_match}
+              ORDER BY (m.kind = 'gotcha') DESC, coalesce(u.helpful, 0) DESC,
+                       m.updated_at DESC, m.memory_id
+              LIMIT $5",
+            visible("m", "$1"),
+        );
+        let query = sqlx::query_as(&sql)
+            .bind(person_id)
+            .bind(project_id)
+            .bind(&command)
+            .bind(&shown)
+            .bind(limit as i64);
+        let query = if let Some(phrase) = phrase {
+            query.bind(phrase)
+        } else {
+            query
+        };
+        let rows: Vec<(String, String, String, String)> = query.fetch_all(&mut *tx).await?;
+
+        let notes: Vec<_> = rows
+            .iter()
+            .map(|(_, kind, title, summary)| {
+                let why = if phrase.is_some() {
+                    "same error seen before".to_owned()
+                } else {
+                    format!("{kind} for `{command}`")
+                };
+                (title.as_str(), summary.as_str(), why)
+            })
+            .collect();
+        let notes: Vec<_> = notes
+            .iter()
+            .map(|(t, s, why)| (*t, *s, why.as_str()))
+            .collect();
+        let label = if failure.is_some() {
+            "failed command"
+        } else {
+            "command"
+        };
+        let (text, count) = topic_notes(label, &notes);
+        let ids: Vec<_> = rows.into_iter().take(count).map(|(id, ..)| id).collect();
+        finish_push(tx, person_id, session, &source, &ids).await?;
+        Ok(text)
     }
 
     /// Up to two memories matching a file, its module or a symbol in the tool input.
@@ -880,7 +999,14 @@ impl Store {
         };
         notes.truncate(count);
         let memory_ids: Vec<_> = notes.iter().map(|note| note.id.clone()).collect();
-        finish_push(tx, person_id, session_id, Lookup::Topic, &memory_ids).await?;
+        finish_push(
+            tx,
+            person_id,
+            session_id,
+            Lookup::Topic.as_str(),
+            &memory_ids,
+        )
+        .await?;
         if card.is_some() {
             notes.clear();
         }

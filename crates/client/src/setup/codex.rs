@@ -7,9 +7,10 @@ use serde_json::{Value, json};
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, value};
 
-const EVENTS: [(&str, u32); 5] = [
+const EVENTS: [(&str, u32); 6] = [
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
+    ("PreToolUse", 3),
     ("PostToolUse", 10),
     ("Stop", 10),
     ("SessionEnd", 3),

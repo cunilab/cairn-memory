@@ -40,11 +40,12 @@ pub fn card(card: &str) -> String {
 pub fn output(agent: &str, event: &str, text: Option<&str>) -> Option<Value> {
     if agent == "antigravity" {
         return match (event, text) {
-            ("SessionStart", Some(text)) => {
+            ("SessionStart" | "PreInvocation", Some(text)) => {
                 Some(json!({"injectSteps": [{"systemMessage": {"systemMessage": text}}]}))
             }
             ("Stop", Some(text)) => Some(json!({"decision": "continue", "reason": text})),
             ("Stop", None) => Some(json!({"decision": "stop"})),
+            ("PreToolUse", Some(text)) => Some(json!({"decision": "allow", "reason": text})),
             ("PostToolUse", _) => Some(json!({})),
             _ => None,
         };

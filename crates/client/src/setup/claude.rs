@@ -6,11 +6,12 @@ use super::{
 use crate::claude_memory;
 use serde_json::{Value, json};
 
-pub(super) const EVENTS: [(&str, u32); 7] = [
+pub(super) const EVENTS: [(&str, u32); 8] = [
     ("SessionStart", 10),
     ("UserPromptSubmit", 5),
     ("PreToolUse", 3),
     ("PostToolUse", 10),
+    ("PostToolUseFailure", 3),
     ("Stop", 10),
     ("PreCompact", 10),
     ("SessionEnd", 3),

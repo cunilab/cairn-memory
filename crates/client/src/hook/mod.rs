@@ -22,7 +22,8 @@ use cairn_core::instructions::{
 use cairn_core::process::distill::{
     HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
 };
-use cairn_core::process::entities::{ENTITY_CAP, is_symbol};
+use cairn_core::process::entities::{ENTITY_CAP, is_symbol, normalize_command};
+use cairn_core::retrieve::command::error_tail;
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -31,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OBSERVE: &str = "/cairn-memory/observe";
+const COMMAND_RECALL_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
@@ -77,6 +79,7 @@ struct Options {
     agent: String,
     config: Option<PathBuf>,
     managed: bool,
+    keep_native_memory: bool,
 }
 
 impl Options {
@@ -89,6 +92,7 @@ impl Options {
             agent: String::new(),
             config: None,
             managed: false,
+            keep_native_memory: false,
         };
         let mut rest = rest.iter();
         while let Some(flag) = rest.next() {
@@ -100,7 +104,11 @@ impl Options {
                 "--agent" => options.agent = value()?.clone(),
                 "--config" => options.config = Some(PathBuf::from(value()?)),
                 "--cairn-managed" => options.managed = true,
-                crate::setup::KEEP_NATIVE_MEMORY if options.event == "SessionStart" => {}
+                crate::setup::KEEP_NATIVE_MEMORY
+                    if matches!(options.event.as_str(), "SessionStart" | "PreToolUse") =>
+                {
+                    options.keep_native_memory = true;
+                }
                 other => return Err(Error::Input(format!("unexpected hook option {other:?}"))),
             }
         }
@@ -129,27 +137,18 @@ pub fn run(args: &[String]) -> Result<i32, Error> {
     {
         return Ok(0);
     }
-    let handle = match (options.event.as_str(), options.agent.as_str()) {
-        ("PreToolUse", "claude") => guard_native_memory(),
-        ("PreToolUse", _) => Ok(()),
-        _ => session(&options),
-    };
+    let handle = session(&options);
     if let Err(message) = handle {
         eprintln!("cairn hook: {message}");
     }
     Ok(0)
 }
 
-fn guard_native_memory() -> Result<(), String> {
-    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
-    let payload = Payload::parse(&raw)?;
+fn guard_native_memory(payload: &Payload, tool: &event::Tool<'_>) {
     let key = match payload.text("tool_name") {
         Some("Write" | "Edit" | "MultiEdit") => "file_path",
         Some("NotebookEdit") => "notebook_path",
-        _ => return Ok(()),
-    };
-    let Some(tool) = payload.tool() else {
-        return Ok(());
+        _ => return,
     };
     if let Some(path) = tool.input_text(key)
         && claude_memory::is_memory_path(Path::new(path), payload.cwd().map(Path::new))
@@ -163,11 +162,31 @@ fn guard_native_memory() -> Result<(), String> {
             }})
         );
     }
-    Ok(())
 }
 
 fn session(options: &Options) -> Result<(), String> {
-    crate::warn_ignored_legacy_config();
+    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
+    let mut payload = Payload::parse(&raw)?;
+    if options.agent == "hermes" {
+        payload.normalize_hermes();
+    }
+    if options.event == "PreToolUse" {
+        // A running Hermes plugin from before the update may still call this and discard stdout.
+        if options.agent == "hermes" {
+            return Ok(());
+        }
+        let Some(tool) = payload.tool() else {
+            return Ok(());
+        };
+        if tool.shell_command().is_none() {
+            if options.agent == "claude" && !options.keep_native_memory {
+                guard_native_memory(&payload, &tool);
+            }
+            return Ok(());
+        }
+    } else {
+        crate::warn_ignored_legacy_config();
+    }
     let path = options.config_path().map_err(|e| e.to_string())?;
     let config = match Config::load_from(&path) {
         Ok(config) => config,
@@ -181,11 +200,6 @@ fn session(options: &Options) -> Result<(), String> {
         .any(|c| c.is_whitespace() || c.is_control())
     {
         return Err("device credential must be one header token".to_owned());
-    }
-    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
-    let mut payload = Payload::parse(&raw)?;
-    if options.agent == "hermes" {
-        payload.normalize_hermes();
     }
     let cwd = match payload.cwd() {
         Some(cwd) => PathBuf::from(cwd),
@@ -245,8 +259,12 @@ struct Hook<'a> {
 impl Hook<'_> {
     /// The text to inject, if the event injects any.
     fn handle(&self) -> Result<Option<String>, String> {
-        self.note_automation();
+        if !matches!(self.event, "PreToolUse" | "PostToolUseFailure") {
+            self.note_automation();
+        }
         match self.event {
+            "PreToolUse" => Ok(self.command_recall(false)),
+            "PostToolUseFailure" => Ok(self.command_recall(true)),
             "SessionStart" => Ok(self.start()),
             "UserPromptSubmit" | "PreInvocation" => {
                 let prompt = self.payload.prompt();
@@ -256,7 +274,14 @@ impl Hook<'_> {
                     }
                     self.note_correction(&capture.content);
                 }
-                self.capture(prompt).map(|()| None)
+                self.capture(prompt)?;
+                Ok((self.agent == "antigravity")
+                    .then(|| {
+                        self.with_state(|s| std::mem::take(&mut s.pending_command_recall))
+                            .unwrap_or_default()
+                    })
+                    .filter(|pending| !pending.is_empty())
+                    .map(|pending| pending.join("\n")))
             }
             "PostToolUse" => {
                 let brief = (self.agent == "grok"
@@ -266,10 +291,20 @@ impl Hook<'_> {
                 .then(|| self.brief())
                 .flatten();
                 let topic = self.tool()?;
-                Ok(match (brief, topic) {
-                    (Some(brief), Some(topic)) => Some(format!("{brief}\n{topic}")),
-                    (brief, topic) => brief.or(topic),
-                })
+                let warning = (self.agent == "hermes")
+                    .then(|| self.command_recall(false))
+                    .flatten();
+                let mut recall = self.command_recall(true);
+                if self.agent == "antigravity"
+                    && let Some(text) = recall.take()
+                {
+                    self.with_state(|s| s.pending_command_recall.push(text));
+                }
+                let text: Vec<_> = [brief, topic, warning, recall]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                Ok((!text.is_empty()).then(|| text.join("\n")))
             }
             "Stop" | "SubagentStop" => {
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
@@ -707,6 +742,40 @@ impl Hook<'_> {
             return Ok((!notes.is_empty()).then(|| notes.join("\n")));
         }
         self.capture(tool.command()).map(|()| None)
+    }
+
+    /// This lookup has a short independent deadline and never queues observations or logs.
+    fn command_recall(&self, failed: bool) -> Option<String> {
+        let tool = self.payload.tool()?;
+        let command = tool.shell_command()?;
+        let error_tail = if failed {
+            Some(error_tail(
+                tool.failure_text(self.event == "PostToolUseFailure")?,
+            ))
+        } else {
+            None
+        };
+        let command = normalize_command(&redact_sensitive_content(command));
+        if command.is_empty() || command.chars().count() > 200 || self.server_is_down() {
+            return None;
+        }
+        let project_id = self.top.as_deref().and_then(git::project_id);
+        let body = json!({
+            "command": command,
+            "session_id": self.session_id,
+            "project_id": project_id,
+            "error_tail": error_tail
+        });
+        let reply = Client::identified(
+            self.config.clone(),
+            COMMAND_RECALL_TIMEOUT,
+            self.agent,
+            ClientKind::Hook,
+        )
+        .post("/cairn-memory/session/command-recall", &body)
+        .ok()?;
+        let text = reply["text"].as_str()?;
+        (!text.is_empty() && text.len() <= inject::TOPIC_MAX_BYTES).then(|| text.to_owned())
     }
 
     /// The note text for the first edit of `path`, within the per-session caps.

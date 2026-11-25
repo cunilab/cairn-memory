@@ -6,6 +6,7 @@ use axum::extract::{Query, State};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Kind, Relation, Scope};
 use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
+use cairn_core::retrieve::command::ERROR_TAIL_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
 use cairn_core::retrieve::pack::{BUDGET_DEFAULT, Cards};
@@ -225,6 +226,45 @@ pub async fn topic(
     )
     .await;
     Ok(Json(reply))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandRecall {
+    session_id: String,
+    project_id: Option<String>,
+    command: String,
+    error_tail: Option<String>,
+}
+
+pub async fn command_recall(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Json(body): Json<CommandRecall>,
+) -> ApiResult<Value> {
+    push_session_id(Some(&body.session_id))?;
+    if body.command.len() > 800
+        || body
+            .error_tail
+            .as_ref()
+            .is_some_and(|tail| tail.len() > ERROR_TAIL_MAX_BYTES)
+    {
+        return Err(ApiError::invalid(
+            "command recall input exceeds its byte limit",
+        ));
+    }
+    let recall = state.store.command_recall(
+        &account.person_id,
+        &body.session_id,
+        body.project_id.as_deref(),
+        &body.command,
+        body.error_tail.as_deref(),
+    );
+    let text = match tokio::time::timeout(std::time::Duration::from_millis(750), recall).await {
+        Ok(result) => result?,
+        Err(_) => String::new(),
+    };
+    Ok(Json(json!({"text": text})))
 }
 
 pub async fn graph(

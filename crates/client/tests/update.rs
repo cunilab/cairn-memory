@@ -183,10 +183,9 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
             "{stdout}"
         );
         let hooks = std::fs::read_to_string(home.join(hooks)).unwrap();
-        assert!(hooks.contains(&format!(
-            "{} hook SessionStart --agent {agent}",
-            copy.display()
-        )));
+        for event in ["SessionStart", "PreToolUse"] {
+            assert!(hooks.contains(&format!("{} hook {event} --agent {agent}", copy.display())));
+        }
         let mcp = std::fs::read_to_string(home.join(mcp)).unwrap();
         assert!(mcp.contains(copy.to_str().unwrap()));
         assert!(!mcp.contains(env!("CARGO_BIN_EXE_cairn")));
@@ -211,7 +210,11 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
         settings["permissions"]["allow"],
         serde_json::json!(["mcp__cairn"])
     );
-    assert!(settings["hooks"]["PreToolUse"].is_null());
+    let warning = &settings["hooks"]["PreToolUse"][0];
+    assert_eq!(warning["matcher"], "Bash");
+    let command = warning["hooks"][0]["command"].as_str().unwrap();
+    assert!(command.starts_with(&format!("{} hook PreToolUse ", copy.display())));
+    assert!(command.ends_with(" --keep-native-memory"));
     let session = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();

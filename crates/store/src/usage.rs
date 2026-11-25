@@ -19,7 +19,7 @@ pub enum Lookup {
 }
 
 impl Lookup {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Search => "search",
             Self::Get => "get",
@@ -86,7 +86,7 @@ pub(crate) async fn finish_push(
     mut tx: Transaction<'_, Postgres>,
     person_id: &str,
     session_id: Option<&str>,
-    source: Lookup,
+    source: &str,
     ids: &[String],
 ) -> Result<()> {
     if !ids.is_empty() {
@@ -98,7 +98,7 @@ pub(crate) async fn finish_push(
             .bind(person_id)
             .bind(session_id)
             .bind(ids)
-            .bind(source.as_str())
+            .bind(source)
             .execute(&mut *tx)
             .await?;
         }

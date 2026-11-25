@@ -100,6 +100,10 @@ fn hooks_text(path: &Path, ctx: &Ctx) -> R<String> {
             &json!({
                 "SessionStart": [handler("SessionStart", 10)],
                 "PreInvocation": [handler("PreInvocation", 5)],
+                "PreToolUse": [{
+                    "matcher": "^run_command$",
+                    "hooks": [handler("PreToolUse", 3)]
+                }],
                 "PostToolUse": [{
                     "matcher": "^(run_command|write_to_file|replace_file_content|multi_replace_file_content|mcp_cairn_.*)$",
                     "hooks": [handler("PostToolUse", 10)]

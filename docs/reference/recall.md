@@ -16,7 +16,11 @@ Project scope requires membership. Global memories match every context; a person
 
 The session brief includes a relevant handoff, project memories and personal preferences within 1,200 bytes. File topics match the exact file, its module or symbol names from a bounded sample of tool input. Results rank rules and gotchas first, followed by decisions, then facts and procedures. Within a group, helpful votes take precedence over recency. Each pushed memory includes a short reason for showing it.
 
-Only memories with normal or proven trust enter automatic recall. The server shares an eight-memory budget across briefs and file topics for each person and session ID. A memory can use only one slot in that session. The idle sweep removes push records after seven days. Explicit searches and gets have their own limits.
+A command warning can show up to two gotchas or procedures once per normalized command per session. It matches an exact command entity after collapsing spaces, stopping at the first pipe, `&&`, semicolon or output redirect, and taking the first three words. The warning preserves the host’s permission flow.
+
+Failed-command recall uses the first error-looking line in the last 2 KiB of redacted output. A match requires the exact command entity and a phrase of at least three adjacent search lexemes. Gotchas rank ahead of procedures. If the host confirms failure and supplies only status, recall matches by command entity. An unknown status, weak match or timeout is silent. The lookup uses PostgreSQL text and entity indexes and leaves the error tail out of capture and memory storage. See the [host hook matrix](hook.md#command-recall-by-host) for delivery timing.
+
+Only memories with normal or proven trust enter automatic recall. The server shares an eight-memory budget across briefs, file topics, command warnings and failed-command recall for each person and session ID. A memory can use only one slot in that session. The idle sweep removes push records after seven days. Explicit searches and gets have their own limits.
 
 ## Session handoffs and distillation
 

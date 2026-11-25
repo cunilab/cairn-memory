@@ -46,7 +46,10 @@ function structuredResponse(event) {
   const code = [meta.exit, meta.exitCode, meta.exit_code, event.exitCode].find((value) => Number.isInteger(value))
   if (code !== undefined) out.exit_code = code
   const error = [event.isError, output && output.isError, meta.isError].find((value) => typeof value === "boolean")
-  if (error !== undefined) out.is_error = error
+  if (event.status === "error" || error !== undefined) out.is_error = event.status === "error" || error
+  const text = typeof output === "string" ? output : output && output.output
+  if (typeof event.error?.message === "string") out.output = event.error.message
+  else if ((out.is_error || (code !== undefined && code !== 0)) && typeof text === "string") out.output = text
   return out
 }
 
@@ -58,7 +61,7 @@ function runHook(payload) {
   return new Promise((resolve) => {
     const child = spawn(EXE, ["hook", payload.hook_event_name, "--agent", "opencode", "--config", config, "--cairn-managed"], { stdio: ["pipe", "pipe", "ignore"] })
     let out = ""
-    const timer = setTimeout(() => { child.kill(); resolve("") }, 4000)
+    const timer = setTimeout(() => { child.kill(); resolve("") }, payload.hook_event_name === "PreToolUse" ? 2500 : 4000)
     child.stdout.on("data", (chunk) => { out += chunk })
     child.on("error", () => { clearTimeout(timer); resolve("") })
     child.on("close", () => {
@@ -71,6 +74,7 @@ function runHook(payload) {
         resolve("")
       }
     })
+    child.stdin.on("error", () => { child.kill(); clearTimeout(timer); resolve("") })
     child.stdin.end(JSON.stringify(payload))
   })
 }
@@ -138,15 +142,21 @@ export default {
       pushText(event, await runHook({ hook_event_name: "SessionStart", session_id: sessionID, cwd: directory, source: "compact" }))
     })
     if (ctx.tool && typeof ctx.tool.hook === "function") {
-      try { await ctx.tool.hook("execute.after", async (event) => {
-        const sessionID = event && (event.sessionID || event.sessionId)
-        const directory = await directoryFor(ctx, sessionID)
-        if (!directory || ignored(directory)) return
-        const name = event && (event.tool || event.name || "")
-        const input = structuredInput(event && (event.input || event.args || event.tool_input))
-        const text = await runHook({ hook_event_name: "PostToolUse", session_id: sessionID, cwd: directory, tool_name: name, tool_input: input, tool_response: structuredResponse(event) })
-        queue(sessionID, text)
-      }) } catch (error) {}
+      const toolHook = (hookEvent) => async (event) => {
+        try {
+          const name = event && (event.tool || event.name || "")
+          if (hookEvent === "PreToolUse" && !["bash", "shell"].includes(name.toLowerCase())) return
+          const sessionID = event && (event.sessionID || event.sessionId)
+          const directory = await directoryFor(ctx, sessionID)
+          if (!directory || ignored(directory)) return
+          const input = structuredInput(event && (event.input || event.args || event.tool_input))
+          const payload = { hook_event_name: hookEvent, session_id: sessionID, cwd: directory, tool_name: name, tool_input: input }
+          if (hookEvent === "PostToolUse") payload.tool_response = structuredResponse(event)
+          queue(sessionID, await runHook(payload))
+        } catch (error) {}
+      }
+      try { await ctx.tool.hook("execute.before", toolHook("PreToolUse")) } catch (error) {}
+      try { await ctx.tool.hook("execute.after", toolHook("PostToolUse")) } catch (error) {}
     }
     if (ctx.event && typeof ctx.event.subscribe === "function") {
       const controller = new AbortController()
