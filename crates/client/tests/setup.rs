@@ -150,6 +150,7 @@ fn claude_install_remove_keeps_others() {
     home.ok("claude", false);
 
     let settings = home.json(".claude/settings.json");
+    assert_eq!(settings.as_object().unwrap().len(), 3);
     assert_eq!(
         settings["permissions"],
         json!({"allow": ["WebFetch", "mcp__another__*", "mcp__cairn"], "deny": ["Read(./.env)"]})
@@ -198,27 +199,38 @@ fn claude_install_remove_keeps_others() {
 }
 
 #[test]
-fn claude_remove_preserves_preexisting_permission_containers_and_rules() {
-    for (i, (permissions, rule)) in [
-        (json!({}), "mcp__cairn"),
-        (json!({"allow": []}), "mcp__cairn"),
-        (json!({"allow": ["mcp__cairn__*"]}), "mcp__cairn__*"),
-        (json!({"allow": ["mcp__cairn"]}), "mcp__cairn"),
+fn claude_remove_keeps_allow_array_and_wildcard() {
+    for (i, (before, installed, removed)) in [
+        (json!([]), json!(["mcp__cairn"]), json!([])),
+        (json!(["mcp__cairn"]), json!(["mcp__cairn"]), json!([])),
+        (
+            json!(["mcp__cairn__*"]),
+            json!(["mcp__cairn__*"]),
+            json!(["mcp__cairn__*"]),
+        ),
+        (
+            json!(["mcp__cairn", "mcp__cairn__*", "mcp__cairn"]),
+            json!(["mcp__cairn", "mcp__cairn__*", "mcp__cairn"]),
+            json!(["mcp__cairn__*"]),
+        ),
     ]
     .into_iter()
     .enumerate()
     {
         let home = Home::new(&format!("claude-permissions-{i}"), false);
-        let original = json!({"permissions": permissions});
+        let original = json!({"permissions": {"allow": before}});
         home.write(".claude/settings.json", &original.to_string());
 
         home.ok("claude", false);
         assert_eq!(
             home.json(".claude/settings.json")["permissions"]["allow"],
-            json!([rule])
+            installed
         );
         home.ok("claude", true);
-        assert_eq!(home.json(".claude/settings.json"), original);
+        assert_eq!(
+            home.json(".claude/settings.json"),
+            json!({"permissions": {"allow": removed}})
+        );
     }
 }
 
@@ -431,9 +443,25 @@ fn codex_native_missing_dir() {
         state.contains(EXE) && state.contains("CAIRN_SETUP_MANAGED"),
         "{state}"
     );
+    let config = read(&home, ".codex/config.toml");
+    assert!(
+        config.contains("default_tools_approval_mode = \"approve\""),
+        "{config}"
+    );
     let before = home.snapshot(".codex");
     home.ok("codex", false);
     assert_eq!(before, home.snapshot(".codex"));
+
+    // Reuse an existing managed server from before approval was configured.
+    let other = "approval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"other\"\ndefault_tools_approval_mode = \"prompt\"\n";
+    let legacy = config.replace("default_tools_approval_mode = \"approve\"\n", "");
+    let config_path = home.write(".codex/config.toml", &format!("{other}{legacy}"));
+    home.ok("codex", false);
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        format!("{other}{config}")
+    );
+
     home.ok("codex", true);
     home.ok("codex", true);
     assert!(
@@ -442,6 +470,10 @@ fn codex_native_missing_dir() {
             .contains("--cairn-managed")
     );
     assert!(!home.dir.join(".codex-fixture-state").exists());
+    assert_eq!(
+        fs::read_to_string(config_path).unwrap().trim_end(),
+        other.trim_end()
+    );
 }
 
 #[test]
@@ -590,7 +622,13 @@ fn claude_setup_edits_only_its_own_bytes_in_the_default_files() {
     );
 
     assert!(home.setup_default_claude(true).status.success());
-    assert_eq!(read(&home, ".claude/settings.json"), settings);
+    let mut remaining = home.json(".claude/settings.json");
+    assert_eq!(
+        remaining.as_object_mut().unwrap().remove("permissions"),
+        Some(json!({"allow": []}))
+    );
+    assert_eq!(remaining, serde_json::from_str::<Value>(settings).unwrap());
+    assert!(read(&home, ".claude/settings.json").contains("\"zeta\": 1e3"));
     assert_eq!(read(&home, ".claude.json"), state);
 }
 
@@ -601,20 +639,17 @@ fn claude_remove_leaves_nothing_behind_and_creates_nothing() {
     assert!(home.setup_default_claude(true).status.success());
     assert!(!home.dir.join(".claude").exists() && !home.dir.join(".claude.json").exists());
 
-    // Install into files with nothing of ours, then remove: the objects Cairn created go too.
+    // Remove the installed entries while retaining an empty allow array.
     home.write(".claude/settings.json", "{\"theme\": \"dark\"}\n");
     home.write(".claude.json", "{\"userID\": \"u1\"}\n");
     assert!(home.setup_default_claude(false).status.success());
     assert!(read(&home, ".claude/settings.json").contains("\"hooks\""));
     assert!(home.setup_default_claude(true).status.success());
-    for (file, keep) in [
-        (".claude/settings.json", "theme"),
-        (".claude.json", "userID"),
-    ] {
-        let value: Value = serde_json::from_str(&read(&home, file)).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 1, "{file}: {value}");
-        assert!(value.get(keep).is_some());
-    }
+    assert_eq!(
+        home.json(".claude/settings.json"),
+        json!({"theme": "dark", "permissions": {"allow": []}})
+    );
+    assert_eq!(home.json(".claude.json"), json!({"userID": "u1"}));
 }
 
 #[test]

@@ -68,6 +68,6 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 - **Linked corrections:** a replacement links to the previous record, preserving provenance and making both searchable.
 - **Scopes and hybrid recall:** personal, project and global scopes set visibility; text, entities, links and local embeddings improve retrieval without broadening access.
 - **Small agent surface:** five MCP tools, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
-- Claude Code setup allows the Cairn MCP server's tools for headless sessions and records ownership so removal preserves any user-provided rule. Client updates refresh existing integration paths. Run setup explicitly to add the permission.
+- Setup and client updates allow the Cairn MCP server's tools in Claude Code and Codex so headless sessions can use them. The approval settings are scoped to the Cairn server.
 
 See the [release process](release.md) for release and update decisions, and the [user guide](user-guide.md) for operation.

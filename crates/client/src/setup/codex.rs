@@ -1,7 +1,9 @@
 //! Codex: hook commands in `hooks.json`; the MCP entry goes through `codex mcp add/remove`.
 
-use super::{Ctx, Plan, R, add_args, hooks_text, native, owned, which};
+use super::{After, Ctx, MARKER, Plan, R, add_args, hooks_text, native, owned, read, which};
 use serde_json::{Value, json};
+use std::path::Path;
+use toml_edit::{DocumentMut, Item, value};
 
 const EVENTS: [(&str, u32); 5] = [
     ("SessionStart", 10),
@@ -47,9 +49,46 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     } else {
         Some(add_args(vec!["add".into(), "cairn".into()], ctx))
     };
+    let after: Option<After> = if ctx.remove {
+        None
+    } else {
+        let config = folder.join("config.toml");
+        Some(Box::new(move |files| {
+            let text = approve_tools(&config)?;
+            files.push((config, text));
+            Ok(())
+        }))
+    };
     Ok(Plan {
         files: vec![(path, text)],
         native: command,
-        after: None,
+        after,
     })
+}
+
+fn approve_tools(path: &Path) -> R<String> {
+    const MODE: &str = "default_tools_approval_mode";
+    // Native MCP registration has no approval flag. Edit only the table it registered.
+    let text = read(path)?;
+    let mut config = text
+        .parse::<DocumentMut>()
+        .map_err(|_| "cannot parse Codex config.toml")?;
+    let server = config
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut("cairn"))
+        .and_then(Item::as_table_like_mut)
+        .ok_or("missing cairn MCP entry in Codex config.toml")?;
+    if server
+        .get("env")
+        .and_then(|env| env.get(MARKER))
+        .and_then(Item::as_str)
+        != Some("1")
+    {
+        return Err(super::UNMARKED.into());
+    }
+    if server.get(MODE).and_then(Item::as_str) == Some("approve") {
+        return Ok(text);
+    }
+    server.insert(MODE, value("approve"));
+    Ok(config.to_string())
 }

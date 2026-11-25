@@ -112,6 +112,12 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let mut child = setup.spawn().unwrap();
     writeln!(child.stdin.take().unwrap(), "test-device").unwrap();
     assert!(child.wait().unwrap().success());
+    let settings_path = home.join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    // Simulate settings written by an older client that installed only hooks.
+    settings.as_object_mut().unwrap().remove("permissions");
+    std::fs::write(&settings_path, settings.to_string()).unwrap();
 
     // The same release feed offers 99.0.0; a copy of the binary updates itself.
     let name = "cairn-x86_64-unknown-linux-musl".to_owned();
@@ -148,8 +154,11 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     );
 
     let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(settings_path).unwrap()).unwrap();
+    assert_eq!(
+        settings["permissions"]["allow"],
+        serde_json::json!(["mcp__cairn"])
+    );
     let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         .as_str()
         .unwrap();

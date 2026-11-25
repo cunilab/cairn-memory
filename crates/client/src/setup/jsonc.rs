@@ -285,6 +285,15 @@ pub fn push(text: &str, path: &[&str], value: &Value) -> Result<String, String> 
 /// nothing. A container this would leave empty goes too (never the root), so removing what was
 /// added restores the file.
 pub fn delete(text: &str, path: &[&str]) -> Result<String, String> {
+    delete_at(text, path, true)
+}
+
+/// Removes an array item while keeping its enclosing array.
+pub fn delete_item(text: &str, path: &[&str]) -> Result<String, String> {
+    delete_at(text, path, false)
+}
+
+fn delete_at(text: &str, path: &[&str], prune: bool) -> Result<String, String> {
     let root = read(text)?;
     let mut chain = vec![&root];
     for segment in path {
@@ -294,7 +303,7 @@ pub fn delete(text: &str, path: &[&str]) -> Result<String, String> {
         }
     }
     let mut level = path.len();
-    while level > 1 && child_count(chain[level - 1]) == 1 {
+    while prune && level > 1 && child_count(chain[level - 1]) == 1 {
         level -= 1;
     }
     let node = chain[level];
