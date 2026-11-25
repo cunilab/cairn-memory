@@ -293,6 +293,9 @@ impl Store {
             }
             None => false,
         };
+        if end {
+            crate::usage::settle_errors(&mut tx, Some((person_id, session_id))).await?;
+        }
         tx.commit().await?;
         Ok(queued)
     }
@@ -680,10 +683,10 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         for row in &idle {
-            let key = distill_key(
-                &row.try_get::<String, _>("person_id")?,
-                &row.try_get::<String, _>("session_id")?,
-            );
+            let person: String = row.try_get("person_id")?;
+            let session: String = row.try_get("session_id")?;
+            crate::usage::settle_errors(&mut tx, Some((&person, &session))).await?;
+            let key = distill_key(&person, &session);
             enqueue_tx(&mut tx, JobKind::Distill, &key).await?;
         }
         report.sessions_closed = idle.len() as u64;
@@ -712,6 +715,7 @@ impl Store {
         ))
         .execute(&mut *tx)
         .await?;
+        crate::usage::settle_errors(&mut tx, None).await?;
         sqlx::query(&format!(
             "DELETE FROM session_shown WHERE shown_at < now() - interval '{SHOWN_RETENTION_DAYS} days'"
         ))

@@ -13,6 +13,8 @@ use std::collections::HashMap;
 pub struct UsageView {
     pub fetched: u32,
     pub shown: u32,
+    pub pushed: u32,
+    pub push_used: u32,
     pub detail_opened: u32,
     pub helpful: u32,
     pub wrong: u32,
@@ -81,6 +83,8 @@ struct Extra {
     checked_at: Option<i64>,
     status_changed_at: i64,
     missing: Vec<String>,
+    pushed: u32,
+    push_used: u32,
 }
 
 impl Store {
@@ -99,10 +103,12 @@ impl Store {
             "SELECT m.memory_id, p.name AS project_name,
                     (m.scope = 'project' AND p.archived_at IS NOT NULL) AS project_archived,
                     CASE WHEN m.owner_id = $2 THEN d.name END AS device_name,
-                    {} AS checked_at, {} AS status_changed_at, m.missing_entities
+                    {} AS checked_at, {} AS status_changed_at, m.missing_entities,
+                    coalesce(pu.pushed, 0) AS pushed, coalesce(pu.used, 0) AS push_used
                FROM memories m
                LEFT JOIN projects p ON p.project_id = m.project_id
                LEFT JOIN devices d ON d.device_id = m.device_id AND d.person_id = m.owner_id
+               LEFT JOIN push_usage pu ON pu.person_id = $2 AND pu.memory_id = m.memory_id
               WHERE m.memory_id = ANY($1)",
             epoch!("m.checked_at"),
             epoch!("m.status_changed_at")
@@ -121,6 +127,8 @@ impl Store {
                     checked_at: row.try_get("checked_at")?,
                     status_changed_at: row.try_get("status_changed_at")?,
                     missing: row.try_get("missing_entities")?,
+                    pushed: row.try_get::<i32, _>("pushed")?.max(0) as u32,
+                    push_used: row.try_get::<i32, _>("push_used")?.max(0) as u32,
                 },
             );
         }
@@ -181,6 +189,8 @@ impl Store {
                     memory.owner.clear();
                 }
                 let extra = extras.remove(&memory.id);
+                let (pushed, push_used) =
+                    extra.as_ref().map_or((0, 0), |e| (e.pushed, e.push_used));
                 let (project_name, project_archived, device_name, checked_at, changed, missing) =
                     match extra {
                         Some(e) => (
@@ -208,6 +218,8 @@ impl Store {
                     usage: UsageView {
                         fetched: memory.usage.fetched,
                         shown: memory.usage.shown,
+                        pushed,
+                        push_used,
                         detail_opened: memory.usage.detail_opened,
                         helpful: memory.usage.helpful,
                         wrong: memory.usage.wrong,

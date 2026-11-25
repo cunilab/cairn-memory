@@ -1064,6 +1064,20 @@ fn mcp_and_hermes_session_start_deduplicate_the_same_brief() {
     );
     assert!(initialize(None).contains(id));
     assert!(initialize(None).contains(id));
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"_meta":{"sessionId":"mcp-first"}}});
+    let get = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"memory_get","arguments":{"ids":[id]}}});
+    let output = with_stdin(
+        command(&team.owner.home).current_dir(&dir).arg("mcp"),
+        &format!("{initialize}\n{get}"),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let view = team
+        .owner_web
+        .get(&format!("/cairn-memory/memories/{id}"))
+        .unwrap();
+    assert_eq!(view["usage"]["push_used"], 1);
 }
 
 #[test]
@@ -2700,7 +2714,30 @@ fn lookup_recorded_silently() {
         assert_eq!(body["query"], Value::Null);
         assert_eq!(body["result_ids"], json!(["m"]));
         assert_eq!(body["hit"], expected);
+        assert_eq!(
+            body["used_ids"],
+            if expected == true {
+                json!(["m"])
+            } else {
+                json!([])
+            }
+        );
     }
+    let output = env.run(
+        "PostToolUse",
+        &env.payload(
+            "lookup",
+            json!({
+                "tool_name":"cairn_memory_feedback", "tool_input":{"id":"m","vote":"helpful"},
+                "tool_response":{"id":"m","status":"active"}
+            }),
+        ),
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        server.to("lookup").last().unwrap().body["used_ids"],
+        json!(["m"])
+    );
 }
 
 #[test]
@@ -3042,4 +3079,87 @@ fn antigravity_command_recall_allows_the_tool_and_delivers_failures_once() {
     );
     assert!(invoke("PreInvocation", json!({})).is_empty());
     assert_eq!(fake.to("command-recall").len(), 2);
+}
+
+#[test]
+fn prompt_hook_skips_noise_and_spent_budget_and_fails_silently_on_timeout() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/prompt-recall") {
+            let reply = match request.body["session_id"].as_str().unwrap() {
+                "match" => json!({"text": "Sol preference (why: matches \"sol\" in your prompt)"}),
+                "spent" => json!({"text": "", "budget_spent": true}),
+                "timeout" => {
+                    thread::sleep(Duration::from_millis(1_300));
+                    json!({"text": "This arrived after the deadline"})
+                }
+                _ => json!({"text": ""}),
+            };
+            return (200, reply.to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("prompt-recall-wire", &server.url);
+    let run = |session, prompt| {
+        env.run(
+            "UserPromptSubmit",
+            &env.payload(session, json!({"prompt": prompt})),
+        )
+    };
+    let matched = run("match", "Please continue the work with sol");
+    assert!(
+        injected(&matched)
+            .unwrap()
+            .contains(r#"why: matches "sol""#)
+    );
+    assert!(injected(&run("no-match", "Inspect the cedar leaves tomorrow")).is_none());
+    assert!(injected(&run("short", "with sol")).is_none());
+    assert!(injected(&run("slash", "/run this job with sol")).is_none());
+    assert!(injected(&run("spent", "Please proceed with sol")).is_none());
+    assert!(injected(&run("spent", "Explain the linker failure afterwards")).is_none());
+    let start = Instant::now();
+    let secret = format!("ghp_{}", "a".repeat(40));
+    let out = run("timeout", &format!("Please continue with sol {secret}"));
+    assert!(start.elapsed() < Duration::from_millis(1_300));
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "{out:?}"
+    );
+    let calls = server.to("prompt-recall");
+    assert_eq!(calls.len(), 4);
+    assert!(!calls.last().unwrap().body.to_string().contains(&secret));
+    assert_eq!(server.observed().len(), 7);
+}
+
+#[test]
+fn grok_delivers_prompt_recall_once_on_the_next_tool_result() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/prompt-recall") {
+            return (200, json!({"text":"Sol preference"}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("grok-prompt-recall", &server.url);
+    let run = |event, extra| {
+        env.run_with(
+            event,
+            &env.payload("grok", extra),
+            &["--agent", "grok"],
+            &[],
+        )
+    };
+    assert!(
+        run(
+            "UserPromptSubmit",
+            json!({"prompt":"Can you proceed with sol?"})
+        )
+        .stdout
+        .is_empty()
+    );
+    let tool = json!({"tool_name":"Bash", "tool_input":{"command":"pwd"}, "tool_response":{"exit_code":0}});
+    assert!(
+        injected(&run("PostToolUse", tool.clone()))
+            .unwrap()
+            .contains("Sol preference")
+    );
+    assert!(run("PostToolUse", tool).stdout.is_empty());
 }

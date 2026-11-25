@@ -56,6 +56,7 @@ pub struct Feedback {
     #[serde(alias = "memoryId", alias = "memory_id")]
     id: String,
     vote: String,
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +64,7 @@ pub struct GetMany {
     ids: Vec<String>,
     #[serde(default)]
     detail: bool,
+    session_id: Option<String>,
 }
 
 /// `missing` holds ids that do not exist or that the person cannot see.
@@ -309,6 +311,7 @@ pub async fn get_many(
     Agent(account): Agent,
     Json(body): Json<GetMany>,
 ) -> ApiResult<Got> {
+    let session = super::retrieve::push_session_id(body.session_id.as_deref())?;
     if body.ids.is_empty() || body.ids.len() > 10 || body.ids.iter().any(|id| id.len() > 128) {
         return Err(ApiError::invalid(
             "ids: 1 to 10 ids of at most 128 characters",
@@ -343,6 +346,10 @@ pub async fn get_many(
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
     state.store.mark_agent_read(&fetched, body.detail).await?;
+    state
+        .store
+        .record_push_use(&account.person_id, session, &fetched, true)
+        .await?;
     let reply = Got { memories, missing };
     let bytes = serde_json::to_string(&reply).map_or(0, |text| text.len());
     state
@@ -363,6 +370,7 @@ pub async fn feedback(
     Agent(account): Agent,
     Json(body): Json<Feedback>,
 ) -> ApiResult<Value> {
+    let session = super::retrieve::push_session_id(body.session_id.as_deref())?;
     let vote = match body.vote.as_str() {
         "helpful" => Vote::Helpful,
         "wrong" | "stale" => Vote::Wrong,
@@ -371,6 +379,15 @@ pub async fn feedback(
     let status = state
         .store
         .feedback(&account.person_id, &body.id, vote)
+        .await?;
+    state
+        .store
+        .record_push_use(
+            &account.person_id,
+            session,
+            std::slice::from_ref(&body.id),
+            vote == Vote::Helpful,
+        )
         .await?;
     let mut reply = json!({"id": body.id, "status": status});
     // A vote cannot lift a stale that came from the repo check: say why it is still stale.

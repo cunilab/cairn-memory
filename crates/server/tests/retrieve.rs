@@ -989,6 +989,16 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
         )
         .await;
     assert_eq!(exhausted, json!({"notes": []}));
+    let prompt = app
+        .post(
+            "session/prompt-recall",
+            json!({
+                "session_id":"shared", "prompt":"Please check the working timer probe"
+            }),
+            &device,
+        )
+        .await;
+    assert_eq!(prompt, json!({"text":"", "budget_spent":true}));
     let search = app
         .post("search", json!({"query":"Working timer probe 8"}), &device)
         .await;
@@ -1152,5 +1162,283 @@ async fn brief_offers_a_check_and_repo_state_is_device_only_and_default_branch_o
         )
         .await;
     assert!(topic.get("card").is_none() && topic["notes"].as_array().unwrap().is_empty());
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn prompt_recall_learns_per_person_across_push_sources() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("push-owner").await;
+    let device = app.device(&admin, "push-device").await;
+    let member = app.member(&admin, "push-member").await;
+    let other = app.device(&member, "member-device").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-push", "name": "E2E push usage"
+            }),
+            &device,
+        )
+        .await["project_id"]
+        .clone();
+    let context = json!({"project_id": project, "files": ["src/push.rs"]});
+    let id = save(
+        &app,
+        &device,
+        json!({
+            "kind": "preference", "scope": "personal", "title": "Sol means Codex on high effort",
+            "summary": "Launch the worker on high effort when asked to work with Sol.",
+            "reason": "The coordinator specifies this worker by its short name.",
+            "context": context
+        }),
+    )
+    .await;
+    let project_rule = save(
+        &app,
+        &device,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Preserve Quartz scheduler isolation",
+            "summary": "Preserve quartz isolation during all scheduler tests.",
+            "reason": "Quartz shares the scheduler lock with other fixtures.",
+            "context": context
+        }),
+    )
+    .await;
+    app.post(
+        "projects/init",
+        json!({"repository": "local:e2e-push", "project_id": project}),
+        &other,
+    )
+    .await;
+    let prompt = |session: &str, text: &str| {
+        json!({
+            "session_id": session, "prompt": text, "context": {"project_id": project}
+        })
+    };
+    let query = "Can we proceed with sol?";
+    let run = |session, text| app.post("session/prompt-recall", prompt(session, text), &device);
+    for skip in [
+        "with sol",
+        "/go ahead with sol",
+        "yes please go ahead",
+        "Should I paint a sunset?",
+    ] {
+        assert_eq!(run("skip", skip).await["text"], "");
+    }
+    let (first, concurrent) = tokio::join!(run("push-a", query), run("push-a", query));
+    let nonempty = |reply: &serde_json::Value| !reply["text"].as_str().unwrap().is_empty();
+    assert_ne!(nonempty(&first), nonempty(&concurrent));
+    for session in ["push-b", "push-c"] {
+        let reply = run(session, query).await;
+        let text = reply["text"].as_str().unwrap();
+        assert!(
+            text.contains(r#"why: matches "sol" in your prompt"#),
+            "{reply}"
+        );
+        assert!(text.len() <= 300);
+        assert_eq!(run(session, query).await["text"], "");
+    }
+    assert_eq!(run("muted", query).await["text"], "");
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id":"muted", "context": context}),
+            &device,
+        )
+        .await;
+    assert!(
+        !brief["brief"].as_str().unwrap().contains("Sol means"),
+        "{brief}"
+    );
+    let topic = app
+        .post(
+            "session/topic",
+            json!({
+                "session_id":"muted", "path":"src/push.rs", "context": context
+            }),
+            &device,
+        )
+        .await;
+    assert!(!topic.to_string().contains("Sol means"), "{topic}");
+    let before = app.get(&format!("memories/{id}"), &admin).await;
+    assert_eq!(before["usage"]["pushed"], 3);
+    assert_eq!(before["usage"]["push_used"], 0);
+    let records: i64 = sqlx::query_scalar("SELECT count(*) FROM lookup_log")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let observations: i64 = sqlx::query_scalar("SELECT count(*) FROM observations")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!((records, observations), (0, 0));
+
+    let search = app
+        .post(
+            "search",
+            json!({"query":"Sol means Codex on high effort"}),
+            &device,
+        )
+        .await;
+    assert_eq!(ids(&search), std::slice::from_ref(&id));
+    assert!(
+        run("revived", query).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("Sol means")
+    );
+    let get = json!({"ids":[id], "session_id":"revived"});
+    for _ in 0..2 {
+        app.post("get", get.clone(), &device).await;
+    }
+    let view = app.get(&format!("memories/{id}"), &admin).await;
+    assert_eq!(view["usage"]["pushed"], 4);
+    assert_eq!(view["usage"]["push_used"], 1);
+    assert_eq!(view["trust_level"], before["trust_level"]);
+
+    let rule_query = "Please preserve quartz isolation";
+    assert!(
+        !run("vote", rule_query).await["text"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    app.post(
+        "session/lookup",
+        json!({"session_id":"vote", "kind":"feedback", "used_ids":[project_rule]}),
+        &device,
+    )
+    .await;
+    app.post(
+        "feedback",
+        json!({"id":project_rule, "vote":"helpful", "session_id":"vote"}),
+        &device,
+    )
+    .await;
+    let shared = format!("memories/{project_rule}");
+    assert_eq!(app.get(&shared, &admin).await["usage"]["push_used"], 1);
+    assert_eq!(app.get(&shared, &member).await["usage"]["push_used"], 0);
+    assert_eq!(
+        app.post(
+            "session/prompt-recall",
+            prompt("other-person", query),
+            &other
+        )
+        .await["text"],
+        ""
+    );
+    assert!(
+        !app.post(
+            "session/prompt-recall",
+            prompt("other-person", rule_query),
+            &other
+        )
+        .await["text"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn prompt_recall_narrows_candidates_before_the_hybrid_limit() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("prompt-scope").await;
+    let device = app.device(&admin, "prompt-scope").await;
+    let project = |name| {
+        app.post(
+            "projects/init",
+            json!({"repository": format!("local:e2e-{name}"), "name": format!("E2E {name}")}),
+            &device,
+        )
+    };
+    let here = project("current").await["project_id"].clone();
+    let elsewhere = project("other").await["project_id"].clone();
+    let save_one = |scope, kind, title, project| {
+        save(
+            &app,
+            &device,
+            json!({
+                "scope": scope, "kind": kind, "title": title, "context":{"project_id":project},
+                "summary": "Keep opal scheduler isolation for this build path.",
+                "reason": "The scheduler shares its queue with a second service."
+            }),
+        )
+    };
+    save_one(
+        "personal",
+        "rule",
+        "Retain opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    save_one(
+        "project",
+        "procedure",
+        "Keep opal scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    let candidate = save_one(
+        "project",
+        "rule",
+        "Candidate scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    let doubted = save_one(
+        "project",
+        "rule",
+        "Doubted opal scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    save_one(
+        "project",
+        "rule",
+        "Other opal scheduler isolation",
+        elsewhere,
+    )
+    .await;
+    save_one(
+        "global",
+        "rule",
+        "Global opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    save_one(
+        "personal",
+        "fact",
+        "Fact about opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE memories SET rank = CASE WHEN memory_id = $1 THEN 'candidate' ELSE 'normal' END",
+    )
+    .bind(&candidate)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+    app.post("feedback", json!({"id":doubted, "vote":"wrong"}), &device)
+        .await;
+    let payload = json!({"session_id":"scope", "context":{"project_id":here}, "prompt":"Please keep opal scheduler isolation"});
+    let reply = app
+        .post("session/prompt-recall", payload.clone(), &device)
+        .await;
+    let text = reply["text"].as_str().unwrap();
+    assert!(
+        text.contains("Retain opal") && text.contains("Keep opal"),
+        "{reply}"
+    );
+    assert_eq!(text.matches("(why:").count(), 2);
+    assert!(text.len() <= 300);
+    assert_eq!(
+        app.post("session/prompt-recall", payload, &device).await["text"],
+        ""
+    );
     app.finish().await;
 }

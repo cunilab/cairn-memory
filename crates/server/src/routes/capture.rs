@@ -142,7 +142,10 @@ pub struct Lookup {
     session_id: String,
     kind: String,
     query: Option<String>,
+    #[serde(default)]
     result_ids: Vec<String>,
+    #[serde(default)]
+    used_ids: Vec<String>,
     hit: Option<bool>,
 }
 
@@ -151,8 +154,29 @@ pub async fn lookup(
     DeviceCaller { account, device_id }: DeviceCaller,
     Json(body): Json<Lookup>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    if !matches!(body.kind.as_str(), "search" | "get") {
+    super::retrieve::push_session_id(Some(&body.session_id))?;
+    if !matches!(body.kind.as_str(), "search" | "get" | "feedback") {
         return Err(ApiError::invalid("invalid lookup kind"));
+    }
+    let used_ids: Vec<String> = body
+        .used_ids
+        .into_iter()
+        .filter(|id| id.len() <= 128)
+        .take(10)
+        .collect();
+    if matches!(body.kind.as_str(), "get" | "feedback") {
+        state
+            .store
+            .record_push_use(
+                &account.person_id,
+                Some(&body.session_id),
+                &used_ids,
+                body.kind == "get",
+            )
+            .await?;
+    }
+    if body.kind == "feedback" {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
     }
     let query = body
         .query

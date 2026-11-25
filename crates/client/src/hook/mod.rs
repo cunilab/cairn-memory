@@ -24,6 +24,7 @@ use cairn_core::process::distill::{
 };
 use cairn_core::process::entities::{ENTITY_CAP, is_symbol, normalize_command};
 use cairn_core::retrieve::command::error_tail;
+use cairn_core::retrieve::prompt::{PROMPT_QUERY_MAX_BYTES, should_recall};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
@@ -32,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OBSERVE: &str = "/cairn-memory/observe";
-const COMMAND_RECALL_TIMEOUT: Duration = Duration::from_secs(1);
+const RECALL_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
@@ -274,14 +275,30 @@ impl Hook<'_> {
                     }
                     self.note_correction(&capture.content);
                 }
-                self.capture(prompt)?;
-                Ok((self.agent == "antigravity")
-                    .then(|| {
-                        self.with_state(|s| std::mem::take(&mut s.pending_command_recall))
-                            .unwrap_or_default()
-                    })
-                    .filter(|pending| !pending.is_empty())
-                    .map(|pending| pending.join("\n")))
+                let capture_result = self.capture(prompt);
+                let mut recall = self
+                    .payload
+                    .prompt_text()
+                    .and_then(|text| self.prompt_recall(text));
+                let mut pending = Vec::new();
+                if self.agent == "grok" && recall.is_some() {
+                    self.with_state(|s| s.pending_prompt_recall = recall.take());
+                }
+                if self.event == "PreInvocation" {
+                    pending = self
+                        .with_state(|s| std::mem::take(&mut s.pending_command_recall))
+                        .unwrap_or_default();
+                }
+                pending.extend(recall);
+                if pending.is_empty() {
+                    capture_result?;
+                    Ok(None)
+                } else {
+                    if let Err(error) = capture_result {
+                        eprintln!("cairn hook: {error}");
+                    }
+                    Ok(Some(pending.join("\n")))
+                }
             }
             "PostToolUse" => {
                 let brief = (self.agent == "grok"
@@ -291,6 +308,12 @@ impl Hook<'_> {
                 .then(|| self.brief())
                 .flatten();
                 let topic = self.tool()?;
+                let prompt = (self.agent == "grok")
+                    .then(|| {
+                        self.with_state(|s| s.pending_prompt_recall.take())
+                            .flatten()
+                    })
+                    .flatten();
                 let warning = (self.agent == "hermes")
                     .then(|| self.command_recall(false))
                     .flatten();
@@ -300,13 +323,16 @@ impl Hook<'_> {
                 {
                     self.with_state(|s| s.pending_command_recall.push(text));
                 }
-                let text: Vec<_> = [brief, topic, warning, recall]
+                let text: Vec<_> = [brief, prompt, topic, warning, recall]
                     .into_iter()
                     .flatten()
                     .collect();
                 Ok((!text.is_empty()).then(|| text.join("\n")))
             }
             "Stop" | "SubagentStop" => {
+                if self.agent == "antigravity" && self.payload.flag("fullyIdle") {
+                    self.with_state(|s| s.last_prompt_recall = None);
+                }
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
                 }
@@ -744,6 +770,51 @@ impl Hook<'_> {
         self.capture(tool.command()).map(|()| None)
     }
 
+    fn prompt_recall(&self, text: &str) -> Option<String> {
+        if !should_recall(text) || self.server_is_down() {
+            return None;
+        }
+        let prompt = redact_sensitive_content(text);
+        let prompt = event::truncate(&prompt, PROMPT_QUERY_MAX_BYTES);
+        let wanted = self.with_state(|s| {
+            if s.prompt_budget_spent {
+                return false;
+            }
+            if self.event == "PreInvocation" {
+                let key = sha256_hex(&[prompt]);
+                if s.last_prompt_recall.as_ref() == Some(&key) {
+                    return false;
+                }
+                s.last_prompt_recall = Some(key);
+            }
+            true
+        })?;
+        if !wanted {
+            return None;
+        }
+        let mut context = self.work_context();
+        // Only this project's identity is needed; prompt text never goes through capture here.
+        context = WorkContext {
+            project_id: context.project_id.take(),
+            branch: context.branch.take(),
+            ..WorkContext::default()
+        };
+        let body = json!({"prompt": prompt, "session_id": self.session_id, "context": context});
+        let reply = Client::identified(
+            self.config.clone(),
+            RECALL_TIMEOUT,
+            self.agent,
+            ClientKind::Hook,
+        )
+        .post("/cairn-memory/session/prompt-recall", &body)
+        .ok()?;
+        if reply["budget_spent"] == true {
+            self.with_state(|s| s.prompt_budget_spent = true);
+        }
+        let text = reply["text"].as_str()?;
+        (!text.is_empty() && text.len() <= inject::TOPIC_MAX_BYTES).then(|| text.to_owned())
+    }
+
     /// This lookup has a short independent deadline and never queues observations or logs.
     fn command_recall(&self, failed: bool) -> Option<String> {
         let tool = self.payload.tool()?;
@@ -768,13 +839,16 @@ impl Hook<'_> {
         });
         let reply = Client::identified(
             self.config.clone(),
-            COMMAND_RECALL_TIMEOUT,
+            RECALL_TIMEOUT,
             self.agent,
             ClientKind::Hook,
         )
         .post("/cairn-memory/session/command-recall", &body)
         .ok()?;
         let text = reply["text"].as_str()?;
+        if failed && !text.is_empty() {
+            self.with_state(|s| s.command_error_recalled = true);
+        }
         (!text.is_empty() && text.len() <= inject::TOPIC_MAX_BYTES).then(|| text.to_owned())
     }
 
@@ -996,6 +1070,7 @@ impl Hook<'_> {
             .map_err(|message| eprintln!("cairn hook: {message}"))
             .ok()?;
         let worked = locked.state.worked;
+        let used_recall = locked.state.command_error_recalled;
         let nudged = locked.state.nudged;
         let saved = locked.state.saved;
         let automated = locked.state.automated
@@ -1010,7 +1085,7 @@ impl Hook<'_> {
         if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
             locked.delete();
         }
-        if worked {
+        if worked || used_recall {
             let mut body = json!({"session_id": self.session_id});
             if !automated {
                 body["nudge_asked"] = json!(nudged);

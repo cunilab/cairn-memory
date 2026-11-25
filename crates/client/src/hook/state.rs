@@ -41,6 +41,15 @@ pub struct SessionState {
     /// Rendered Antigravity cards held until the next model invocation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_command_recall: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_recall: Option<String>,
+    /// Antigravity repeats the same user input across its model invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_recall: Option<String>,
+    #[serde(default)]
+    pub prompt_budget_spent: bool,
+    #[serde(default)]
+    pub command_error_recalled: bool,
     /// Edits outside the project root. A count only; the paths are not stored.
     #[serde(default)]
     pub outside_edits: u32,

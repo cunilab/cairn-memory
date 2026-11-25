@@ -555,8 +555,9 @@ import json, sys
 normal, doubted = [json.load(open(path)) for path in sys.argv[1:3]]
 assert [row["id"] for row in normal] == [sys.argv[3]], normal
 assert normal[0]["trust"] == normal[0]["trust_level"] == "normal"
-assert normal[0]["usage"] == dict(fetched=0, shown=0, helpful=0, wrong=0,
-                                  detail_opened=0, last_used_at=None, last_shown_at=None)
+assert normal[0]["usage"] == dict(fetched=0, shown=0, pushed=0, push_used=0,
+                                  helpful=0, wrong=0, detail_opened=0,
+                                  last_used_at=None, last_shown_at=None)
 assert doubted == [], doubted
 PY
 branches_body="$workdir/branches.body"

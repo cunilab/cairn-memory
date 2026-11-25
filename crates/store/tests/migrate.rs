@@ -36,6 +36,7 @@ async fn migrate_twice_is_a_no_op() {
             "0018_memory_usage",
             "0019_session_shown",
             "0020_device_agent_hermes",
+            "0021_push_usage",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -44,9 +45,9 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 21);
+    assert_eq!(tables, 22);
     // Everything lives in the test schema, nothing leaks into public.
-    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs','session_shown')")
+    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs','session_shown','push_usage')")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
@@ -940,6 +941,10 @@ async fn fixes_migration_additive() {
             "0014_memory_owner_project_created",
             include_str!("../../../migrations/0014_memory_owner_project_created.sql"),
         ),
+        (
+            "0019_session_shown",
+            include_str!("../../../migrations/0019_session_shown.sql"),
+        ),
     ] {
         sqlx::raw_sql(sql).execute(store.pool()).await.unwrap();
         sqlx::query("INSERT INTO schema_version(version) VALUES ($1)")
@@ -956,6 +961,8 @@ async fn fixes_migration_additive() {
         INSERT INTO project_members (project_id,person_id) VALUES ('pr','p');
         INSERT INTO memories (memory_id,owner_id,scope,kind,title,summary,evidence_hash,identity_hash) VALUES
             ('m1','p','personal','fact','one','one','e1','i1'),('m2','p','personal','fact','two','two','e2','i2');
+        INSERT INTO session_shown(person_id,session_id,memory_id,source) VALUES
+            ('p','session1','m1','brief'),('p','session2','m1','topic'),('p','session3','m1','recall');
         INSERT INTO memory_aliases(memory_id,ord,source,text) VALUES ('m1',1,'agent','one');
         INSERT INTO entities(memory_id,kind,name) VALUES ('m1','term','one');
         INSERT INTO links(source_id,target_id,relation,origin) VALUES ('m1','m2','relates','agent');
@@ -1011,8 +1018,8 @@ async fn fixes_migration_additive() {
     versions.push("0016_project_archive".into());
     versions.push("0017_device_agents".into());
     versions.push("0018_memory_usage".into());
-    versions.push("0019_session_shown".into());
     versions.push("0020_device_agent_hermes".into());
+    versions.push("0021_push_usage".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1034,6 +1041,13 @@ async fn fixes_migration_additive() {
     .await
     .unwrap();
     assert_eq!(usage, (7, 2, 1, true, 0, 0, true));
+    let pushes: (i32, i32, bool) = sqlx::query_as(
+        "SELECT pushed, used, muted FROM push_usage WHERE person_id = 'p' AND memory_id = 'm1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(pushes, (3, 0, true));
     for (table, expected) in tables.into_iter().zip(before) {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(store.pool())

@@ -4,11 +4,11 @@ use crate::memory::{
     MEMORY_COLUMNS, MEMORY_SELECT, MEMORY_SELECT_WITH_DETAIL, SEARCH_VECTOR, collection_memory,
     entities_for, memory_from_row, search_matches, searchable, visible,
 };
-use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push};
+use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push, repeat_error, unmuted};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
-use cairn_core::memory::{Fields, Kind, Memory, Status};
+use cairn_core::memory::{Fields, Kind, Memory, Status, TrustLevel};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
@@ -19,6 +19,7 @@ use cairn_core::retrieve::gate::{self, GateInput};
 use cairn_core::retrieve::graph::{Graph, GraphFilter, build, node_cap};
 use cairn_core::retrieve::hybrid::{CANDIDATES_PER_CHANNEL, POOL, fuse};
 use cairn_core::retrieve::pack::{Cards, Hit, pack, sort_best_first};
+use cairn_core::retrieve::prompt::{matching_word, named_preference};
 use cairn_core::retrieve::rank::adjust;
 use serde::Serialize;
 use sqlx::postgres::PgArguments;
@@ -31,6 +32,8 @@ const NEIGHBOUR_SEEDS: usize = 32;
 /// Rules read for the brief: those on a recent file or its directory, then the newest of any.
 const BRIEF_NEAR_RULES: i32 = 100;
 const BRIEF_NEWEST_RULES: i32 = 200;
+// The normal gate admits half-coverage and cosine-only hits. A push needs stronger evidence.
+const PROMPT_RELEVANCE_MIN: f32 = 0.60;
 /// The proven and normal cases of Memory::trust, applied before any SQL limit.
 const PUSH_TRUST: &str =
     "m.status <> 'stale' AND m.rank <> 'candidate' AND coalesce(u.wrong, 0) = 0";
@@ -69,6 +72,7 @@ pub struct Narrow {
     pub scoped: bool,
     pub project: Option<String>,
     pub kind: Option<String>,
+    prompt_session: Option<String>,
 }
 
 impl Narrow {
@@ -76,10 +80,26 @@ impl Narrow {
         scoped: false,
         project: None,
         kind: None,
+        prompt_session: None,
     };
 
     /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
-    fn sql(&self, alias: &str, first: usize) -> String {
+    fn sql(&self, alias: &str, person: &str, first: usize) -> String {
+        if self.prompt_session.is_some() {
+            let session = first + 1;
+            return format!(
+                " AND (({alias}.scope = 'personal' AND {alias}.kind IN ('preference','rule'))
+                       OR ({alias}.scope = 'project' AND {alias}.project_id = ${first}
+                           AND {alias}.kind IN ('rule','decision','gotcha','procedure')))
+                  AND {alias}.status = 'active' AND {alias}.rank <> 'candidate'
+                  AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.memory_id = {alias}.memory_id AND u.wrong > 0)
+                  AND {}
+                  AND NOT EXISTS (SELECT 1 FROM session_shown s
+                       WHERE s.person_id = {person} AND s.session_id = ${session}
+                         AND s.memory_id = {alias}.memory_id)",
+                unmuted(alias, person)
+            );
+        }
         let mut next = first;
         let mut out = String::new();
         if self.scoped {
@@ -97,6 +117,9 @@ impl Narrow {
         &'q self,
         mut q: Query<'q, Postgres, PgArguments>,
     ) -> Query<'q, Postgres, PgArguments> {
+        if let Some(session) = &self.prompt_session {
+            return q.bind(self.project.as_deref()).bind(session);
+        }
         if self.scoped {
             q = q.bind(self.project.as_deref());
         }
@@ -113,6 +136,7 @@ impl From<&Filter> for Narrow {
             scoped: f.session_id.is_some() || f.context.is_some(),
             project: f.context.as_ref().and_then(|c| c.project_id.clone()),
             kind: f.kind.map(|k| k.as_str().to_owned()),
+            prompt_session: None,
         }
     }
 }
@@ -217,7 +241,7 @@ impl Store {
                           GROUP BY e.memory_id, m.created_at
                           ORDER BY score DESC, m.created_at DESC, e.memory_id LIMIT $4",
                         searchable("m", "$1", "$3"),
-                        narrow.sql("m", 5)
+                        narrow.sql("m", "$1", 5)
                     ))
                     .bind(person_id)
                     .bind(names)
@@ -274,7 +298,7 @@ impl Store {
 // upgrade by ranking per rare lexeme if a corpus has >2,000 matches for its rarest term.
 pub fn lexical_sql(narrow: &Narrow) -> String {
     let scope = searchable("m", "$1", "$3");
-    let narrowed = narrow.sql("m", 5);
+    let narrowed = narrow.sql("m", "$1", 5);
     let all = search_matches("q.all_terms");
     let any = search_matches("q.any_term");
     format!(
@@ -302,7 +326,7 @@ pub const ALIASES_IN_SEARCH: bool = false;
 /// The vector channel's statement; the plan test explains the same text.
 pub fn vector_sql(narrow: &Narrow) -> String {
     let scope = searchable("m", "$1", "$3");
-    let narrowed = narrow.sql("m", 5);
+    let narrowed = narrow.sql("m", "$1", 5);
     let memory = format!(
         "SELECT m.memory_id, m.created_at, m.embedding <=> $2::vector AS dist
            FROM memories m
@@ -378,7 +402,7 @@ impl Store {
         filter: &Filter,
     ) -> Result<Cards> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter)
+            .candidate_pool(person_id, query, vector, filter, None)
             .await?;
         let mut hits = rank(&pool, filter, cairn_core::id::now_seconds());
         if filter.kind == Some(Kind::Handoff) {
@@ -387,6 +411,7 @@ impl Store {
         let cards = pack(&hits, limit, budget);
         let ids: Vec<String> = cards.results.iter().map(|c| c.id.clone()).collect();
         self.mark_fetched(&ids).await?;
+        self.record_push_use(person_id, None, &ids, true).await?;
         Ok(cards)
     }
 
@@ -399,7 +424,7 @@ impl Store {
         filter: &Filter,
     ) -> Result<Vec<Trace>> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter)
+            .candidate_pool(person_id, query, vector, filter, None)
             .await?;
         Ok(pool
             .fused
@@ -426,6 +451,7 @@ impl Store {
         query: &str,
         vector: Option<&[f32]>,
         filter: &Filter,
+        prompt_session: Option<&str>,
     ) -> Result<Pool> {
         if query.trim().is_empty() {
             return Err(crate::StoreError::Validation(
@@ -434,7 +460,8 @@ impl Store {
         }
         let projects = self.member_projects(person_id).await?;
         let per_channel = CANDIDATES_PER_CHANNEL as i64;
-        let narrow = Narrow::from(filter);
+        let mut narrow = Narrow::from(filter);
+        narrow.prompt_session = prompt_session.map(str::to_owned);
         let lexical = self
             .lexical_candidates(person_id, &projects, query, per_channel, &narrow)
             .await?;
@@ -479,7 +506,14 @@ impl Store {
         fused.truncate(POOL);
         let ids: Vec<String> = fused.iter().map(|(id, _)| id.clone()).collect();
         let by_id = self
-            .load_candidates(person_id, &projects, &ids, query, vector)
+            .load_candidates_inner(
+                person_id,
+                &projects,
+                &ids,
+                query,
+                vector,
+                prompt_session.is_none(),
+            )
             .await?
             .into_iter()
             .map(|c| (c.memory.id.clone(), c))
@@ -502,6 +536,22 @@ impl Store {
         query: &str,
         vector: Option<&[f32]>,
     ) -> Result<Vec<Candidate>> {
+        self.load_candidates_inner(person_id, projects, ids, query, vector, true)
+            .await
+    }
+
+    async fn load_candidates_inner(
+        &self,
+        person_id: &str,
+        projects: &[String],
+        ids: &[String],
+        query: &str,
+        vector: Option<&[f32]>,
+        with_attachments: bool,
+    ) -> Result<Vec<Candidate>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         // The gate sees the best of the memory's own vector and its aliases' (`least` skips NULLs).
         let nearest = if ALIASES_IN_SEARCH {
             "least(m.embedding <=> $4::vector,
@@ -541,7 +591,9 @@ impl Store {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .unzip();
-        self.attach(person_id, &mut memories, false).await?;
+        if with_attachments {
+            self.attach(person_id, &mut memories, false).await?;
+        }
         sources
             .into_iter()
             .zip(memories)
@@ -580,7 +632,7 @@ impl Store {
                       WHERE (l.source_id = ANY($2) OR l.target_id = ANY($2)) AND {}{}
                       ORDER BY n.created_at DESC, n.memory_id, l.source_id, l.target_id",
                     searchable("n", "$1", "$3"),
-                    narrow.sql("n", 4)
+                    narrow.sql("n", "$1", 4)
                 ))
                 .bind(person_id)
                 .bind(&ids)
@@ -617,6 +669,126 @@ impl Store {
             .collect())
     }
 
+    pub async fn push_budget_spent(&self, person_id: &str, session_id: &str) -> Result<bool> {
+        let shown: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM session_shown WHERE person_id = $1 AND session_id = $2",
+        )
+        .bind(person_id)
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(shown >= SESSION_PUSH_LIMIT as i64)
+    }
+
+    /// Automatic prompt recall shares the hybrid candidates and scoring, without marking a fetch.
+    pub async fn prompt_recall(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        context: WorkContext,
+        prompt: &str,
+        vector: Option<&[f32]>,
+    ) -> Result<(String, bool)> {
+        let filter = Filter {
+            context: Some(context.clone()),
+            ..Filter::default()
+        };
+        let pool = self
+            .candidate_pool(person_id, prompt, vector, &filter, Some(session_id))
+            .await?;
+        let now = cairn_core::id::now_seconds();
+        let mut ranked = Vec::new();
+        for (id, _) in &pool.fused {
+            let Some(candidate) = pool.by_id.get(id) else {
+                continue;
+            };
+            let memory = &candidate.memory;
+            if memory.status != Status::Active
+                || !matches!(memory.trust().0, TrustLevel::Normal | TrustLevel::Proven)
+            {
+                continue;
+            }
+            let input = gate_input(&pool, id, candidate);
+            let named = (memory.kind == Kind::Preference)
+                .then(|| named_preference(prompt, &memory.title, &memory.summary))
+                .flatten();
+            let relevance = if named.is_some() {
+                gate::relevance(&input).max(gate::ENTITY_RELEVANCE)
+            } else if gate::keep(&input) {
+                gate::relevance(&input)
+            } else {
+                continue;
+            };
+            if relevance >= PROMPT_RELEVANCE_MIN {
+                let why = named.or_else(|| matching_word(prompt, &memory.title, &memory.summary));
+                ranked.push((
+                    relevance * (1.0 + adjust(memory, &context, now)),
+                    memory,
+                    why,
+                ));
+            }
+        }
+        if ranked.is_empty() {
+            return Ok((String::new(), false));
+        }
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        // Rank outside the lock, then recheck the session ledger and mute state before committing.
+        let mut tx = self.pool.begin().await?;
+        let session = Some(session_id);
+        let shown = already_shown(&mut tx, person_id, session).await?;
+        let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
+        if remaining == 0 {
+            return Ok((String::new(), true));
+        }
+        let ids: Vec<_> = ranked.iter().map(|(_, memory, _)| &memory.id).collect();
+        let mut narrow = Narrow::from(&filter);
+        narrow.prompt_session = Some(session_id.to_owned());
+        let statement = format!(
+            "SELECT m.memory_id FROM memories m WHERE m.memory_id = ANY($2) AND {}{}",
+            visible("m", "$1"),
+            narrow.sql("m", "$1", 3)
+        );
+        let eligible: HashSet<String> = sqlx::query_scalar(&statement)
+            .bind(person_id)
+            .bind(ids)
+            .bind(&narrow.project)
+            .bind(session_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+        let chosen: Vec<_> = ranked
+            .into_iter()
+            .filter(|(_, memory, _)| eligible.contains(&memory.id))
+            .take(2.min(remaining))
+            .map(|(_, memory, why)| {
+                let why = why.map_or_else(
+                    || "matches your prompt".to_owned(),
+                    |word| format!("matches \"{word}\" in your prompt"),
+                );
+                (
+                    memory,
+                    &memory.title[..memory.title.floor_char_boundary(40)],
+                    &memory.summary[..memory.summary.floor_char_boundary(34)],
+                    why,
+                )
+            })
+            .collect();
+        let notes: Vec<_> = chosen
+            .iter()
+            .map(|(_, title, summary, why)| (*title, *summary, why.as_str()))
+            .collect();
+        let (text, count) = topic_notes("your prompt", &notes);
+        let ids: Vec<_> = chosen
+            .into_iter()
+            .take(count)
+            .map(|(memory, ..)| memory.id.clone())
+            .collect();
+        finish_push(tx, person_id, session, "prompt", &ids).await?;
+        Ok((text, count == remaining))
+    }
+
     /// The fenced brief a hook injects at session start: this branch's last handoff, the project's
     /// rules, decisions and gotchas ranked by `recent_files`, branch and feedback, and the
     /// person's preferences. Nothing is counted as fetched. Each section has its own query and
@@ -629,6 +801,7 @@ impl Store {
         recent_files: &[String],
         session_id: Option<&str>,
     ) -> Result<SessionBrief> {
+        let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
         let shown = already_shown(&mut tx, person_id, session_id).await?;
         let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
@@ -658,7 +831,7 @@ impl Store {
         let newest = "ORDER BY m.created_at DESC, m.memory_id";
         let handoff = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status <> 'forgotten' AND {PUSH_TRUST} AND m.kind = 'handoff' AND m.owner_id = $1
+              WHERE {} AND m.status <> 'forgotten' AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'handoff' AND m.owner_id = $1
                 AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
                 AND m.project_id IS NOT DISTINCT FROM $2
               {newest} LIMIT 50",
@@ -673,7 +846,7 @@ impl Store {
         .await?;
         let preferences = sqlx::query(&format!(
             "{MEMORY_SELECT}
-              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.kind = 'preference' AND m.scope = 'personal'
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'preference' AND m.scope = 'personal'
                 AND m.owner_id = $1 AND m.memory_id <> ALL($2)
               {newest} LIMIT 2",
             visible("m", "$1")
@@ -687,7 +860,7 @@ impl Store {
         let project_items = |extra: &str, order: &str, limit: i32| {
             format!(
                 "{MEMORY_SELECT}
-                  WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.scope = 'project' AND m.project_id = $2
+                  WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.scope = 'project' AND m.project_id = $2
                     AND m.kind IN ('rule','decision','gotcha')
                     AND (m.repo_branch IS NULL OR m.repo_branch = $3
                          OR CASE WHEN $4::text IS NULL THEN m.repo_branch IN ('main','master')
@@ -814,16 +987,29 @@ impl Store {
             _ => None,
         };
 
+        let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
         let session = Some(session_id);
         let shown = already_shown(&mut tx, person_id, session).await?;
+        let error_source = phrase.map(|line| {
+            let line = line
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            format!("error:{}", sha256_hex(&[&line]))
+        });
+        if let Some(source) = &error_source {
+            repeat_error(&mut tx, person_id, session_id, source).await?;
+        }
         let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
         if limit == 0 {
+            tx.commit().await?;
             return Ok(String::new());
         }
         // The ledger lock covers both the once-per-command check and the card reservation.
         let source = if failure.is_some() {
-            "recall".to_owned()
+            error_source.unwrap_or_else(|| "recall".to_owned())
         } else {
             let source = format!("command:{}", sha256_hex(&[&command]));
             let sent: bool = sqlx::query_scalar(
@@ -851,7 +1037,7 @@ impl Store {
         let sql = format!(
             "SELECT m.memory_id, m.kind, m.title, m.summary
                FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id
-              WHERE {} AND m.status = 'active' AND {PUSH_TRUST}
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted}
                 AND (m.scope <> 'project' OR m.project_id = $2)
                 AND m.kind IN ('gotcha', 'procedure') AND m.memory_id <> ALL($4)
                 AND {exact_command} {error_match}
@@ -908,6 +1094,7 @@ impl Store {
         context: &WorkContext,
         session_id: Option<&str>,
     ) -> Result<Topic> {
+        let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
         let shown = already_shown(&mut tx, person_id, session_id).await?;
         let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
@@ -930,7 +1117,7 @@ impl Store {
                FROM memories m
                JOIN entities e ON e.memory_id = m.memory_id
                LEFT JOIN usage u ON u.memory_id = m.memory_id
-              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND m.kind <> 'handoff'
+              WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.kind <> 'handoff'
                 AND m.memory_id <> ALL($6)
                 AND ((e.kind = 'file' AND e.name = $2) OR (e.kind = 'module' AND e.name = $4)
                      OR (e.kind = 'symbol' AND e.name = ANY($5)

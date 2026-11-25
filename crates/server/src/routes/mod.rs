@@ -143,5 +143,9 @@ pub fn router() -> Router<AppState> {
             "/cairn-memory/session/command-recall",
             post(retrieve::command_recall),
         )
+        .route(
+            "/cairn-memory/session/prompt-recall",
+            post(retrieve::prompt_recall),
+        )
         .route("/cairn-memory/graph", get(retrieve::graph))
 }

@@ -9,4 +9,6 @@ pub mod gate;
 pub mod graph;
 pub mod hybrid;
 pub mod pack;
+pub mod prompt;
+
 pub mod rank;

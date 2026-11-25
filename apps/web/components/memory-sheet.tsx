@@ -197,8 +197,10 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
           <dd>{memory.trust}</dd>
           <dt className="text-muted-foreground">Usage</dt>
           <dd className="tabular-nums">
-            Shown {memory.usage.shown} · used {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong} · detail opened {memory.usage.detail_opened}
+            Fetched {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong} · detail opened {memory.usage.detail_opened}
           </dd>
+          <dt className="text-muted-foreground">Automatic recall</dt>
+          <dd className="tabular-nums">pushed {memory.usage.pushed ?? 0}× · used {memory.usage.push_used ?? 0}×</dd>
           <dt className="text-muted-foreground">Last shown</dt>
           <dd><Time value={memory.usage.last_shown_at} /></dd>
           <dt className="text-muted-foreground">Last used</dt>

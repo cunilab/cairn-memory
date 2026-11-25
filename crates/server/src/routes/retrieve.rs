@@ -3,18 +3,20 @@ use crate::auth::Agent;
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Query, State};
-use cairn_core::capture::WorkContext;
+use cairn_core::capture::{WorkContext, redact_sensitive_content};
 use cairn_core::memory::{Kind, Relation, Scope};
 use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use cairn_core::retrieve::command::ERROR_TAIL_MAX_BYTES;
 use cairn_core::retrieve::filter::Filter;
 use cairn_core::retrieve::graph::{Graph, GraphFilter};
 use cairn_core::retrieve::pack::{BUDGET_DEFAULT, Cards};
+use cairn_core::retrieve::prompt::{PROMPT_QUERY_MAX_BYTES, should_recall};
 use cairn_store::usage::Lookup;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 const MAX_LIMIT: usize = 20;
+const RECALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 
 fn five() -> usize {
     5
@@ -128,7 +130,7 @@ async fn record(state: &AppState, person_id: &str, lookup: Lookup, reply: &Value
     }
 }
 
-fn push_session_id(id: Option<&str>) -> Result<Option<&str>, ApiError> {
+pub(super) fn push_session_id(id: Option<&str>) -> Result<Option<&str>, ApiError> {
     if id.is_some_and(|id| id.trim().is_empty() || id.len() > 512 || id.contains('\0')) {
         return Err(ApiError::invalid(
             "session_id must be 1–512 bytes with no null bytes",
@@ -260,11 +262,60 @@ pub async fn command_recall(
         &body.command,
         body.error_tail.as_deref(),
     );
-    let text = match tokio::time::timeout(std::time::Duration::from_millis(750), recall).await {
+    let text = match tokio::time::timeout(RECALL_TIMEOUT, recall).await {
         Ok(result) => result?,
         Err(_) => String::new(),
     };
     Ok(Json(json!({"text": text})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptRecall {
+    session_id: String,
+    prompt: String,
+    #[serde(default)]
+    context: WorkContext,
+}
+
+pub async fn prompt_recall(
+    State(state): State<AppState>,
+    Agent(account): Agent,
+    Json(body): Json<PromptRecall>,
+) -> ApiResult<Value> {
+    push_session_id(Some(&body.session_id))?;
+    if body.prompt.len() > PROMPT_QUERY_MAX_BYTES || body.prompt.contains('\0') {
+        return Ok(Json(json!({"text": ""})));
+    }
+    let prompt = redact_sensitive_content(&body.prompt);
+    if !should_recall(&prompt) {
+        return Ok(Json(json!({"text": ""})));
+    }
+    let recall = async {
+        if state
+            .store
+            .push_budget_spent(&account.person_id, &body.session_id)
+            .await?
+        {
+            return Ok::<_, cairn_store::StoreError>((String::new(), true));
+        }
+        let embedding = vector(&state, &prompt).await;
+        state
+            .store
+            .prompt_recall(
+                &account.person_id,
+                &body.session_id,
+                body.context,
+                &prompt,
+                embedding.as_deref(),
+            )
+            .await
+    };
+    let (text, spent) = match tokio::time::timeout(RECALL_TIMEOUT, recall).await {
+        Ok(result) => result?,
+        Err(_) => (String::new(), false),
+    };
+    Ok(Json(json!({"text": text, "budget_spent": spent})))
 }
 
 pub async fn graph(

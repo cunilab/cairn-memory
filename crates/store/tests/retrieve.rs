@@ -2769,3 +2769,98 @@ async fn command_recall_uses_strict_matches_and_the_shared_session_ledger() {
     assert!(shown >= 3, "{shown}");
     db.finish().await;
 }
+
+#[tokio::test]
+async fn command_error_uses_settle_and_revoke_without_overwriting_explicit_use() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("error-use").await;
+    let (project, _) = store
+        .init_project(&person, "local:e2e-error-use", Some("E2E error use"))
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        commands: vec!["cargo test --workspace".into()],
+        ..WorkContext::default()
+    };
+    let memory = store
+        .save(
+            &person,
+            save_input(serde_json::json!({
+                "kind": "gotcha", "title":"Linker target cache",
+                "summary": "Error: poisoned target directory",
+                "reason": "A stale locker holds the build directory.",
+                "fields":{"fix":"Restart the linker to remove its stale lock."}
+            })),
+            &context,
+        )
+        .await
+        .unwrap();
+    let failure = "Error: poisoned target directory";
+    let recall = |session| {
+        store.command_recall(
+            &person,
+            session,
+            context.project_id.as_deref(),
+            "cargo test --workspace",
+            Some(failure),
+        )
+    };
+    let state = |session| {
+        sqlx::query_as::<_, (bool, bool, bool)>(
+        "SELECT used_at IS NOT NULL, inferred_use, error_repeated FROM session_shown WHERE session_id = $1"
+    ).bind(session).fetch_one(store.pool())
+    };
+    assert!(!recall("repeated").await.unwrap().is_empty());
+    assert!(recall("repeated").await.unwrap().is_empty());
+    store.end_session(&person, "repeated").await.unwrap();
+    assert_eq!(state("repeated").await.unwrap(), (false, false, true));
+
+    assert!(!recall("resolved").await.unwrap().is_empty());
+    store.end_session(&person, "resolved").await.unwrap();
+    assert_eq!(state("resolved").await.unwrap(), (true, true, false));
+    let later_command = store
+        .command_recall(
+            &person,
+            "resolved",
+            context.project_id.as_deref(),
+            "cargo build",
+            Some(failure),
+        )
+        .await
+        .unwrap();
+    assert!(later_command.is_empty());
+    assert_eq!(state("resolved").await.unwrap(), (false, false, true));
+
+    assert!(!recall("explicit").await.unwrap().is_empty());
+    assert!(recall("muted").await.unwrap().is_empty());
+    store
+        .record_push_use(
+            &person,
+            Some("explicit"),
+            std::slice::from_ref(&memory.id),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(recall("explicit").await.unwrap().is_empty());
+    store.end_session(&person, "explicit").await.unwrap();
+    assert_eq!(state("explicit").await.unwrap(), (true, false, true));
+    assert!(!recall("idle").await.unwrap().is_empty());
+    sqlx::query("UPDATE session_shown SET shown_at = now() - interval '8 days'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.sweep().await.unwrap();
+    let counts: (i32, i32, bool) =
+        sqlx::query_as("SELECT pushed, used, muted FROM push_usage WHERE memory_id = $1")
+            .bind(&memory.id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(counts, (4, 2, false));
+    db.finish().await;
+}

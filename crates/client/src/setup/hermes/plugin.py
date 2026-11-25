@@ -33,10 +33,12 @@ def register(ctx):
     def on_prompt(session_id, user_message, is_first_turn=False, **_):
         # Hermes ignores on_session_start output. Its first prompt can carry the brief.
         reply = forward("SessionStart", session_id) if is_first_turn else None
-        forward("UserPromptSubmit", session_id, user_message=user_message)
+        recall = forward("UserPromptSubmit", session_id, user_message=user_message)
         notes = list(pending.pop(session_id, {}).values())
         if text := context(reply):
             notes.insert(0, text)
+        if text := context(recall):
+            notes.append(text)
         if notes:
             return {"context": "\n".join(notes)}
 

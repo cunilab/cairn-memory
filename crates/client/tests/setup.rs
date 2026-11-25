@@ -500,7 +500,7 @@ fn claude_install_remove_keeps_others() {
     );
     assert_eq!(
         post[1]["matcher"],
-        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
+        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get|mcp__cairn__memory_feedback"
     );
     let mcp = &home.json(".claude/.claude.json")["mcpServers"];
     assert_eq!(mcp["cairn"]["command"], EXE);

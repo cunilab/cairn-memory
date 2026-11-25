@@ -139,6 +139,7 @@ impl Payload {
         let name = name
             .strip_prefix("cairn__")
             .or_else(|| name.strip_prefix("mcp_cairn_"))
+            .or_else(|| name.strip_prefix("cairn_"))
             .map_or_else(
                 || canonical_tool(name),
                 |tool| format!("mcp__cairn__{tool}"),
@@ -161,9 +162,13 @@ impl Payload {
         })
     }
 
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.text("prompt").or_else(|| self.text("lastUserInput"))
+    }
+
     /// `kind=prompt`: the redacted prompt, clipped to 8 KiB.
     pub fn prompt(&self) -> Option<Capture> {
-        let prompt = self.text("prompt").or_else(|| self.text("lastUserInput"))?;
+        let prompt = self.prompt_text()?;
         Some(Capture::new(
             CaptureKind::Prompt,
             text_of(prompt, PROMPT_MAX_BYTES),
@@ -310,6 +315,14 @@ impl Tool<'_> {
             "search"
         } else if self.name == "mcp__cairn__memory_get" {
             "get"
+        } else if self.name == "mcp__cairn__memory_feedback" {
+            let reply = self.mcp_response();
+            let id = reply.as_ref().and_then(|v| v["id"].as_str()).or_else(|| {
+                (self.antigravity_ok == Some(true))
+                    .then(|| self.input_text("id"))
+                    .flatten()
+            })?;
+            return Some(serde_json::json!({"kind": "feedback", "used_ids": [id]}));
         } else {
             return None;
         };
@@ -341,25 +354,26 @@ impl Tool<'_> {
                 })
             })
             .and_then(Value::as_array);
-        let ids: Vec<String> = if kind == "get" {
-            input_ids
+        let returned_ids: Vec<_> = records
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.get("id").and_then(Value::as_str))
+            .take(20)
+            .collect();
+        let hit = records.map(|r| !r.is_empty());
+        let ids: Vec<_> = if kind == "get" {
+            input_ids.iter().map(String::as_str).collect()
         } else {
-            records
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.get("id").and_then(Value::as_str))
-                .take(20)
-                .map(str::to_owned)
-                .collect()
+            returned_ids.clone()
         };
-        let hit = records.map(|r| {
-            if kind == "search" {
-                !ids.is_empty()
-            } else {
-                !r.is_empty()
-            }
-        });
-        Some(serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit}))
+        let used_ids = if kind == "get" && records.is_none() && self.antigravity_ok == Some(true) {
+            &ids
+        } else {
+            &returned_ids
+        };
+        Some(
+            serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit,"used_ids":used_ids}),
+        )
     }
 
     fn command_text(&self) -> Option<&str> {

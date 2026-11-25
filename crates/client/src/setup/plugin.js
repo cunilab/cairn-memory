@@ -119,7 +119,7 @@ export default {
       const directory = await directoryFor(ctx, sessionID)
       const text = event && event.prompt && event.prompt.text
       if (!directory || typeof text !== "string" || !text) return
-      await runHook({ hook_event_name: "UserPromptSubmit", session_id: sessionID, cwd: directory, prompt: text })
+      queue(sessionID, await runHook({ hook_event_name: "UserPromptSubmit", session_id: sessionID, cwd: directory, prompt: text }))
     })
     await ctx.session.hook("context", async (event) => {
       const sessionID = event && event.sessionID
@@ -151,7 +151,20 @@ export default {
           if (!directory || ignored(directory)) return
           const input = structuredInput(event && (event.input || event.args || event.tool_input))
           const payload = { hook_event_name: hookEvent, session_id: sessionID, cwd: directory, tool_name: name, tool_input: input }
-          if (hookEvent === "PostToolUse") payload.tool_response = structuredResponse(event)
+          if (hookEvent === "PostToolUse") {
+            const mcpName = name.replace(/^cairn__?/, "mcp__cairn__")
+            if (mcpName.startsWith("mcp__cairn__")) {
+              payload.tool_name = mcpName
+              for (const key of ["ids", "id", "query"]) {
+                const value = (event.input || event.args || event.tool_input || {})[key]
+                if (typeof value === "string" || Array.isArray(value)) input[key] = value
+              }
+              const result = event.output || event.result || event.tool_response
+              payload.tool_response = result?.isError ? result : (result?.structuredContent || result?.output || result)
+            } else {
+              payload.tool_response = structuredResponse(event)
+            }
+          }
           queue(sessionID, await runHook(payload))
         } catch (error) {}
       }

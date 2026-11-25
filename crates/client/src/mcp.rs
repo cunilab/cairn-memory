@@ -62,6 +62,7 @@ pub struct McpServer {
     /// What `client` was built from; a 401 reloads the file and retries when it changed.
     config: Config,
     initialized: bool,
+    session_id: Option<String>,
 }
 
 impl McpServer {
@@ -70,6 +71,7 @@ impl McpServer {
             client: Client::identified(config.clone(), crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
             config,
             initialized: false,
+            session_id: None,
         }
     }
 
@@ -214,13 +216,14 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or(PROTOCOL_VERSION);
 
-        let session = params
+        self.session_id = params
             .as_ref()
             .and_then(|params| params.pointer("/_meta/sessionId"))
             .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty() && id.len() <= 512 && !id.contains('\0'));
+            .filter(|id| !id.trim().is_empty() && id.len() <= 512 && !id.contains('\0'))
+            .map(str::to_owned);
         let mut instructions = tools::instructions().to_owned();
-        if let Some(brief) = self.checkout_brief(session) {
+        if let Some(brief) = self.checkout_brief(self.session_id.as_deref()) {
             instructions.push_str("\n\n");
             instructions.push_str(&brief);
         }
@@ -255,11 +258,16 @@ impl McpServer {
         let Some(tool) = tools::find_by_name(name) else {
             return rpc_error(id, -32602, format!("unknown tool: {name}"));
         };
-        let arguments = match params.get("arguments") {
+        let mut arguments = match params.get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
+        if let Some(session) = &self.session_id
+            && matches!(name, "memory_get" | "memory_feedback")
+        {
+            arguments.insert("session_id".to_owned(), json!(session));
+        }
         match self.call_with_fresh_config(tool, arguments) {
             Ok(value) => rpc_result(id, present::success(&value)),
             Err(error) => rpc_result(id, present::failure(&error.to_string())),
