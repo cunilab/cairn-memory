@@ -136,10 +136,13 @@ fn expected(event: &str, agent: &str, home: &Home) -> String {
 fn claude_install_remove_keeps_others() {
     let home = Home::new("claude", false);
     let other = json!({"matcher": "Read", "hooks": [{"type": "command", "command": "my-helper"}]});
-    home.write(
-        ".claude/settings.json",
-        &json!({"theme": "dark", "hooks": {"PostToolUse": [other]}}).to_string(),
-    );
+    let permissions = json!({
+        "allow": ["WebFetch", "mcp__another__*"],
+        "deny": ["Read(./.env)"]
+    });
+    let original =
+        json!({"theme": "dark", "hooks": {"PostToolUse": [other]}, "permissions": permissions});
+    home.write(".claude/settings.json", &original.to_string());
     home.write(
         ".claude/.claude.json",
         r#"{"mcpServers":{"other":{"command":"other"}}}"#,
@@ -147,6 +150,10 @@ fn claude_install_remove_keeps_others() {
     home.ok("claude", false);
 
     let settings = home.json(".claude/settings.json");
+    assert_eq!(
+        settings["permissions"],
+        json!({"allow": ["WebFetch", "mcp__another__*", "mcp__cairn"], "deny": ["Read(./.env)"]})
+    );
     for event in [
         "SessionStart",
         "UserPromptSubmit",
@@ -183,14 +190,36 @@ fn claude_install_remove_keeps_others() {
     assert_eq!(before, home.snapshot(".claude"));
 
     home.ok("claude", true);
-    assert_eq!(
-        home.json(".claude/settings.json"),
-        json!({"theme": "dark", "hooks": {"PostToolUse": [other]}})
-    );
+    assert_eq!(home.json(".claude/settings.json"), original);
     assert_eq!(
         home.json(".claude/.claude.json"),
         json!({"mcpServers": {"other": {"command": "other"}}})
     );
+}
+
+#[test]
+fn claude_remove_preserves_preexisting_permission_containers_and_rules() {
+    for (i, (permissions, rule)) in [
+        (json!({}), "mcp__cairn"),
+        (json!({"allow": []}), "mcp__cairn"),
+        (json!({"allow": ["mcp__cairn__*"]}), "mcp__cairn__*"),
+        (json!({"allow": ["mcp__cairn"]}), "mcp__cairn"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let home = Home::new(&format!("claude-permissions-{i}"), false);
+        let original = json!({"permissions": permissions});
+        home.write(".claude/settings.json", &original.to_string());
+
+        home.ok("claude", false);
+        assert_eq!(
+            home.json(".claude/settings.json")["permissions"]["allow"],
+            json!([rule])
+        );
+        home.ok("claude", true);
+        assert_eq!(home.json(".claude/settings.json"), original);
+    }
 }
 
 #[test]

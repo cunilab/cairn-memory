@@ -60,3 +60,5 @@ The bounded outbox in the configuration directory (or `CAIRN_OUTBOX`) is bound t
 ## Setup
 
 Run `cairn setup <url> --agent claude|codex|opencode` and supply the device token on stdin. Setup writes managed hook and MCP entries, preserving unrelated configuration. Codex and OpenCode setup need their native CLI on `PATH`; Codex also requires trusting the hooks. `cairn doctor` checks the configuration. Re-run setup after upgrading to refresh the managed integration.
+
+Claude Code setup adds `mcp__cairn` to `permissions.allow` in `settings.json` so Cairn MCP calls can run in `claude -p`. An existing Cairn server-wide allow rule is reused. Setup removal revokes the rule only if Cairn added it.

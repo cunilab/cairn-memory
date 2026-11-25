@@ -1,5 +1,5 @@
-//! `cairn setup --agent`: installs or removes the Cairn MCP entry, instructions and hook
-//! commands in Claude Code, Codex and OpenCode (docs/reference/hook.md#setup). Only Cairn-marked entries are
+//! `cairn setup --agent`: installs or removes Cairn's MCP entry, permissions, instructions and
+//! hooks in Claude Code, Codex and OpenCode (docs/reference/hook.md#setup). Only Cairn-marked entries are
 //! ever replaced. All files are read and checked first; a native MCP command runs next, then the
 //! files are written, so a conflict leaves every file as it was. Credentials stay in the Cairn
 //! config; no host file holds one.
@@ -39,6 +39,7 @@ type After = Box<dyn FnOnce(&mut Vec<(PathBuf, String)>) -> R<()>>;
 pub(crate) struct Ctx<'a> {
     agent: &'a str,
     remove: bool,
+    refresh: bool,
     exe: &'a str,
     config: &'a Path,
     home: PathBuf,
@@ -395,7 +396,13 @@ fn apply(ctx: &Ctx) -> R<String> {
     ))
 }
 
-fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Result<String, Error> {
+fn configure_with(
+    agent: &str,
+    remove: bool,
+    refresh: bool,
+    exe: &Path,
+    config: &Path,
+) -> Result<String, Error> {
     let home = env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .or_else(|| env::var_os("USERPROFILE"))
@@ -406,6 +413,7 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
     let ctx = Ctx {
         agent,
         remove,
+        refresh,
         exe: &exe,
         config: &config,
         home,
@@ -416,7 +424,7 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
 /// Installs or removes one agent's integration for this executable and the selected config.
 pub fn configure(agent: &str, remove: bool) -> Result<String, Error> {
     let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
-    configure_with(agent, remove, &exe, &selected_config_path()?)
+    configure_with(agent, remove, false, &exe, &selected_config_path()?)
 }
 
 /// Where each agent keeps the file that proves a Cairn hook is installed.
@@ -459,7 +467,7 @@ pub fn refresh(exe: &Path) -> Vec<String> {
         if !fs::read_to_string(file).is_ok_and(|text| text.contains(MANAGED_FLAG)) {
             continue;
         }
-        lines.push(match configure_with(agent, false, exe, &config) {
+        lines.push(match configure_with(agent, false, true, exe, &config) {
             Ok(done) => done,
             Err(error) => format!(
                 "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"
