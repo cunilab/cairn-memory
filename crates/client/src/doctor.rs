@@ -140,6 +140,7 @@ fn agent_checks(home: &Path) -> Vec<Check> {
     let opencode = dir("XDG_CONFIG_HOME", home.join(".config")).join("opencode");
     let grok = crate::setup::grok::config_dir(home);
     let antigravity = crate::setup::antigravity::config_dir(home);
+    let hermes = crate::setup::hermes::config_dir(home);
     // (agent, config dir, file holding the MCP entry, files holding the hook command)
     let agents = [
         (
@@ -174,6 +175,12 @@ fn agent_checks(home: &Path) -> Vec<Check> {
             antigravity.clone(),
             vec![antigravity.join("mcp_config.json")],
             vec![crate::setup::antigravity::hook_file(home)],
+        ),
+        (
+            "hermes",
+            hermes.clone(),
+            vec![hermes.join("config.yaml")],
+            vec![crate::setup::hermes::hook_file(home)],
         ),
     ];
     let has = |files: &[PathBuf], marker: &str| {

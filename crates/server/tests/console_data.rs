@@ -408,6 +408,7 @@ async fn devices_report_client_health() {
         "mcp",
         "grok",
         "antigravity",
+        "hermes",
     ] {
         tokens.push((name, app.device(&admin, name).await));
     }
@@ -432,7 +433,7 @@ async fn devices_report_client_health() {
     hook("legacy", "Python-urllib/3.12").await;
     hook("quiet", &current("opencode; hook")).await;
     hook("mcp", &current("mcp")).await;
-    for agent in ["grok", "antigravity"] {
+    for agent in ["grok", "antigravity", "hermes"] {
         hook(agent, &current(&format!("{agent}; hook"))).await;
     }
     sql(
@@ -464,7 +465,7 @@ async fn devices_report_client_health() {
         (Some("working"), Some("codex"))
     );
     assert_eq!(working["client_version"], SERVER_VERSION);
-    for agent in ["grok", "antigravity"] {
+    for agent in ["grok", "antigravity", "hermes"] {
         let device = by(agent);
         assert_eq!(device["agent"], agent);
         assert_eq!(device["health"], "working");

@@ -159,7 +159,14 @@ impl ClientKind {
     }
 }
 
-pub const AGENTS: [&str; 5] = ["claude", "codex", "opencode", "grok", "antigravity"];
+pub const AGENTS: [&str; 6] = [
+    "claude",
+    "codex",
+    "opencode",
+    "grok",
+    "antigravity",
+    "hermes",
+];
 
 pub fn client_user_agent(version: &str, agent: &str, kind: ClientKind) -> String {
     if AGENTS.contains(&agent) {

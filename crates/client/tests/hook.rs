@@ -480,6 +480,100 @@ fn antigravity_hooks_capture_native_payloads_and_checkpoint_on_stop() {
     );
 }
 
+#[test]
+fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
+    let fake = fake();
+    let env = Env::new("hermes-native-hook", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload = json!({"session_id": "hermes-session", "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home)
+                .env("CAIRN_CAPTURE_ASSISTANT", "1")
+                .args(["hook", event, "--agent", "hermes"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        out
+    };
+    assert_eq!(
+        injected(&invoke("SessionStart", json!({}))).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
+    invoke(
+        "UserPromptSubmit",
+        json!({"user_message": "Edit and test the widget"}),
+    );
+    let terminal = json!({
+        "tool_name": "terminal", "tool_call_id": "cmd-1", "args": {"command": "cargo test"},
+        "result": r#"{"exit_code":101,"output":"","error":"first error"}"#,
+        "status": "error", "error_message": "first error",
+    });
+    assert!(invoke("PreToolUse", terminal.clone()).stdout.is_empty());
+    assert_eq!(fake.observed().len(), 1);
+    invoke("PostToolUse", terminal);
+    for (status, path) in [("blocked", "blocked.rs"), ("ok", "widget.rs")] {
+        invoke(
+            "PostToolUse",
+            json!({
+                "tool_name": "write_file", "tool_call_id": path,
+                "args": {"path": path, "content": "written contents"}, "result": "{}", "status": status,
+            }),
+        );
+    }
+    invoke(
+        "PostToolUse",
+        json!({
+            "tool_name": "mcp__cairn__memory_search", "tool_call_id": "search-1",
+            "args": {"query": "widgets"}, "result": json!({"result": r#"{"results":[]}"#}).to_string(),
+            "status": "ok",
+        }),
+    );
+    assert!(
+        invoke("Stop", json!({"assistant_response": "Verified the patch"}))
+            .stdout
+            .is_empty()
+    );
+    let observed = fake.observed();
+    assert_eq!(
+        observed
+            .iter()
+            .map(|row| row["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "Edit and test the widget",
+            "cargo test\nexit 101: first error",
+            "Write widget.rs\nwritten contents",
+            "Verified the patch",
+            "changed files\nwidget.rs",
+        ]
+    );
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(hermes; hook)"))
+    );
+    assert_eq!(fake.to("brief").len(), 1);
+    assert_eq!(fake.to("lookup").len(), 1);
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    assert!(fake.to("topic").is_empty());
+    invoke(
+        "PostToolUse",
+        json!({
+            "tool_name": "mcp__cairn__memory_save", "tool_call_id": "save-1",
+            "args": {}, "result": json!({"result": r#"{"id":"mem_test","deduplicated":false}"#}).to_string(),
+            "status": "ok",
+        }),
+    );
+    invoke("PreCompact", json!({}));
+    invoke("SessionEnd", json!({}));
+    assert_eq!(fake.to("end").len(), 1);
+    assert_eq!(fake.to("end")[0].body["nudge_saved"], true);
+}
+
 fn injected(output: &Output) -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {

@@ -180,7 +180,10 @@ fn session(options: &Options) -> Result<(), String> {
         return Err("device credential must be one header token".to_owned());
     }
     let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
-    let payload = Payload::parse(&raw)?;
+    let mut payload = Payload::parse(&raw)?;
+    if options.agent == "hermes" {
+        payload.normalize_hermes();
+    }
     let cwd = match payload.cwd() {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().map_err(|e| format!("no working folder: {e}"))?,
@@ -555,7 +558,7 @@ impl Hook<'_> {
                 ))
             || (self.agent == "antigravity" && !self.payload.flag("fullyIdle"))
             || self.automated()
-            || self.agent == "opencode"
+            || matches!(self.agent, "opencode" | "hermes")
             || !self.nudging()
         {
             return None;
@@ -630,7 +633,10 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
-        if self.agent == "antigravity" && tool.is_file_tool() && tool.ok() == Some(false) {
+        if matches!(self.agent, "antigravity" | "hermes")
+            && tool.is_file_tool()
+            && tool.ok() == Some(false)
+        {
             return Ok(None);
         }
         if let Some(mut lookup) = tool.lookup() {
@@ -690,7 +696,7 @@ impl Hook<'_> {
 
     /// The note text for the first edit of `path`, within the per-session caps.
     fn topic(&self, path: &str) -> Option<String> {
-        if self.agent == "antigravity" {
+        if matches!(self.agent, "antigravity" | "hermes") {
             return None; // The host discards context returned from PostToolUse.
         }
         // The lookup is reserved before the request, so a failing server is not asked without end.

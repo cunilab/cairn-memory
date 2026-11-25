@@ -118,7 +118,7 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     let mut child = setup.spawn().unwrap();
     writeln!(child.stdin.take().unwrap(), "test-device").unwrap();
     assert!(child.wait().unwrap().success());
-    for agent in ["grok", "antigravity"] {
+    for agent in ["grok", "antigravity", "hermes"] {
         let mut setup = cairn();
         setup_env(&mut setup);
         let output = setup.args(["setup", agent]).output().unwrap();
@@ -190,6 +190,19 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
         let mcp = std::fs::read_to_string(home.join(mcp)).unwrap();
         assert!(mcp.contains(copy.to_str().unwrap()));
         assert!(!mcp.contains(env!("CARGO_BIN_EXE_cairn")));
+    }
+
+    assert!(
+        stdout.contains("Cairn hermes integration installed"),
+        "{stdout}"
+    );
+    for path in [
+        ".hermes/config.yaml",
+        ".hermes/plugins/cairn-memory/__init__.py",
+    ] {
+        let installed = std::fs::read_to_string(home.join(path)).unwrap();
+        assert!(installed.contains(copy.to_str().unwrap()));
+        assert!(!installed.contains(env!("CARGO_BIN_EXE_cairn")));
     }
 
     let settings: serde_json::Value =

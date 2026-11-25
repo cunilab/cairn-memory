@@ -255,6 +255,122 @@ fn antigravity_setup_round_trips_config_hooks_and_instructions() {
     );
 }
 
+#[test]
+fn hermes_setup_preserves_existing_settings_and_removes_only_cairn() {
+    let home = Home::new("hermes", false);
+    let original = "+model: test-model
+approvals:
+  mode: manual
+plugins:
+  enabled: [code-review]
+  disabled: [scheduler]
+mcp_servers:
+  other:
+    command: other
+    trust: untrusted
+";
+    let config = home.write(".hermes/config.yaml", original);
+    let soul = home.write(".hermes/SOUL.md", "User personality\n");
+    let other = home.write(
+        ".hermes/plugins/code-review/plugin.yaml",
+        "name: code-review\n",
+    );
+    let load = || yaml_serde::from_str::<Value>(&fs::read_to_string(&config).unwrap()).unwrap();
+    let initial = load();
+    home.ok("hermes", false);
+    let mut installed = load();
+    assert_eq!(
+        installed["mcp_servers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cairn")
+            .unwrap(),
+        json!({
+            "command": EXE, "args": ["mcp"], "trust": "full",
+            "env": {
+                "XDG_CONFIG_HOME": home.dir.join(".config"), "CAIRN_CONFIG": home.config(),
+                "CAIRN_SETUP_MANAGED": "1", "CAIRN_SETUP_PLUGIN_ENABLED": "1"
+            }
+        }),
+    );
+    assert_eq!(
+        installed["plugins"]["enabled"],
+        json!(["code-review", "cairn-memory"])
+    );
+    installed["plugins"]["enabled"] = json!(["code-review"]);
+    assert_eq!(installed, initial);
+    assert!(
+        fs::read_to_string(&soul)
+            .unwrap()
+            .contains("<!-- cairn:begin -->")
+    );
+    let plugin = home.dir.join(".hermes/plugins/cairn-memory");
+    assert!(
+        fs::read_to_string(plugin.join("__init__.py"))
+            .unwrap()
+            .contains(EXE)
+    );
+    assert!(
+        fs::read_to_string(plugin.join("plugin.yaml"))
+            .unwrap()
+            .contains("pre_llm_call")
+    );
+    assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
+        text.windows(SECRET.len())
+            .any(|part| part == SECRET.as_bytes())
+    }));
+
+    check_existing_setup(&home, "hermes", ".hermes");
+    assert_eq!(load(), initial);
+    assert_eq!(fs::read_to_string(&soul).unwrap(), "User personality\n");
+    assert_eq!(fs::read_to_string(&other).unwrap(), "name: code-review\n");
+    assert!(!plugin.join("__init__.py").exists());
+    assert!(!plugin.join("plugin.yaml").exists());
+}
+
+#[test]
+fn hermes_custom_home_preserves_unowned_entries_and_plugin_preferences() {
+    let home = Home::new("hermes-custom", false);
+    let profile = home.dir.join("custom profile");
+    let config = home.write(
+        "custom profile/config.yaml",
+        "plugins:\n  enabled: [cairn-memory]\n",
+    );
+    let run = |remove| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        with_stdin(&mut cmd, SECRET)
+    };
+    for remove in [false, true] {
+        let output = run(remove);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(!home.dir.join(".hermes").exists());
+    let read = || fs::read_to_string(&config).unwrap();
+    let remaining: Value = yaml_serde::from_str(&read()).unwrap();
+    assert_eq!(remaining, json!({"plugins": {"enabled": ["cairn-memory"]}}));
+
+    for (input, expected) in [
+        (
+            "mcp_servers:\n  cairn:\n    command: user-owned\n",
+            "unmarked cairn MCP entry",
+        ),
+        (
+            "plugins:\n  disabled: [cairn-memory]\n",
+            "disabled in Hermes plugins.disabled",
+        ),
+    ] {
+        fs::write(&config, input).unwrap();
+        let before = home.snapshot("custom profile");
+        let output = run(false);
+        assert!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{output:?}"
+        );
+        assert_eq!(home.snapshot("custom profile"), before);
+    }
+}
+
 fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
     let command = || {
         let mut cmd = command(&home.dir.join(".config"));

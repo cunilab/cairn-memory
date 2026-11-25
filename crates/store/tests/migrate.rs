@@ -34,6 +34,7 @@ async fn migrate_twice_is_a_no_op() {
             "0016_project_archive",
             "0017_device_agents",
             "0018_memory_usage",
+            "0020_device_agent_hermes",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1009,6 +1010,7 @@ async fn fixes_migration_additive() {
     versions.push("0016_project_archive".into());
     versions.push("0017_device_agents".into());
     versions.push("0018_memory_usage".into());
+    versions.push("0020_device_agent_hermes".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1047,7 +1049,7 @@ async fn fixes_migration_additive() {
         device,
         ("p".into(), "device".into(), "hash".into(), "claude".into())
     );
-    for agent in ["grok", "antigravity"] {
+    for agent in ["grok", "antigravity", "hermes"] {
         sqlx::query("INSERT INTO devices (device_id,person_id,name,token_hash,agent) VALUES ($1,'p',$1,$1,$1)")
             .bind(agent)
             .execute(store.pool())

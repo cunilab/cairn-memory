@@ -42,6 +42,59 @@ impl Payload {
         }
     }
 
+    /// Hermes tool callbacks carry the arguments and JSON-encoded result from the tool handler.
+    pub(super) fn normalize_hermes(&mut self) {
+        for (native, common) in [
+            ("user_message", "prompt"),
+            ("assistant_response", "last_assistant_message"),
+            ("tool_call_id", "tool_use_id"),
+            ("args", "tool_input"),
+        ] {
+            if let Some(value) = self.0.remove(native) {
+                self.0.insert(common.into(), value);
+            }
+        }
+        let name = self.text("tool_name");
+        let mcp = name
+            .is_some_and(|name| name.starts_with("mcp__cairn__") || name.starts_with("mcp_cairn_"));
+        let canonical = match name {
+            Some("terminal") => Some("Bash"),
+            Some("write_file") => Some("Write"),
+            Some("patch") => Some("apply_patch"),
+            _ => None,
+        };
+        if let Some(name) = canonical {
+            self.0.insert("tool_name".into(), Value::from(name));
+        }
+        if let Some(result) = self.0.remove("result") {
+            let decoded = decode_json_text(result);
+            let mut response = if mcp {
+                decoded
+                    .get("result")
+                    .cloned()
+                    .map(decode_json_text)
+                    .unwrap_or(decoded)
+            } else {
+                decoded
+            };
+            if let Some(fields) = response.as_object_mut() {
+                match self.text("status") {
+                    Some("ok") => {
+                        fields.entry("is_error").or_insert(Value::Bool(false));
+                    }
+                    Some(_) => {
+                        fields.insert("is_error".into(), Value::Bool(true));
+                    }
+                    _ => {}
+                }
+                if let Some(error) = self.text("error_message") {
+                    fields.insert("stderr".into(), Value::from(error));
+                }
+            }
+            self.0.insert("tool_response".into(), response);
+        }
+    }
+
     pub(super) fn text(&self, key: &str) -> Option<&str> {
         self.0
             .get(key)
@@ -184,6 +237,13 @@ fn patch_sections(patch: &str) -> Vec<(String, String)> {
         .filter(|(path, _)| !path.is_empty())
         .map(|(path, body)| (path, body.join("\n")))
         .collect()
+}
+
+fn decode_json_text(value: Value) -> Value {
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(value)
 }
 
 /// A tool call, with the tool name canonical.

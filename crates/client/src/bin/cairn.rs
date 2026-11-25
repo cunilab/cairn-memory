@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process;
 
 const USAGE: &str = "Usage:
-  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity] [--remove|--keep-native-memory]
+  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory]
   cairn setup <agent> [--remove]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
   cairn import claude-memory [--yes]

@@ -30,6 +30,7 @@ Web console              ──web session───▶       │
 | OpenCode | `--agent opencode` | Plugin hooks and MCP; no continuing Stop reminder |
 | Grok Build | `--agent grok` | Hooks and MCP with a brief on the first tool result |
 | Antigravity CLI | `--agent antigravity` | Hooks and MCP with checkpoints on Stop |
+| Hermes Agent | `--agent hermes` | Plugin hooks and MCP with a brief on the first prompt |
 
 ## Set up Cairn
 
@@ -137,7 +138,7 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex`, `opencode`, `grok` or `antigravity` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
+Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
 
 In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
 

@@ -5,3 +5,4 @@
 0004_processing.sql|ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check|widened CHECK, re-added in same migration
 0013_link_origin_system.sql|ALTER TABLE links DROP CONSTRAINT links_origin_check|widened CHECK, re-added in same migration
 0017_device_agents.sql|ALTER TABLE devices DROP CONSTRAINT devices_agent_check, ADD CONSTRAINT devices_agent_check CHECK (agent IN ('claude', 'codex', 'opencode', 'grok', 'antigravity'))|user approved atomic CHECK expansion with no row or column changes
+0020_device_agent_hermes.sql|ALTER TABLE devices DROP CONSTRAINT devices_agent_check, ADD CONSTRAINT devices_agent_check CHECK (agent IN ('claude', 'codex', 'opencode', 'grok', 'antigravity', 'hermes'))|user approved atomic CHECK expansion with no row or column changes

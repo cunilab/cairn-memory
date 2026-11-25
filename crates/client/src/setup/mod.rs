@@ -7,6 +7,7 @@ pub(crate) mod antigravity;
 mod claude;
 mod codex;
 pub(crate) mod grok;
+pub(crate) mod hermes;
 mod jsonc;
 mod opencode;
 
@@ -385,6 +386,7 @@ fn plan(ctx: &Ctx) -> R<Plan> {
         "opencode" => opencode::plan(ctx),
         "grok" => grok::plan(ctx),
         "antigravity" => antigravity::plan(ctx),
+        "hermes" => hermes::plan(ctx),
         _ => Err(format!("agent must be one of {}", AGENTS.join(", "))),
     }
 }
@@ -488,6 +490,7 @@ pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); AGENTS.len()] {
         ),
         ("grok", grok::hook_file(home)),
         ("antigravity", antigravity::hook_file(home)),
+        ("hermes", hermes::hook_file(home)),
     ]
 }
 
