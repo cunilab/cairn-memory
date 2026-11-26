@@ -347,7 +347,11 @@ mod tests {
                 "memory_get",
                 "memory_save",
                 "memory_feedback",
-                "memory_forget"
+                "memory_forget",
+                "skill_search",
+                "skill_get",
+                "skill_save",
+                "skill_feedback"
             ]
         );
     }
@@ -525,10 +529,10 @@ mod tests {
 
     /// Compact JSON bytes of `memory_save`'s inputSchema before `items` was added.
     #[test]
-    fn five_tools_and_schema_budget() {
+    fn tool_count_and_memory_save_schema_budget() {
         let list = tools::tools_list();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 9);
         let save = tools
             .iter()
             .find(|tool| tool["name"] == "memory_save")

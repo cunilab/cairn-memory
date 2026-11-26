@@ -14,6 +14,7 @@ pub mod memory;
 pub mod project;
 pub mod repo;
 pub mod retrieve;
+pub mod skill;
 pub mod stats;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -122,6 +123,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0024_hermes_route_privacy",
         include_str!("../../../migrations/0024_hermes_route_privacy.sql"),
+    ),
+    (
+        "0025_skills",
+        include_str!("../../../migrations/0025_skills.sql"),
     ),
 ];
 

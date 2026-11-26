@@ -221,6 +221,119 @@
     "type": "object"
    },
    "name": "memory_forget"
+  },
+  {
+   "description": "Search the global skill library. Returns cards with name, title, description, relevance score and votes.",
+   "inputSchema": {
+    "properties": {
+     "limit": {
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+     },
+     "offset": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "query": {
+      "maxLength": 1024,
+      "type": "string"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "type": "object"
+   },
+   "name": "skill_search"
+  },
+  {
+   "description": "Read a skill's full text by name or ID. Omit version for the latest version.",
+   "inputSchema": {
+    "properties": {
+     "name_or_id": {
+      "type": "string"
+     },
+     "version": {
+      "minimum": 1,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "name_or_id"
+    ],
+    "type": "object"
+   },
+   "name": "skill_get"
+  },
+  {
+   "description": "Create a global skill or publish a new version with a change note.",
+   "inputSchema": {
+    "properties": {
+     "body": {
+      "maxLength": 32000,
+      "type": "string"
+     },
+     "change_note": {
+      "maxLength": 240,
+      "type": "string"
+     },
+     "description": {
+      "maxLength": 240,
+      "type": "string"
+     },
+     "name": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+     },
+     "title": {
+      "maxLength": 80,
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "title",
+     "description",
+     "body",
+     "change_note"
+    ],
+    "type": "object"
+   },
+   "name": "skill_save"
+  },
+  {
+   "description": "Mark a skill version helpful or wrong, with an optional note. Your latest vote replaces your earlier vote on that version.",
+   "inputSchema": {
+    "properties": {
+     "name_or_id": {
+      "type": "string"
+     },
+     "note": {
+      "maxLength": 240,
+      "type": "string"
+     },
+     "version": {
+      "minimum": 1,
+      "type": "integer"
+     },
+     "vote": {
+      "enum": [
+       "helpful",
+       "wrong"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "name_or_id",
+     "version",
+     "vote"
+    ],
+    "type": "object"
+   },
+   "name": "skill_feedback"
   }
  ]
 }

@@ -7,6 +7,7 @@ import {
   ChevronsUpDownIcon,
   ActivityIcon,
   BrainIcon,
+  BookOpenIcon,
   FolderIcon,
   LayoutDashboardIcon,
   LockKeyholeIcon,
@@ -61,6 +62,7 @@ const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 const WORKSPACE = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboardIcon },
   { href: "/memories", label: "Memories", icon: BrainIcon },
+  { href: "/skills", label: "Skills", icon: BookOpenIcon },
   { href: "/activity", label: "Activity", icon: ActivityIcon },
   { href: "/projects", label: "Projects", icon: FolderIcon },
   { href: "/graph", label: "Graph", icon: WaypointsIcon },

@@ -73,8 +73,10 @@ try:
 
     tools = call(2, "tools/list", {})
     names = [tool["name"] for tool in tools["result"]["tools"]]
-    assert names == ["memory_search", "memory_get", "memory_save", "memory_feedback", "memory_forget"], names
-    assert len(json.dumps(tools["result"], separators=(",", ":"))) <= 3500
+    assert names == ["memory_search", "memory_get", "memory_save", "memory_feedback", "memory_forget",
+                     "skill_search", "skill_get", "skill_save", "skill_feedback"], names
+    memory_tools = {"tools": tools["result"]["tools"][:5]}
+    assert len(json.dumps(memory_tools, separators=(",", ":"))) <= 3500
     schema = next(t["inputSchema"] for t in tools["result"]["tools"] if t["name"] == "memory_save")
     assert "required" not in schema
     assert schema["properties"]["items"]["items"]["required"] == ["kind", "title", "summary"]
@@ -136,6 +138,33 @@ try:
     assert forgotten == {"id": newer_id, "status": "forgotten"}
     gone = result_json(call(9, "tools/call", {"name": "memory_get", "arguments": {"ids": [newer_id]}}))
     assert gone["missing"] == [newer_id]
+    skill = {"name": "e2e-skill-compile", "title": "E2E compile exercises", "description": "Practice crates compilation",
+             "body": "Run the build before review. token=abc123", "change_note": "E2E initial skill"}
+    first_skill = result_json(call(40, "tools/call", {"name": "skill_save", "arguments": skill}))
+    assert first_skill["version"] == 1
+    matches = result_json(call(41, "tools/call", {"name": "skill_search", "arguments": {"query": "crates compilation"}}))
+    assert [item["id"] for item in matches["results"]] == [first_skill["id"]]
+    read = result_json(call(42, "tools/call", {"name": "skill_get", "arguments": {"name_or_id": skill["name"], "version": 1}}))
+    assert "Run the build" in read["body"] and "abc123" not in read["body"]
+    vote = dict(name_or_id=first_skill["id"], version=1, vote="helpful")
+    rated = result_json(call(43, "tools/call", {"name": "skill_feedback", "arguments": vote}))
+    assert rated["votes"] == {"helpful": 1, "wrong": 0}
+
+    def chat_skill(name, args):
+        payload = {"session_id": "hchat_" + "a" * 32,
+                   "chat_context": {"platform": "telegram", "kind": "group", "chat_id_hash": "a" * 64},
+                   "skill_tool": name, "arguments": dict(args, context={"chat_id_hash": "b" * 64}, sender_id="raw-id")}
+        reply = subprocess.run([os.environ["CAIRN_BIN"], "hook", "ChatSkill", "--agent", "hermes"],
+                               input=json.dumps(payload), text=True, capture_output=True, check=True)
+        return json.loads(reply.stdout)
+
+    chat_saved = chat_skill("skill_save", dict(skill, body="Chat-saved body. token=zzz999", change_note="E2E chat edit"))
+    assert chat_saved["version"] == 2, chat_saved
+    chat_read = chat_skill("skill_get", {"name_or_id": first_skill["id"]})
+    assert "Chat-saved body" in chat_read["body"] and "zzz999" not in chat_read["body"]
+    assert "chat_id_hash" not in chat_read and "sender_id" not in chat_read
+    assert chat_skill("skill_search", {"query": "crates compilation"})["results"][0]["id"] == first_skill["id"]
+    assert chat_skill("skill_feedback", dict(vote, vote="wrong"))["votes"] == {"helpful": 0, "wrong": 1}
 finally:
     process.stdin.close()
     process.wait(timeout=10)

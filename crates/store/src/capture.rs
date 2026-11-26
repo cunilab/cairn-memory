@@ -719,11 +719,13 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         crate::usage::settle_errors(&mut tx, None).await?;
-        sqlx::query(&format!(
-            "DELETE FROM session_shown WHERE shown_at < now() - interval '{SHOWN_RETENTION_DAYS} days'"
-        ))
-        .execute(&mut *tx)
-        .await?;
+        for ledger in ["session_shown", "session_skill_shown"] {
+            sqlx::query(&format!(
+                "DELETE FROM {ledger} WHERE shown_at < now() - interval '{SHOWN_RETENTION_DAYS} days'"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("DELETE FROM lookup_log WHERE at < now() - interval '14 days'")
             .execute(&mut *tx)
             .await?;

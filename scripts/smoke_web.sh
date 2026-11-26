@@ -645,13 +645,31 @@ if [ "$dotdot_code" = "200" ]; then
   printf '%s\n' "a dot segment escaped the allowlist" >&2
   exit 1
 fi
-for page in dashboard memories activity graph projects settings "projects/${project_id}"; do
+for page in dashboard memories skills activity graph projects settings "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
     printf '%s\n' "${page} page status: ${page_code}" >&2
     exit 1
   fi
 done
+
+skill_api="${web}/api/cairn/skills"
+skill_id="$(curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d '{"name":"e2e-web-skill","title":"E2E Web skill","description":"Rehearse project cutover","body":"Run the drill.","change_note":"E2E first version"}' \
+  "${skill_api}/create" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+curl -fsS -b "$owner_jar" "${skill_api}?query=cutover" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["results"][0]["name"] == "e2e-web-skill"'
+for action in archive restore; do
+  skill_status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$member_accounts_jar" -X POST "${skill_api}/${skill_id}/${action}")"
+  if [ "$skill_status" != "403" ]; then
+    printf '%s\n' "a non-admin must not ${action} skills: ${skill_status}" >&2
+    exit 1
+  fi
+done
+curl -fsS -b "$owner_jar" -X POST "${skill_api}/${skill_id}/archive"
+curl -fsS -b "$owner_jar" "${skill_api}?archived=true" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["results"][0]["version"] == 1'
+curl -fsS -b "$owner_jar" -X POST "${skill_api}/${skill_id}/restore"
 
 if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
   printf '%s\n' "the page does not carry the theme script" >&2

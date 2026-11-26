@@ -9,6 +9,10 @@ use sqlx::{PgConnection, Postgres, Transaction};
 pub const RETRIEVAL_RETENTION_DAYS: i64 = 120;
 pub(crate) const SHOWN_RETENTION_DAYS: i64 = 7;
 pub(crate) const SESSION_PUSH_LIMIT: usize = 8;
+pub(crate) const SESSION_SHOWN: &str =
+    "SELECT memory_id AS id FROM session_shown WHERE person_id = $1 AND session_id = $2
+     UNION ALL
+     SELECT skill_id AS id FROM session_skill_shown WHERE person_id = $1 AND session_id = $2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lookup {
@@ -225,13 +229,11 @@ pub(crate) async fn already_shown(
     .bind(person_id)
     .execute(&mut **tx)
     .await?;
-    Ok(sqlx::query_scalar(
-        "SELECT memory_id FROM session_shown WHERE person_id = $1 AND session_id = $2",
-    )
-    .bind(person_id)
-    .bind(session_id)
-    .fetch_all(&mut **tx)
-    .await?)
+    Ok(sqlx::query_scalar(SESSION_SHOWN)
+        .bind(person_id)
+        .bind(session_id)
+        .fetch_all(&mut **tx)
+        .await?)
 }
 
 /// Commit both the reservation and its usage counter for exactly the cards that fit.

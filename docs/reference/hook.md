@@ -94,9 +94,8 @@ The CLI plugin uses `pre_llm_call` to deliver the brief with the first user prom
 
 Use a dedicated Hermes profile with `plugins.isolation: in_process`. Stop the gateway, then run
 `HERMES_HOME=/path/to/profile cairn setup hermes --gateway` with Cairn already configured.
-Setup replaces the profile's managed Cairn MCP entry with the native `memory_search` and
-`memory_save` tools. Restart the gateway and use `/new` so Hermes loads the current tool
-schemas. Run `HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration.
+Setup replaces the profile's managed Cairn MCP entry with native `memory_search`,
+`memory_save`, and the four [global skill tools](cli-and-mcp.md#tools). Restart the gateway and use `/new` so Hermes loads the current tool schemas. Run `HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration.
 Keep the profile's chat salt so Cairn can find its existing chat memories.
 [Hermes tool selection](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/tools_config.py#L737-L757) · [Tool schema restoration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/conversation_loop.py#L769-L788)
 
@@ -109,7 +108,7 @@ from **Settings → Agent instructions**. A server admin can edit it or reset it
 text. It has the same 600-byte limit as the session start line. Hermes handles conversation
 and owner confirmation. Cairn checks scope and membership for each explicit memory request.
 Pass an exact project name or ID to extend a search to that project or to share a save with
-its members. [Chat recall](recall.md#hermes-chat-recall)
+its members. Skill tools use the global library without chat or project metadata. Prompt recall in chats skips skill cards. [Chat recall](recall.md#hermes-chat-recall)
 
 #### Hermes gateway research
 

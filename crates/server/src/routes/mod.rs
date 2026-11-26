@@ -10,6 +10,7 @@ mod instructions;
 mod memory;
 mod project;
 mod retrieve;
+mod skill;
 mod stats;
 
 use crate::AppState;
@@ -136,6 +137,27 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/memories/{id}/pin", post(memory::pin))
         .route("/cairn-memory/feedback", post(memory::feedback))
         .route("/cairn-memory/forget", post(memory::forget))
+        // skills
+        .route("/cairn-memory/skills", get(skill::list))
+        .route("/cairn-memory/skills/search", post(skill::search))
+        .route("/cairn-memory/skills/get", post(skill::get))
+        .route("/cairn-memory/skills/save", post(skill::save))
+        .route("/cairn-memory/skills/create", post(skill::create))
+        .route("/cairn-memory/skills/feedback", post(skill::feedback))
+        .route("/cairn-memory/skills/{key}", get(skill::web_get))
+        .route("/cairn-memory/skills/{key}/history", get(skill::history))
+        .route("/cairn-memory/skills/{key}/rollback", post(skill::rollback))
+        .route("/cairn-memory/skills/{key}/archive", post(skill::archive))
+        .route("/cairn-memory/skills/{key}/restore", post(skill::restore))
+        .route("/cairn-memory/skills/suggestions", get(skill::suggestions))
+        .route(
+            "/cairn-memory/skills/suggestions/{memory_id}/create",
+            post(skill::convert),
+        )
+        .route(
+            "/cairn-memory/skills/suggestions/{memory_id}/dismiss",
+            post(skill::dismiss),
+        )
         // retrieve
         .route("/cairn-memory/search", post(retrieve::search))
         .route("/cairn-memory/session/brief", post(retrieve::brief))

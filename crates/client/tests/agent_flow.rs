@@ -1,5 +1,5 @@
 //! Runs the real `cairn` binary (CLI and `cairn mcp`) against an in-process Cairn server on a
-//! `TestDb` schema: the five tools through both transports, plus config and argument handling.
+//! `TestDb` schema: the five memory tools through both transports, plus config and argument handling.
 
 mod common;
 
@@ -489,7 +489,7 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
     assert_eq!(voted, json!({"id": id, "status": "active"}));
     assert!(!member.run_in(&dir_b, &["forget", &id]).status.success());
 
-    // The same five tools over MCP, with the instruction text sent once at initialize.
+    // MCP lists the memory and skill tools, with instructions sent once at initialize.
     let mut mcp = owner.mcp_in(&dir_a);
     let listed = mcp.request("tools/list", json!({}));
     let names: Vec<_> = listed["result"]["tools"]
@@ -505,7 +505,11 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
             "memory_get",
             "memory_save",
             "memory_feedback",
-            "memory_forget"
+            "memory_forget",
+            "skill_search",
+            "skill_get",
+            "skill_save",
+            "skill_feedback"
         ]
     );
     let via_mcp = mcp.ok("memory_search", json!({"query": "skip locked"}));

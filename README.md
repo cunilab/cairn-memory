@@ -163,6 +163,10 @@ At session start the hook requests a brief and an instruction. During work it ca
 | `memory_save` | Save a decision, gotcha, procedure or other reusable knowledge. |
 | `memory_feedback` | Mark a memory helpful or wrong. |
 | `memory_forget` | Hide an owned memory from normal recall. |
+| `skill_search` | Find shared skills. |
+| `skill_get` | Read one version of a skill. |
+| `skill_save` | Create a skill or publish a new version. |
+| `skill_feedback` | Vote on a skill version. |
 
 The CLI also offers `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`. Use `cairn fixes` to list device fixes, `cairn fixes apply [id]` to apply them, and `cairn doctor` to diagnose setup. See [CLI and MCP](docs/reference/cli-and-mcp.md) for arguments.
 
@@ -170,6 +174,7 @@ In the web console:
 
 - **Dashboard** shows activity and health.
 - **Memories** lists and inspects records.
+- **Skills** lists shared instructions and their version history, and suggests procedures to publish as skills.
 - **Projects** shows members, branches and session reports.
 - **Graph** shows memory relationships.
 - **Activity** shows sessions, jobs and audit events.

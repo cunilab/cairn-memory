@@ -3,7 +3,10 @@ use crate::memory::{
     MEMORY_COLUMNS, MEMORY_SELECT, MEMORY_SELECT_WITH_DETAIL, SEARCH_VECTOR, collection_memory,
     memory_from_row, search_matches, searchable, visible,
 };
-use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push, repeat_error, unmuted};
+use crate::skill::prompt_skill;
+use crate::usage::{
+    Lookup, SESSION_PUSH_LIMIT, SESSION_SHOWN, already_shown, finish_push, repeat_error, unmuted,
+};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
@@ -709,13 +712,12 @@ impl Store {
     }
 
     pub async fn push_budget_spent(&self, person_id: &str, session_id: &str) -> Result<bool> {
-        let shown: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM session_shown WHERE person_id = $1 AND session_id = $2",
-        )
-        .bind(person_id)
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let shown: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM ({SESSION_SHOWN}) shown"))
+                .bind(person_id)
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(shown >= SESSION_PUSH_LIMIT as i64)
     }
 
@@ -767,7 +769,7 @@ impl Store {
                 ));
             }
         }
-        if ranked.is_empty() {
+        if ranked.is_empty() && context.chat.is_some() {
             return Ok((String::new(), false));
         }
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -779,6 +781,14 @@ impl Store {
         let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
         if remaining == 0 {
             return Ok((String::new(), true));
+        }
+        let skill = if context.chat.is_none() && !shown.iter().any(|id| id.starts_with("skill_")) {
+            prompt_skill(&mut tx, prompt, PROMPT_RELEVANCE_MIN).await?
+        } else {
+            None
+        };
+        if skill.is_none() && ranked.is_empty() {
+            return Ok((String::new(), false));
         }
         let ids: Vec<_> = ranked.iter().map(|(_, memory, _)| &memory.id).collect();
         let mut narrow = Narrow::from(&filter);
@@ -802,7 +812,7 @@ impl Store {
         let chosen: Vec<_> = ranked
             .into_iter()
             .filter(|(_, memory, _)| eligible.contains(&memory.id))
-            .take(2.min(remaining))
+            .take(2.min(remaining - usize::from(skill.is_some())))
             .map(|(_, memory, why)| {
                 let why = why.map_or_else(
                     || "matches your prompt".to_owned(),
@@ -817,14 +827,36 @@ impl Store {
                 )
             })
             .collect();
-        let notes: Vec<_> = chosen
-            .iter()
-            .map(|(_, title, summary, why, age)| (*title, *summary, why.as_str(), age.as_str()))
-            .collect();
+        let skill_title = skill
+            .as_ref()
+            .map(|(_, title, _)| format!("Skill: {title}"));
+        let mut notes = Vec::new();
+        if let (Some((_, _, description)), Some(title)) = (&skill, &skill_title) {
+            let description = if chosen.is_empty() {
+                description
+            } else {
+                &description[..description.floor_char_boundary(80)]
+            };
+            notes.push((title.as_str(), description, "matches your prompt", ""));
+        }
+        notes.extend(
+            chosen.iter().map(|(_, title, summary, why, age)| {
+                (*title, *summary, why.as_str(), age.as_str())
+            }),
+        );
         let (text, count) = topic_notes("your prompt", &notes);
+        let skill_shown = count > 0 && skill.is_some();
+        if let Some((id, ..)) = skill.filter(|_| skill_shown) {
+            sqlx::query("INSERT INTO session_skill_shown (person_id, session_id, skill_id) VALUES ($1, $2, $3)")
+                .bind(person_id)
+                .bind(session_id)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         let ids: Vec<_> = chosen
             .into_iter()
-            .take(count)
+            .take(count - usize::from(skill_shown))
             .map(|(memory, ..)| memory.id.clone())
             .collect();
         finish_push(tx, person_id, session, "prompt", &ids).await?;

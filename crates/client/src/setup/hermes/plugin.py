@@ -14,6 +14,7 @@ EXE, CONFIG = __CAIRN_PATHS__
 
 
 GATEWAY = __CAIRN_GATEWAY__
+SKILL_TOOLS = json.loads(__CAIRN_SKILL_TOOLS__)
 IDLE_SECONDS = 30 * 60
 BACKGROUND = ("cron", "subagent", "flush")
 
@@ -299,13 +300,13 @@ def register_gateway(ctx):
                 pass
             return str(result) + "\n" + text
 
-    def tool(event, properties):
+    def tool(event, properties, **fields):
         def call(args, **details):
             state, chat = active(**details)
             reply = None
             if state is not None:
                 arguments = {key: args[key] for key in properties if key in args}
-                reply = send(event, state, chat, arguments=arguments)
+                reply = send(event, state, chat, arguments=arguments, **fields)
             return json.dumps(reply or {"error": "Cairn chat memory is unavailable."})
         return call
 
@@ -327,6 +328,13 @@ def register_gateway(ctx):
         schema = {"name": name, "description": description,
                   "parameters": {"type": "object", "properties": properties, "required": required}}
         ctx.register_tool(name=name, toolset="cairn-chat", schema=schema, handler=tool(event, properties),
+                          check_fn=available, description=description)
+
+    for skill in SKILL_TOOLS:
+        name, description, parameters = skill["name"], skill["description"], skill["inputSchema"]
+        schema = {"name": name, "description": description, "parameters": parameters}
+        ctx.register_tool(name=name, toolset="cairn-chat", schema=schema,
+                          handler=tool("ChatSkill", parameters["properties"], skill_tool=name),
                           check_fn=available, description=description)
 
     ctx.register_hook("pre_llm_call", on_prompt)

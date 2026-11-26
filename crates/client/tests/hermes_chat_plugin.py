@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 
 PLUGIN = Path(__file__).resolve().parents[1] / "src/setup/hermes/plugin.py"
+TOOLS = json.loads((Path(__file__).parent / "fixtures/tools_list.json").read_text())["tools"]
+SKILL_TOOLS = [tool for tool in TOOLS if tool["name"].startswith("skill_")]
 
 
 class Context:
@@ -78,7 +80,10 @@ class GatewayPlugin(unittest.TestCase):
     def load_plugin(self, gateway):
         namespace = {}
         script = PLUGIN.read_text().replace("__CAIRN_PATHS__", '["cairn", "selected.json"]')
-        exec(compile(script.replace("__CAIRN_GATEWAY__", str(gateway)), str(PLUGIN), "exec"), namespace)
+        script = script.replace("__CAIRN_GATEWAY__", str(gateway)).replace(
+            "__CAIRN_SKILL_TOOLS__", json.dumps(json.dumps(SKILL_TOOLS))
+        )
+        exec(compile(script, str(PLUGIN), "exec"), namespace)
         return namespace
 
     def run_hook(self, command, input, **_):
@@ -105,8 +110,23 @@ class GatewayPlugin(unittest.TestCase):
     def end(self, host_session="host-session"):
         self.ctx.hooks["on_session_end"](host_session)
 
+    def test_all_skill_tools_filter_transport_and_project_arguments(self):
+        self.route(kind="group")
+        self.prompt()
+        for skill in SKILL_TOOLS:
+            name = skill["name"]
+            tool = self.ctx.tools[name]
+            self.assertEqual(tool["schema"]["parameters"], skill["inputSchema"])
+            self.assertTrue(tool["check_fn"]())
+            args = {key: "test" for key in skill["inputSchema"]["required"]}
+            tool["handler"](dict(args, project="E2E unwanted", context={"chat": "raw"}, sender="raw"))
+            event, request = self.requests[-1]
+            self.assertEqual(event, "ChatSkill")
+            self.assertEqual(request["skill_tool"], name)
+            self.assertEqual(request["arguments"], args)
+
     def test_only_hashed_routes_and_explicit_project_reach_cairn(self):
-        self.assertEqual(set(self.ctx.tools), {"memory_search", "memory_save"})
+        self.assertEqual(set(self.ctx.tools), {"memory_search", "memory_save", *(tool["name"] for tool in SKILL_TOOLS)})
         self.assertTrue(all(tool["toolset"] == "cairn-chat" for tool in self.ctx.tools.values()))
         self.assertIsNone(self.prompt())
         self.assertEqual(self.requests, [])

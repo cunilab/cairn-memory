@@ -81,16 +81,22 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         });
     }
     let paths = json!([ctx.exe, ctx.config.to_string_lossy()]).to_string();
-    let script = PLUGIN.replacen("__CAIRN_PATHS__", &paths, 1).replacen(
-        "__CAIRN_GATEWAY__",
-        if gateway { "True" } else { "False" },
-        1,
-    );
-    let manifest_text = if gateway {
-        format!("{MANIFEST}provides_tools:\n  - memory_search\n  - memory_save\n")
-    } else {
-        MANIFEST.to_owned()
-    };
+    let schemas = json!(crate::tools::skill_tool_schemas()).to_string();
+    let script = PLUGIN
+        .replacen("__CAIRN_PATHS__", &paths, 1)
+        .replacen(
+            "__CAIRN_GATEWAY__",
+            if gateway { "True" } else { "False" },
+            1,
+        )
+        .replacen("__CAIRN_SKILL_TOOLS__", &json!(schemas).to_string(), 1);
+    let mut manifest_text = MANIFEST.to_owned();
+    if gateway {
+        manifest_text.push_str("provides_tools:\n  - memory_search\n  - memory_save\n");
+        for tool in &crate::tools::SKILL_TOOLS {
+            manifest_text.push_str(&format!("  - {}\n", tool.name));
+        }
+    }
     Ok(Plan {
         files: vec![
             config,

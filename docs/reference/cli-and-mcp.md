@@ -6,9 +6,7 @@ status: draft
 
 # CLI and MCP
 
-The `cairn mcp` stdio server and the `cairn` CLI share one tool table
-(`crates/client/src/tools.rs`): five tools, one REST call each, authenticated with a device
-token. Neither opens a store file. The credential model is in
+The `cairn mcp` stdio server and the `cairn` CLI share five memory tools. MCP and Hermes gateway chats also expose four skill tools. Each tool calls the REST API with the configured device token. The credential model is in
 [authentication](auth.md).
 
 ## Transport
@@ -39,9 +37,7 @@ instruction block by setup. It includes the default session-start instruction. `
 
 ## Tools
 
-`tools/list` is `{"tools":[{name,description,inputSchema}]}`, limited to 3,500 bytes compact (the
-snapshot is `crates/client/tests/fixtures/tools_list.json`). The client adds `context` (repository,
-branch, worktree, commit, `project_id`) from git when available; it is in no schema.
+`tools/list` returns `{"tools":[{name,description,inputSchema}]}`. The five memory tools retain their 3,500-byte compact budget. The schema snapshot is `crates/client/tests/fixtures/tools_list.json`. The client adds checkout context to memory tool calls when available.
 
 | Tool | Route | Arguments |
 | --- | --- | --- |
@@ -50,6 +46,10 @@ branch, worktree, commit, `project_id`) from git when available; it is in no sch
 | `memory_save` | `POST /remember` | `kind`, `title` ≤80, `summary` ≤240; `reason`, `detail` ≤8,000, `fields`, `evidence[]`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` |
 | `memory_feedback` | `POST /feedback` | `id`, `vote` = `helpful` \| `wrong` |
 | `memory_forget` | `POST /forget` | `id` |
+| `skill_search` | `POST /skills/search` | `query`, `limit` (1–20, default 5), `offset` (default 0) |
+| `skill_get` | `POST /skills/get` | `name_or_id`, optional `version` |
+| `skill_save` | `POST /skills/save` | `name`, `title`, `description`, `body`, `change_note` |
+| `skill_feedback` | `POST /skills/feedback` | `name_or_id`, `version`, `vote` (`helpful` or `wrong`), optional `note` |
 
 `reason` is required for every kind except `note`; the server answers the one-line error
 `reason must not be empty for kind <kind>`. A correction is a save with `supersedes=<old id>`, allowed on the
@@ -84,6 +84,10 @@ with empty values omitted. A record with long detail includes `detail_chars`. Pa
 existing id with `deduplicated:true` and merges new evidence. Detail is optional and does not affect identity. A duplicate can fill empty detail. An explicit correction can update detail without changing the id. A save that matches a forgotten memory is an
 error. `memory_feedback` → `{"id","status"}`: `wrong` votes from two different people, or one from the owner, make it `stale`; a repeat vote by the same person changes nothing.
 `memory_forget` → `{"id","status":"forgotten"}`.
+
+`skill_search` uses PostgreSQL full-text search and returns `{results, next_offset}`. Each card includes the name, title, description, current version, score and vote counts. `skill_get` adds the full Markdown, author, creation time, change note and your vote. `skill_save` returns the saved version's card. `skill_feedback` returns the version's card with the updated vote totals.
+
+Skills are global. A save with an existing name adds a new version with the caller as author. A vote applies to the named version and replaces the same account's previous vote. Skill names use 1–64 lowercase ASCII letters or digits separated by single hyphens. Byte limits are 80 for titles, 240 for descriptions and notes, 32,000 for bodies, and 1,024 for search queries. Cairn redacts secrets before saving skill text. The web console shows version history and rolls back by appending a version. Administrators can archive or restore skills in the web console. Archived skills are absent from agent search and get reports that the skill is archived. Hermes gateway tool calls use the same global library; the plugin strips chat and project context from these calls.
 
 Search applies the relevance floor and scope rules of [recall](recall.md); no external
 model API is used. Record shape and visibility: [projects](projects.md#memory-scopes-and-record).

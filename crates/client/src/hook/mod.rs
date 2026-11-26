@@ -243,7 +243,7 @@ fn session(options: &Options) -> Result<(), String> {
         check: OnceCell::new(),
         payload,
     };
-    if matches!(hook.event, "ChatSearch" | "ChatSave") {
+    if matches!(hook.event, "ChatSearch" | "ChatSave" | "ChatSkill") {
         if hook.chat.is_none() {
             return Err("Hermes chat tools require chat context".into());
         }
@@ -396,6 +396,33 @@ impl Hook<'_> {
     }
 
     fn chat_tool(&self) -> Result<Value, Error> {
+        let arguments = self
+            .payload
+            .value("arguments")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Error::Input("chat tool arguments must be an object".into()))?;
+        if self.event == "ChatSkill" {
+            let tool = self
+                .payload
+                .value("skill_tool")
+                .and_then(Value::as_str)
+                .and_then(|name| {
+                    crate::tools::SKILL_TOOLS
+                        .iter()
+                        .find(|tool| tool.name == name)
+                })
+                .ok_or_else(|| Error::Input("unknown chat skill tool".into()))?;
+            let schema = (tool.schema)();
+            let body: serde_json::Map<_, _> = arguments
+                .iter()
+                .filter(|(key, _)| schema["properties"].get(key.as_str()).is_some())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            return self.post(
+                &format!("/cairn-memory{}", tool.route),
+                &Value::Object(body),
+            );
+        }
         let (route, keys): (&str, &[&str]) = if self.event == "ChatSearch" {
             ("/cairn-memory/search", &["query"])
         } else {
@@ -404,11 +431,6 @@ impl Hook<'_> {
                 &["kind", "title", "summary", "reason", "fields"],
             )
         };
-        let arguments = self
-            .payload
-            .value("arguments")
-            .and_then(Value::as_object)
-            .ok_or_else(|| Error::Input("chat tool arguments must be an object".into()))?;
         let mut body = serde_json::Map::new();
         for key in keys {
             if let Some(value) = arguments.get(*key) {
