@@ -7,19 +7,34 @@ description: "Read configuration, connection, device and integration checks and 
 
 # Doctor
 
+Run system diagnostics to verify credentials, database connectivity, and agent configurations.
+
 ```sh
 cairn doctor
 ```
 
-Each line starts with `ok`, `warn` or `fail`, followed by the check and detail. Any failure makes the command exit 1. If the configured device has a pending device fix, doctor can apply it.
+Outputs line-by-line checks prefixed with `ok`, `warn`, or `fail`. Exits with code `1` if any check fails.
 
-| Check | What to do if it reports a problem |
-| --- | --- |
-| Config, server or device | Read the named config path and confirm the server address and the device status in Settings. Run setup again with a current token if the server rejects it. |
-| Semantic search | Check deployment health and the model directory. Lexical, entity and link recall can operate while semantic search is disabled. |
-| Project | Inspect `.cairn/project.json` and run `cairn init` in the checkout when you intend to attach it. |
-| Integration or instructions | Run `cairn setup <agent>` with the intended host profile. Repair malformed instruction markers before refreshing. |
-| Claude native memory | Run [Claude memory import](../agents/claude-code.md#import-claude-code-memory) in the project if setup manages native memory and the pointer is missing. |
-| Hermes | Check the [minimum host version and profile](../agents/hermes.md). Doctor checks provider selection for Hermes. |
+## Health checks
 
-Run `cairn fixes` to see device fixes or `cairn fixes apply [id]` to run them directly. [CLI reference](../reference/cli.md).
+| Subsystem | Verified items | Resolution if failing |
+| --- | --- | --- |
+| **Config, server, device** | Local config file readability, server reachability, and valid device token | Re-run `cairn setup <url>` with a fresh token from **Settings → Devices**. |
+| **Semantic search** | Local MiniLM model directory and ONNX runtime health | Inspect model volume and server logs. Lexical and entity recall remain functional while semantic search is offline. |
+| **Project** | Presence and syntax of `.cairn/project.json` | Run `cairn init` in the checkout root to register or attach the repository. |
+| **Agent integrations** | Managed instruction blocks and hook configuration files | Re-run `cairn setup <agent>` to repair missing or outdated instruction markers. |
+| **Claude native memory** | Integrity of `MEMORY.md` pointer file | Run `cairn import claude-memory` in the project root to restore the Cairn pointer. |
+| **Hermes** | Host version (≥ v2026.4.23) and memory provider setting | Upgrade Hermes Agent and verify `memory.provider: cairn-memory` in `config.yaml`. |
+
+## Automated fixes
+
+When doctor reports available fixes, inspect and apply them:
+
+```sh
+# List pending fixes
+cairn fixes
+# Apply a specific fix
+cairn fixes apply <id>
+```
+
+See [CLI reference](../reference/cli.md).

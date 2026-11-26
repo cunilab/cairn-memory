@@ -7,8 +7,12 @@ description: "Codex event mapping, hook results and command failure detection."
 
 # Codex hooks
 
-`SessionStart` and `UserPromptSubmit` can return `hookSpecificOutput.additionalContext`. Shell `PreToolUse` can return the same envelope for a command warning. `PostToolUse` captures tool activity and can return advisory context when Codex reports a failure. Stop checkpoints the session and can return `decision: "block"` with the once-per-session reminder as its reason.
+Lifecycle event integration, advisory context responses, and error detection in OpenAI Codex CLI.
 
-Unified exec can return plain output with no exit status. Cairn only considers failed-command recall when it can identify a failure from the host output. Unknown status produces no failed-command advisory.
+- **`SessionStart` & `UserPromptSubmit`**: Return `hookSpecificOutput.additionalContext` with session brief and prompt recall.
+- **`PreToolUse`**: Bash execution checks return advisory command warnings in `additionalContext`.
+- **`PostToolUse`**: Captures tool results; attaches advisory gotchas when Codex reports command failure.
+- **`Stop`**: Checkpoints session work; can return `decision: "block"` to present the Stop save reminder.
+- **Unified exec**: When unified exec returns unformatted output without an explicit exit status, Cairn remains silent to avoid false error recall.
 
-[Supported hook events](index.md#events) · [Install the Codex integration](../../users/agents/codex.md).
+See [Supported hook events](index.md#events) and [Codex setup](../../users/agents/codex.md).

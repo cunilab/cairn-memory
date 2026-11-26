@@ -7,14 +7,29 @@ description: "Follow typed captures through checkpoints, distillation, retrieval
 
 # Processing and jobs
 
+Background worker lifecycle, distillation heuristics, embedding jobs, and link consolidation.
+
 ## Session handoffs and distillation
 
-Checkpoint and session-end processing turns typed captures into notes, a digest and, when appropriate, a handoff. A session that mixes projects, or project and personal work, distills each attachment on its own; a mixed or indeterminate cohort stays personal. The digest's test line is the last execution of that command. Explicit `next:` or `todo:` lines supply next steps. Short chats and automated or subagent sessions do not overwrite a useful handoff. Raw observations are not returned by memory search.
+Background processing transforms raw capture events into structured notes, digests, and continuity records:
+
+- **Session boundaries**: Triggered at checkpoints (`Stop`, `PreCompact`) and session termination (`SessionEnd`).
+- **Scope resolution**: Sessions touching multiple projects distill each attachment independently; indeterminate cohorts stay personal.
+- **Handoff generation**: Preserves explicit `next:` and `todo:` steps and records the final execution outcome of test commands. Short chats or automated sessions (`CAIRN_SESSION_ORIGIN=automation`) do not overwrite useful developer handoffs.
+- **Observation privacy**: Raw observations expire after 30 days and are never exposed to memory search.
 
 ## Durable jobs
 
-The worker runs distill, embed, link and consolidate jobs. Jobs use leases, retry with backoff and quarantine on repeated failure. The console shows quarantined jobs; a sweep and a server-version change can retry them. Finished jobs and raw observations have retention limits, while memories do not expire by age.
+Asynchronous background workers manage compute-intensive tasks via a PostgreSQL job queue:
 
-Consolidation can link related records or supersede a near duplicate. Differences in numbers, versions or file names veto an automatic merge. Explicit corrections use `supersedes`; declared contradictions are kept as links. Search cards give compact results; `memory_get` returns full records and links.
+| Job name | Responsibility | Trigger |
+| --- | --- | --- |
+| `distill` | Parses raw observations into candidate notes, handoffs, and project digests | Checkpoint or SessionEnd |
+| `embed` | Computes 384-dimensional vector embeddings with local MiniLM | Memory save or update |
+| `link` | Traverses entity references to establish graph edges between memories | New or revised memory |
+| `consolidate` | Identifies near-duplicates, applies proof counts, and suggests merges | Nightly or batch sweep |
 
-The `distill` job extracts records, a digest and eligible handoffs from typed observations. The `embed` job populates the vector index when local embeddings are available. The `link` job derives evidence from shared entities. The `consolidate` job applies the similarity and merge guardrails to active memories. See the [data model](data-model.mdx) for the owner of each durable record and [the architecture](index.mdx#main-flows) for the capture-to-recall path.
+- **Leases & backoff**: Workers acquire jobs with time-bounded leases and retry with exponential backoff.
+- **Quarantine**: Jobs failing repeatedly are quarantined. Administrators can review or retry them in the console.
+
+See [Data model](data-model.mdx) and [Main flows](index.mdx#main-flows).

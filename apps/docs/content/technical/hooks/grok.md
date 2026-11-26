@@ -7,8 +7,12 @@ description: "Grok Build delivers the brief and prompt suggestions with tool res
 
 # Grok Build hooks
 
-SessionStart records the checkout baseline. Grok ignores its advisory output, so the first PostToolUse result delivers the brief. UserPromptSubmit captures and looks up the prompt, then defers matching cards to the next PostToolUse.
+Event processing and deferred context delivery mechanisms for Grok Build CLI.
 
-A Bash PreToolUse lookup runs before execution and Grok presents its advisory with the tool batch result. PostToolUse can report nonzero exit status and carry related Cairn memories as `additionalContext`. Grok also supports Stop, PreCompact and SessionEnd.
+- **`SessionStart`**: Captures initial workspace state. Because Grok discards advisory output on startup, the brief is deferred and delivered with the first `PostToolUse` tool result.
+- **`UserPromptSubmit`**: Captures and analyzes prompt; defers matched cards to the next `PostToolUse`.
+- **`PreToolUse`**: Evaluates command warnings and attaches advisory notices to the tool batch.
+- **`PostToolUse`**: Captures tool execution; returns related gotchas and remedies when commands exit with non-zero status.
+- **Checkpoints**: Supports `Stop`, `PreCompact`, and `SessionEnd` for state distillation.
 
-[Host delivery matrix](index.md#command-recall-by-host) · [Grok Build setup](../../users/agents/grok.md).
+See [Host delivery matrix](index.md#command-recall-by-host) and [Grok Build setup](../../users/agents/grok.md).

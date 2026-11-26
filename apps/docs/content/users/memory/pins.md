@@ -7,8 +7,20 @@ description: "Pin an owned memory so it leads the session brief."
 
 # Pins
 
-Open an owned personal or project memory in the web console and use its pin action. Use the same sheet to unpin it.
+Pin essential personal or project memories to lead the opening session brief.
 
-Owners can pin or unpin memories in the web memory sheet. The web route is `POST /cairn-memory/memories/{id}/pin` with a Boolean `pinned` field. A person can pin up to five personal memories and a project holds up to ten pins across its members. Pins bypass muting. Archived project, forgotten and superseded memories stay out of L0. A superseded pin retains its slot until unpinned so restoring a correction preserves the quota. Forgetting a memory frees its slot.
+## Pin management
 
-The brief shows eligible pins oldest first within the [L0 budget](layers.md#automatic-recall). Pinning a project memory shares it through the project with members who open a session there.
+- **Web console**: Open any owned personal or project memory and toggle the **Pin** action.
+- **API endpoint**: `POST /cairn-memory/memories/{id}/pin` with `{"pinned": true|false}`.
+
+## Quotas and rules
+
+| Scope | Quota limit | Shared with |
+| --- | --- | --- |
+| **Personal** | Up to 5 pins per account | Owner only |
+| **Project** | Up to 10 pins per project | All project members |
+
+- **Brief priority**: Eligible pins appear oldest first within the [L0 budget](layers.md#automatic-recall).
+- **Bypass muting**: Pinned memories are exempt from automatic muting.
+- **Exclusions**: Archived projects, forgotten memories, and superseded records are excluded from L0. A superseded pin retains its slot until unpinned.

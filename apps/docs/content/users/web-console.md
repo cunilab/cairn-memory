@@ -7,23 +7,29 @@ description: "Find memories, skills, sessions, jobs, device settings and adminis
 
 # Web console
 
+Browser interface for inspecting memories, managing projects and devices, reviewing audit logs, and applying fixes.
+
 ## Navigate the console
 
-| Section | Use it to |
+| Section | Purpose |
 | --- | --- |
-| Dashboard | See health and activity. |
-| Memories | Filter by trust, sort loaded rows, and inspect the reason, evidence and counters. Owners can pin eligible records. |
-| Skills | Read shared skills and version history, roll back, or convert suggested procedures. |
-| Projects | Find members, branches and session reports, and manage projects you own. |
-| Graph | Inspect relationships between visible memories. |
-| Activity | Review capture events, jobs and audit events. Administrator access is required for jobs and the account-wide audit view. |
-| Fixes | Inspect detected issues and their suggested actions as the administrator. |
-| Settings | Manage your account, devices and data export. Administrators manage accounts and global agent instructions. |
+| **Dashboard** | Overview of system health, active sessions, and recent activity. |
+| **Memories** | Search and filter memories by trust, scope, and status. Inspect evidence, counters, and pins. |
+| **Skills** | Browse the shared global skill library, view version histories, and roll back revisions. |
+| **Projects** | Manage project settings, view members, browse branches, and inspect session handoffs. |
+| **Graph** | Visualize relationship links (`supersedes`, `contradicts`, `related`) between memories. |
+| **Activity** | Inspect raw capture events, background processing jobs, and account audit logs (admin only). |
+| **Fixes** | Automated health detector diagnosing configuration drift, stale pins, and updates. |
+| **Settings** | Manage personal device tokens and exports. Administrators manage accounts and global agent prompts. |
 
-Session save counts represent new records during the session's window. One record can count in overlapping sessions. Project owners and the administrator can edit a project's instructions on its project page.
+*Session save counts track new records created during a session window. Project owners and administrators can edit project-specific instructions directly on the project page.*
 
 ## Fixes
 
-Apply or ignore a fix, or copy the suggested prompt for your agent. Device fixes wait for `cairn doctor`, `cairn init` or `cairn fixes apply [id]` on the affected computer. An update fix is complete once the installed version reaches the target. Fixes can also turn off a project's Stop ask, lower an unused memory's rank or undo a wrong automatic merge.
+The **Fixes** panel highlights detected system issues and provides one-click remediation:
 
-[Accounts and privacy](../technical/security.md) · [Trust and counters](memory/trust.md)
+- **Apply or ignore**: Administrators can apply fixes directly or dismiss false positives.
+- **Device fixes**: Apply locally via `cairn fixes apply [id]`, `cairn doctor`, or `cairn init`.
+- **Capabilities**: Fixes resolve unmigrated settings, tune down unused memories, update out-of-date integrations, or reverse incorrect automatic merges.
+
+See [Accounts and authentication](../technical/security.md) and [Trust and corrections](memory/trust.md).

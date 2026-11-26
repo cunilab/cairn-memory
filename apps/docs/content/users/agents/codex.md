@@ -7,14 +7,24 @@ description: "Register Cairn with the native Codex CLI and trust its installed h
 
 # Codex
 
-Put the Codex CLI on PATH before running setup. Supply your Cairn device token on stdin.
+Register Cairn with OpenAI Codex CLI, approve MCP servers, and configure global instructions.
+
+## Setup and verification
+
+Prerequisite: Ensure the `codex` CLI is on your `PATH`.
 
 ```sh
-cairn setup https://your-server.example --agent codex
+cairn setup https://cairn.example.com --agent codex
 cairn doctor
 codex mcp list
 ```
 
-On a configured machine use `cairn setup codex`. Restart Codex and trust the installed Cairn hooks when reviewing them in Codex. Setup adds `mcp_servers.cairn` with `default_tools_approval_mode = "approve"`, including for `codex exec`.
+Supply the device token on stdin. On an existing device, run `cairn setup codex`.
 
-The global Cairn block is in `AGENTS.md` under `CODEX_HOME` or `~/.codex`. A nonempty global `AGENTS.override.md` takes precedence. Review that file if the expected global instructions do not appear. [Codex hook details](../../technical/hooks/codex.md).
+## Configuration details
+
+- **MCP server**: Adds `mcp_servers.cairn` with `default_tools_approval_mode = "approve"` (including for `codex exec`).
+- **Trust hooks**: Trust the installed Cairn hooks when prompted in Codex.
+- **Instructions**: Writes global instructions to `${CODEX_HOME:-~/.codex}/AGENTS.md`. A non-empty `AGENTS.override.md` takes precedence if present.
+
+See [Codex hook details](../../technical/hooks/codex.md).

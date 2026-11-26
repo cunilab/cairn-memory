@@ -7,12 +7,24 @@ description: "Install the OpenCode plugin and MCP integration."
 
 # OpenCode
 
-Put the OpenCode CLI on PATH. Install Cairn and check discovery.
+Install the OpenCode V2 server plugin and MCP tools for session capture and memory retrieval.
+
+## Setup and verification
+
+Prerequisite: Ensure `opencode` CLI is on your `PATH`.
 
 ```sh
-cairn setup https://your-server.example --agent opencode
+cairn setup https://cairn.example.com --agent opencode
 cairn doctor
 opencode mcp list
 ```
 
-Supply the device token on stdin. On a configured machine use `cairn setup opencode`. Restart OpenCode to load the plugin. It can capture and checkpoint work at Stop. Continuing the model turn with a Stop reminder is unavailable. [OpenCode V2 hooks](../../technical/hooks/opencode.md).
+Supply the device token on stdin. On a previously configured device, run `cairn setup opencode`.
+
+## Integration details
+
+- **Plugin**: Registers Cairn's OpenCode server plugin to capture events and checkpoint work on `Stop`.
+- **Turn continuation**: Note that OpenCode does not support continuing the model turn from a Stop reminder.
+- **MCP server**: Registers standard Cairn memory and skill tools. Restart OpenCode to activate.
+
+See [OpenCode V2 hooks](../../technical/hooks/opencode.md).

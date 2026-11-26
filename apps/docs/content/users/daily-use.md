@@ -7,22 +7,47 @@ description: "Save, find and correct useful decisions and resume work across dev
 
 # Daily use
 
+Core workflow for recording verified decisions, retrieving context, managing corrections, and resuming sessions.
+
 ## Save a decision
 
-Give the agent a concrete title, summary and reason. Include the project context where the decision applies. The [quickstart](index.mdx) has a CLI example. With an agent, ask it to save the decision as soon as you have verified it. Add evidence such as a relevant source file.
+Instruct your agent to save verified findings immediately:
+
+- **What to provide**: Title, summary, and explicit reason. Add context, alternatives, or source evidence where relevant.
+- **CLI equivalent**:
+  ```sh
+  cairn save '{"kind":"decision","title":"Title","summary":"Summary","reason":"Why"}'
+  ```
+- **Rule of thumb**: Save only verified, reusable decisions, rules, gotchas, or procedures.
 
 ## Find the full record
 
-Ask the agent to search for the decision with `memory_search` or run `cairn search "disposable PostgreSQL schema"`. Use the returned ID in `memory_get` or `cairn get ID` to read the reason, evidence and links. Add `--detail` to read stored long-form detail for one ID.
+Retrieve context explicitly whenever automatic recall is insufficient:
+
+- **Search**: Run `cairn search "query"` or instruct the agent to call `memory_search`.
+- **Read record**: Run `cairn get <id>` or pass `detail: true` (`cairn get <id> --detail`) for full technical details.
 
 ## Correct what changed
 
-Save the updated decision with `supersedes` set to the previous ID. Include a reason explaining the change. The old record remains searchable with a replaced status. Use [feedback](memory/trust.md) to record a wrong or helpful result.
+Keep memory accurate when requirements or architectural choices evolve:
+
+- **Supersede**: Save the revised decision with `supersedes: "<old_id>"` and a clear reason for the change.
+- **History preserved**: The superseded record remains searchable with a `superseded` status.
+- **Feedback**: Call `memory_feedback` with `helpful` or `wrong` to adjust confidence rankings ([Trust and corrections](memory/trust.md)).
 
 ## Resume on another device
 
-Configure the other device with a token from the same account or have a teammate create their own. Open the shared checkout and run `cairn init`. [Project membership](memory/scopes.md) lets teammates see project-scoped decisions, while a personal handoff follows your account and checkout context. Ask the agent for the last handoff when the opening brief is insufficient.
+Seamlessly continue development across machines or teammates:
+
+- **Configure device**: Add a new token under **Settings → Devices** or join from a teammate account.
+- **Attach repo**: Open the repository checkout and run `cairn init`.
+- **Handoffs**: Project members automatically receive project-scoped decisions. Personal handoffs track your account and checkout context. Ask your agent for the last handoff if the brief is incomplete.
 
 ## Capture controls
 
-Hooks capture prompts, edits and non-read-only commands. Add `.cairnignore` to disable capture for a checkout. Assistant text is opt-in with `CAIRN_CAPTURE_ASSISTANT=1`. Use `CAIRN_SESSION_ORIGIN=automation` for automation, which can capture and distill without replacing a personal handoff or triggering the Stop reminder. [Hook protocol](../technical/hooks/index.md).
+Control how Cairn records development activity:
+
+- **Automatic capture**: Hooks capture prompts, code edits, and non-read-only terminal commands.
+- **Opt out**: Add a `.cairnignore` file in a checkout root to disable capture entirely for that directory.
+- **Assistant text**: Disabled by default; enable with `CAIRN_CAPTURE_ASSISTANT=1`.
+- **Automated sessions**: Set `CAIRN_SESSION_ORIGIN=automation` in CI or batch scripts to capture and distill without overriding personal handoffs or triggering Stop reminders ([Hook protocol](../technical/hooks/index.md)).

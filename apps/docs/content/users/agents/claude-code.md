@@ -7,32 +7,48 @@ description: "Set up Claude Code hooks and MCP, and optionally import existing p
 
 # Claude Code
 
+Configure Claude Code hooks and MCP, manage native memory guards, and import project notes.
+
 ## Connect Claude Code
 
 ```sh
-cairn setup https://your-server.example --agent claude
+cairn setup https://cairn.example.com --agent claude
 cairn doctor
 ```
 
-Supply the device token on stdin. On a configured machine use `cairn setup claude`. Restart Claude Code and check Cairn in `/mcp`. The managed instruction is written to the Claude Code config directory's `CLAUDE.md`.
+Supply the device token on stdin. On a previously configured device, run `cairn setup claude`.
 
-Setup and update add `mcp__cairn` to `permissions.allow` when neither it nor the server-wide wildcard is present. Removal deletes the bare rule and retains the wildcard and permission containers.
+- **Instructions**: Writes managed prompt instructions into `CLAUDE.md`.
+- **Permissions**: Appends `mcp__cairn` to `permissions.allow` in the Claude Code settings.
+- **Verify**: Restart Claude Code and verify that `cairn` appears active under `/mcp`.
 
 ## Native memory
 
-Claude Code setup matches Bash and the four file-writing tools `Write`, `Edit`, `MultiEdit` and `NotebookEdit`. The local write guard denies those tools under the Claude config directory's `projects/*/memory/`. Use `cairn setup <url> --agent claude --keep-native-memory` to keep native writes enabled across updates while keeping the Bash warning hook. [Claude Code hook decisions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
+By default, Cairn installs a local write guard denying Claude Code's file-writing tools (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`) inside `projects/*/memory/` to prevent dual-memory conflicts.
+
+- **Keep native writes**: Run setup with `--keep-native-memory` to allow native memory writes while retaining Bash warning hooks:
+  ```sh
+  cairn setup https://cairn.example.com --agent claude --keep-native-memory
+  ```
 
 ### Import Claude Code memory
 
-Run `cairn import claude-memory` from the project to preview the files, scopes, and titles, then confirm the import and index replacement together. Pass `--yes` to apply directly. Cairn looks in the Claude config directory's `projects/<encoded project>/memory/`. It uses the main checkout for Git worktrees, respects `CLAUDE_CONFIG_DIR` and its optional `CLAUDE_CODE_PROJECT_DIR_NAME`, and uses the default layout for auto memory. [Claude Code memory directory](https://code.claude.com/docs/en/memory#where-auto-memory-is-stored) [Claude Code project directory names](https://code.claude.com/docs/en/sessions#name-the-project-directory-yourself)
+Migrate existing native Claude Code memory files into Cairn:
 
-| Claude file type | Cairn kind | Scope |
+```sh
+cairn import claude-memory
+# Or apply immediately without prompt:
+cairn import claude-memory --yes
+```
+
+| Claude file type | Cairn kind | Default scope |
 | --- | --- | --- |
 | `user` | `preference` | Personal |
 | `feedback` | `rule` | Personal |
-| `project` | `note` | Project when `.cairn/project.json` exists, otherwise personal |
+| `project` | `note` | Project (if `.cairn/project.json` exists), otherwise Personal |
 | `reference` | `fact` | Personal |
 
-The import lists possible-secret files it skips and prints any coaching hints for saved files. The normal save API deduplicates reruns. Cairn stores the body in `detail`, uses the `**Why:**` line or the first 1,000 body characters as the reason, and keeps the source path as evidence. It lists bodies clipped to the 8,000-character detail limit and includes a pointer to the full text for each. Once every eligible file saves, Cairn backs up the old `MEMORY.md` as `MEMORY.md.pre-cairn` and writes the pointer. The original note files stay on disk. If a save fails, fix the reported file and rerun. Any files already saved will deduplicate.
+- **Safe backup**: Backs up existing `MEMORY.md` to `MEMORY.md.pre-cairn` and writes a pointer to Cairn.
+- **Deduplication**: Files with matching content deduplicate cleanly without creating redundant records.
 
-[Claude Code hook details](../../technical/hooks/claude-code.md).
+See [Claude Code hook details](../../technical/hooks/claude-code.md).

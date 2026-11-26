@@ -7,35 +7,67 @@ description: "Authoritative records, visibility, retrieval indexes and startup m
 
 # Data model and migrations
 
-PostgreSQL holds the authoritative store. Cairn defaults to the `cairn` schema, and installs the `vector` extension in `public`. The selected schema holds accounts, projects and memberships, memories and links, capture records, and worker state. Device outboxes bridge temporary delivery failures.
+PostgreSQL schema, entity relationships, visibility boundaries, and transactional startup migrations.
 
-## Owners, members and records
+PostgreSQL is the authoritative store. Cairn isolates tables in the `cairn` schema and installs the `vector` extension in `public`.
 
 ```mermaid
 flowchart TD
-  Account["Account"] -->|joins| Project["Project"]
-  Account -->|owns| Memory["Memory"]
-  Project -->|scopes| Memory
-  Memory -->|links to| Related["Related memory"]
+  subgraph Auth["Identity & Access"]
+    Account["accounts\n(Admin / User)"]
+    Device["devices\n(Bearer token hash)"]
+    Session["web_sessions\n(Cookie auth)"]
+    Account --> Device
+    Account --> Session
+  end
+
+  subgraph Org["Projects & Scope"]
+    Project["projects\n(ID, name, archive_at)"]
+    Member["project_members\n(account_id, project_id)"]
+    Account --> Member
+    Project --> Member
+  end
+
+  subgraph StoreData["Memories & Knowledge"]
+    Memory["memories\n(kind, title, summary, trust, scope)"]
+    Embedding["memories.embedding\n(384-dim pgvector)"]
+    Links["links\n(supersedes, contradicts, related)"]
+    Account -->|owns| Memory
+    Project -.->|scopes| Memory
+    Memory --- Embedding
+    Memory --> Links
+  end
+
+  subgraph Processing["Capture & Jobs"]
+    CapSession["sessions"] --> Observation["observations\n(Redacted events)"]
+    Observation --> Job["jobs\n(distill, embed, link, consolidate)"]
+    Job -.-> Memory
+  end
 ```
 
-An account owns its devices and memories. The pair `project_id, person_id` identifies membership, including the owner's membership. A project-scoped memory points to the project. Both ends of a link refer to memory IDs. A capture belongs to a session keyed by person and session ID.
+*Entity relationships: Accounts own devices and project memberships; projects scope shared memories; memories hold vector embeddings and link relations; capture sessions distill into background jobs.*
 
-| Records | Keys and purpose |
+## Owners, members and records
+
+| Record tables | Primary keys and purpose |
 | --- | --- |
-| `accounts`, `devices`, `web_sessions` | Stable IDs identify accounts and credentials. Passwords and bearer tokens are stored as hashes. The database enforces a single administrator. |
-| `projects`, `project_members` | The committed project ID identifies a project. Membership joins the project to an account. |
-| `memories`, `links` | `memory_id` identifies the record. A link uses the source ID, target ID and relation as its key. Explicit corrections preserve the replaced record and link back to it. |
-| `entities`, `memories.embedding`, `memory_aliases` | Derived entity names, 384-dimensional vectors and alternate phrasings support retrieval. The main search document is a generated PostgreSQL full-text column on the memory. |
-| `usage`, `usage_votes`, `session_shown` | Counters, votes and the per-person session ledger record retrieval usage and feedback. |
-| `sessions`, `observations` | A session is keyed by person and session ID. Observations are keyed by person and event ID so a repeated delivery can be deduplicated. |
-| `jobs`, `schema_version` | Durable jobs record claims and their outcomes. The migration ledger records applied version names and timestamps. |
-| `skills`, `skill_versions`, `skill_votes` | Skills are global. New versions preserve earlier text. A person's vote applies to one version. |
-
-Visibility follows scope, owner and membership. Archived projects keep memberships and memory IDs and are omitted from agent retrieval. A Hermes chat route further restricts chat-tagged personal memory. Raw observations never appear in memory search. They expire after 30 days, and distilled captures can be removed after seven days. Finished jobs and the automatic recall ledger also have separate retention. Stale and superseded memories remain searchable with a label, and age alone does not hide a memory. [Scopes](../users/memory/scopes.md) · [Processing](processing.md).
+| `accounts`, `devices`, `web_sessions` | Identity and credentials. Passwords and bearer tokens stored as Argon2 / SHA-256 hashes. Single admin enforced. |
+| `projects`, `project_members` | Project registration and membership join table (`project_id`, `person_id`). |
+| `memories`, `links` | `memory_id` identifies knowledge. Links join source and target IDs with a relation (`supersedes`, `contradicts`, `related`). |
+| `entities`, `memories.embedding`, `memory_aliases` | Extracted symbols/commands, 384-dimensional MiniLM vectors, and derived search aliases. |
+| `usage`, `usage_votes`, `session_shown` | Retrieval usage counters, user feedback votes, and per-session automatic recall ledgers. |
+| `sessions`, `observations` | Capture event store keyed by person and session ID. Deduplicated by event ID. Expire after 30 days. |
+| `jobs`, `schema_version` | Transactional job queue claims and applied migration history ledger. |
+| `skills`, `skill_versions`, `skill_votes` | Global procedural skill library with immutable revision history. |
 
 ## Startup migrations
 
-The store checks for the legacy `public.cairn_memories` table and refuses that pre-0.1.6 database. It creates the selected schema and `vector` extension, then walks the compiled list of SQL files. Each unapplied version runs in a transaction with a PostgreSQL advisory lock. Recording the version and applying its SQL commit together. Already applied versions are skipped. Provision a database with pgvector available and the permissions to initialize the store.
+At boot, the server acquires a PostgreSQL advisory lock, checks for legacy pre-0.1.6 tables, ensures `vector` extension availability, and runs unapplied SQL files from `migrations/` in individual transactions.
 
-Write additive migrations with backfills for existing rows so users keep their data across upgrades. Keep applied files intact. The release notes list compatibility boundaries, including when a fresh database is required. [Migration rules](contributing.md#migrations) · [SQL migrations](https://github.com/cunilab/cairn-memory/tree/main/migrations) · [Startup code](../../../../crates/store/src/lib.rs) · [Release notes](../users/releases/index.md).
+### Migration rules
+
+- **Additive changes**: New columns must be nullable or supply sensible defaults. Backfills must be idempotent.
+- **No destructive SQL**: `DROP`, `TRUNCATE`, and column drops are blocked by CI unless explicitly allowlisted in `migrations/destructive-allowlist.txt`.
+- Applied migration files are immutable.
+
+See [Migration rules](contributing.md#migrations), [Scopes](../users/memory/scopes.md), and [Processing](processing.md).

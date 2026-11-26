@@ -7,14 +7,26 @@ description: "Read a brief or handoff, search for a decision, and fetch the full
 
 # Find and use memories
 
+Strategies for consuming opening briefs, triggering contextual recall, and executing explicit searches.
+
 ## Start from the brief
 
-The session brief can include the checkout handoff, relevant preferences and project knowledge. File, command and prompt activity can trigger smaller replies later in the session. [Recall layers](layers.md) shows their delivery limits.
+At session startup, Cairn injects the opening brief:
+- **Identity & Pins (L0)**: Active personal and project pins.
+- **Essential Context (L1)**: Last checkout handoff, personal preferences, and core project rules, decisions, and gotchas.
+- See [Recall layers](layers.md) for size caps and ordering.
 
 ## Search explicitly
 
-Ask the agent to call `memory_search`. Include the distinctive decision, command, file name or version. Use `kind: handoff` to find continuity records. For a known ID, call `memory_get` and request detail if the title, summary and reason are insufficient.
+When automatic context is insufficient, instruct your agent to call `memory_search`:
+
+- **Keyword queries**: Search specific terms, file paths, tool names, or error messages (`cairn search "PostgreSQL schema"`).
+- **Handoff continuity**: Pass `kind: "handoff"` to retrieve recent session continuity summaries.
+- **Fetch full record**: Call `memory_get` with the returned ID. Pass `detail: true` (`cairn get <id> --detail`) to inspect long-form technical notes.
 
 ## When a record does not appear
 
-Confirm that the account can see the record and belongs to the expected project. Check that the project is active and that the current checkout attaches to it. Query with an exact term from the record to test the relevance gate. Check [semantic search health](../help/troubleshooting.md) if paraphrases miss. Use search or get to restore automatic eligibility for a muted card.
+1. **Verify scope & membership**: Ensure your account belongs to the project where the memory was saved.
+2. **Check project status**: Confirm the project is active (archived projects are excluded from agent retrieval).
+3. **Test lexical match**: Query with an exact title word to verify whether the semantic relevance gate dropped a paraphrase.
+4. **Inspect muting**: Memories pushed three times without use are muted; fetch the record with `cairn get <id>` or vote helpful to restore automatic eligibility ([Troubleshooting](../help/troubleshooting.md)).

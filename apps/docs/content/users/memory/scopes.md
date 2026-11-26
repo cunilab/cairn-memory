@@ -7,26 +7,52 @@ description: "Understand visibility, membership, and what happens when you archi
 
 # Projects and memory scopes
 
+Visibility boundaries between personal, project, and global memories, and project lifecycle management.
+
+```mermaid
+flowchart TD
+  subgraph Global["Global Scope"]
+    G1["Skills & Shared Instructions\nVisible to all authenticated accounts"]
+  end
+  subgraph Project["Project Scope (.cairn/project.json)"]
+    P1["Decisions, Rules, Gotchas, Procedures\nVisible strictly to project members"]
+  end
+  subgraph Personal["Personal Scope"]
+    U1["Preferences, Handoffs, Draft Notes\nVisible exclusively to owner account"]
+  end
+```
+
+*Scope hierarchy: Global memories are visible across all users; Project memories are restricted to accounts holding the project ID; Personal memories belong strictly to the owner.*
+
 ## Memory scopes and record
 
-Personal memories are visible to their owner, project memories to project members, and global memories to authenticated server users. A preference is personal. A decision, rule, gotcha, procedure or fact defaults to project scope when the caller belongs to the project in context, otherwise personal; a note defaults to personal. A handoff is system-written. Age does not hide memories. Forgotten memories are hidden from normal recall; stale and superseded memories can still be found.
+- **Personal**: Visible only to the creating account. Preferences, session handoffs, and draft notes default to personal scope.
+- **Project**: Visible to all registered members of the project. Decisions, rules, gotchas, facts, and procedures default to project scope when the caller belongs to the project.
+- **Global**: Visible to all authenticated accounts on the Cairn server. Used for shared skills and server-wide instructions.
+- **Retention**: Memories never expire by age. Forgotten memories are excluded from search; stale and superseded records remain retrievable with lower ranking and a label.
 
-A save contains kind, title, summary, reason (except for notes), optional kind-specific fields, evidence, aliases, scope, and optional `supersedes` or `contradicts` IDs. The server redacts and validates it. An identical save can return the existing ID and merge evidence; a forgotten identity cannot be silently recreated. [CLI and MCP](../reference/mcp.md) describes the tools.
+See [CLI and MCP](../reference/mcp.md) for tool interfaces.
 
 ## Init and membership
 
-Run `cairn init "Project name"` in a folder and commit `.cairn/project.json`; the file contains a project ID, repository and name, not a server URL or credential. This works without Git. An existing file joins a known project. An unknown ID requires explicit confirmation with `cairn init --yes` before registration. To rename a project, the owner uses its page in the web console. Teammates see a session-start notice; run `cairn init` to update the project file and commit it.
+Initialize a project directory and commit `.cairn/project.json`:
 
-**An ID grants membership:** anyone with an account on the server and the project ID can join and read project memories and member emails. A Git remote alone does not grant membership. Joins made using the project file are audited. Protect the file accordingly; deleting it does not remove an existing membership.
+```sh
+cairn init "Project name"
+```
 
-A checkout with no project file still attaches when its Git remote matches exactly one project the person already belongs to. Captures and project-scoped saves in that checkout are project memories, so the other members can read them. Zero matching memberships, or more than one, stay personal. Use `.cairn/project.json` when the checkout should be shared on purpose.
-
-The project owner or an administrator can transfer ownership to an existing member using the web console. The former owner remains a member.
+- **Project ID is authority**: Anyone possessing the committed project ID can join and access project memories. A Git remote alone does not grant membership.
+- **Single-remote attachment**: A checkout lacking a `.cairn/project.json` file automatically attaches if its Git remote matches exactly one existing project membership for that user. Zero or multiple matching memberships default to personal scope.
+- **Renaming**: Project owners rename projects in the web console. Teammates update their local file by re-running `cairn init`.
+- **Ownership transfer**: Owners can transfer project ownership to any active member via the web console.
 
 ## Archive and restore
 
-The project owner or an administrator can choose **Archive project** on the project page. The confirmation shows how many project memories will be hidden from agents. Archived projects appear under **Projects → Archived**, where members can still read their memories in read-only mode. On **Memories**, select the archived project to see its records.
+Project owners and administrators can archive inactive repositories from the project page:
 
-Archiving preserves memory IDs, content, statuses, links and membership. Project-scoped memories stop appearing in agent search, direct reads, briefings and topic notes. Project processing pauses, and project-scoped saves and `cairn init` report that the project is archived. Personal and global saves still work.
-
-Choose **Restore** under **Projects → Archived** or on the project page to make its memories available to agents again and resume queued processing.
+- **What happens on archive**:
+  - Project memories are hidden from agent retrieval, briefings, and topic notes.
+  - Members can still view records in read-only mode under **Projects → Archived**.
+  - Memory IDs, links, history, and memberships are completely preserved.
+- **Restore**:
+  - Click **Restore** under **Projects → Archived** to immediately re-enable agent search and resume queued processing.

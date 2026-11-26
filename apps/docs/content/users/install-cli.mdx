@@ -7,9 +7,11 @@ description: "Verify the Cairn binary for your operating system and put it on PA
 
 # Install the CLI
 
-Download the binary and `SHA256SUMS` from the same [GitHub release](https://github.com/cunilab/cairn-memory/releases/latest). Use the [repository installation commands](../../../../README.md#2-install-and-configure-the-first-device) for a copyable download, verification and install on each platform.
+Download and verify the standalone `cairn` client binary for macOS, Linux, or Windows.
 
-| Platform | Release asset | Checksum tool |
+Download the binary and `SHA256SUMS` from the [latest GitHub release](https://github.com/cunilab/cairn-memory/releases/latest). See the [repository installation guide](../../../../README.md#2-install-and-configure-the-first-device) for copyable install scripts.
+
+| Platform | Release asset | Checksum command |
 | --- | --- | --- |
 | macOS Apple silicon | `cairn-aarch64-apple-darwin` | `shasum -a 256` |
 | Linux x86-64 | `cairn-x86_64-unknown-linux-musl` | `sha256sum` |
@@ -18,7 +20,7 @@ Download the binary and `SHA256SUMS` from the same [GitHub release](https://gith
 
 ## Confirm the installed binary
 
-Open a fresh terminal after changing PATH. Confirm which binary it finds and print the version.
+Open a fresh terminal after updating `PATH` and verify the installation:
 
 <Tabs items={['Shell', 'PowerShell']}>
 <Tab value="Shell">
@@ -39,6 +41,6 @@ cairn --version
 </Tab>
 </Tabs>
 
-The Shell commands in the README install to `~/.local/bin`. The PowerShell example installs to `%LOCALAPPDATA%\cairn\bin` and adds that directory to the user PATH. If the command cannot be found, check the relevant PATH entry and open a new terminal.
-
-You can also compile with `cargo build --release -p cairn-client` from the repository. With the CLI on PATH, [connect an agent](agents/index.md).
+- **Default paths**: Unix scripts install to `~/.local/bin`. PowerShell installs to `%LOCALAPPDATA%\cairn\bin` and updates the user `PATH`.
+- **Source build**: Alternatively, compile from source with `cargo build --release -p cairn-client`.
+- **Next step**: With `cairn` on your `PATH`, [connect an agent](agents/index.md).

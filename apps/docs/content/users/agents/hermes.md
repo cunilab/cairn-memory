@@ -7,28 +7,56 @@ description: "Set up a Hermes profile to use Cairn as its memory provider."
 
 # Hermes Agent
 
+Configure Hermes Agent to use Cairn as its native memory provider and plugin hook engine.
+
+```mermaid
+flowchart TD
+  subgraph Hermes["Hermes Agent Profile"]
+    Provider["Memory Provider (cairn-memory)\n• Prompt prefetch (on_turn_start)\n• Native tools: memory_search, memory_save"]
+    Plugin["Plugin Hooks (plugins/cairn-memory/)\n• post_tool_call (Tool capture)\n• transform_tool_result (Error warnings)"]
+  end
+  subgraph Scope["Memory Scope & Chat"]
+    DevEnv["Coding Checkouts\nProject & personal scoped memories"]
+    Gateway["Chat Gateway\nPersonal chat-tagged memories"]
+  end
+
+  Provider <-->|Sync turn & tools| Cairn[Cairn Server]
+  Plugin -->|Tool events & capture| Cairn
+  Hermes --> DevEnv
+  Hermes --> Gateway
+```
+
+*Hermes integration architecture: Cairn operates as both an external memory provider (for prompt prefetch and native tools) and a standalone plugin (for tool event capture and command warnings).*
+
 ## Check the Hermes version
 
-Cairn needs Hermes v2026.4.23 or newer. v2026.4.16 can load Cairn as a provider, but it lacks the `transform_tool_result` hook, so command warnings and failed-command recall never reach the model, and it lacks the bound gateway session context, so gateway chat memory is off. Earlier releases cannot load a provider from the profile at all. Setup and `cairn doctor` read `__release_date__` from the installer's `hermes-agent/hermes_cli/__init__.py` next to the profile or its profiles folder, and warn when it is older or cannot be found; they never run Hermes. [transform_tool_result added](https://github.com/NousResearch/hermes-agent/commit/04068c5891ada4052088ed1febabd9384c87c649), [v2026.4.23](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.4.23)
+Cairn requires **Hermes v2026.4.23 or newer**:
+- v2026.4.16 lacks `transform_tool_result`, preventing failed-command recall.
+- Releases prior to v2026.4.16 cannot load external memory providers.
+- `cairn setup` and `cairn doctor` verify `__release_date__` in `hermes_cli/__init__.py`.
 
 ## Connect a profile
 
-Supply the device token on stdin. These commands target the default profile.
+Target the default profile (or specify `HERMES_HOME=/path/to/profile`):
 
 ```sh
-cairn setup https://your-server.example --agent hermes
+cairn setup https://cairn.example.com --agent hermes
 cairn doctor
 ```
 
-Set `HERMES_HOME` to target a different profile. After restarting Hermes, check provider and plugin discovery.
+Verify provider and plugin discovery after restarting Hermes:
 
 ```sh
 hermes memory status
 hermes plugins list
 ```
 
-Hermes Agent setup makes Cairn the profile's memory provider: it sets `memory.provider: cairn-memory` in `config.yaml`, enables `plugins/cairn-memory/` through `plugins.enabled` and adds the marked block to `SOUL.md`. Hermes allows one external memory provider per profile, so setup replaces another one and saves its exact previous value, including an absent key or `none`. `cairn setup hermes --remove` restores that value while `memory.provider` is still `cairn-memory`; a provider chosen later is kept. Setup removes the Cairn-managed `mcp_servers.cairn` entry from earlier versions, because the provider offers the same tools natively ([Hermes provider tools](../reference/mcp.md#hermes-provider-tools)); removal does not add it back. Hermes built-in memory (`MEMORY.md`, `USER.md`, `memory.memory_enabled`, `memory.user_profile_enabled`) is left unchanged, and Cairn does not mirror built-in memory writes. Run setup with `HERMES_HOME` pointing at your profile to target a profile other than the default. The YAML rewrite preserves unrelated settings and may change comments and formatting. Use `hermes memory status` and `hermes plugins list` to check discovery after restarting Hermes. [Hermes profile paths](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_constants.py), [one external provider](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_manager.py#L285-L296), [provider interface](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_provider.py#L84-L267), [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins), [Hermes context files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files)
+- **Memory provider**: Updates `config.yaml` to set `memory.provider: cairn-memory`.
+- **Plugin enabled**: Enables `plugins/cairn-memory/` in `plugins.enabled`.
+- **Instruction**: Adds a managed instruction block to `SOUL.md`.
+- **Native tools**: The provider supplies memory and skill tools directly without separate MCP configuration ([Hermes provider tools](../reference/mcp.md#hermes-provider-tools)).
+- **Removal**: Run `cairn setup hermes --remove` to restore the previous memory provider.
 
 ## Tool availability
 
-Keep the platform's Hermes `memory` toolset enabled to access the [provider tools](../reference/mcp.md#hermes-provider-tools). For chat platforms use a [dedicated gateway profile](hermes-gateway.md).
+Ensure Hermes's built-in `memory` toolset remains enabled to expose Cairn tools to the model. For multi-user messaging platforms, configure a [dedicated gateway profile](hermes-gateway.md).

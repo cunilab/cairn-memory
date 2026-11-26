@@ -7,34 +7,54 @@ description: "Develop Cairn with disposable stores, run the checks, and update t
 
 # Development
 
-The workspace contains `crates/core`, `crates/store`, `crates/server`, and `crates/client`. The console is in `apps/web`. Rust conventions are in [Rust idioms](rust-idioms.md).
+Local development environment setup, workspace checks, test execution, and documentation rules.
+
+The Cairn repository contains four Rust crates (`cairn-core`, `cairn-store`, `cairn-server`, `cairn-client`), the Next.js web console (`apps/web`), and the documentation site (`apps/docs`).
 
 ## Checks
 
+Run the verification suite before opening a pull request:
+
 ```sh
+# Rust formatting, compilation, and unit tests
 cargo fmt --all -- --check
 cargo check --workspace
 cargo test --workspace
+
+# Database migrations and integrity checks
 python3 scripts/validate_phase0.py
 python3 scripts/check_migrations.py
 python3 scripts/test_check_migrations.py
+
+# Acceptance smokes and web console checks
 ./scripts/smoke_mcp.sh
 ./scripts/smoke_web.sh
 cd apps/web && npm run lint
 ```
 
-Database tests need a disposable PostgreSQL instance with pgvector and `CAIRN_TEST_DATABASE_URL`. CI uses PostgreSQL 17 and requires the database rather than skipping tests. The smoke scripts isolate their data. For local development `./scripts/dev_up.sh` starts the Compose stack and `./scripts/dev_down.sh` stops it while keeping data. `./scripts/dev_down.sh --wipe` removes its database volume.
-
-`scripts/bench.py` measures search and injection; `scripts/bench_write.py` checks capture and session output. See [the benchmark](../../../../bench/README.md).
+- **Database tests**: Require a running PostgreSQL 17 + pgvector instance (`CAIRN_TEST_DATABASE_URL`).
+- **Local stack**: Use `./scripts/dev_up.sh` to start Compose services and `./scripts/dev_down.sh` (or `--wipe` to reset data) to stop them.
+- **Benchmarks**: Execute `scripts/bench.py` and `scripts/bench_write.py` to evaluate retrieval accuracy ([Benchmarks](../../../../bench/README.md)).
 
 ## Migrations
 
-Preserve user data. New migrations should be additive and include an idempotent backfill when existing rows need new values. Test backfills on a database containing existing rows. Never edit applied migrations.
+Preserve user state across all database revisions:
 
-`scripts/check_migrations.py` scans SQL for destructive statements such as `DROP`, `ALTER TABLE ... DROP`, `DELETE FROM` and `TRUNCATE`. Foreign-key `ON DELETE` clauses are not destructive statements. The checker skips comments and requires each matching statement to have an entry in `migrations/destructive-allowlist.txt`; stale entries fail. A new allowlist entry requires explicit user approval, quoted in the PR description. The checker is not a substitute for reviewing runtime deletion or all SQL syntax.
+- **Additive only**: New columns must be nullable or provide defaults; write idempotent backfills for existing rows.
+- **Destructive check**: `scripts/check_migrations.py` scans SQL files for `DROP`, `TRUNCATE`, and column deletions. Any destructive statement requires explicit entry in `migrations/destructive-allowlist.txt` with user approval.
+- Applied migrations are strictly immutable.
 
 ## Documentation
 
-Every Markdown or MDX file under `apps/docs/content/` starts with YAML fields `id`, `title`, and `status`, has a unique ID, and has a first heading matching its title. Relative links must resolve. The root README and the GitHub documentation index need no YAML header. `scripts/validate_phase0.py` checks these rules. Keep one source of truth per topic and link to it from other pages.
+Every documentation page under `apps/docs/content/` must follow Phase 0 rules:
 
-Use Node 22.18 or later for the separate docs app. From `apps/docs`, run `npm ci`, `npm run typecheck`, `npm run build` and `npm run check:export`. Use relative source links between articles so GitHub and the site both resolve them. The default export uses the `/cairn-memory` prefix.
+- Valid YAML header containing unique `id`, `title`, and `status`.
+- The top-level `# <Heading>` must match `title` exactly.
+- All internal relative markdown links must resolve to existing files.
+- Verified by `python3 scripts/validate_phase0.py`.
+- Documentation site build and export tests:
+  ```sh
+  cd apps/docs && npm ci && npm run typecheck && npm run build && npm run check:export
+  ```
+
+See [Cairn Rust idioms](rust-idioms.md) and [Release process](release-process.md).

@@ -7,8 +7,13 @@ description: "PreInvocation input, deferred context and the available lifecycle 
 
 # Antigravity CLI hooks
 
-SessionStart can inject the brief. PreInvocation extracts the latest user input, deduplicates repeated invocations of the same prompt within an execution, and supplies prompt recall through `injectSteps`. PostToolUse captures tool activity and can queue failed-command cards for a one-time system message in the next PreInvocation.
+Lifecycle hook integration and deferred context injection for Google's Antigravity CLI.
 
-For `run_command`, PreToolUse can return `allow` with a reason for an exact command warning. The host's permissions still apply. Delivery of that reason to the model is unverified. PostToolUse supplies neither file topic injection nor MCP result contents. Stop checkpoints work. The hook API has no compact or session-end event.
+- **`SessionStart`**: Evaluates workspace context and injects the opening brief.
+- **`PreInvocation`**: Extracts latest user prompt, deduplicates model invocations within a turn, and injects prompt recall via `injectSteps`.
+- **`PreToolUse`**: For `run_command`, returns `allow` with a warning reason on matching commands.
+- **`PostToolUse`**: Captures tool results; queues failed-command cards for system injection in the subsequent `PreInvocation`.
+- **`Stop`**: Checkpoints session work.
+- **Limits**: Compact and session-end events are not available in Antigravity.
 
-[Host delivery matrix](index.md#command-recall-by-host) · [Antigravity CLI setup](../../users/agents/antigravity.md).
+See [Host delivery matrix](index.md#command-recall-by-host) and [Antigravity CLI setup](../../users/agents/antigravity.md).

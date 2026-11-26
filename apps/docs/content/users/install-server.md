@@ -7,22 +7,33 @@ description: "Run the Cairn server, PostgreSQL and the web console locally."
 
 # Install the server
 
+Deploy the Cairn server, PostgreSQL 17 with pgvector, and the web console using Docker Compose.
+
 ## Run the local stack
 
-Install Docker with Compose. Use the [Compose file in the repository README](../../../../README.md#1-run-the-server-and-web-console) to start PostgreSQL 17 with pgvector, the Cairn server on loopback port 3111 and the console on loopback port 3000.
+Prerequisite: Docker with Compose. Use the [Compose file in the repository README](../../../../README.md#1-run-the-server-and-web-console).
 
-Save the example as `compose.yaml` and supply a URL-safe `POSTGRES_PASSWORD` in the environment. Start all three services with Compose.
+Save the file as `compose.yaml`, set a URL-safe `POSTGRES_PASSWORD` in your environment, and start all three services:
 
 ```sh
 docker compose up -d
 ```
 
-The named database volume holds accounts, projects, memories and jobs across service restarts. For an upgrade you control, use matching `vMAJOR.MINOR.PATCH` image tags for server and console.
+| Service | Port | Description |
+| --- | --- | --- |
+| `cairn-server` | `3111` | REST API and background workers |
+| `cairn-web` | `3000` | Next.js web console |
+| `postgres` | `5432` | PostgreSQL 17 with `pgvector` extension |
+
+A named database volume retains accounts, projects, memories, and jobs across container restarts. For controlled upgrades, use matching `vMAJOR.MINOR.PATCH` image tags for the server and console.
 
 ## Create the first account
 
-Open `http://localhost:3000`. The first account is the only administrator and can create additional accounts. Create a device from **Settings → Devices**, then follow the [CLI install guide](install-cli.mdx).
+1. Open `http://localhost:3000` in your browser.
+2. Register the initial account. This first account is the sole administrator and can invite teammates.
+3. Navigate to **Settings → Devices** to create a device token.
+4. Proceed to [Install the CLI](install-cli.mdx).
 
 ## Other deployment options
 
-Use the standalone server when you already operate PostgreSQL with pgvector 0.8.0 or newer. The [deployment guide](../technical/deployment.md) covers environment variables, the Linux runtime, remote TLS and the agent API address.
+For standalone servers with an external PostgreSQL 17 + pgvector 0.8.0+ instance, consult the [deployment guide](../technical/deployment.md) for environment variables, Linux runtime setups, and reverse proxy TLS configurations.
