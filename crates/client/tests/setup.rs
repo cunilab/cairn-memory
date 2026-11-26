@@ -43,6 +43,15 @@ impl Home {
         self.dir.join(".config/cairn/config.json")
     }
 
+    fn doctor(&self) -> std::process::Command {
+        let mut cmd = command(&self.dir.join(".config"));
+        cmd.env("HOME", &self.dir)
+            .env("USERPROFILE", &self.dir)
+            .current_dir(&self.dir)
+            .arg("doctor");
+        cmd
+    }
+
     fn setup(&self, agent: &str, remove: bool) -> Output {
         let mut cmd = self.command(agent, remove);
         cmd.env("CLAUDE_CONFIG_DIR", self.dir.join(".claude"));
@@ -410,11 +419,129 @@ fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
         doctor.contains(&format!("{agent} hook present")),
         "{doctor}"
     );
+    assert!(!doctor.contains("warn  instructions"), "{doctor}");
     let removed = command()
         .args(["setup", agent, "--remove"])
         .output()
         .unwrap();
     assert!(removed.status.success(), "{removed:?}");
+}
+
+#[test]
+fn doctor_checks_managed_instructions_in_the_hermes_profile() {
+    let home = Home::new("doctor-instructions", false);
+    let profile = home.dir.join("custom profile");
+    let soul = home.write("custom profile/SOUL.md", "User personality\n");
+    let mut setup = home.command("hermes", false);
+    setup.env("HERMES_HOME", &profile);
+    let setup = with_stdin(&mut setup, SECRET);
+    assert!(setup.status.success(), "{setup:?}");
+
+    let doctor = || {
+        let before = home.snapshot(".");
+        let output = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+        assert_eq!(home.snapshot("."), before);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let clean = fs::read_to_string(&soul).unwrap();
+    fs::write(&soul, format!("{clean}\nAnother user instruction\n")).unwrap();
+    assert!(!doctor().contains("warn  instructions"));
+
+    let instructions = cairn_client::tools::instructions();
+    for (content, issue) in [
+        (None, "Cairn instruction block is missing"),
+        (
+            Some("User personality\n".to_owned()),
+            "Cairn instruction block is missing",
+        ),
+        (
+            Some(clean.replace(instructions.trim_end(), "Older Cairn instructions")),
+            "Cairn instruction block is edited or stale",
+        ),
+        (
+            Some(clean.replace("<!-- cairn:end -->", "")),
+            "malformed Cairn markers; repair the marked block first",
+        ),
+    ] {
+        if let Some(content) = content {
+            fs::write(&soul, content).unwrap();
+        } else {
+            fs::remove_file(&soul).unwrap();
+        }
+        let text = doctor();
+        assert!(
+            text.contains(&format!(
+                "warn  instructions  hermes {}: {issue}; run cairn setup hermes",
+                soul.display()
+            )),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn doctor_checks_the_claude_index_unless_native_memory_is_kept() {
+    let home = Home::new("doctor-claude-memory", false);
+    let profile = home.dir.join("custom claude");
+    let settings = home.write(
+        "custom claude/settings.json",
+        "{\"autoMemoryEnabled\": true}\n",
+    );
+    let install = |keep: bool| {
+        let mut setup = home.command("claude", false);
+        setup.env("CLAUDE_CONFIG_DIR", &profile);
+        if keep {
+            setup.arg("--keep-native-memory");
+        }
+        let output = with_stdin(&mut setup, SECRET);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            home.json("custom claude/settings.json")["autoMemoryEnabled"],
+            true
+        );
+    };
+    let command = |args: &[&str]| {
+        let mut cmd = command(&home.dir.join(".config"));
+        cmd.env("HOME", &home.dir)
+            .env("USERPROFILE", &home.dir)
+            .env("CLAUDE_CONFIG_DIR", &profile)
+            .env("CLAUDE_CODE_PROJECT_DIR_NAME", "test-checkout")
+            .current_dir(&home.dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let doctor = || {
+        let before = home.snapshot(".");
+        let output = command(&["doctor"]);
+        assert_eq!(home.snapshot("."), before);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    install(false);
+    assert!(!doctor().contains("warn  claude-memory"));
+
+    let folder = profile.join("projects/test-checkout/memory");
+    fs::create_dir_all(&folder).unwrap();
+    let index = folder.join("MEMORY.md");
+    let warning = format!(
+        "warn  claude-memory  {} is missing the Cairn pointer; run cairn import claude-memory",
+        index.display()
+    );
+    let text = doctor();
+    assert!(text.contains(&warning), "{text}");
+
+    let imported = command(&["import", "claude-memory", "--yes"]);
+    assert!(imported.status.success(), "{imported:?}");
+    assert!(!doctor().contains("warn  claude-memory"));
+
+    fs::write(&index, "# Native memory\n").unwrap();
+    let text = doctor();
+    assert!(text.contains(&warning), "{text}");
+
+    install(true);
+    let text = fs::read_to_string(&settings).unwrap();
+    fs::write(settings, format!("// User settings\n{text}")).unwrap();
+    assert!(!doctor().contains("warn  claude-memory"));
 }
 
 #[test]
@@ -1200,6 +1327,9 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
             .unwrap()
             .contains("  - memory_search\n  - memory_save")
     );
+    let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(!doctor.contains("warn  instructions"), "{doctor}");
     let before = home.snapshot("gateway-profile");
     invoke(true, false);
     assert_eq!(before, home.snapshot("gateway-profile"));

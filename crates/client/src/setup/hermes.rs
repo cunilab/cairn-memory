@@ -103,14 +103,29 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     })
 }
 
-fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
-    let raw = read(path)?;
+fn parse_config(raw: &str) -> R<Value> {
     let mut root: Value =
-        yaml_serde::from_str(&raw).map_err(|_| "cannot parse Hermes config.yaml")?;
+        yaml_serde::from_str(raw).map_err(|_| "cannot parse Hermes config.yaml")?;
     root.apply_merge()
         .map_err(|_| "cannot resolve Hermes config.yaml merges")?;
+    Ok(root)
+}
+
+fn plugin_settings(root: &Value) -> &Value {
+    &root["plugins"]["entries"][PLUGIN_NAME]["settings"]
+}
+
+pub(crate) fn gateway_profile(path: &Path) -> bool {
+    read(path)
+        .and_then(|raw| parse_config(&raw))
+        .is_ok_and(|root| plugin_settings(&root)["cairn_gateway"].as_bool() == Some(true))
+}
+
+fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
+    let raw = read(path)?;
+    let mut root = parse_config(&raw)?;
     let before = root.clone();
-    let settings = &root["plugins"]["entries"][PLUGIN_NAME]["settings"];
+    let settings = plugin_settings(&root);
     let gateway = ctx.gateway || settings["cairn_gateway"].as_bool() == Some(true);
     let legacy_chat_settings =
         settings.get("chat_owner_hashes").is_some() || settings.get("chat_projects").is_some();

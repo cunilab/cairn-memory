@@ -2,9 +2,11 @@
 
 use super::{
     Ctx, KEEP_NATIVE_MEMORY, MANAGED_FLAG, Plan, R, hooks_text, instruction_file, jsonc, mcp_text,
+    read,
 };
 use crate::claude_memory;
 use serde_json::{Value, json};
+use std::path::Path;
 
 pub(super) const EVENTS: [(&str, u32); 8] = [
     ("SessionStart", 10),
@@ -44,11 +46,11 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     })
 }
 
-pub(super) fn keeps_native_memory(settings: &str) -> bool {
-    let Ok(root) = serde_json::from_str::<Value>(settings) else {
+pub(crate) fn keeps_native_memory(settings: &Path) -> bool {
+    let Ok(root) = read(settings).and_then(|text| jsonc::read(&text)) else {
         return false;
     };
-    root["hooks"]["SessionStart"]
+    root.value["hooks"]["SessionStart"]
         .as_array()
         .into_iter()
         .flatten()

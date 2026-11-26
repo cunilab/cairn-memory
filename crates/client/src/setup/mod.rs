@@ -4,7 +4,7 @@
 //! and applying the file edits. Credentials stay in the Cairn config.
 
 pub(crate) mod antigravity;
-mod claude;
+pub(crate) mod claude;
 mod codex;
 pub(crate) mod grok;
 pub(crate) mod hermes;
@@ -14,16 +14,17 @@ mod opencode;
 use crate::{Error, create_private_dir, selected_config_path, write_private};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io};
 
 pub use cairn_core::account::AGENTS;
-const MARKER: &str = "CAIRN_SETUP_MANAGED";
+pub(crate) const MARKER: &str = "CAIRN_SETUP_MANAGED";
 // The host can rewrite its config. Keep grant ownership with the marked MCP registration.
 const APPROVAL_MARKER: &str = "CAIRN_SETUP_APPROVAL";
-const MANAGED_FLAG: &str = "--cairn-managed";
+pub(crate) const MANAGED_FLAG: &str = "--cairn-managed";
 pub(crate) const KEEP_NATIVE_MEMORY: &str = "--keep-native-memory";
 pub(crate) const UNMARKED: &str =
     "an unmarked cairn MCP entry exists; rename or remove it explicitly";
@@ -283,36 +284,55 @@ fn edit_hooks(
     })
 }
 
-/// The instruction block between markers; one block at most, replaced in place on re-setup.
-fn block(text: &str, content: &str, remove: bool) -> R<String> {
-    const BEGIN: &str = "<!-- cairn:begin -->";
-    const END: &str = "<!-- cairn:end -->";
-    let count = text.matches(BEGIN).count();
-    if count != text.matches(END).count() || count > 1 {
-        return Err("malformed Cairn markers; repair the marked block first".into());
+const INSTRUCTION_BEGIN: &str = "<!-- cairn:begin -->";
+const INSTRUCTION_END: &str = "<!-- cairn:end -->";
+
+fn instruction_span(text: &str) -> Result<Option<Range<usize>>, &'static str> {
+    let mut begins = text.match_indices(INSTRUCTION_BEGIN);
+    let mut ends = text.match_indices(INSTRUCTION_END);
+    match (begins.next(), ends.next()) {
+        (None, None) => Ok(None),
+        (Some((start, _)), Some((end, _)))
+            if start < end && begins.next().is_none() && ends.next().is_none() =>
+        {
+            Ok(Some(start..end + INSTRUCTION_END.len()))
+        }
+        _ => Err("malformed Cairn markers; repair the marked block first"),
     }
-    let mut text = text.to_owned();
-    if let Some(start) = text.find(BEGIN) {
-        let mut finish = text.find(END).map_or(0, |end| end + END.len());
-        if finish <= start {
-            return Err("malformed Cairn markers".into());
+}
+
+fn instruction_block() -> String {
+    let content = crate::tools::instructions().trim_end();
+    format!("{INSTRUCTION_BEGIN}\n{content}\n{INSTRUCTION_END}")
+}
+
+pub(crate) fn instruction_issue(path: &Path) -> Option<&'static str> {
+    let Ok(text) = read(path) else {
+        return Some("could not read the Cairn instruction file");
+    };
+    match instruction_span(&text) {
+        Ok(Some(span)) => (text[span] != instruction_block())
+            .then_some("Cairn instruction block is edited or stale"),
+        Ok(None) => Some("Cairn instruction block is missing"),
+        Err(problem) => Some(problem),
+    }
+}
+
+fn instruction_file(path: PathBuf, remove: bool) -> R<(PathBuf, String)> {
+    let mut text = read(&path)?;
+    if let Some(mut span) = instruction_span(&text)? {
+        if text[span.end..].starts_with('\n') {
+            span.end += 1;
         }
-        if text[finish..].starts_with('\n') {
-            finish += 1;
-        }
-        text.replace_range(start..finish, "");
+        text.replace_range(span, "");
     }
     if !remove {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!("{BEGIN}\n{}\n{END}\n", content.trim_end()));
+        text.push_str(&instruction_block());
+        text.push('\n');
     }
-    Ok(text)
-}
-
-fn instruction_file(path: PathBuf, remove: bool) -> R<(PathBuf, String)> {
-    let text = block(&read(&path)?, crate::tools::instructions(), remove)?;
     Ok((path, text))
 }
 
@@ -450,8 +470,9 @@ fn configure_with(
         gateway,
         keep_native_memory: keep_native_memory.unwrap_or_else(|| {
             agent == "claude"
-                && fs::read_to_string(crate::claude_memory::config_dir(&home).join("settings.json"))
-                    .is_ok_and(|text| claude::keeps_native_memory(&text))
+                && claude::keeps_native_memory(
+                    &crate::claude_memory::config_dir(&home).join("settings.json"),
+                )
         }),
         home,
     };

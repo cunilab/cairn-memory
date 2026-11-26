@@ -277,6 +277,15 @@ fn read_index(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+pub(crate) fn index_without_pointer(cwd: &Path, home: &Path) -> Option<PathBuf> {
+    let folder = directory(cwd, home).ok()?;
+    if !folder.is_dir() {
+        return None;
+    }
+    let index = folder.join(INDEX);
+    (!read_index(&index).is_ok_and(|content| content.as_deref() == Some(POINTER))).then_some(index)
+}
+
 fn replace_index(folder: &Path, old: Option<&[u8]>) -> io::Result<()> {
     let index = folder.join(INDEX);
     if read_index(&index)?.as_deref() != old {

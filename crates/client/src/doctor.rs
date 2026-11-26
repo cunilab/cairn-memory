@@ -1,6 +1,7 @@
 //! `cairn doctor`: read-only health checks, one `ok|warn|fail  <check>  <detail>` line each.
 
-use crate::{Client, Config, Error, project, selected_config_path};
+use crate::{Client, Config, Error, claude_memory, project, selected_config_path, setup};
+use cairn_core::capture::redact_sensitive_content as redact;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,35 +126,39 @@ fn project_check() -> Check {
     }
 }
 
-/// Agents whose config directory exists; each must carry a Cairn-managed MCP entry and hook.
-/// Paths and markers mirror `setup`; a hook command that still names the retired Python script
-/// counts as stale.
+/// Check MCP and hooks for detected agents, and instruction drift for Cairn-managed installs.
 fn agent_checks(home: &Path) -> Vec<Check> {
-    let dir = |var: &str, default: PathBuf| env::var_os(var).map_or(default, PathBuf::from);
-    let claude = dir("CLAUDE_CONFIG_DIR", home.join(".claude"));
-    let claude_json = if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+    let dir = |var: &str, default: PathBuf| {
+        env::var_os(var)
+            .filter(|value| !value.is_empty())
+            .map_or(default, PathBuf::from)
+    };
+    let claude = claude_memory::config_dir(home);
+    let claude_json = if env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|dir| !dir.is_empty()) {
         claude.join(".claude.json")
     } else {
         home.join(".claude.json")
     };
     let codex = dir("CODEX_HOME", home.join(".codex"));
     let opencode = dir("XDG_CONFIG_HOME", home.join(".config")).join("opencode");
-    let grok = crate::setup::grok::config_dir(home);
-    let antigravity = crate::setup::antigravity::config_dir(home);
-    let hermes = crate::setup::hermes::config_dir(home);
-    // (agent, config dir, file holding the MCP entry, files holding the hook command)
+    let grok = setup::grok::config_dir(home);
+    let antigravity = setup::antigravity::config_dir(home);
+    let hermes = setup::hermes::config_dir(home);
+    // (agent, config dir, MCP files, hook file, instruction filename)
     let agents = [
         (
             "claude",
             claude.clone(),
             vec![claude_json],
-            vec![claude.join("settings.json")],
+            claude.join("settings.json"),
+            "CLAUDE.md",
         ),
         (
             "codex",
             codex.clone(),
             vec![codex.join("config.toml")],
-            vec![codex.join("hooks.json")],
+            codex.join("hooks.json"),
+            "AGENTS.md",
         ),
         (
             "opencode",
@@ -162,39 +167,44 @@ fn agent_checks(home: &Path) -> Vec<Check> {
                 opencode.join("opencode.json"),
                 opencode.join("opencode.jsonc"),
             ],
-            vec![opencode.join("plugins/cairn/index.js")],
+            opencode.join("plugins/cairn/index.js"),
+            "AGENTS.md",
         ),
         (
             "grok",
             grok.clone(),
             vec![grok.join("config.toml")],
-            vec![crate::setup::grok::hook_file(home)],
+            setup::grok::hook_file(home),
+            "AGENTS.md",
         ),
         (
             "antigravity",
             antigravity.clone(),
             vec![antigravity.join("mcp_config.json")],
-            vec![crate::setup::antigravity::hook_file(home)],
+            setup::antigravity::hook_file(home),
+            "AGENTS.md",
         ),
         (
             "hermes",
             hermes.clone(),
             vec![hermes.join("config.yaml")],
-            vec![crate::setup::hermes::hook_file(home)],
+            setup::hermes::hook_file(home),
+            "SOUL.md",
         ),
     ];
-    let has = |files: &[PathBuf], marker: &str| {
-        files
-            .iter()
-            .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(marker)))
-    };
-    let stale = |files: &[PathBuf]| has(files, "cairn_hook.py") || has(files, "hook/run-hook");
     let mut checks = Vec::new();
-    for (agent, folder, mcp, hooks) in &agents {
+    for (agent, folder, mcp, hook, instruction_name) in &agents {
         if !folder.is_dir() {
             continue;
         }
-        checks.push(if has(mcp, "CAIRN_SETUP_MANAGED") {
+        let managed_mcp = mcp
+            .iter()
+            .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(setup::MARKER)));
+        let hook_text = fs::read_to_string(hook);
+        let managed_hook = hook_text
+            .as_ref()
+            .is_ok_and(|text| text.contains(setup::MANAGED_FLAG));
+        checks.push(if managed_mcp {
             check("ok", "agents", format!("{agent} MCP entry present"))
         } else {
             check(
@@ -203,21 +213,56 @@ fn agent_checks(home: &Path) -> Vec<Check> {
                 format!("{agent} has no Cairn MCP entry; run cairn setup"),
             )
         });
-        checks.push(if stale(hooks) {
-            check(
+        checks.push(
+            if hook_text
+                .as_ref()
+                .is_ok_and(|text| text.contains("cairn_hook.py") || text.contains("hook/run-hook"))
+            {
+                check(
+                    "warn",
+                    "hooks",
+                    format!("{agent} hook still runs the retired Python script; run cairn setup"),
+                )
+            } else if managed_hook {
+                check("ok", "hooks", format!("{agent} hook present"))
+            } else {
+                check(
+                    "warn",
+                    "hooks",
+                    format!("{agent} has no Cairn hook; run cairn setup"),
+                )
+            },
+        );
+        if !managed_mcp && !managed_hook {
+            continue;
+        }
+        let instruction = folder.join(instruction_name);
+        if !(*agent == "hermes" && setup::hermes::gateway_profile(&folder.join("config.yaml")))
+            && let Some(issue) = setup::instruction_issue(&instruction)
+        {
+            checks.push(check(
                 "warn",
-                "hooks",
-                format!("{agent} hook still runs the retired Python script; run cairn setup"),
-            )
-        } else if has(hooks, "--cairn-managed") {
-            check("ok", "hooks", format!("{agent} hook present"))
-        } else {
-            check(
+                "instructions",
+                format!(
+                    "{agent} {}: {issue}; run cairn setup {agent}",
+                    redact(&instruction.display().to_string())
+                ),
+            ));
+        }
+        if *agent == "claude"
+            && !setup::claude::keeps_native_memory(hook)
+            && let Ok(cwd) = env::current_dir()
+            && let Some(index) = claude_memory::index_without_pointer(&cwd, home)
+        {
+            checks.push(check(
                 "warn",
-                "hooks",
-                format!("{agent} has no Cairn hook; run cairn setup"),
-            )
-        });
+                "claude-memory",
+                format!(
+                    "{} is missing the Cairn pointer; run cairn import claude-memory",
+                    redact(&index.display().to_string())
+                ),
+            ));
+        }
     }
     checks
 }

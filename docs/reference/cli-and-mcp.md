@@ -101,8 +101,21 @@ cairn feedback <id> helpful|wrong               cairn forget <id>
 
 The five verbs call the same tools and print the same compact JSON plus a newline; `save` reads one
 `SaveInput` object from its argument or stdin. `doctor` prints `ok|warn|fail  <check>  <detail>`
-per check (config, server, semantic, device, project, agents, hooks), exiting 1 on any `fail`. `hook` runs the
-capture and injection hook ([hook contract](./hook.md)). Account and device management stay in the web console.
+per check, exiting 1 on any `fail`. It checks the config, server, semantic search, device, project,
+and agent integrations. `hook` runs the capture and injection hook ([hook contract](./hook.md)).
+Account and device management stay in the web console.
+
+For a Cairn-managed integration, `doctor` warns if its global instruction block is missing or
+differs from this version. The warning names the file and the `cairn setup <agent>` command that
+refreshes the block. Repair malformed block markers before refreshing. Hermes gateway profiles
+receive their instructions per chat and skip this check.
+
+For Claude Code, `doctor` also checks the current project's `MEMORY.md` when the memory folder
+exists and setup is managing native memory. Run `cairn import claude-memory` from that project
+to restore the Cairn pointer. If import reports that an existing backup differs from a rewritten
+index, move the rewritten index out of the memory folder before retrying.
+Setup with `--keep-native-memory` skips the pointer check. These diagnostics only read local files
+and print warnings.
 
 ### Hermes gateway tools
 
