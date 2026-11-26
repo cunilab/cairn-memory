@@ -3,16 +3,47 @@
 
 import hmac
 import json
+import re
 import subprocess
 import threading
 import time
 import uuid
+from functools import wraps
 
 EXE, CONFIG = __CAIRN_PATHS__
 
 
 GATEWAY = __CAIRN_GATEWAY__
 IDLE_SECONDS = 30 * 60
+BACKGROUND = ("cron", "subagent", "flush")
+
+
+def background(session_id=None, task_id=None, platform=None, agent_context=None, **_):
+    if platform in BACKGROUND or agent_context in BACKGROUND:
+        return True
+    if isinstance(session_id, str) and session_id.startswith(("cron_", "flush_")):
+        return True
+    if isinstance(task_id, str) and task_id.startswith("cron:"):
+        return True
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+        if is_delegated_child_process_context():
+            return True
+    except ImportError:
+        pass
+    try:
+        from gateway.session_context import bound_session_env
+        return bound_session_env("HERMES_CRON_SESSION") == "1"
+    except ImportError:
+        return False
+
+
+def foreground(callback):
+    @wraps(callback)
+    def call(*args, **kwargs):
+        if not background(**kwargs):
+            return callback(*args, **kwargs)
+    return call
 
 
 def forward(ctx, event, session_id, **fields):
@@ -47,6 +78,7 @@ def register(ctx):
         return register_gateway(ctx)
     pending = {}
 
+    @foreground
     def on_prompt(session_id, user_message, is_first_turn=False, **_):
         # Hermes ignores on_session_start output. Its first prompt can carry the brief.
         reply = forward(ctx, "SessionStart", session_id) if is_first_turn else None
@@ -64,6 +96,11 @@ def register(ctx):
             ("mcp__cairn__", "mcp_cairn_")
         )
 
+    def before_tool(tool_name, **details):
+        if tool_name in {"mcp__cairn__memory_save", "mcp_cairn_memory_save"} and background(**details):
+            return {"action": "block", "message": "Cairn memory saves require an interactive Hermes turn."}
+
+    @foreground
     def after_tool(tool_name, args, result, session_id=None, tool_call_id=None, status=None, error_message=None, **_):
         if relevant(tool_name):
             reply = forward(ctx, "PostToolUse", session_id, tool_name=tool_name, args=args,
@@ -71,6 +108,7 @@ def register(ctx):
             if text := context(reply):
                 pending.setdefault(session_id, {})[tool_call_id] = text
 
+    @foreground
     def append_recall(tool_name, result, session_id=None, tool_call_id=None, **_):
         if tool_name != "terminal":
             return None
@@ -86,21 +124,26 @@ def register(ctx):
                 pass
             return result + "\n" + text
 
+    @foreground
     def after_turn(session_id, assistant_response, **_):
         forward(ctx, "Stop", session_id, assistant_response=assistant_response)
 
+    @foreground
     def failed_turn(session_id, failed=False, interrupted=False, **_):
         if failed or interrupted:
             forward(ctx, "Stop", session_id)
 
+    @foreground
     def after_compaction(session_id, old_session_id=None, **_):
         forward(ctx, "PreCompact", old_session_id or session_id)
 
+    @foreground
     def end_session(session_id=None, **_):
         pending.pop(session_id, None)
         forward(ctx, "SessionEnd", session_id)
 
     ctx.register_hook("pre_llm_call", on_prompt)
+    ctx.register_hook("pre_tool_call", before_tool)
     ctx.register_hook("post_tool_call", after_tool)
     try:
         ctx.register_hook("transform_tool_result", append_recall)
@@ -127,39 +170,36 @@ def register_gateway(ctx):
     salt = ctx.get_config("chat_salt")
     if not isinstance(salt, str) or not salt:
         return
-    owners = ctx.get_config("chat_owner_hashes", {})
-    projects = ctx.get_config("chat_projects", {})
-    owners = owners if isinstance(owners, dict) else {}
-    projects = projects if isinstance(projects, dict) else {}
     sessions = {}
     lock = threading.Lock()
 
-    def route():
+    def route(session_id=None, **details):
+        if background(session_id=session_id, **details):
+            return None
+
         def value(field):
             return bound_session_env("HERMES_SESSION_" + field)
 
         platform, chat_id, kind = value("PLATFORM"), value("CHAT_ID"), value("CHAT_TYPE")
-        if platform not in {"telegram", "discord"} or not chat_id or not kind:
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", platform) or not chat_id or not kind:
+            return None
+        if platform in BACKGROUND:
+            return None
+        bound_session = value("ID")
+        if session_id and bound_session and session_id != bound_session:
             return None
         # Discord reports the thread as its effective channel, with its parent separately.
         parent = value("PARENT_CHAT_ID")
         thread = value("THREAD_ID")
-        sender = value("ACTOR_ID")
         dm = kind in {"dm", "direct", "private"}
         chat_hash = chat_digest(salt, platform, "chat", parent or chat_id)
-        sender_hash = chat_digest(salt, platform, "sender", sender) if sender else None
         thread_hash = chat_digest(salt, platform, "thread", thread) if thread else None
-        owner_hash = owners.get(platform)
-        owner = bool(dm and sender_hash and isinstance(owner_hash, str)
-                     and owner_hash.isascii() and hmac.compare_digest(sender_hash, owner_hash))
         chat = {"platform": platform, "kind": "dm" if dm else "group",
-                "chat_id_hash": chat_hash, "sender_id_hash": sender_hash,
-                "thread_id_hash": thread_hash, "owner": owner}
+                "chat_id_hash": chat_hash, "thread_id_hash": thread_hash}
         return (chat_hash, thread_hash), chat
 
     def send(event, state, chat, **fields):
-        return forward(ctx, event, state["id"], chat_context=chat,
-                       project_id=projects.get(chat["chat_id_hash"]), **fields)
+        return forward(ctx, event, state["id"], chat_context=chat, **fields)
 
     def idle(key, state, timer, chat):
         with lock:
@@ -169,8 +209,8 @@ def register_gateway(ctx):
         send("Stop", state, chat)
         send("SessionEnd", state, chat)
 
-    def on_prompt(session_id, user_message, turn_id=None, **_):
-        current = route()
+    def on_prompt(session_id, user_message, turn_id=None, **details):
+        current = route(session_id, **details)
         if current is None:
             return
         key, chat = current
@@ -201,8 +241,8 @@ def register_gateway(ctx):
         if notes:
             return {"context": "\n".join(notes)}
 
-    def after_turn(session_id, turn_id=None, **_):
-        current = route()
+    def after_turn(session_id, turn_id=None, **details):
+        current = route(session_id, **details)
         if current is None:
             return
         key, chat = current
@@ -222,18 +262,18 @@ def register_gateway(ctx):
             timer.daemon = True
             timer.start()
 
-    def active():
-        current = route()
+    def active(**details):
+        current = route(**details)
         if current is None:
             return None, None
         key, chat = current
         with lock:
             return sessions.get(key), chat
 
-    def after_tool(tool_name, args, result, tool_call_id=None, status=None, error_message=None, **_):
+    def after_tool(tool_name, args, result, tool_call_id=None, status=None, error_message=None, **details):
         if tool_name != "terminal":
             return
-        state, chat = active()
+        state, chat = active(**details)
         if state is not None:
             reply = send("PostToolUse", state, chat, tool_name=tool_name, args=args, result=result,
                          tool_call_id=tool_call_id, status=status, error_message=error_message)
@@ -241,10 +281,10 @@ def register_gateway(ctx):
                 with lock:
                     state["recall"][tool_call_id] = text
 
-    def append_recall(tool_name, result, tool_call_id=None, **_):
+    def append_recall(tool_name, result, tool_call_id=None, **details):
         if tool_name != "terminal":
             return
-        state, _ = active()
+        state, _ = active(**details)
         if state is None:
             return
         with lock:
@@ -259,18 +299,23 @@ def register_gateway(ctx):
                 pass
             return str(result) + "\n" + text
 
-    def tool(event):
-        def call(args, **_):
-            state, chat = active()
-            reply = send(event, state, chat, arguments=args) if state is not None else None
+    def tool(event, properties):
+        def call(args, **details):
+            state, chat = active(**details)
+            reply = None
+            if state is not None:
+                arguments = {key: args[key] for key in properties if key in args}
+                reply = send(event, state, chat, arguments=arguments)
             return json.dumps(reply or {"error": "Cairn chat memory is unavailable."})
         return call
 
     available = no_cache_check_fn(lambda: route() is not None)
     for name, event, description, properties, required in [
-        ("memory_search", "ChatSearch", "Search memories available in this chat.",
+        ("memory_search", "ChatSearch",
+         "Search this chat's memories. Pass a project ID or exact name when you also need memories from that project.",
          {"query": {"type": "string"}}, ["query"]),
-        ("memory_save", "ChatSave", "Save a personal memory tagged with this chat.",
+        ("memory_save", "ChatSave",
+         "Save lasting knowledge for this chat. Pass a project ID or exact name only to share a note, rule, decision, gotcha, procedure, or fact with that project. Save preferences without a project.",
          {"kind": {"type": "string", "enum": ["note", "decision", "rule", "preference",
                                              "procedure", "gotcha", "fact"]},
           "title": {"type": "string", "maxLength": 80},
@@ -278,9 +323,10 @@ def register_gateway(ctx):
           "reason": {"type": "string"},
           "fields": {"type": "object"}}, ["kind", "title", "summary"]),
     ]:
+        properties["project"] = {"type": "string", "description": "Project ID or exact name."}
         schema = {"name": name, "description": description,
                   "parameters": {"type": "object", "properties": properties, "required": required}}
-        ctx.register_tool(name=name, toolset="cairn-chat", schema=schema, handler=tool(event),
+        ctx.register_tool(name=name, toolset="cairn-chat", schema=schema, handler=tool(event, properties),
                           check_fn=available, description=description)
 
     ctx.register_hook("pre_llm_call", on_prompt)

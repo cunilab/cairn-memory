@@ -1,5 +1,5 @@
 use super::entities;
-use crate::capture::{WorkContext, redact_sensitive_content};
+use crate::capture::{ChatKind, WorkContext, redact_sensitive_content};
 use crate::error::Error;
 use crate::memory::identity::{evidence_hash, identity_hash, normalize_evidence};
 use crate::memory::kind::{expires_at, resolve_scope};
@@ -14,6 +14,8 @@ pub enum Origin {
     Agent,
     System,
 }
+
+pub const CHAT_PREFERENCE_ERROR: &str = "A preference is always personal. Save it without a project to keep it in this chat, or save shared project knowledge as a note, rule, decision, gotcha, procedure, or fact with the project.";
 
 impl Origin {
     pub fn as_str(self) -> &'static str {
@@ -103,6 +105,10 @@ fn prepare(
     now: i64,
     strict_quality: bool,
 ) -> Result<NewMemory, Error> {
+    let chat_project = work.chat.is_some() && origin == Origin::Agent && has_project;
+    if chat_project && input.kind == Kind::Preference {
+        return Err(Error::validation(CHAT_PREFERENCE_ERROR));
+    }
     let redact = |text: &str| redact_sensitive_content(text.trim());
     let fields =
         Fields::parse(input.kind, input.fields.clone())?.map_text(redact_sensitive_content);
@@ -123,7 +129,9 @@ fn prepare(
             "supersedes and contradicts must name different memories",
         ));
     }
-    let scope = if work.chat.is_some() {
+    let scope = if chat_project {
+        Scope::Project
+    } else if work.chat.is_some() {
         Scope::Personal
     } else {
         resolve_scope(input.kind, input.scope, has_project)?
@@ -164,7 +172,12 @@ fn prepare(
         contradicts: input.contradicts,
     };
     if let Some(chat) = &work.chat {
-        new.tag_chat(chat.chat_id_hash.clone(), !chat.owner_dm());
+        let candidate = chat.kind == ChatKind::Group;
+        if scope == Scope::Personal {
+            new.tag_chat(chat.chat_id_hash.clone(), candidate);
+        } else {
+            new.chat_candidate = candidate;
+        }
     }
     Ok(new)
 }

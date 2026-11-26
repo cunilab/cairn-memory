@@ -1715,16 +1715,15 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
         )
         .await["project_id"]
         .clone();
-    let chat = |kind, hash: &str, sender, owner| {
+    let chat = |kind, hash: &str| {
         json!({
-            "platform": "telegram", "kind": kind, "chat_id_hash": hash.repeat(64),
-            "sender_id_hash": sender, "thread_id_hash": "d".repeat(64), "owner": owner,
+            "platform": "matrix", "kind": kind, "chat_id_hash": hash.repeat(64),
+            "thread_id_hash": "d".repeat(64),
         })
     };
-    let group = chat("group", "a", "e".repeat(64), true);
-    let other_group = chat("group", "b", "e".repeat(64), false);
-    let owner_dm = chat("dm", "c", "e".repeat(64), true);
-    let mut guest_dm = chat("dm", "c", "f".repeat(64), false);
+    let group = chat("group", "a");
+    let other_group = chat("group", "b");
+    let dm = chat("dm", "c");
     let private = save(
         &app,
         &token,
@@ -1764,7 +1763,7 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
     let saved_body = json!({
         "kind": "note", "scope": "global", "title": "Kestrel observatory schedule",
         "summary": "The Kestrel observatory runs a public tour every Thursday.",
-        "context": {"chat": group, "project_id": project}
+        "context": {"chat": group}
     });
     let group_id = save(&app, &token, saved_body.clone()).await;
     assert_eq!(save(&app, &token, saved_body.clone()).await, group_id);
@@ -1786,31 +1785,67 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
     };
     assert_eq!(search(&group, &token).await, [group_id.as_str()]);
     assert!(search(&other_group, &token).await.is_empty());
-    assert!(search(&guest_dm, &token).await.is_empty());
-    let guest_saved = save(&app, &token, json!({
-        "kind": "note", "title": "Guest ticket", "summary": "The guest has a ticket for Thursday.",
-        "context": {"chat": guest_dm}
+    assert!(search(&dm, &token).await.is_empty());
+    let dm_saved = save(&app, &token, json!({
+        "kind": "note", "title": "Kestrel ticket", "summary": "The next Kestrel tour runs on Thursday.",
+        "context": {"chat": dm}
     })).await;
-    let guest_memory = app.get(&format!("memories/{guest_saved}"), &owner).await;
-    assert_eq!(guest_memory["trust"], "new · awaiting confirmation");
-    guest_dm["owner"] = true.into();
-    guest_dm["sender_id_hash"] = serde_json::Value::Null;
-    assert!(search(&guest_dm, &token).await.is_empty());
+    assert_eq!(search(&dm, &token).await, [dm_saved.as_str()]);
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
     assert!(search(&group, &foreign_token).await.is_empty());
-    let owner_ids = search(&owner_dm, &token).await;
-    assert!(owner_ids.contains(&group_id) && owner_ids.contains(&private));
-    assert!(!owner_ids.contains(&project_rule));
-    let linked = app
+
+    let project_save = json!({
+        "kind": "note", "title": "Kestrel tour capacity",
+        "summary": "The Kestrel tour can take twelve passengers.",
+        "context": {"chat": group, "project_id": "E2E Hermes chat"}
+    });
+    let project_note = save(&app, &token, project_save.clone()).await;
+    let record = app.get(&format!("memories/{project_note}"), &owner).await;
+    assert_eq!(record["scope"], "project");
+    assert_eq!(record["project_id"], project);
+    assert_eq!(record["trust"], "new · awaiting confirmation");
+    let tag: Option<String> =
+        sqlx::query_scalar("SELECT chat_id_hash FROM memories WHERE memory_id = $1")
+            .bind(&project_note)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(tag, None);
+    let denied_search = json!({
+        "query": "Kestrel", "context": {"chat": group, "project_id": project}
+    });
+    for (route, body) in [
+        ("search", denied_search),
+        ("remember", project_save.clone()),
+    ] {
+        assert_eq!(
+            app.send("POST", route, body, Some(&foreign_token)).await.0,
+            404
+        );
+    }
+    let mut preference = project_save.clone();
+    preference["kind"] = "preference".into();
+    let (status, reply) = app.send("POST", "remember", preference, Some(&token)).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        reply["error"],
+        cairn_core::process::prepare::CHAT_PREFERENCE_ERROR
+    );
+
+    let selected = app
         .post(
             "search",
             json!({"query": "Kestrel", "context": {
-                "chat": group, "project_id": project
+                "chat": group, "project_id": "E2E Hermes chat"
             }}),
             &token,
         )
         .await;
-    assert!(ids(&linked).contains(&project_rule));
-    assert!(!ids(&linked).contains(&private));
+    let selected = ids(&selected);
+    assert!(selected.contains(&project_rule) && selected.contains(&project_note));
+    assert!(selected.contains(&group_id));
+    assert!(!selected.contains(&private) && !selected.contains(&dm_saved));
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
     assert!(
         !ids(&app
             .post("search", json!({"query": "Kestrel"}), &token)
@@ -1829,12 +1864,21 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
         404
     );
 
-    let mut raw_id = saved_body;
-    raw_id["context"]["chat"]["chat_id_hash"] = "unhashed-transport-id".into();
-    assert_eq!(
-        app.send("POST", "remember", raw_id, Some(&token)).await.0,
-        400
-    );
+    for (key, invalid) in [
+        ("chat_id_hash", json!("unhashed-transport-id")),
+        ("sender_id_hash", json!("e".repeat(64))),
+        ("owner", json!(true)),
+        ("platform", json!("Uppercase")),
+    ] {
+        let mut invalid_chat = saved_body.clone();
+        invalid_chat["context"]["chat"][key] = invalid;
+        assert_eq!(
+            app.send("POST", "remember", invalid_chat, Some(&token))
+                .await
+                .0,
+            400
+        );
+    }
 
     let session = |digit: char| format!("hchat_{}", digit.to_string().repeat(32));
     let brief = app
@@ -1849,23 +1893,26 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
     let briefing = brief["brief"].as_str().unwrap();
     assert!(briefing.contains("Kestrel project schedule"), "{brief}");
     assert!(!briefing.contains("private fallback") && !briefing.contains("Private identity pin"));
-    assert!(brief["instructions"].is_null());
-    let owner_brief = app
+    assert_eq!(
+        brief["instructions"]["chat_instruction"],
+        cairn_core::instructions::DEFAULT_CHAT_INSTRUCTION
+    );
+    let dm_brief = app
         .post(
             "session/brief",
             json!({
-                "session_id": session('b'), "context": {"chat": owner_dm}
+                "session_id": session('b'), "context": {"chat": dm}
             }),
             &token,
         )
         .await;
     assert!(
-        owner_brief["brief"]
+        !dm_brief["brief"]
             .as_str()
             .unwrap()
             .contains("Private identity pin")
     );
-    for (chat, digit, visible) in [(&group, 'c', false), (&owner_dm, 'd', true)] {
+    for (chat, digit) in [(&group, 'c'), (&dm, 'd')] {
         let prompt = app
             .post(
                 "session/prompt-recall",
@@ -1876,12 +1923,11 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
                 &token,
             )
             .await;
-        assert_eq!(
-            prompt["text"]
+        assert!(
+            !prompt["text"]
                 .as_str()
                 .unwrap()
                 .contains("Kestrel private fallback"),
-            visible,
             "{prompt}"
         );
     }
@@ -1893,7 +1939,7 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
                    "cause": "kestrel audit overwrites it", "fix": "Copy the previous report first"},
         "context": {"commands": ["kestrel audit"]}
     })).await;
-    for (chat, digit, visible) in [(&group, 'e', false), (&owner_dm, 'f', true)] {
+    for (chat, digit) in [(&group, 'e'), (&dm, 'f')] {
         let warning = app
             .post(
                 "session/command-recall",
@@ -1903,12 +1949,11 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
                 &token,
             )
             .await;
-        assert_eq!(
-            warning["text"]
+        assert!(
+            !warning["text"]
                 .as_str()
                 .unwrap()
                 .contains("Kestrel command warning"),
-            visible,
             "{warning}"
         );
     }

@@ -8,6 +8,9 @@ pub const MAX_INSTRUCTION_BYTES: usize = 600;
 /// Appended to the session brief.
 pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is the only memory. Do not read or write built-in memory files. Call memory_search before deciding, debugging or acting on a name, tool, model, person or convention you do not know from this conversation. Call memory_save with a reason after decisions, fixes or corrections.";
 
+/// Delivered on the first prompt of each Hermes gateway chat session.
+pub const DEFAULT_CHAT_INSTRUCTION: &str = "Cairn memory here covers only this conversation. In groups, never reveal private information. If unsure which project applies or whether to share something outside this chat, don't guess or act. Say you need your owner's confirmation without private details. Wait for your owner to confirm in this conversation. Save lasting preferences, decisions and corrections right away. Skip chit-chat. Use only memories directly useful here. Never save message, chat or sender IDs in memory text. Pass a project ID or exact name only for project knowledge. Omit the project for preferences.";
+
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
 pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints.";
 
@@ -58,6 +61,7 @@ mod tests {
     fn the_defaults_fit_and_the_placeholder_is_filled() {
         assert!(DEFAULT_SESSION_INSTRUCTION.len() <= 280);
         assert!(DEFAULT_STOP_NUDGE.len() <= MAX_INSTRUCTION_BYTES);
+        assert!(DEFAULT_CHAT_INSTRUCTION.len() <= MAX_INSTRUCTION_BYTES);
         assert!(fill_stop_nudge(DEFAULT_STOP_NUDGE, 3).starts_with("You changed 3 file(s)."));
         assert_eq!(fill_stop_nudge("no placeholder", 3), "no placeholder");
     }

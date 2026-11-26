@@ -17,7 +17,8 @@ use cairn_core::capture::{
 };
 use cairn_core::id::{new_id, now_seconds, sha256_hex};
 use cairn_core::instructions::{
-    DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
+    DEFAULT_CHAT_INSTRUCTION, DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE,
+    fill_correction_nudge, fill_stop_nudge,
 };
 use cairn_core::process::distill::{
     HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
@@ -246,9 +247,17 @@ fn session(options: &Options) -> Result<(), String> {
         if hook.chat.is_none() {
             return Err("Hermes chat tools require chat context".into());
         }
-        let reply = hook
-            .chat_tool()
-            .unwrap_or_else(|_| json!({"error": "Cairn could not complete this chat request."}));
+        let reply = hook.chat_tool().unwrap_or_else(|error| {
+            let message = match error {
+                Error::Input(message)
+                | Error::Status {
+                    status: 400 | 404 | 409,
+                    message,
+                } => redact_sensitive_content(&message),
+                _ => "Cairn could not complete this chat request.".into(),
+            };
+            json!({"error": message})
+        });
         println!("{reply}");
         return Ok(());
     }
@@ -406,7 +415,18 @@ impl Hook<'_> {
                 body.insert((*key).to_owned(), value.clone());
             }
         }
-        body.insert("context".into(), json!(self.work_context()));
+        let mut work = self.work_context();
+        if let Some(project) = arguments.get("project") {
+            work.project_id = Some(
+                project
+                    .as_str()
+                    .ok_or_else(|| {
+                        Error::Input("project must be a project ID or exact name".into())
+                    })?
+                    .to_owned(),
+            );
+        }
+        body.insert("context".into(), json!(work));
         self.post(route, &Value::Object(body))
     }
 
@@ -414,7 +434,6 @@ impl Hook<'_> {
         if let Some(chat) = &self.chat {
             return WorkContext {
                 chat: Some(chat.clone()),
-                project_id: self.payload.text("project_id").map(str::to_owned),
                 ..WorkContext::default()
             };
         }
@@ -521,11 +540,13 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
+                if self.chat.is_some() {
+                    return Some(DEFAULT_CHAT_INSTRUCTION.to_owned());
+                }
                 return self
                     .config
                     .nudge()
                     .then_some(DEFAULT_SESSION_INSTRUCTION)
-                    .filter(|_| self.chat.is_none())
                     .map(str::to_owned);
             }
         };
@@ -555,7 +576,13 @@ impl Hook<'_> {
         if let Some(id) = resolved.clone() {
             self.with_state(|s| s.project_id = Some(id));
         }
-        let line = if !self.config.nudge() || self.chat.is_some() {
+        let line = if self.chat.is_some() {
+            Some(inject::server_text(
+                &reply,
+                "chat_instruction",
+                DEFAULT_CHAT_INSTRUCTION,
+            ))
+        } else if !self.config.nudge() {
             None
         } else {
             let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);

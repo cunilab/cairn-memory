@@ -14,8 +14,37 @@ use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
-use sqlx::{Executor, PgConnection, Postgres, Row};
+use sqlx::{Executor, PgConnection, PgExecutor, Postgres, Row};
 use std::collections::{HashMap, HashSet};
+
+async fn resolve_chat_project<'e>(
+    db: impl PgExecutor<'e>,
+    person_id: &str,
+    project: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(project) = project.map(str::trim) else {
+        return Ok(None);
+    };
+    cairn_core::project::validate_project_text(project, "project")?;
+    let matches: Vec<String> = sqlx::query_scalar(
+        "SELECT p.project_id FROM projects p
+          JOIN project_members m USING (project_id)
+         WHERE m.person_id = $1 AND (p.project_id = $2 OR p.name = $2)
+         ORDER BY (p.project_id = $2) DESC, p.project_id LIMIT 2 FOR SHARE OF m",
+    )
+    .bind(person_id)
+    .bind(project)
+    .fetch_all(db)
+    .await?;
+    match matches.as_slice() {
+        [id] => Ok(Some(id.clone())),
+        [id, ..] if id == project => Ok(Some(id.clone())),
+        [] => Err(StoreError::NotFound("member project".into())),
+        _ => Err(StoreError::Validation(
+            "more than one member project has that name; use the project ID".into(),
+        )),
+    }
+}
 
 fn pin_limit(scope: Scope) -> Option<i64> {
     match scope {
@@ -314,8 +343,16 @@ impl Store {
         source: SaveSource,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        let project_id = self.context_project(person_id, work, device_id).await?;
+        let mut project_id = if work.chat.is_none() {
+            self.context_project(person_id, work, device_id).await?
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
+        if work.chat.is_some() {
+            project_id =
+                resolve_chat_project(&mut *tx, person_id, work.project_id.as_deref()).await?;
+        }
         let saved = save_in_tx(
             &mut tx,
             person_id,
@@ -365,6 +402,13 @@ impl Store {
         person_id: &str,
         work: &WorkContext,
     ) -> Result<ProjectResolution> {
+        if work.chat.is_some() {
+            return Ok(ProjectResolution {
+                project_id: resolve_chat_project(&self.pool, person_id, work.project_id.as_deref())
+                    .await?,
+                by_repository: false,
+            });
+        }
         if let Some(project_id) = work
             .project_id
             .as_deref()

@@ -209,7 +209,11 @@ pub async fn brief(
         BriefBudget::Legacy
     };
     let mut reply = json!({"max_bytes": budget.max_bytes()});
-    if context.chat.as_ref().is_none_or(ChatContext::owner_dm) {
+    if context.chat.is_some() {
+        reply["instructions"] = json!({
+            "chat_instruction": state.store.chat_instruction().await?,
+        });
+    } else {
         // The texts the hook appends at start and sends at Stop, so it needs no other request.
         let instructions = state
             .store

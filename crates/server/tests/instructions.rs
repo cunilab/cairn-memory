@@ -13,6 +13,54 @@ fn text(reply: &Value, field: &str) -> (String, String) {
 }
 
 #[tokio::test]
+async fn web_chat_instruction_is_validated_and_delivered_only_to_chat() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let member = app.member(&admin, "member").await;
+    let device = app.device(&member, "hermes").await;
+    let default = cairn_core::instructions::DEFAULT_CHAT_INSTRUCTION;
+    let key = "chat_instruction";
+    let route = "agent-instructions";
+    let start = app.get(route, &admin).await;
+    assert_eq!(text(&start, key), (default.into(), "default".into()));
+    assert!(default.len() <= start["max_bytes"].as_u64().unwrap() as usize);
+    let edited = "Ask before sharing private details.";
+    let change = json!({(key): format!("  {edited}  ")});
+    for (token, expected) in [(&member, 403), (&device, 401)] {
+        assert_eq!(
+            app.send("POST", route, change.clone(), Some(token)).await.0,
+            expected
+        );
+    }
+    for invalid in ["é".repeat(301), "invalid\0text".into()] {
+        assert_eq!(
+            app.send("POST", route, json!({(key): invalid}), Some(&admin))
+                .await
+                .0,
+            400
+        );
+    }
+    let set = app.post(route, change, &admin).await;
+    assert_eq!(text(&set, key), (edited.into(), "global".into()));
+    let brief = app.post("session/brief", json!({
+        "session_id": format!("hchat_{}", "a".repeat(32)),
+        "context": {"chat": {"platform": "slack", "kind": "group", "chat_id_hash": "b".repeat(64)}}
+    }), &device).await;
+    assert_eq!(brief["instructions"], json!({(key): edited}));
+    let cli = app
+        .post(
+            "session/brief",
+            json!({"session_id": "plain-session"}),
+            &device,
+        )
+        .await;
+    assert!(cli["instructions"][key].is_null());
+    let cleared = app.post(route, json!({(key): ""}), &admin).await;
+    assert_eq!(text(&cleared, key), (default.into(), "default".into()));
+    app.db.finish().await;
+}
+
+#[tokio::test]
 async fn global_texts_default_set_cap_clear_and_audit() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;

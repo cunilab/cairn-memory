@@ -574,6 +574,120 @@ fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
     assert_eq!(fake.to("end")[0].body["nudge_saved"], true);
 }
 
+#[test]
+fn hermes_chat_hook_forwards_project_and_chat_instruction() {
+    const PREFERENCE_ERROR: &str = cairn_core::process::prepare::CHAT_PREFERENCE_ERROR;
+    let server = fake_with(|_, request| {
+        match request.path.rsplit('/').next() {
+        Some("brief") => (200, json!({"brief": "Chat recall", "instructions": {
+            "chat_instruction": "Custom chat line.", "session_instruction": "Private instruction"
+        }}).to_string()),
+        Some("remember") => (400, json!({"error": PREFERENCE_ERROR}).to_string()),
+        _ => default_reply(request),
+    }
+    });
+    let env = Env::new("hermes-chat-hook", &server.url);
+    let chat = json!({"platform": "matrix", "kind": "group", "chat_id_hash": "a".repeat(64)});
+    let invoke = |event, context: &Value, arguments: Value| {
+        let mut body = json!({
+            "session_id": format!("hchat_{}", "b".repeat(32)),
+            "project_id": "implicit project must be ignored",
+            "arguments": arguments,
+        });
+        if !context.is_null() {
+            body["chat_context"] = context.clone();
+        }
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        out
+    };
+    let start = invoke("SessionStart", &chat, Value::Null);
+    assert_eq!(
+        injected(&start).as_deref(),
+        Some("Chat recall\nCustom chat line.")
+    );
+    let scope = &server.to("brief")[0].body["context"];
+    assert_eq!(scope["chat"]["chat_id_hash"], chat["chat_id_hash"]);
+    assert!(scope.get("project_id").is_none());
+    for key in ["owner", "sender_id_hash"] {
+        assert!(scope["chat"].get(key).is_none());
+    }
+    invoke(
+        "ChatSearch",
+        &chat,
+        json!({"query":"tour", "project": "E2E Tours"}),
+    );
+    assert_eq!(
+        server.to("search")[0].body["context"]["project_id"],
+        "E2E Tours"
+    );
+    let save = invoke(
+        "ChatSave",
+        &chat,
+        json!({
+            "kind":"preference", "title":"User preference", "project":"E2E Tours"
+        }),
+    );
+    let reply: Value = serde_json::from_slice(&save.stdout).unwrap();
+    assert_eq!(reply["error"], PREFERENCE_ERROR);
+    assert_eq!(
+        server.to("remember")[0].body["context"]["project_id"],
+        "E2E Tours"
+    );
+    invoke("ChatSearch", &Value::Null, json!({"query":"tour"}));
+    assert_eq!(server.to("search").len(), 1);
+}
+
+#[test]
+fn hermes_chat_replays_legacy_captures_without_sender_metadata() {
+    let offline = Arc::new(AtomicBool::new(true));
+    let server = fake_with({
+        let offline = offline.clone();
+        move |_, request| {
+            if request.path.ends_with("/observe") && offline.load(Ordering::Relaxed) {
+                (503, "{}".into())
+            } else {
+                default_reply(request)
+            }
+        }
+    });
+    let env = Env::new("hermes-chat-outbox", &server.url);
+    let prompt = |message| {
+        with_stdin(
+            command(&env.home).args(["hook", "UserPromptSubmit", "--agent", "hermes"]),
+            &json!({
+                "session_id": format!("hchat_{}", "b".repeat(32)),
+                "chat_context": {"platform": "matrix", "kind": "group", "chat_id_hash": "a".repeat(64)},
+                "user_message": message,
+            }).to_string(),
+        )
+    };
+    let first = prompt("Keep the older capture");
+    assert!(first.status.success(), "{first:?}");
+    let outbox = env.outbox();
+    let mut queue: Value = serde_json::from_slice(&std::fs::read(&outbox).unwrap()).unwrap();
+    let body = &mut queue["events"][0]["body"];
+    body["context"]["chat"]["sender_id_hash"] = "c".repeat(64).into();
+    body["context"]["chat"]["owner"] = true.into();
+    let original_id = body["event_id"].clone();
+    std::fs::write(&outbox, queue.to_string()).unwrap();
+
+    offline.store(false, Ordering::Relaxed);
+    let second = prompt("Replay when connected");
+    assert!(second.status.success(), "{second:?}");
+    let sent = server.observed();
+    assert_eq!(sent.len(), 3);
+    let replay = &sent[2];
+    assert_eq!(replay["event_id"], original_id);
+    assert_eq!(replay["content"], "Keep the older capture");
+    assert!(replay["context"]["chat"].get("sender_id_hash").is_none());
+    assert!(replay["context"]["chat"].get("owner").is_none());
+    assert!(queued_ids(&outbox).is_empty());
+}
+
 fn injected(output: &Output) -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {

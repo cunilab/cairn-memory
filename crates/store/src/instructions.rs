@@ -6,15 +6,20 @@ use crate::account::audit_tx;
 use crate::{Result, Store, StoreError};
 use cairn_core::account::ADMIN_ONLY_ERROR;
 use cairn_core::instructions::{
-    DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, MAX_INSTRUCTION_BYTES, validate_instruction,
+    DEFAULT_CHAT_INSTRUCTION, DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE,
+    MAX_INSTRUCTION_BYTES, validate_instruction,
 };
 use serde::Serialize;
 use sqlx::PgConnection;
 
 /// Audit action written for every changed field; metadata has `scope`, `field`, `old` and `new`.
 pub const INSTRUCTIONS_AUDIT: &str = "agent_instructions_changed";
-const GLOBAL_KEYS: [&str; 2] = ["agent_session_instruction", "agent_stop_nudge"];
-const FIELDS: [&str; 2] = ["session_instruction", "stop_nudge"];
+const GLOBAL_KEYS: [&str; 3] = [
+    "agent_session_instruction",
+    "agent_stop_nudge",
+    "agent_chat_instruction",
+];
+const FIELDS: [&str; 3] = ["session_instruction", "stop_nudge", "chat_instruction"];
 
 /// Where the text an agent receives comes from.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -40,12 +45,15 @@ pub struct InstructionField {
     pub inherited_source: InstructionSource,
 }
 
-/// Both fields at one scope; the global scope or one project.
+/// The fields at one scope. The chat instruction is global.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AgentInstructions {
     pub session_instruction: InstructionField,
     pub stop_nudge: InstructionField,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub chat_instruction: Option<InstructionField>,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub max_bytes: usize,
 }
@@ -55,10 +63,15 @@ pub struct AgentInstructions {
 pub struct InstructionsUpdate {
     pub session_instruction: Option<String>,
     pub stop_nudge: Option<String>,
+    pub chat_instruction: Option<String>,
 }
 
 fn default_text(field: usize) -> &'static str {
-    [DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE][field]
+    [
+        DEFAULT_SESSION_INSTRUCTION,
+        DEFAULT_STOP_NUDGE,
+        DEFAULT_CHAT_INSTRUCTION,
+    ][field]
 }
 
 fn field(
@@ -86,18 +99,22 @@ fn field(
     }
 }
 
-async fn global_values(conn: &mut PgConnection) -> Result<[Option<String>; 2]> {
-    let mut out = [None, None];
-    for (slot, key) in out.iter_mut().zip(GLOBAL_KEYS) {
-        *slot = sqlx::query_scalar("SELECT value FROM server_state WHERE key = $1")
-            .bind(key)
-            .fetch_optional(&mut *conn)
+async fn global_values(conn: &mut PgConnection) -> Result<[Option<String>; 3]> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM server_state WHERE key = ANY($1)")
+            .bind(&GLOBAL_KEYS[..])
+            .fetch_all(conn)
             .await?;
+    let mut out = [None, None, None];
+    for (key, value) in rows {
+        if let Some(i) = GLOBAL_KEYS.iter().position(|candidate| *candidate == key) {
+            out[i] = Some(value);
+        }
     }
     Ok(out)
 }
 
-async fn project_values(conn: &mut PgConnection, project_id: &str) -> Result<[Option<String>; 2]> {
+async fn project_values(conn: &mut PgConnection, project_id: &str) -> Result<[Option<String>; 3]> {
     let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT session_instruction, stop_nudge FROM projects WHERE project_id = $1",
     )
@@ -105,7 +122,7 @@ async fn project_values(conn: &mut PgConnection, project_id: &str) -> Result<[Op
     .fetch_optional(conn)
     .await?;
     let (a, b) = row.ok_or_else(|| StoreError::NotFound("project".into()))?;
-    Ok([a, b])
+    Ok([a, b, None])
 }
 
 async fn view(conn: &mut PgConnection, project_id: Option<&str>) -> Result<AgentInstructions> {
@@ -125,11 +142,23 @@ async fn view(conn: &mut PgConnection, project_id: Option<&str>) -> Result<Agent
     Ok(AgentInstructions {
         session_instruction: build(0),
         stop_nudge: build(1),
+        chat_instruction: project_id.is_none().then(|| build(2)),
         max_bytes: MAX_INSTRUCTION_BYTES,
     })
 }
 
 impl Store {
+    pub async fn chat_instruction(&self) -> Result<String> {
+        let own: Option<String> =
+            sqlx::query_scalar("SELECT value FROM server_state WHERE key = $1")
+                .bind(GLOBAL_KEYS[2])
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(own
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| DEFAULT_CHAT_INSTRUCTION.to_owned()))
+    }
+
     /// The global instructions, or a project's with its overrides. A project the person is not a
     /// member of (an admin sees every project) is not found.
     pub async fn agent_instructions(
@@ -190,16 +219,25 @@ impl Store {
         project_id: Option<&str>,
         update: &InstructionsUpdate,
     ) -> Result<AgentInstructions> {
-        let changes: Vec<(usize, String)> = [&update.session_instruction, &update.stop_nudge]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, text)| text.as_ref().map(|text| (i, text)))
-            .map(|(i, text)| {
-                validate_instruction(FIELDS[i], text)
-                    .map(|text| (i, text))
-                    .map_err(StoreError::Validation)
-            })
-            .collect::<Result<_>>()?;
+        if project_id.is_some() && update.chat_instruction.is_some() {
+            return Err(StoreError::Validation(
+                "the chat instruction is global".into(),
+            ));
+        }
+        let changes: Vec<(usize, String)> = [
+            &update.session_instruction,
+            &update.stop_nudge,
+            &update.chat_instruction,
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, text)| text.as_ref().map(|text| (i, text)))
+        .map(|(i, text)| {
+            validate_instruction(FIELDS[i], text)
+                .map(|text| (i, text))
+                .map_err(StoreError::Validation)
+        })
+        .collect::<Result<_>>()?;
         let mut tx = self.pool.begin().await?;
         match project_id {
             None if !is_admin => return Err(StoreError::Forbidden(ADMIN_ONLY_ERROR.into())),

@@ -119,6 +119,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0023_hermes_chat",
         include_str!("../../../migrations/0023_hermes_chat.sql"),
     ),
+    (
+        "0024_hermes_route_privacy",
+        include_str!("../../../migrations/0024_hermes_route_privacy.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

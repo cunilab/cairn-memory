@@ -73,20 +73,16 @@ pub const LEXICAL_MATCH_CAP: i64 = 2000;
 /// Web reads use their own owner visibility. Agent reads also apply this chat boundary.
 fn chat_visibility(alias: &str, parameter: usize) -> String {
     format!(
-        " AND (${parameter}::text = '*' OR
-            CASE WHEN ${parameter} IS NULL THEN {alias}.chat_id_hash IS NULL
-                 ELSE {alias}.scope <> 'personal' OR {alias}.chat_id_hash = ${parameter} END)"
+        " AND (CASE WHEN ${parameter}::text IS NULL THEN {alias}.chat_id_hash IS NULL
+                 ELSE ({alias}.scope <> 'personal' OR {alias}.chat_id_hash = ${parameter})
+                  AND ({alias}.scope <> 'project' OR EXISTS (
+                    SELECT 1 FROM project_members pm
+                     WHERE pm.project_id = {alias}.project_id AND pm.person_id = $1)) END)"
     )
 }
 
 fn chat_key(chat: Option<&ChatContext>) -> Option<&str> {
-    chat.map(|chat| {
-        if chat.owner_dm() {
-            "*"
-        } else {
-            chat.chat_id_hash.as_str()
-        }
-    })
+    chat.map(|chat| chat.chat_id_hash.as_str())
 }
 
 /// The request's project and kind, applied inside every channel's `WHERE` so the candidate pool

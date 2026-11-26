@@ -17,6 +17,8 @@ pub struct Update {
     session_instruction: Option<String>,
     #[serde(default)]
     stop_nudge: Option<String>,
+    #[serde(default)]
+    chat_instruction: Option<String>,
 }
 
 impl From<Update> for InstructionsUpdate {
@@ -24,6 +26,7 @@ impl From<Update> for InstructionsUpdate {
         Self {
             session_instruction: update.session_instruction,
             stop_nudge: update.stop_nudge,
+            chat_instruction: update.chat_instruction,
         }
     }
 }

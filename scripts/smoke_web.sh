@@ -333,6 +333,13 @@ curl -fsS -b "$owner_jar" -o "$workdir/fixes-page" "${web}/fixes"
 grep -q 'Fixes' "$workdir/fixes-page"
 curl -fsS -b "$owner_jar" "${web}/api/cairn/admin/fixes" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
 
+curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d '{"chat_instruction":"Check with the owner in this conversation."}' \
+  "${web}/api/cairn/agent-instructions" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["chat_instruction"]["source"] == "global"'
+curl -fsS -b "$owner_jar" "${web}/api/cairn/agent-instructions" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["chat_instruction"]["text"] == "Check with the owner in this conversation."'
+
 # An admin session creates accounts without its own cookie changing or the new token returned.
 register_headers="$workdir/register.headers"
 register_body="$workdir/register.body"

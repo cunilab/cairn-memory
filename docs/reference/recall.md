@@ -41,20 +41,21 @@ After three pushes in separate sessions with zero uses, that person's automatic 
 
 ## Hermes chat recall
 
-Cairn saves chat memories as personal records owned by the gateway's Cairn account.
-The same chat, that owner's verified DM with the bot, and the owner's web console can
-read those records. Other chats and standalone agent sessions leave chat-tagged
-memories out of their results. A group or an unmapped DM can read personal memories
-tagged to its own chat. L0 pins, L1 essentials, L2 prompts and commands, and explicit
-search use the same privacy rule. Project recall in chat requires an explicit existing
-project link and the owner's project membership. Group and unmapped DM saves start
-as new candidates, including repeat saves and memories derived from captured turns.
+Cairn saves a memory without a project as a personal record tagged to its chat. The
+same chat and the gateway account's web session can read it. DMs and groups use the
+same rule for L0 pins, L1 essentials, L2 prompts and commands, and explicit search.
+Other chats and standalone agent sessions leave out those personal memories.
+
+Explicit search can also include a project selected by ID or exact name when the
+gateway account is a member. Saves with an explicit project become project
+memories without a chat tag. Preferences stay personal. Memories from group
+chats start as candidates, including project saves and memories derived from turns.
 
 Each chat thread has its own Cairn session and eight-card automatic recall ledger.
 A chat without threads uses one session. At 30 minutes of idle time Cairn closes
 the session and queues distillation. The next message starts a new ledger. A
 gateway restart starts a new session on the next message. Cairn's idle sweep closes
-any earlier session with retained captures. See [Hermes gateway setup](hook.md#hermes-telegram-and-discord-gateway).
+any earlier session with retained captures. See [Hermes gateway setup](hook.md#hermes-gateway).
 
 ## Session handoffs and distillation
 

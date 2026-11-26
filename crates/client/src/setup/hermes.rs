@@ -112,6 +112,8 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
     let before = root.clone();
     let settings = &root["plugins"]["entries"][PLUGIN_NAME]["settings"];
     let gateway = ctx.gateway || settings["cairn_gateway"].as_bool() == Some(true);
+    let legacy_chat_settings =
+        settings.get("chat_owner_hashes").is_some() || settings.get("chat_projects").is_some();
     let mut owns_enable = settings[ENABLED_MARKER].as_bool() == Some(true);
     let config = as_mapping(&mut root, "Hermes config.yaml")?;
     let servers = as_mapping(
@@ -124,7 +126,7 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
         return Err(UNMARKED.into());
     }
     owns_enable |= marked(ENABLED_MARKER);
-    if ctx.remove && !gateway && existing.is_none() {
+    if ctx.remove && !gateway && !legacy_chat_settings && existing.is_none() {
         return Ok((raw, false));
     }
     if ctx.remove || gateway {
@@ -163,7 +165,7 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
         }
     }
 
-    if gateway {
+    if gateway || legacy_chat_settings {
         let plugins = as_mapping(
             config.entry("plugins".into()).or_insert(Value::Null),
             "plugins",
@@ -180,10 +182,12 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
             entry.entry("settings".into()).or_insert(Value::Null),
             "Cairn plugins settings",
         )?;
+        settings.remove("chat_owner_hashes");
+        settings.remove("chat_projects");
         if ctx.remove {
             settings.remove("cairn_gateway");
             settings.remove(ENABLED_MARKER);
-        } else {
+        } else if gateway {
             settings.insert("cairn_gateway".into(), true.into());
             if owns_enable {
                 settings.insert(ENABLED_MARKER.into(), true.into());
@@ -192,7 +196,8 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
                 .entry("chat_salt".into())
                 .or_insert_with(|| cairn_core::id::new_id("salt").into());
         }
-    } else if !ctx.remove {
+    }
+    if !gateway && !ctx.remove {
         let mut env = ctx.mcp_env();
         // Hermes filters the inherited stdio environment, including CAIRN_CONFIG.
         env.insert("CAIRN_CONFIG".into(), json!(ctx.config.to_string_lossy()));

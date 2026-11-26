@@ -1209,6 +1209,21 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
         home.snapshot("gateway-profile"),
         "routine setup preserves gateway mode"
     );
+    let mut legacy = yaml();
+    let settings = &mut legacy["plugins"]["entries"]["cairn-memory"]["settings"];
+    settings["chat_owner_hashes"] = json!({"telegram": "b".repeat(64)});
+    settings["chat_projects"] = json!({"c".repeat(64): "proj_obsolete"});
+    fs::write(
+        profile.join("config.yaml"),
+        yaml_serde::to_string(&legacy).unwrap(),
+    )
+    .unwrap();
+    invoke(false, false);
+    let refreshed = yaml();
+    let settings = &refreshed["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert!(settings.get("chat_owner_hashes").is_none());
+    assert!(settings.get("chat_projects").is_none());
+    assert_eq!(settings["chat_salt"], salt);
 
     invoke(false, true);
     let removed = yaml();

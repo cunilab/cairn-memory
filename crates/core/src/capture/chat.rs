@@ -33,11 +33,24 @@ pub enum ChatKind {
     Group,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChatPlatform {
-    Telegram,
-    Discord,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ChatPlatform(String);
+
+impl TryFrom<String> for ChatPlatform {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let mut bytes = value.bytes();
+        if value.len() <= 32
+            && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+            && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            Ok(Self(value))
+        } else {
+            Err("chat platform must be a lowercase token of at most 32 bytes")
+        }
+    }
 }
 
 /// Hashed transport context supplied by the operator's trusted gateway plugin.
@@ -47,14 +60,5 @@ pub struct ChatContext {
     pub platform: ChatPlatform,
     pub kind: ChatKind,
     pub chat_id_hash: ChatHash,
-    pub sender_id_hash: Option<ChatHash>,
     pub thread_id_hash: Option<ChatHash>,
-    #[serde(default)]
-    pub owner: bool,
-}
-
-impl ChatContext {
-    pub fn owner_dm(&self) -> bool {
-        self.kind == ChatKind::Dm && self.owner && self.sender_id_hash.is_some()
-    }
 }

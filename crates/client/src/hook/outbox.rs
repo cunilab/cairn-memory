@@ -95,9 +95,22 @@ impl Outbox {
         let Ok(text) = fs::read_to_string(&self.path) else {
             return (!self.path.exists()).then(empty);
         };
-        let queue: Queue = serde_json::from_str(&text).ok()?;
-        (queue.version == VERSION && queue.origin == self.origin && queue.device == self.device)
-            .then_some(queue)
+        let mut queue: Queue = serde_json::from_str(&text).ok()?;
+        if queue.version != VERSION || queue.origin != self.origin || queue.device != self.device {
+            return None;
+        }
+        // An older gateway may have queued a capture before sender metadata was removed.
+        for event in &mut queue.events {
+            if let Some(chat) = event
+                .body
+                .pointer_mut("/context/chat")
+                .and_then(Value::as_object_mut)
+            {
+                chat.remove("sender_id_hash");
+                chat.remove("owner");
+            }
+        }
+        Some(queue)
     }
 
     /// Waits up to `wait` for the lock; the holder only reads or writes one small file.

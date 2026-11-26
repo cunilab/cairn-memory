@@ -56,6 +56,7 @@ The hook and server use the same ordered patterns, replacing secrets with `[REDA
 | 15 | `\bAIza[A-Za-z0-9_-]{35}\b` | `[REDACTED]` |
 | 16 | `\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b` (JWT) | `[REDACTED]` |
 | 17 | `\bcdt_[A-Za-z0-9_-]{16,}\b` (Cairn device token) | `[REDACTED]` |
+| 18 | Numeric sender IDs in the retired Hermes owner setup argument | Sender ID only |
 
 ## Outbox
 
@@ -89,58 +90,26 @@ Standalone Hermes Agent setup registers `mcp_servers.cairn` in the profile's `co
 The CLI plugin uses `pre_llm_call` to deliver the brief with the first user prompt and deliver prompt recall before model calls. It forwards after tool calls, checkpoints at turn completion and after committed compaction, and closes on session teardown. Capture requires a working directory supplied by Hermes. Per-file notes and continuing the model loop with a Stop reminder are unavailable on Hermes. [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks), [Hermes plugin session context](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)
 
 
-### Hermes Telegram and Discord gateway
+### Hermes gateway
 
-Use a dedicated Hermes profile for chat with Hermes's default `plugins.isolation: in_process`.
-Stop the gateway before conversion, then run
+Use a dedicated Hermes profile with `plugins.isolation: in_process`. Stop the gateway, then run
 `HERMES_HOME=/path/to/profile cairn setup hermes --gateway` with Cairn already configured.
-Setup removes the managed Cairn MCP entry from that profile and installs two native tools,
-`memory_search` and `memory_save`. A standalone CLI profile keeps its regular MCP tools.
-After restarting the gateway, start a fresh Hermes conversation with `/new` before using Cairn.
-Hermes can restore tool schemas pinned to an earlier conversation. Use
-`HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration. Setup
-retains the chat salt and the operator's mappings so reinstalling the plugin can find earlier
-chat memories. [Hermes tool selection](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/tools_config.py#L737-L757) · [Hermes tool schema restoration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/conversation_loop.py#L769-L788)
+Setup replaces the profile's managed Cairn MCP entry with the native `memory_search` and
+`memory_save` tools. Restart the gateway and use `/new` so Hermes loads the current tool
+schemas. Run `HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration.
+Keep the profile's chat salt so Cairn can find its existing chat memories.
+[Hermes tool selection](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/tools_config.py#L737-L757) · [Tool schema restoration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/conversation_loop.py#L769-L788)
 
-The owner is the Cairn device-token holder. For each platform, use that person's sender ID,
-obtained from the platform or Hermes `/whoami`. Read `chat_salt` from the profile's
-`plugins.entries.cairn-memory.settings` and generate the sender digest locally.
+Cairn accepts a bound route from any platform with a lowercase token of up to 32 ASCII
+characters. It sends salted hashes of the chat and thread route. A missing route disables
+Cairn in that turn. DMs and groups share the same visibility rules.
 
-```sh
-python3 - telegram <<'PYTHON'
-import getpass
-import hmac
-import json
-import sys
-
-platform = sys.argv[1]
-salt = getpass.getpass("Cairn chat salt: ").strip()
-sender = getpass.getpass("Owner sender ID: ").strip()
-message = json.dumps([platform, "sender", sender], separators=(",", ":")).encode()
-print(hmac.digest(salt.encode(), message, "sha256").hex())
-PYTHON
-```
-
-Use `discord` for a Discord sender. Add each digest under the existing settings in
-`config.yaml` and restart the gateway.
-
-```yaml
-plugins:
-  entries:
-    cairn-memory:
-      settings:
-        chat_owner_hashes:
-          telegram: "<64-character sender digest>"
-          discord: "<64-character sender digest>"
-```
-
-A DM without a matching sender digest gets the same personal-memory restrictions as a
-group. Cairn derives no project from the gateway's working directory. Operators who already
-know a project ID and its chat digest can set `chat_projects` in the same settings. It maps
-the chat digest to the ID of an existing project membership. Use the digest procedure above
-with the field `chat` and the platform chat ID. For Discord threads use the parent channel ID.
-The gateway plugin hashes chat, sender and thread IDs with the profile salt before forwarding
-them. Keep the salt stable across upgrades.
+On the first prompt of a Cairn chat session, Hermes receives the **Hermes chat instruction**
+from **Settings → Agent instructions**. A server admin can edit it or reset it to the built-in
+text. It has the same 600-byte limit as the session start line. Hermes handles conversation
+and owner confirmation. Cairn checks scope and membership for each explicit memory request.
+Pass an exact project name or ID to extend a search to that project or to share a save with
+its members. [Chat recall](recall.md#hermes-chat-recall)
 
 #### Hermes gateway research
 
@@ -148,12 +117,21 @@ Reviewed against NousResearch Hermes Agent commit `f85f33bf`.
 
 | Interface | Finding | Source |
 | --- | --- | --- |
-| `pre_llm_call` | Carries the platform, session and turn IDs, sender hint and prompt. It accepts ephemeral context for the model. | [Turn hook](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_context.py#L912-L937) |
-| `post_tool_call` and `post_llm_call` | The tool observer carries tool and call IDs, arguments, result and status. The turn callback has session and turn IDs, platform and response. | [Tool observer](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/model_tools.py#L700-L724), [turn callback](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_finalizer.py#L505-L517) |
-| Session callbacks and idle | Start exposes session, model and platform. End fires at turn completion with outcome flags. Finalize supplies session, platform and reason at teardown. Hermes core leaves the conversation open after inactivity, so Cairn ends its own session after 30 minutes of idle time. | [Start](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/conversation_loop.py#L959-L968), [end](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_finalizer.py#L912-L926), [finalize](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/run_shutdown_session_end.py#L56-L74), [continuity](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/website/docs/user-guide/messaging/index.md#L322-L332) |
-| Chat routing and sender | The gateway binds platform, chat ID and kind, parent channel, thread or topic, and current actor ID and display name to the turn. The actor can be empty when several senders contributed. The plugin reads the bound route to distinguish a supported chat from CLI. Display names are optional text. | [Gateway bindings](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/run.py#L3888-L3918), [actor and context reader](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/session_context.py#L220-L242), [Telegram topics](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/plugins/platforms/telegram/adapter.py#L736-L764), [Discord threads](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/plugins/platforms/discord/adapter.py#L5988-L6014) |
-| Bot and owner identity | The adapters can query bot identity. The lifecycle hooks carry neither that identity nor a Cairn owner binding. Telegram and Discord allowlists admit users independently of Cairn ownership. | [Telegram bot lookup](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/plugins/platforms/telegram/adapter.py#L5356-L5367), [Discord bot identity](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/plugins/platforms/discord/adapter.py#L4868-L4874), [Telegram allowlist](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/website/docs/user-guide/messaging/telegram.md#L326-L335), [Discord allowlist](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/website/docs/user-guide/messaging/discord.md#L302-L309) |
-| Memory provider | Hermes can activate a memory provider for prefetch, tool dispatch and session extraction. The native plugin already owns Cairn's capture lifecycle and can register chat tools directly. | [Memory provider interface](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/website/docs/developer-guide/memory-provider-plugin.md#L176-L205), [native tool registration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/plugins_context.py#L281-L318) |
+| Chat routing | The gateway binds platform, chat kind, parent channel, thread and session ID to the active turn. Cairn reads the route from the bound context and uses the session ID to check that callbacks belong to it. | [Gateway bindings](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/run.py#L3888-L3918), [bound context](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/session_context.py#L230-L236), [Discord thread routing](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/plugins/platforms/discord/adapter.py#L5988-L6014) |
+| Prompt, tools and session end | The prompt hook accepts context for the model. Tool observers carry session and call IDs. The turn-end hook provides a session ID and platform. Cairn starts a new chat session after 30 minutes of inactivity. | [Prompt hook](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_context.py#L912-L937), [tool observer](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/model_tools.py#L700-L724), [turn end](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_finalizer.py#L912-L926) |
+| Cron | Hermes labels agents with platform `cron`, uses distinct cron sessions, and binds a cron marker to the execution context. Tool callbacks can use that marker when they omit the platform. | [Agent platform](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/cron/scheduler.py#L2469-L2476), [session ID](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/cron/scheduler.py#L2529-L2535), [cron context](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/cron/scheduler.py#L2329-L2345) |
+| Delegation | Hermes uses platform and memory-agent context `subagent`, gives the child its own session, and binds the delegated-child marker around the turn. | [Child configuration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/delegate_tool.py#L317-L332), [child turn](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/delegate_tool_child_run.py#L1011-L1021), [context predicate](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/delegation_context.py#L105-L110) |
+| Flush | Hermes documents `flush` as a memory-provider context. The pinned gateway drains providers during teardown outside interactive turns. Cairn skips callbacks marked as flush as well as cron and delegated turns in CLI and gateway mode. | [Provider contract](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_provider.py#L120-L132), [provider context](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/agent_init_memory_provider.py#L113-L126), [gateway drain](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/run_shutdown.py#L1226-L1247) |
+
+#### Not yet: Hermes built-in memory
+
+Hermes keeps profile-wide notes in `memories/MEMORY.md` and `memories/USER.md`.
+The entries are separated by `§` and carry no project scope. Both
+`memory.memory_enabled` and `memory.user_profile_enabled` control the built-in tool.
+Import, disabling the native stores, and restoring their previous settings are deferred to
+0.1.11. The open questions are how to select an import scope for untyped entries and how
+removal should restore prior setting values, including omitted flags.
+[Memory directory](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool.py#L38-L40), [store filenames](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L303-L306), [entry delimiter](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L24-L26), [entry reader](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L695-L704), [native flags and tool](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool.py#L306-L318)
 
 ## Command recall by host
 

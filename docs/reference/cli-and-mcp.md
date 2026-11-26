@@ -91,8 +91,8 @@ model API is used. Record shape and visibility: [projects](projects.md#memory-sc
 ## CLI
 
 ```
-cairn setup <url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory]
-cairn setup <agent> [--remove]                           cairn init [name] [--yes]
+cairn setup <url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory|--gateway]
+cairn setup <agent> [--remove|--gateway]                 cairn init [name] [--yes]
 cairn import claude-memory [--yes]
 cairn fixes [apply [id]]     cairn doctor     cairn mcp     cairn update [--check]     cairn hook <Event> …     cairn --version
 cairn search <query> [--kind k] [--limit n]     cairn get <id>... [--detail]     cairn save [<json>|-]
@@ -103,6 +103,14 @@ The five verbs call the same tools and print the same compact JSON plus a newlin
 `SaveInput` object from its argument or stdin. `doctor` prints `ok|warn|fail  <check>  <detail>`
 per check (config, server, semantic, device, project, agents, hooks), exiting 1 on any `fail`. `hook` runs the
 capture and injection hook ([hook contract](./hook.md)). Account and device management stay in the web console.
+
+### Hermes gateway tools
+
+`cairn setup hermes --gateway` installs two native tools in the selected profile.
+`memory_search` accepts `query` and an optional `project` ID or exact name.
+`memory_save` accepts `kind`, `title`, `summary`, `reason`, `fields` and the same optional
+`project`. Use the project only for project knowledge when the gateway account is a member.
+Save preferences without a project. See [gateway setup](hook.md#hermes-gateway).
 
 ### Import Claude Code memory
 

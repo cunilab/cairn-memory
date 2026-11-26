@@ -860,12 +860,11 @@ async fn hermes_chat_distill_keeps_the_tag_on_every_derived_memory() {
     };
     let person = db.person("chat-owner").await;
     let chat_id = "a".repeat(64);
-    let sender_id = "b".repeat(64);
     let thread_id = "c".repeat(64);
     let session_id = format!("hchat_{}", "d".repeat(32));
     let chat = serde_json::json!({
         "platform": "discord", "kind": "group", "chat_id_hash": chat_id,
-        "sender_id_hash": sender_id, "thread_id_hash": thread_id,
+        "thread_id_hash": thread_id,
     });
     let mut input = prompt(
         "e1",
@@ -874,17 +873,43 @@ async fn hermes_chat_distill_keeps_the_tag_on_every_derived_memory() {
     );
     input.context = serde_json::from_value(serde_json::json!({"chat": chat})).unwrap();
     db.store.capture(&person, input).await.unwrap();
-    let stored: serde_json::Value = sqlx::query_scalar(
-        "SELECT context->'chat' FROM sessions WHERE person_id = $1 AND session_id = $2",
-    )
-    .bind(&person)
-    .bind(&session_id)
-    .fetch_one(db.store.pool())
-    .await
-    .unwrap();
-    assert_eq!(stored["chat_id_hash"], chat_id);
-    assert_eq!(stored["sender_id_hash"], sender_id);
-    assert_eq!(stored["thread_id_hash"], thread_id);
+    for table in ["sessions", "observations"] {
+        let context =
+            format!("SELECT context->'chat' FROM {table} WHERE person_id = $1 AND session_id = $2");
+        let stored: serde_json::Value = sqlx::query_scalar(&context)
+            .bind(&person)
+            .bind(&session_id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, chat);
+        let mut legacy = chat.clone();
+        legacy["sender_id_hash"] = "b".repeat(64).into();
+        legacy["owner"] = true.into();
+        sqlx::query(&format!(
+            "UPDATE {table} SET context = jsonb_set(context, '{{chat}}', $1)"
+        ))
+        .bind(legacy)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    }
+    for _ in 0..2 {
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0024_hermes_route_privacy.sql"
+        ))
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    }
+    for table in ["sessions", "observations"] {
+        let stored: serde_json::Value =
+            sqlx::query_scalar(&format!("SELECT context->'chat' FROM {table}"))
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored, chat);
+    }
     assert!(db.store.end_session(&person, &session_id).await.unwrap());
     let report = db
         .store

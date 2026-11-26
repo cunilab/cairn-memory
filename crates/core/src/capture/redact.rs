@@ -27,7 +27,7 @@ pub fn redact_work_context(context: &WorkContext) -> WorkContext {
     }
 }
 
-/// Rows 2-17 of docs/reference/hook.md#redaction, in application order; row 1 (PEM blocks) runs first.
+/// Rows 2-18 of docs/reference/hook.md#redaction, in application order; row 1 (PEM blocks) runs first.
 const PATTERNS: &[(&str, &str)] = &[
     (
         r#"(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+"#,
@@ -66,6 +66,10 @@ const PATTERNS: &[(&str, &str)] = &[
         REDACTED,
     ),
     (r"\bcdt_[A-Za-z0-9_-]{16,}\b", REDACTED),
+    (
+        r#"(?i)(--owner(?:=|\s+)["']?(?:telegram|discord):)[0-9]+"#,
+        "${1}[REDACTED]",
+    ),
 ];
 
 fn compiled() -> &'static [(Regex, &'static str)] {
@@ -261,6 +265,13 @@ mod tests {
             assert!(!out.contains(secret), "{input} -> {out}");
             assert!(out.contains(REDACTED), "{input} -> {out}");
         }
+        let text = "cairn setup hermes --gateway --owner telegram:3813245 --owner 'discord:576612'";
+        let redacted = redact_sensitive_content(text);
+        assert_eq!(
+            redacted,
+            "cairn setup hermes --gateway --owner telegram:[REDACTED] --owner 'discord:[REDACTED]'"
+        );
+        assert_eq!(redact_sensitive_content(&redacted), redacted);
         let out = redact_sensitive_content("token=abc, disk-full ok sk-short");
         assert_eq!(out, "token=[REDACTED], disk-full ok sk-short");
         assert!(redact_sensitive_content("Authorization: Bearer xyz").ends_with(REDACTED));
