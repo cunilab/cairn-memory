@@ -18,14 +18,18 @@ H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
 def validate_markdown(root: Path) -> list[str]:
     errors: list[str] = []
-    files = [root / "README.md", *sorted((root / "docs").rglob("*.md"))]
+    content = root / "apps" / "docs" / "content"
+    indexes = [root / "README.md", root / "docs" / "README.md"]
+    files = indexes + sorted(
+        path for path in content.rglob("*") if path.suffix in {".md", ".mdx"}
+    )
     ids: dict[str, str] = {}
 
     for path in files:
         text = path.read_text(encoding="utf-8")
         relative = path.relative_to(root)
 
-        if path != root / "README.md":
+        if path not in indexes:
             parts = text.split("---\n", 2)
             if not text.startswith("---\n") or len(parts) < 3:
                 errors.append(f"{relative}: malformed YAML header")

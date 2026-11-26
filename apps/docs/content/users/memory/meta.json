@@ -1,0 +1,13 @@
+{
+  "title": "Memory concepts",
+  "defaultOpen": false,
+  "pages": [
+    "kinds",
+    "scopes",
+    "trust",
+    "layers",
+    "recall",
+    "skills",
+    "pins"
+  ]
+}

@@ -197,20 +197,29 @@ fn agent_checks(home: &Path) -> Vec<Check> {
         if !folder.is_dir() {
             continue;
         }
-        let managed_mcp = mcp
-            .iter()
-            .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(setup::MARKER)));
+        // Hermes uses Cairn's memory provider tools instead of an MCP entry.
+        let managed_mcp = if *agent == "hermes" {
+            setup::hermes::provider_set(&mcp[0])
+        } else {
+            mcp.iter()
+                .any(|file| fs::read_to_string(file).is_ok_and(|text| text.contains(setup::MARKER)))
+        };
+        let tools = if *agent == "hermes" {
+            "memory provider"
+        } else {
+            "MCP entry"
+        };
         let hook_text = fs::read_to_string(hook);
         let managed_hook = hook_text
             .as_ref()
             .is_ok_and(|text| text.contains(setup::MANAGED_FLAG));
         checks.push(if managed_mcp {
-            check("ok", "agents", format!("{agent} MCP entry present"))
+            check("ok", "agents", format!("{agent} {tools} present"))
         } else {
             check(
                 "warn",
                 "agents",
-                format!("{agent} has no Cairn MCP entry; run cairn setup"),
+                format!("{agent} has no Cairn {tools}; run cairn setup"),
             )
         });
         checks.push(
@@ -235,6 +244,11 @@ fn agent_checks(home: &Path) -> Vec<Check> {
         );
         if !managed_mcp && !managed_hook {
             continue;
+        }
+        if *agent == "hermes"
+            && let Some(warning) = setup::hermes::version_warning(home)
+        {
+            checks.push(check("warn", "hermes", warning));
         }
         let instruction = folder.join(instruction_name);
         if !(*agent == "hermes" && setup::hermes::gateway_profile(&folder.join("config.yaml")))

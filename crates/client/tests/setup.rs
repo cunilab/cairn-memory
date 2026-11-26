@@ -202,7 +202,7 @@ fn grok_setup_round_trips_config_hooks_and_instructions() {
         fs::read_to_string(instructions).unwrap(),
         "Grok user instructions\n"
     );
-    assert!(home.json(".grok/hooks/cairn.json").get("hooks").is_none());
+    assert!(!home.dir.join(".grok/hooks/cairn.json").exists());
 }
 
 #[test]
@@ -295,24 +295,20 @@ mcp_servers:
     let initial = load();
     home.ok("hermes", false);
     let mut installed = load();
+    // Cairn's provider tools replace the MCP entry; the plugin settings hold what remove needs.
+    assert!(installed["mcp_servers"]["cairn"].is_null());
+    assert_eq!(installed["memory"], json!({"provider": "cairn-memory"}));
     assert_eq!(
-        installed["mcp_servers"]
-            .as_object_mut()
-            .unwrap()
-            .remove("cairn")
-            .unwrap(),
-        json!({
-            "command": EXE, "args": ["mcp"], "trust": "full",
-            "env": {
-                "XDG_CONFIG_HOME": home.dir.join(".config"), "CAIRN_CONFIG": home.config(),
-                "CAIRN_SETUP_MANAGED": "1", "CAIRN_SETUP_PLUGIN_ENABLED": "1"
-            }
-        }),
+        installed["plugins"]["entries"]["cairn-memory"]["settings"],
+        json!({"CAIRN_SETUP_PLUGIN_ENABLED": true, "previous_memory_provider": []})
     );
     assert_eq!(
         installed["plugins"]["enabled"],
         json!(["code-review", "cairn-memory"])
     );
+    let object = installed.as_object_mut().unwrap();
+    object.remove("memory");
+    object["plugins"].as_object_mut().unwrap().remove("entries");
     installed["plugins"]["enabled"] = json!(["code-review"]);
     assert_eq!(installed, initial);
     assert!(
@@ -321,22 +317,24 @@ mcp_servers:
             .contains("<!-- cairn:begin -->")
     );
     let plugin = home.dir.join(".hermes/plugins/cairn-memory");
-    assert!(
-        fs::read_to_string(plugin.join("__init__.py"))
-            .unwrap()
-            .contains(EXE)
-    );
+    let script = fs::read_to_string(plugin.join("__init__.py")).unwrap();
+    assert!(script.contains(EXE));
+    assert!(script.contains("register_memory_provider") && script.contains("GATEWAY = False"));
     let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
-    for event in ["pre_llm_call", "post_tool_call", "transform_tool_result"] {
+    // Without an explicit kind, Hermes would load a provider file only as the memory provider.
+    assert!(manifest.contains("\nkind: standalone\n"));
+    for event in [
+        "post_tool_call",
+        "transform_tool_result",
+        "on_session_end",
+        "on_session_finalize",
+    ] {
         assert!(manifest.contains(event), "{event}");
-        assert!(
-            fs::read_to_string(plugin.join("__init__.py"))
-                .unwrap()
-                .contains(event),
-            "{event}"
-        );
+        assert!(script.contains(event), "{event}");
     }
-    assert!(!manifest.contains("pre_tool_call"));
+    for event in ["pre_tool_call", "pre_llm_call", "post_llm_call"] {
+        assert!(!manifest.contains(event), "{event}");
+    }
     assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
         text.windows(SECRET.len())
             .any(|part| part == SECRET.as_bytes())
@@ -348,6 +346,314 @@ mcp_servers:
     assert_eq!(fs::read_to_string(&other).unwrap(), "name: code-review\n");
     assert!(!plugin.join("__init__.py").exists());
     assert!(!plugin.join("plugin.yaml").exists());
+}
+
+#[test]
+fn hermes_provider_replaces_the_previous_provider_and_remove_restores_it() {
+    let home = Home::new("hermes-provider", false);
+    let profile = home.dir.join("profile");
+    let config = profile.join("config.yaml");
+    let run = |remove| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+    };
+    let yaml = || yaml_serde::from_str::<Value>(&fs::read_to_string(&config).unwrap()).unwrap();
+    let without_plugins = |mut value: Value| {
+        value.as_object_mut().unwrap().remove("plugins");
+        value
+    };
+    fs::create_dir_all(&profile).unwrap();
+    for previous in [
+        "memory:\n  provider: honcho\n  memory_enabled: true\n  user_profile_enabled: false\n",
+        "memory:\n  provider: none\n",
+        "memory:\n  provider: ''\n",
+        "memory:\n  provider: null\n",
+        "model: test-model\n",
+    ] {
+        fs::write(&config, previous).unwrap();
+        let original = yaml();
+        run(false);
+        let installed = yaml();
+        assert_eq!(
+            installed["memory"]["provider"], "cairn-memory",
+            "{previous}"
+        );
+        for flag in ["memory_enabled", "user_profile_enabled"] {
+            assert_eq!(
+                installed["memory"][flag], original["memory"][flag],
+                "{previous}"
+            );
+        }
+        let before = home.snapshot("profile");
+        run(false);
+        assert_eq!(home.snapshot("profile"), before, "setup is idempotent");
+        run(true);
+        assert_eq!(without_plugins(yaml()), original, "{previous}");
+    }
+
+    // A provider the person picked after setup stays on removal.
+    fs::write(&config, "memory:\n  provider: honcho\n").unwrap();
+    run(false);
+    let mut changed = yaml();
+    changed["memory"]["provider"] = json!("mem0");
+    fs::write(&config, yaml_serde::to_string(&changed).unwrap()).unwrap();
+    run(true);
+    assert_eq!(yaml()["memory"], json!({"provider": "mem0"}));
+
+    // An install from before the provider: its managed MCP entry goes, plugin ownership stays.
+    fs::write(
+        &config,
+        "plugins:\n  enabled: [cairn-memory]\nmcp_servers:\n  cairn:\n    command: cairn\n    env:\n      CAIRN_SETUP_MANAGED: '1'\n      CAIRN_SETUP_PLUGIN_ENABLED: '1'\n  other:\n    command: other\n",
+    )
+    .unwrap();
+    run(false);
+    let migrated = yaml();
+    assert_eq!(
+        migrated["mcp_servers"],
+        json!({"other": {"command": "other"}})
+    );
+    assert_eq!(
+        migrated["plugins"]["entries"]["cairn-memory"]["settings"]["CAIRN_SETUP_PLUGIN_ENABLED"],
+        true
+    );
+    run(true);
+    assert_eq!(
+        yaml(),
+        json!({"plugins": {"enabled": []}, "mcp_servers": {"other": {"command": "other"}}})
+    );
+}
+
+#[test]
+fn hermes_setup_and_doctor_warn_about_old_or_unknown_hermes() {
+    let home = Home::new("hermes-version", false);
+    let root = home.dir.join("hermes root");
+    let profile = root.join("profiles/work");
+    let setup = || {
+        let mut cmd = home.command("hermes", false);
+        cmd.env("HERMES_HOME", &profile);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let doctor = || {
+        let output = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let lost = "Cairn needs Hermes v2026.4.23 or newer; older Hermes never delivers command warnings or failed-command recall, and gateway chat memory is off";
+
+    let unknown = setup();
+    assert!(
+        unknown.contains(&format!("cairn: warning: Hermes version unknown (no hermes-agent/hermes_cli/__init__.py found). {lost}.")),
+        "{unknown}"
+    );
+    assert!(doctor().contains("warn  hermes  Hermes version unknown"));
+
+    // The installer's checkout sits next to the profiles folder.
+    let stamp = root.join("hermes-agent/hermes_cli/__init__.py");
+    fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    fs::write(
+        &stamp,
+        "import sys\n\n__version__ = \"0.10.0\"\n__release_date__ = \"2026.4.16\"\n",
+    )
+    .unwrap();
+    let old = setup();
+    assert!(
+        old.contains(&format!(
+            "cairn: warning: Hermes v2026.4.16 found. {lost}. Run hermes update."
+        )),
+        "{old}"
+    );
+    assert!(doctor().contains(&format!("warn  hermes  Hermes v2026.4.16 found. {lost}.")));
+
+    for current in ["2026.4.23", "2026.9.24", "2027.1.2"] {
+        fs::write(&stamp, format!("__release_date__ = \"{current}\"\n")).unwrap();
+        assert!(!setup().contains("warning"), "{current}");
+        assert!(!doctor().contains("warn  hermes"), "{current}");
+    }
+    fs::write(&stamp, "__release_date__ = \"unreleased\"\n").unwrap();
+    assert!(setup().contains("Hermes version unknown"));
+}
+
+#[test]
+fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
+    // (agent, instruction file, files and folders setup creates that removal deletes)
+    let agents = [
+        (
+            "hermes",
+            ".hermes/SOUL.md",
+            &[".hermes/plugins/cairn-memory", ".hermes/plugins"][..],
+        ),
+        (
+            "grok",
+            ".grok/AGENTS.md",
+            &[".grok/hooks/cairn.json", ".grok/config.toml", ".grok"][..],
+        ),
+        (
+            "antigravity",
+            ".gemini/config/AGENTS.md",
+            &[
+                ".gemini/config/mcp_config.json",
+                ".gemini/config/hooks.json",
+                ".gemini/antigravity-cli/settings.json",
+                ".gemini",
+            ][..],
+        ),
+        ("claude", ".claude/CLAUDE.md", &[".claude.json"][..]),
+        (
+            "codex",
+            ".codex/AGENTS.md",
+            &[".codex/config.toml", ".codex/hooks.json", ".codex"][..],
+        ),
+        (
+            "opencode",
+            ".config/opencode/AGENTS.md",
+            &[".config/opencode/plugins"][..],
+        ),
+    ];
+    for (agent, instructions, created) in agents {
+        // Created by setup: removal deletes it.
+        let home = Home::new(&format!("leftovers-{agent}"), true);
+        home.ok(agent, false);
+        if agent == "hermes" {
+            // Hermes's Python writes this when it loads the plugin.
+            home.write(
+                ".hermes/plugins/cairn-memory/__pycache__/__init__.cpython-314.pyc",
+                "bytecode",
+            );
+        }
+        assert!(home.dir.join(instructions).exists(), "{agent}");
+        home.ok(agent, true);
+        for path in std::iter::once(instructions).chain(created.iter().copied()) {
+            assert!(!home.dir.join(path).exists(), "{agent} left {path}");
+        }
+
+        // Empty before setup: removal deletes it, since an empty instruction file carries nothing.
+        let home = Home::new(&format!("leftovers-empty-{agent}"), true);
+        home.write(instructions, "");
+        home.ok(agent, false);
+        home.ok(agent, true);
+        assert!(!home.dir.join(instructions).exists(), "{agent}");
+
+        // User content keeps the file, byte for byte.
+        let home = Home::new(&format!("leftovers-user-{agent}"), true);
+        let file = home.write(instructions, "User instructions\n\n");
+        home.ok(agent, false);
+        home.ok(agent, true);
+        assert_eq!(
+            fs::read_to_string(file).unwrap(),
+            "User instructions\n\n",
+            "{agent}"
+        );
+
+        // An empty file Cairn never touched stays: remove changes nothing it did not write.
+        let home = Home::new(&format!("leftovers-untouched-{agent}"), true);
+        let file = home.write(instructions, "  \n");
+        home.ok(agent, true);
+        assert_eq!(fs::read_to_string(file).unwrap(), "  \n", "{agent}");
+    }
+
+    // Host configs that still hold anything after removal stay: other keys, even empty ones, or
+    // what setup keeps by design (Claude's permissions container, Hermes's plugins list,
+    // OpenCode's mcp.servers from its CLI).
+    let kept = [
+        ("hermes", ".hermes/config.yaml", None),
+        ("claude", ".claude/settings.json", None),
+        ("opencode", ".config/opencode/opencode.json", None),
+        ("claude", ".claude.json", Some("{\"theme\": {}}\n")),
+        ("claude", ".claude/settings.json", Some("{\"env\": {}}\n")),
+        (
+            "antigravity",
+            ".gemini/config/mcp_config.json",
+            Some("{\"other\": {}}\n"),
+        ),
+        (
+            "antigravity",
+            ".gemini/config/hooks.json",
+            Some("{\"user-hooks\": {}}\n"),
+        ),
+        (
+            "antigravity",
+            ".gemini/antigravity-cli/settings.json",
+            Some("{\"theme\": \"dark\"}\n"),
+        ),
+        ("grok", ".grok/config.toml", Some("model = \"grok-test\"\n")),
+        (
+            "codex",
+            ".codex/config.toml",
+            Some("model = \"codex-test\"\n"),
+        ),
+        ("hermes", ".hermes/config.yaml", Some("model: test-model\n")),
+    ];
+    for (index, (agent, path, original)) in kept.into_iter().enumerate() {
+        let home = Home::new(&format!("kept-{index}-{agent}"), true);
+        if let Some(original) = original {
+            home.write(path, original);
+        }
+        home.ok(agent, false);
+        home.ok(agent, true);
+        let after = fs::read_to_string(home.dir.join(path))
+            .unwrap_or_else(|_| panic!("{agent} deleted {path}"));
+        if let Some(original) = original {
+            let key = original
+                .split(['"', ' ', ':'])
+                .find(|part| part.len() > 1)
+                .unwrap();
+            assert!(after.contains(key), "{agent} {path}: {after}");
+        }
+    }
+
+    // A plugin folder holding the user's own file stays with that file.
+    let home = Home::new("leftovers-plugin-user-file", false);
+    home.ok("hermes", false);
+    let note = home.write(".hermes/plugins/cairn-memory/notes.txt", "mine\n");
+    let cache = ".hermes/plugins/cairn-memory/__pycache__";
+    home.write(&format!("{cache}/__init__.cpython-314.pyc"), "bytecode");
+    let user_cache = home.write(&format!("{cache}/notes.cpython-314.pyc"), "mine");
+    home.ok("hermes", true);
+    assert_eq!(fs::read_to_string(note).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(user_cache).unwrap(), "mine");
+    assert!(
+        !home
+            .dir
+            .join(cache)
+            .join("__init__.cpython-314.pyc")
+            .exists()
+    );
+    assert!(
+        !home
+            .dir
+            .join(".hermes/plugins/cairn-memory/__init__.py")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_never_follows_links_out_of_the_managed_folders() {
+    use std::os::unix::fs::symlink;
+    // A plugin cache linked to another package's cache: removal leaves that cache untouched.
+    let home = Home::new("remove-linked-cache", false);
+    home.ok("hermes", false);
+    let outside = temp_dir("remove-linked-cache-target");
+    let foreign = outside.join("__init__.cpython-314.pyc");
+    fs::write(&foreign, "foreign").unwrap();
+    let cache = home.dir.join(".hermes/plugins/cairn-memory/__pycache__");
+    symlink(&outside, &cache).unwrap();
+    home.ok("hermes", true);
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "foreign");
+    assert!(cache.symlink_metadata().unwrap().file_type().is_symlink());
+
+    // A linked agent folder: Cairn's file goes, but no folder behind the link is pruned.
+    let home = Home::new("remove-linked-ancestor", true);
+    let outside = temp_dir("remove-linked-ancestor-target");
+    symlink(&outside, home.dir.join(".grok")).unwrap();
+    home.ok("grok", false);
+    assert!(outside.join("hooks/cairn.json").exists());
+    home.ok("grok", true);
+    assert!(!outside.join("hooks/cairn.json").exists());
+    assert!(outside.join("hooks").is_dir());
 }
 
 #[test]
@@ -411,8 +717,13 @@ fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
     assert_eq!(home.snapshot(folder), before);
     let doctor = command().arg("doctor").output().unwrap();
     let doctor = String::from_utf8(doctor.stdout).unwrap();
+    let tools = if agent == "hermes" {
+        "memory provider"
+    } else {
+        "MCP entry"
+    };
     assert!(
-        doctor.contains(&format!("{agent} MCP entry present")),
+        doctor.contains(&format!("{agent} {tools} present")),
         "{doctor}"
     );
     assert!(
@@ -957,11 +1268,8 @@ fn codex_native_missing_dir() {
     home.ok("codex", true);
     home.ok("codex", true);
     assert_eq!(fs::read_to_string(global).unwrap(), user);
-    assert!(
-        !fs::read_to_string(home.dir.join(".codex/hooks.json"))
-            .unwrap()
-            .contains("--cairn-managed")
-    );
+    // hooks.json held only Cairn's hooks, so removal deleted it.
+    assert!(!home.dir.join(".codex/hooks.json").exists());
     assert!(!home.dir.join(".codex-fixture-state").exists());
     assert_eq!(
         fs::read_to_string(config_path).unwrap().trim_end(),
@@ -1164,7 +1472,7 @@ fn remove_still_cleans_the_files_after_the_host_cli_is_gone() {
     for agent in ["codex", "opencode"] {
         home.ok(agent, true);
     }
-    let hooks = read(&home, ".codex/hooks.json");
+    let hooks = fs::read_to_string(home.dir.join(".codex/hooks.json")).unwrap_or_default();
     assert!(!hooks.contains("--cairn-managed"), "{hooks}");
     assert!(
         !home
@@ -1196,7 +1504,12 @@ fn refresh_adds_command_hooks_to_every_existing_install() {
         assert!(
             lines
                 .iter()
-                .all(|line| line.ends_with("integration installed")),
+                // A Hermes line can carry the version warning on its second line.
+                .all(|line| line
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .ends_with("integration installed")),
             "{lines:?}"
         );
         return;
@@ -1308,7 +1621,7 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
             .unwrap()
     };
     invoke(false, false);
-    assert_eq!(yaml()["mcp_servers"]["cairn"]["trust"], "full");
+    assert_eq!(yaml()["memory"]["provider"], "cairn-memory");
 
     invoke(true, false);
     let converted = yaml();
@@ -1321,11 +1634,6 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
         fs::read_to_string(plugin.join("__init__.py"))
             .unwrap()
             .contains("GATEWAY = True")
-    );
-    assert!(
-        fs::read_to_string(plugin.join("plugin.yaml"))
-            .unwrap()
-            .contains("  - memory_search\n  - memory_save")
     );
     let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
     let doctor = String::from_utf8(doctor.stdout).unwrap();
@@ -1358,6 +1666,7 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
     invoke(false, true);
     let removed = yaml();
     assert!(removed["mcp_servers"]["cairn"].is_null());
+    assert!(removed["memory"].is_null());
     assert!(removed["plugins"]["enabled"].as_array().unwrap().is_empty());
     let settings = &removed["plugins"]["entries"]["cairn-memory"]["settings"];
     assert!(settings["cairn_gateway"].is_null());

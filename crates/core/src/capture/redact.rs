@@ -27,7 +27,7 @@ pub fn redact_work_context(context: &WorkContext) -> WorkContext {
     }
 }
 
-/// Rows 2-18 of docs/reference/hook.md#redaction, in application order; row 1 (PEM blocks) runs first.
+/// Rows 2-18 of apps/docs/content/technical/hooks/index.md#redaction, in application order; row 1 (PEM blocks) runs first.
 const PATTERNS: &[(&str, &str)] = &[
     (
         r#"(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+"#,
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn markers_and_patterns() {
-        // One case per row of the spec's table (docs/reference/hook.md#redaction): (input, text that must go).
+        // One case per row of the spec's table (apps/docs/content/technical/hooks/index.md#redaction): (input, text that must go).
         let cases = [
             ("Authorization: Bearer abc.def-123", "abc.def-123"),
             ("authorization: basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),

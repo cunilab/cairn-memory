@@ -4,6 +4,7 @@ use super::{
     After, Ctx, MARKER, Plan, R, add_args, hooks_text, instruction_file, native, owned, read, which,
 };
 use serde_json::{Value, json};
+use std::fs;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item, value};
 
@@ -57,7 +58,16 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         Some(add_args(vec!["add".into(), "cairn".into()], ctx))
     };
     let after: Option<After> = if ctx.remove {
-        None
+        let config = folder.join("config.toml");
+        // `codex mcp remove` can leave an empty config.toml; one with any other content stays.
+        command.is_some().then(|| -> After {
+            Box::new(move |_| {
+                if super::is_empty_config(&read(&config)?) {
+                    let _ = fs::remove_file(&config);
+                }
+                Ok(())
+            })
+        })
     } else {
         let config = folder.join("config.toml");
         Some(Box::new(move |files| {

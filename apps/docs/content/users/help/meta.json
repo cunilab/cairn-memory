@@ -1,0 +1,9 @@
+{
+  "title": "Help",
+  "defaultOpen": false,
+  "pages": [
+    "doctor",
+    "troubleshooting",
+    "faq"
+  ]
+}

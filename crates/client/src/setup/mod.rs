@@ -1,5 +1,5 @@
 //! `cairn setup --agent`: installs or removes Cairn's MCP entry, permissions, instructions and
-//! hooks in supported agents (docs/reference/hook.md#setup). Cairn marks its own
+//! hooks in supported agents (apps/docs/content/users/agents/index.md#setup). Cairn marks its own
 //! MCP registrations and hooks. Setup checks for conflicts before running a native MCP command
 //! and applying the file edits. Credentials stay in the Cairn config.
 
@@ -433,6 +433,23 @@ fn apply(ctx: &Ctx) -> R<String> {
         if read(&path)? == body {
             continue;
         }
+        // Removal leaves no empty file behind: one holding only Cairn's part carries nothing.
+        if ctx.remove && is_empty_config(&body) {
+            // A missing file is already the wanted state; never create an empty one.
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    return Err(format!("cannot remove {}: {e}", path.display()));
+                }
+                _ => {}
+            }
+            // Setup may have created the folders too; `remove_dir` keeps one with anything in it.
+            for folder in path.ancestors().skip(1) {
+                if !below(&ctx.home, folder) || fs::remove_dir(folder).is_err() {
+                    break;
+                }
+            }
+            continue;
+        }
         if let Some(parent) = path.parent() {
             create_private_dir(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -440,11 +457,34 @@ fn apply(ctx: &Ctx) -> R<String> {
         write_private(&path, body.as_bytes())
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
-    Ok(format!(
+    let mut done = format!(
         "Cairn {} integration {}",
         ctx.agent,
         if ctx.remove { "removed" } else { "installed" }
-    ))
+    );
+    if ctx.agent == "hermes"
+        && !ctx.remove
+        && let Some(warning) = hermes::version_warning(&ctx.home)
+    {
+        done.push_str("\ncairn: warning: ");
+        done.push_str(&warning);
+    }
+    Ok(done)
+}
+
+/// Whether removal may delete `folder`: resolved through links and `..`, it is still below `root`.
+pub(super) fn below(root: &Path, folder: &Path) -> bool {
+    match (root.canonicalize(), folder.canonicalize()) {
+        (Ok(root), Ok(real)) => real != root && real.starts_with(root),
+        _ => false,
+    }
+}
+
+/// Whitespace, or an empty JSON object (also an empty YAML mapping); a comment or any key is content.
+pub(super) fn is_empty_config(body: &str) -> bool {
+    body.trim().is_empty()
+        || serde_json::from_str::<Value>(body)
+            .is_ok_and(|v| v.as_object().is_some_and(Map::is_empty))
 }
 
 fn configure_with(

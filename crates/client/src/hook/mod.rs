@@ -1,5 +1,5 @@
 //! `cairn hook <Event> [--agent a] [--config p] [--cairn-managed]`: the capture and injection
-//! hook of every agent host (docs/reference/hook.md#events). The host's event arrives as JSON on stdin; stdout
+//! hook of every agent host (apps/docs/content/technical/hooks/index.md#events). The host's event arrives as JSON on stdin; stdout
 //! carries only an injection reply or a native memory write decision. A failure writes one
 //! stderr line and still exits 0.
 
@@ -214,6 +214,10 @@ fn session(options: &Options) -> Result<(), String> {
     {
         return Err("device credential must be one header token".to_owned());
     }
+    if options.event == "Tool" && chat.is_none() {
+        println!("{}", provider_tool(config, &payload, &options.agent));
+        return Ok(());
+    }
     let cwd = match payload.cwd() {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().map_err(|e| format!("no working folder: {e}"))?,
@@ -281,6 +285,30 @@ fn session(options: &Options) -> Result<(), String> {
     }
     hook.report_repo_state();
     Ok(())
+}
+
+/// A Hermes memory-provider tool call: the MCP tool of the same name, run in the session's folder
+/// (the plugin starts the hook there) and with the session id MCP would add.
+fn provider_tool(config: Config, payload: &Payload, agent: &str) -> Value {
+    let Some(tool) = payload
+        .text("tool_name")
+        .and_then(crate::tools::find_by_name)
+    else {
+        return json!({"error": "unknown Cairn tool"});
+    };
+    let mut arguments = payload
+        .value("arguments")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(session) = payload.session_id()
+        && matches!(tool.name, "memory_get" | "memory_feedback")
+    {
+        arguments.insert("session_id".to_owned(), json!(session));
+    }
+    let client = Client::identified(config, crate::REQUEST_TIMEOUT, agent, ClientKind::Mcp);
+    crate::tools::call(&client, tool, arguments)
+        .unwrap_or_else(|error| json!({"error": error.to_string()}))
 }
 
 struct Hook<'a> {

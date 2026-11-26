@@ -1,0 +1,105 @@
+---
+id: CM-INDEX-001
+title: "Shared memory for coding agents"
+status: accepted
+description: "Self-host Cairn to carry decisions, rules, and gotchas across agent sessions, machines, and teammates."
+---
+
+# Shared memory for coding agents
+
+<section className="home-section" aria-labelledby="how-it-works">
+
+## How it works
+
+<ol className="home-steps">
+  <li>
+    <h3>Capture the work</h3>
+    <p>Agent hooks record prompts, edits, and commands. Your agent can also save a verified decision directly.</p>
+  </li>
+  <li>
+    <h3>Keep what matters</h3>
+    <p>Cairn distills observations into candidate memories and handoffs. It stores durable records in PostgreSQL.</p>
+  </li>
+  <li>
+    <h3>Recall it when needed</h3>
+    <p>Later sessions start with a brief and get relevant context as they work. Agents can search for a specific record.</p>
+  </li>
+</ol>
+
+[Explore recall layers](users/memory/layers.md)
+
+</section>
+
+<section className="home-section" aria-labelledby="working-with-memory">
+
+## Working with memory
+
+<div className="grid gap-x-10 gap-y-4 md:grid-cols-3">
+  <div>
+
+### Share by project
+
+Keep personal memories private and share project decisions, rules, and gotchas with teammates.
+
+[Projects and scopes](users/memory/scopes.md)
+
+  </div>
+  <div>
+
+### Review and correct
+
+Inspect records, vote on their accuracy, and link corrections from the web console.
+
+[Web console](users/web-console.md)
+
+  </div>
+  <div>
+
+### Run on your infrastructure
+
+Cairn stores memory in PostgreSQL with pgvector and can embed search records locally.
+
+[Architecture](technical/index.mdx)
+
+  </div>
+</div>
+
+</section>
+
+<section className="home-section" aria-labelledby="supported-agents">
+
+## Supported agents
+
+<div className="home-agent-links">
+
+- [Claude Code](users/agents/claude-code.md)
+- [Codex](users/agents/codex.md)
+- [OpenCode](users/agents/opencode.md)
+- [Grok Build](users/agents/grok.md)
+- [Antigravity CLI](users/agents/antigravity.md)
+- [Hermes Agent](users/agents/hermes.md)
+
+</div>
+
+</section>
+
+<section className="home-section grid gap-6 sm:grid-cols-2">
+  <div>
+
+## Use Cairn
+
+Set up your agent, learn the daily workflow, and look up Cairn terminology.
+
+[Daily use](users/daily-use.md) · [Glossary](glossary.md)
+
+  </div>
+  <div>
+
+## Operate Cairn
+
+Run the server and console, manage access, and practice restoring your database.
+
+[Deployment](technical/deployment.md) · [Backup and restore](technical/backups.md)
+
+  </div>
+</section>

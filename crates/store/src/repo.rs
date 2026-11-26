@@ -1,4 +1,4 @@
-//! Git facts reported by the hook (docs/reference/hook.md#events): which files and symbols a project's memories
+//! Git facts reported by the hook (apps/docs/content/technical/hooks/index.md#events): which files and symbols a project's memories
 //! cite still exist on the default branch, and which branches were merged into it.
 
 use crate::{Result, Store, StoreError};

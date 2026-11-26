@@ -1,0 +1,8 @@
+{
+  "title": "Tool reference",
+  "defaultOpen": false,
+  "pages": [
+    "cli",
+    "mcp"
+  ]
+}

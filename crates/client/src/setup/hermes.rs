@@ -32,6 +32,51 @@ pub(crate) fn config_dir(home: &Path) -> PathBuf {
     home.join(format!(".hermes{suffix}"))
 }
 
+/// The oldest Hermes with the plugin and provider surface Cairn uses (`transform_tool_result`,
+/// bound gateway session context).
+const MIN_RELEASE: (u32, u32, u32) = (2026, 4, 23);
+
+/// A warning when the installed Hermes is older than Cairn needs or its version cannot be read. Reads
+/// the release date the installer's checkout carries; never runs Hermes.
+pub(crate) fn version_warning(home: &Path) -> Option<String> {
+    let profile = config_dir(home);
+    // Profiles live in `<root>/profiles/<name>`; the installer's checkout is `<root>/hermes-agent`.
+    let root = (profile.parent().and_then(Path::file_name) == Some("profiles".as_ref()))
+        .then(|| {
+            profile
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        })
+        .flatten();
+    let found = [Some(profile), root, Some(home.join(".hermes"))]
+        .into_iter()
+        .flatten()
+        .find_map(|dir| release_date(&dir.join("hermes-agent/hermes_cli/__init__.py")));
+    let needed = "Cairn needs Hermes v2026.4.23 or newer; older Hermes never delivers command warnings or failed-command recall, and gateway chat memory is off";
+    match found {
+        Some(release) if release >= MIN_RELEASE => None,
+        Some((year, month, day)) => Some(format!(
+            "Hermes v{year}.{month}.{day} found. {needed}. Run hermes update."
+        )),
+        None => Some(format!(
+            "Hermes version unknown (no hermes-agent/hermes_cli/__init__.py found). {needed}."
+        )),
+    }
+}
+
+/// `__release_date__ = "2026.4.23"` from Hermes's `hermes_cli/__init__.py`.
+fn release_date(path: &Path) -> Option<(u32, u32, u32)> {
+    let text = fs::read_to_string(path).ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("__release_date__"))?
+        .split('"')
+        .nth(1)?;
+    let mut parts = value.split('.').map(|part| part.parse().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
 pub(crate) fn hook_file(home: &Path) -> PathBuf {
     config_dir(home)
         .join("plugins")
@@ -61,7 +106,9 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     let config = (config, text);
     let instructions = instruction_file(folder.join("SOUL.md"), ctx.remove || gateway)?;
     if ctx.remove {
+        let root = folder.clone();
         let after: super::After = Box::new(move |_| {
+            let mut owned = false;
             for path in [&manifest, &hook] {
                 if read(path)?.starts_with(FILE_MARKER) {
                     fs::remove_file(path)
@@ -70,6 +117,28 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
                             _ => Err(error),
                         })
                         .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+                    owned = true;
+                }
+            }
+            // Hermes's Python caches bytecode for our __init__.py; drop only that cache, and only from
+            // our own plugin's real cache folder, never through a link.
+            let cache = hook.with_file_name("__pycache__");
+            if owned
+                && cache.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+                && super::below(&root, &cache)
+            {
+                for entry in fs::read_dir(&cache).into_iter().flatten().flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("__init__.") && name.ends_with(".pyc") {
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+            // Only empty folders inside the profile go; one holding the user's files stays.
+            for folder in std::iter::once(cache.as_path()).chain(hook.ancestors().skip(1).take(2)) {
+                if super::below(&root, folder) {
+                    let _ = fs::remove_dir(folder);
                 }
             }
             Ok(())
@@ -81,7 +150,7 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         });
     }
     let paths = json!([ctx.exe, ctx.config.to_string_lossy()]).to_string();
-    let schemas = json!(crate::tools::skill_tool_schemas()).to_string();
+    let tools = crate::tools::tools_list()["tools"].to_string();
     let script = PLUGIN
         .replacen("__CAIRN_PATHS__", &paths, 1)
         .replacen(
@@ -89,19 +158,12 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
             if gateway { "True" } else { "False" },
             1,
         )
-        .replacen("__CAIRN_SKILL_TOOLS__", &json!(schemas).to_string(), 1);
-    let mut manifest_text = MANIFEST.to_owned();
-    if gateway {
-        manifest_text.push_str("provides_tools:\n  - memory_search\n  - memory_save\n");
-        for tool in &crate::tools::SKILL_TOOLS {
-            manifest_text.push_str(&format!("  - {}\n", tool.name));
-        }
-    }
+        .replacen("__CAIRN_TOOLS__", &json!(tools).to_string(), 1);
     Ok(Plan {
         files: vec![
             config,
             (hook, script),
-            (manifest, manifest_text),
+            (manifest, MANIFEST.to_owned()),
             instructions,
         ],
         native: None,
@@ -121,40 +183,75 @@ fn plugin_settings(root: &Value) -> &Value {
     &root["plugins"]["entries"][PLUGIN_NAME]["settings"]
 }
 
+/// Whether the profile selects Cairn as its Hermes memory provider.
+pub(crate) fn provider_set(path: &Path) -> bool {
+    read(path)
+        .and_then(|raw| parse_config(&raw))
+        .is_ok_and(|root| root["memory"]["provider"].as_str() == Some(PLUGIN_NAME))
+}
+
 pub(crate) fn gateway_profile(path: &Path) -> bool {
     read(path)
         .and_then(|raw| parse_config(&raw))
         .is_ok_and(|root| plugin_settings(&root)["cairn_gateway"].as_bool() == Some(true))
 }
 
+/// `[]` when `memory.provider` was absent, `[value]` with its exact value otherwise.
+const PREVIOUS_PROVIDER: &str = "previous_memory_provider";
+
 fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
     let raw = read(path)?;
     let mut root = parse_config(&raw)?;
     let before = root.clone();
     let settings = plugin_settings(&root);
-    let gateway = ctx.gateway || settings["cairn_gateway"].as_bool() == Some(true);
-    let legacy_chat_settings =
-        settings.get("chat_owner_hashes").is_some() || settings.get("chat_projects").is_some();
+    let had_settings = settings.is_mapping();
+    let gateway = !ctx.remove && (ctx.gateway || settings["cairn_gateway"].as_bool() == Some(true));
+    let saved = settings.get(PREVIOUS_PROVIDER).cloned();
     let mut owns_enable = settings[ENABLED_MARKER].as_bool() == Some(true);
     let config = as_mapping(&mut root, "Hermes config.yaml")?;
+
+    // Cairn's provider tools replace the MCP entry in Hermes; earlier setups left one.
     let servers = as_mapping(
         config.entry("mcp_servers".into()).or_insert(Value::Null),
         "mcp_servers",
     )?;
-    let existing = servers.get("cairn");
-    let marked = |marker| existing.and_then(|server| server["env"][marker].as_str()) == Some("1");
-    if existing.is_some() && !marked(MARKER) {
-        return Err(UNMARKED.into());
-    }
-    owns_enable |= marked(ENABLED_MARKER);
-    if ctx.remove && !gateway && !legacy_chat_settings && existing.is_none() {
-        return Ok((raw, false));
-    }
-    if ctx.remove || gateway {
-        servers.remove("cairn");
-        if servers.is_empty() {
-            config.remove("mcp_servers");
+    if let Some(existing) = servers.get("cairn") {
+        let marked = |marker| existing["env"][marker].as_str() == Some("1");
+        if !marked(MARKER) {
+            return Err(UNMARKED.into());
         }
+        owns_enable |= marked(ENABLED_MARKER);
+        servers.remove("cairn");
+    }
+    if servers.is_empty() {
+        config.remove("mcp_servers");
+    }
+
+    let memory = as_mapping(
+        config.entry("memory".into()).or_insert(Value::Null),
+        "memory",
+    )?;
+    let current = memory.get("provider").cloned();
+    let ours = current.as_ref().and_then(Value::as_str) == Some(PLUGIN_NAME);
+    let mut previous = None;
+    if ctx.remove {
+        // Restore only while Cairn still holds the slot: a later user choice wins.
+        if ours {
+            match saved
+                .as_ref()
+                .and_then(Value::as_sequence)
+                .and_then(|v| v.first())
+            {
+                Some(value) => memory.insert("provider".into(), value.clone()),
+                None => memory.remove("provider"),
+            };
+        }
+    } else if !ours {
+        previous = Some(Value::Sequence(current.into_iter().collect()));
+        memory.insert("provider".into(), PLUGIN_NAME.into());
+    }
+    if memory.is_empty() {
+        config.remove("memory");
     }
 
     if !ctx.remove || owns_enable {
@@ -186,60 +283,66 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
         }
     }
 
-    if gateway || legacy_chat_settings {
-        let plugins = as_mapping(
-            config.entry("plugins".into()).or_insert(Value::Null),
-            "plugins",
-        )?;
-        let entries = as_mapping(
-            plugins.entry("entries".into()).or_insert(Value::Null),
-            "plugins.entries",
-        )?;
-        let entry = as_mapping(
-            entries.entry(PLUGIN_NAME.into()).or_insert(Value::Null),
-            PLUGIN_NAME,
-        )?;
-        let settings = as_mapping(
-            entry.entry("settings".into()).or_insert(Value::Null),
-            "Cairn plugins settings",
-        )?;
-        settings.remove("chat_owner_hashes");
-        settings.remove("chat_projects");
+    if !ctx.remove || had_settings {
+        let settings = settings_mut(config)?;
+        for key in ["chat_owner_hashes", "chat_projects"] {
+            settings.remove(key);
+        }
         if ctx.remove {
-            settings.remove("cairn_gateway");
-            settings.remove(ENABLED_MARKER);
-        } else if gateway {
-            settings.insert("cairn_gateway".into(), true.into());
+            // The chat salt stays so a later setup finds the profile's chat memories.
+            for key in ["cairn_gateway", ENABLED_MARKER, PREVIOUS_PROVIDER] {
+                settings.remove(key);
+            }
+        } else {
             if owns_enable {
                 settings.insert(ENABLED_MARKER.into(), true.into());
             }
-            settings
-                .entry("chat_salt".into())
-                .or_insert_with(|| cairn_core::id::new_id("salt").into());
+            if let Some(previous) = previous {
+                settings.insert(PREVIOUS_PROVIDER.into(), previous);
+            }
+            if gateway {
+                settings.insert("cairn_gateway".into(), true.into());
+                settings
+                    .entry("chat_salt".into())
+                    .or_insert_with(|| cairn_core::id::new_id("salt").into());
+            }
         }
-    }
-    if !gateway && !ctx.remove {
-        let mut env = ctx.mcp_env();
-        // Hermes filters the inherited stdio environment, including CAIRN_CONFIG.
-        env.insert("CAIRN_CONFIG".into(), json!(ctx.config.to_string_lossy()));
-        if owns_enable {
-            env.insert(ENABLED_MARKER.into(), json!("1"));
-        }
-        let entry = json!({"command": ctx.exe, "args": ["mcp"], "env": env, "trust": "full"});
-        as_mapping(
-            config.entry("mcp_servers".into()).or_insert(Value::Null),
-            "mcp_servers",
-        )?
-        .insert(
-            "cairn".into(),
-            yaml_serde::to_value(entry).map_err(|_| "cannot serialize Hermes MCP entry")?,
-        );
+        prune_settings(config);
     }
     if root == before {
         return Ok((raw, gateway));
     }
     let text = yaml_serde::to_string(&root).map_err(|_| "cannot serialize Hermes config.yaml")?;
     Ok((text, gateway))
+}
+
+fn settings_mut(config: &mut Mapping) -> R<&mut Mapping> {
+    let mut map = config;
+    for (key, name) in [
+        ("plugins", "plugins"),
+        ("entries", "plugins.entries"),
+        (PLUGIN_NAME, PLUGIN_NAME),
+        ("settings", "Cairn plugins settings"),
+    ] {
+        map = as_mapping(map.entry(key.into()).or_insert(Value::Null), name)?;
+    }
+    Ok(map)
+}
+
+/// Drops the settings path's mappings that this run left empty, innermost first.
+fn prune_settings(config: &mut Mapping) {
+    fn prune(map: &mut Mapping, path: &[&str]) {
+        let Some((key, rest)) = path.split_first() else {
+            return;
+        };
+        if let Some(child) = map.get_mut(*key).and_then(Value::as_mapping_mut) {
+            prune(child, rest);
+            if child.is_empty() {
+                map.remove(*key);
+            }
+        }
+    }
+    prune(config, &["plugins", "entries", PLUGIN_NAME, "settings"]);
 }
 
 fn as_mapping<'a>(value: &'a mut Value, name: &str) -> R<&'a mut Mapping> {

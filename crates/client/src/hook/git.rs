@@ -144,7 +144,7 @@ pub(super) fn project_id(top: &Path) -> Option<String> {
 const SYMBOL_GREP_TIMEOUT: Duration = Duration::from_millis(1500);
 const MERGED_BRANCHES_MAX: usize = 50;
 
-/// What the checkout answers to a brief's `check` (docs/reference/hook.md#events).
+/// What the checkout answers to a brief's `check` (apps/docs/content/technical/hooks/index.md#events).
 pub struct RepoFacts {
     pub commit: Option<String>,
     pub files_missing: Vec<String>,

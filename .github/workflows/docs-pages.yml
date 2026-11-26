@@ -1,0 +1,84 @@
+name: Publish documentation
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Latest stable release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+      - name: Require the latest stable release on main
+        id: tag
+        env:
+          EVENT_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          bash scripts/check_docs_tag.sh "$TAG" "${EVENT_SHA:-$commit}"
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        id: pages
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/docs/package-lock.json
+      - name: Build and check the Pages export
+        working-directory: apps/docs
+        env:
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          NEXT_PUBLIC_SITE_ORIGIN: ${{ steps.pages.outputs.origin }}
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run check:export
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: apps/docs/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+      - name: Recheck the tag before publishing
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: bash scripts/check_docs_tag.sh "$TAG" "$(git rev-parse HEAD)"
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+        id: deploy

@@ -1,4 +1,4 @@
-//! The `link` job (docs/reference/recall.md): automatic links from shared entities and from a gotcha's
+//! The `link` job (apps/docs/content/technical/retrieval.md): automatic links from shared entities and from a gotcha's
 //! fix/cause entities. Independent of the embedding model.
 
 use crate::{Result, Store};

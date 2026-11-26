@@ -1,4 +1,4 @@
-"""Runs scripts/check_migrations.py against temp trees. See docs/development.md#migrations."""
+"""Runs scripts/check_migrations.py against temp trees. See apps/docs/content/technical/contributing.md#migrations."""
 
 import io
 import pathlib

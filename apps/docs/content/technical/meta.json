@@ -1,0 +1,24 @@
+{
+  "title": "Technical",
+  "root": true,
+  "pages": [
+    "---Internals---",
+    "index",
+    "data-model",
+    "retrieval",
+    "processing",
+    "hooks",
+    "---API and trust---",
+    "http-api",
+    "security",
+    "---Operate---",
+    "deployment",
+    "backups",
+    "---Evaluate---",
+    "benchmarks",
+    "---Contribute---",
+    "contributing",
+    "rust-idioms",
+    "release-process"
+  ]
+}

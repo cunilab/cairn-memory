@@ -1,0 +1,21 @@
+{
+  "title": "Users",
+  "root": true,
+  "pages": [
+    "---Start---",
+    "index",
+    "install-server",
+    "install-cli",
+    "---Connect---",
+    "agents",
+    "---Use Cairn---",
+    "daily-use",
+    "web-console",
+    "memory",
+    "reference",
+    "help",
+    "---Releases---",
+    "upgrade",
+    "releases"
+  ]
+}
