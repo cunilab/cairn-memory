@@ -202,7 +202,7 @@ fn grok_setup_round_trips_config_hooks_and_instructions() {
         fs::read_to_string(instructions).unwrap(),
         "Grok user instructions\n"
     );
-    assert!(home.json(".grok/hooks/cairn.json").get("hooks").is_none());
+    assert!(!home.dir.join(".grok/hooks/cairn.json").exists());
 }
 
 #[test]
@@ -474,6 +474,78 @@ fn hermes_setup_and_doctor_warn_about_old_or_unknown_hermes() {
     }
     fs::write(&stamp, "__release_date__ = \"unreleased\"\n").unwrap();
     assert!(setup().contains("Hermes version unknown"));
+}
+
+#[test]
+fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
+    // (agent, instruction file, Cairn-only files and folders setup creates)
+    let agents = [
+        (
+            "hermes",
+            ".hermes/SOUL.md",
+            &[".hermes/plugins/cairn-memory", ".hermes/plugins"][..],
+        ),
+        (
+            "grok",
+            ".grok/AGENTS.md",
+            &[".grok/hooks/cairn.json", ".grok/hooks", ".grok"][..],
+        ),
+        ("antigravity", ".gemini/config/AGENTS.md", &[][..]),
+        ("claude", ".claude/CLAUDE.md", &[][..]),
+        ("codex", ".codex/AGENTS.md", &[][..]),
+        (
+            "opencode",
+            ".config/opencode/AGENTS.md",
+            &[".config/opencode/plugins/cairn"][..],
+        ),
+    ];
+    for (agent, instructions, created) in agents {
+        // Created by setup: removal deletes it.
+        let home = Home::new(&format!("leftovers-{agent}"), true);
+        home.ok(agent, false);
+        assert!(home.dir.join(instructions).exists(), "{agent}");
+        home.ok(agent, true);
+        for path in std::iter::once(instructions).chain(created.iter().copied()) {
+            assert!(!home.dir.join(path).exists(), "{agent} left {path}");
+        }
+
+        // Empty before setup: removal deletes it, since an empty instruction file carries nothing.
+        let home = Home::new(&format!("leftovers-empty-{agent}"), true);
+        home.write(instructions, "");
+        home.ok(agent, false);
+        home.ok(agent, true);
+        assert!(!home.dir.join(instructions).exists(), "{agent}");
+
+        // User content keeps the file, byte for byte.
+        let home = Home::new(&format!("leftovers-user-{agent}"), true);
+        let file = home.write(instructions, "User instructions\n\n");
+        home.ok(agent, false);
+        home.ok(agent, true);
+        assert_eq!(
+            fs::read_to_string(file).unwrap(),
+            "User instructions\n\n",
+            "{agent}"
+        );
+
+        // An empty file Cairn never touched stays: remove changes nothing it did not write.
+        let home = Home::new(&format!("leftovers-untouched-{agent}"), true);
+        let file = home.write(instructions, "  \n");
+        home.ok(agent, true);
+        assert_eq!(fs::read_to_string(file).unwrap(), "  \n", "{agent}");
+    }
+
+    // A plugin folder holding the user's own file stays with that file.
+    let home = Home::new("leftovers-plugin-user-file", false);
+    home.ok("hermes", false);
+    let note = home.write(".hermes/plugins/cairn-memory/notes.txt", "mine\n");
+    home.ok("hermes", true);
+    assert_eq!(fs::read_to_string(note).unwrap(), "mine\n");
+    assert!(
+        !home
+            .dir
+            .join(".hermes/plugins/cairn-memory/__init__.py")
+            .exists()
+    );
 }
 
 #[test]

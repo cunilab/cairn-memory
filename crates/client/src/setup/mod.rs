@@ -433,6 +433,15 @@ fn apply(ctx: &Ctx) -> R<String> {
         if read(&path)? == body {
             continue;
         }
+        // Removal leaves no empty file behind: one holding only Cairn's part carries nothing.
+        if ctx.remove && body.trim().is_empty() {
+            fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+            // Setup may have created the folder too; `remove_dir` keeps one with anything in it.
+            if let Some(parent) = path.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+            continue;
+        }
         if let Some(parent) = path.parent() {
             create_private_dir(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;

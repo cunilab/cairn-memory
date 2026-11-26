@@ -117,6 +117,10 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
                         .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
                 }
             }
+            // Only empty folders go; one holding the user's files stays.
+            for folder in hook.ancestors().skip(1).take(2) {
+                let _ = fs::remove_dir(folder);
+            }
             Ok(())
         });
         return Ok(Plan {

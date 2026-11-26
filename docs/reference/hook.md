@@ -64,7 +64,7 @@ The bounded outbox in the configuration directory (or `CAIRN_OUTBOX`) is bound t
 
 ## Setup
 
-Run `cairn setup <url> --agent claude|codex|opencode|grok|antigravity|hermes` and supply the device token on stdin. On an already configured device, run `cairn setup <agent>`. Setup writes managed hook and MCP entries and adds a marked instruction block. Upgrades refresh installed integrations. Run `cairn setup <agent> --remove` to remove the integration while keeping the device configuration. Codex and OpenCode setup need their native CLI on `PATH`. Codex also requires trusting the hooks. `cairn doctor` checks the configuration.
+Run `cairn setup <url> --agent claude|codex|opencode|grok|antigravity|hermes` and supply the device token on stdin. On an already configured device, run `cairn setup <agent>`. Setup writes managed hook and MCP entries and adds a marked instruction block. Upgrades refresh installed integrations. Run `cairn setup <agent> --remove` to remove the integration while keeping the device configuration. Removal deletes an instruction file or Cairn plugin file it leaves empty or whitespace-only, and an empty Cairn plugin folder; a file with any other content keeps it. Codex and OpenCode setup need their native CLI on `PATH`. Codex also requires trusting the hooks. `cairn doctor` checks the configuration.
 
 | Agent | Global instruction file |
 | --- | --- |
