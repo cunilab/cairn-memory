@@ -39,22 +39,12 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     Ok(Plan {
         files: vec![
             (config.clone(), config_text(&config, ctx)?),
-            (
-                hooks.clone(),
-                cairn_hooks(hooks_text(&hooks, ctx, &EVENTS)?, ctx.remove),
-            ),
+            (hooks.clone(), hooks_text(&hooks, ctx, &EVENTS)?),
             instruction_file(folder.join("AGENTS.md"), ctx.remove)?,
         ],
         native: None,
         after: None,
     })
-}
-
-/// Cairn owns `hooks/cairn.json`: removal deletes it once no hooks remain in it.
-fn cairn_hooks(text: String, remove: bool) -> String {
-    let empty = serde_json::from_str::<serde_json::Value>(&text)
-        .is_ok_and(|value| value.as_object().is_some_and(serde_json::Map::is_empty));
-    if remove && empty { String::new() } else { text }
 }
 
 fn config_text(path: &Path, ctx: &Ctx) -> R<String> {

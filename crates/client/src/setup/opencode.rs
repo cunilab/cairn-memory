@@ -99,6 +99,7 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
                 let _ = fs::remove_file(&index);
             }
             let _ = fs::remove_dir(base.join("plugins/cairn"));
+            let _ = fs::remove_dir(base.join("plugins"));
         } else if !index.exists() || ours(&index) {
             files.push((index, rendered));
         }

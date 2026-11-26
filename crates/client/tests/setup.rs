@@ -478,7 +478,7 @@ fn hermes_setup_and_doctor_warn_about_old_or_unknown_hermes() {
 
 #[test]
 fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
-    // (agent, instruction file, Cairn-only files and folders setup creates)
+    // (agent, instruction file, files and folders setup creates that removal deletes)
     let agents = [
         (
             "hermes",
@@ -488,15 +488,28 @@ fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
         (
             "grok",
             ".grok/AGENTS.md",
-            &[".grok/hooks/cairn.json", ".grok/hooks", ".grok"][..],
+            &[".grok/hooks/cairn.json", ".grok/config.toml", ".grok"][..],
         ),
-        ("antigravity", ".gemini/config/AGENTS.md", &[][..]),
-        ("claude", ".claude/CLAUDE.md", &[][..]),
-        ("codex", ".codex/AGENTS.md", &[][..]),
+        (
+            "antigravity",
+            ".gemini/config/AGENTS.md",
+            &[
+                ".gemini/config/mcp_config.json",
+                ".gemini/config/hooks.json",
+                ".gemini/antigravity-cli/settings.json",
+                ".gemini",
+            ][..],
+        ),
+        ("claude", ".claude/CLAUDE.md", &[".claude.json"][..]),
+        (
+            "codex",
+            ".codex/AGENTS.md",
+            &[".codex/config.toml", ".codex/hooks.json", ".codex"][..],
+        ),
         (
             "opencode",
             ".config/opencode/AGENTS.md",
-            &[".config/opencode/plugins/cairn"][..],
+            &[".config/opencode/plugins"][..],
         ),
     ];
     for (agent, instructions, created) in agents {
@@ -532,6 +545,56 @@ fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
         let file = home.write(instructions, "  \n");
         home.ok(agent, true);
         assert_eq!(fs::read_to_string(file).unwrap(), "  \n", "{agent}");
+    }
+
+    // Host configs that still hold anything after removal stay: other keys, even empty ones, or
+    // what setup keeps by design (Claude's permissions container, Hermes's plugins list,
+    // OpenCode's mcp.servers from its CLI).
+    let kept = [
+        ("hermes", ".hermes/config.yaml", None),
+        ("claude", ".claude/settings.json", None),
+        ("opencode", ".config/opencode/opencode.json", None),
+        ("claude", ".claude.json", Some("{\"theme\": {}}\n")),
+        ("claude", ".claude/settings.json", Some("{\"env\": {}}\n")),
+        (
+            "antigravity",
+            ".gemini/config/mcp_config.json",
+            Some("{\"other\": {}}\n"),
+        ),
+        (
+            "antigravity",
+            ".gemini/config/hooks.json",
+            Some("{\"user-hooks\": {}}\n"),
+        ),
+        (
+            "antigravity",
+            ".gemini/antigravity-cli/settings.json",
+            Some("{\"theme\": \"dark\"}\n"),
+        ),
+        ("grok", ".grok/config.toml", Some("model = \"grok-test\"\n")),
+        (
+            "codex",
+            ".codex/config.toml",
+            Some("model = \"codex-test\"\n"),
+        ),
+        ("hermes", ".hermes/config.yaml", Some("model: test-model\n")),
+    ];
+    for (index, (agent, path, original)) in kept.into_iter().enumerate() {
+        let home = Home::new(&format!("kept-{index}-{agent}"), true);
+        if let Some(original) = original {
+            home.write(path, original);
+        }
+        home.ok(agent, false);
+        home.ok(agent, true);
+        let after = fs::read_to_string(home.dir.join(path))
+            .unwrap_or_else(|_| panic!("{agent} deleted {path}"));
+        if let Some(original) = original {
+            let key = original
+                .split(['"', ' ', ':'])
+                .find(|part| part.len() > 1)
+                .unwrap();
+            assert!(after.contains(key), "{agent} {path}: {after}");
+        }
     }
 
     // A plugin folder holding the user's own file stays with that file.
@@ -1160,11 +1223,8 @@ fn codex_native_missing_dir() {
     home.ok("codex", true);
     home.ok("codex", true);
     assert_eq!(fs::read_to_string(global).unwrap(), user);
-    assert!(
-        !fs::read_to_string(home.dir.join(".codex/hooks.json"))
-            .unwrap()
-            .contains("--cairn-managed")
-    );
+    // hooks.json held only Cairn's hooks, so removal deleted it.
+    assert!(!home.dir.join(".codex/hooks.json").exists());
     assert!(!home.dir.join(".codex-fixture-state").exists());
     assert_eq!(
         fs::read_to_string(config_path).unwrap().trim_end(),
@@ -1367,7 +1427,7 @@ fn remove_still_cleans_the_files_after_the_host_cli_is_gone() {
     for agent in ["codex", "opencode"] {
         home.ok(agent, true);
     }
-    let hooks = read(&home, ".codex/hooks.json");
+    let hooks = fs::read_to_string(home.dir.join(".codex/hooks.json")).unwrap_or_default();
     assert!(!hooks.contains("--cairn-managed"), "{hooks}");
     assert!(
         !home

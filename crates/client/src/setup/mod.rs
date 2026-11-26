@@ -434,11 +434,22 @@ fn apply(ctx: &Ctx) -> R<String> {
             continue;
         }
         // Removal leaves no empty file behind: one holding only Cairn's part carries nothing.
-        if ctx.remove && body.trim().is_empty() {
-            fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
-            // Setup may have created the folder too; `remove_dir` keeps one with anything in it.
-            if let Some(parent) = path.parent() {
-                let _ = fs::remove_dir(parent);
+        if ctx.remove && is_empty_config(&body) {
+            // A missing file is already the wanted state; never create an empty one.
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    return Err(format!("cannot remove {}: {e}", path.display()));
+                }
+                _ => {}
+            }
+            // Setup may have created the folders too; `remove_dir` keeps one with anything in it.
+            for folder in path.ancestors().skip(1) {
+                if folder == ctx.home
+                    || !folder.starts_with(&ctx.home)
+                    || fs::remove_dir(folder).is_err()
+                {
+                    break;
+                }
             }
             continue;
         }
@@ -462,6 +473,13 @@ fn apply(ctx: &Ctx) -> R<String> {
         done.push_str(&warning);
     }
     Ok(done)
+}
+
+/// Whitespace, or an empty JSON object (also an empty YAML mapping); a comment or any key is content.
+pub(super) fn is_empty_config(body: &str) -> bool {
+    body.trim().is_empty()
+        || serde_json::from_str::<Value>(body)
+            .is_ok_and(|v| v.as_object().is_some_and(Map::is_empty))
 }
 
 fn configure_with(
