@@ -112,6 +112,23 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --locked -p cairn-client -p cairn-server
       - run: cargo test --locked -p cairn-client --lib --no-run
+      # --version and update --check of the real binary against a local release listing (no network).
+      - if: runner.os == 'Windows'
+        run: cargo test --locked -p cairn-client --test update
+      - name: cairn doctor runs on Windows without a server
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "cairn-home"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $env:HOME = $dir; $env:USERPROFILE = $dir; $env:APPDATA = $dir
+          $env:XDG_CONFIG_HOME = "$dir\.config"; $env:CAIRN_NO_UPDATE_CHECK = "1"
+          # No config: doctor prints fail lines and exits 1 (docs/reference/cli-and-mcp.md); a crash exits otherwise.
+          $out = & target\debug\cairn.exe doctor
+          $code = $LASTEXITCODE
+          $out
+          if ($code -ne 1 -or -not ($out -match '^fail\s+config')) { Write-Error "doctor exited $code"; exit 1 }
+          exit 0
 
   web-console:
     name: Web console typecheck, lint, build
