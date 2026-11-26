@@ -629,6 +629,33 @@ fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn remove_never_follows_links_out_of_the_managed_folders() {
+    use std::os::unix::fs::symlink;
+    // A plugin cache linked to another package's cache: removal leaves that cache untouched.
+    let home = Home::new("remove-linked-cache", false);
+    home.ok("hermes", false);
+    let outside = temp_dir("remove-linked-cache-target");
+    let foreign = outside.join("__init__.cpython-314.pyc");
+    fs::write(&foreign, "foreign").unwrap();
+    let cache = home.dir.join(".hermes/plugins/cairn-memory/__pycache__");
+    symlink(&outside, &cache).unwrap();
+    home.ok("hermes", true);
+    assert_eq!(fs::read_to_string(&foreign).unwrap(), "foreign");
+    assert!(cache.symlink_metadata().unwrap().file_type().is_symlink());
+
+    // A linked agent folder: Cairn's file goes, but no folder behind the link is pruned.
+    let home = Home::new("remove-linked-ancestor", true);
+    let outside = temp_dir("remove-linked-ancestor-target");
+    symlink(&outside, home.dir.join(".grok")).unwrap();
+    home.ok("grok", false);
+    assert!(outside.join("hooks/cairn.json").exists());
+    home.ok("grok", true);
+    assert!(!outside.join("hooks/cairn.json").exists());
+    assert!(outside.join("hooks").is_dir());
+}
+
 #[test]
 fn hermes_custom_home_preserves_unowned_entries_and_plugin_preferences() {
     let home = Home::new("hermes-custom", false);

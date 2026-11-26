@@ -106,7 +106,9 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     let config = (config, text);
     let instructions = instruction_file(folder.join("SOUL.md"), ctx.remove || gateway)?;
     if ctx.remove {
+        let root = folder.clone();
         let after: super::After = Box::new(move |_| {
+            let mut owned = false;
             for path in [&manifest, &hook] {
                 if read(path)?.starts_with(FILE_MARKER) {
                     fs::remove_file(path)
@@ -115,20 +117,29 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
                             _ => Err(error),
                         })
                         .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+                    owned = true;
                 }
             }
-            // Hermes's Python caches bytecode for our __init__.py; drop only that cache.
+            // Hermes's Python caches bytecode for our __init__.py; drop only that cache, and only from
+            // our own plugin's real cache folder, never through a link.
             let cache = hook.with_file_name("__pycache__");
-            for entry in fs::read_dir(&cache).into_iter().flatten().flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("__init__.") && name.ends_with(".pyc") {
-                    let _ = fs::remove_file(entry.path());
+            if owned
+                && cache.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+                && super::below(&root, &cache)
+            {
+                for entry in fs::read_dir(&cache).into_iter().flatten().flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("__init__.") && name.ends_with(".pyc") {
+                        let _ = fs::remove_file(entry.path());
+                    }
                 }
             }
-            // Only empty folders go; one holding the user's files stays.
+            // Only empty folders inside the profile go; one holding the user's files stays.
             for folder in std::iter::once(cache.as_path()).chain(hook.ancestors().skip(1).take(2)) {
-                let _ = fs::remove_dir(folder);
+                if super::below(&root, folder) {
+                    let _ = fs::remove_dir(folder);
+                }
             }
             Ok(())
         });

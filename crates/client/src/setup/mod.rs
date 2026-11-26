@@ -444,10 +444,7 @@ fn apply(ctx: &Ctx) -> R<String> {
             }
             // Setup may have created the folders too; `remove_dir` keeps one with anything in it.
             for folder in path.ancestors().skip(1) {
-                if folder == ctx.home
-                    || !folder.starts_with(&ctx.home)
-                    || fs::remove_dir(folder).is_err()
-                {
+                if !below(&ctx.home, folder) || fs::remove_dir(folder).is_err() {
                     break;
                 }
             }
@@ -473,6 +470,14 @@ fn apply(ctx: &Ctx) -> R<String> {
         done.push_str(&warning);
     }
     Ok(done)
+}
+
+/// Whether removal may delete `folder`: resolved through links and `..`, it is still below `root`.
+pub(super) fn below(root: &Path, folder: &Path) -> bool {
+    match (root.canonicalize(), folder.canonicalize()) {
+        (Ok(root), Ok(real)) => real != root && real.starts_with(root),
+        _ => false,
+    }
 }
 
 /// Whitespace, or an empty JSON object (also an empty YAML mapping); a comment or any key is content.
