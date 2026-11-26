@@ -1,12 +1,10 @@
 # CAIRN_SETUP_MANAGED
 name: cairn-memory
-version: 1.0.0
-description: Forward Hermes lifecycle events to Cairn Memory.
+version: 2.0.0
+# Explicit: the file also defines a memory provider, which Hermes would otherwise load only as a provider.
+kind: standalone
+description: Cairn Memory provider and tool hooks for Hermes.
 provides_hooks:
-  - pre_llm_call
   - post_tool_call
   - transform_tool_result
-  - post_llm_call
   - on_session_end
-  - post_compaction
-  - on_session_finalize

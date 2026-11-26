@@ -1,5 +1,5 @@
-//! The agent tool surface: memory tools are shared by MCP and CLI, and skill tools by MCP and
-//! the Hermes gateway. Account and device management have
+//! The agent tool surface: memory tools are shared by MCP, the CLI and Hermes's memory provider, and
+//! skill tools by MCP and Hermes. Account and device management have
 //! no tool: a device token is refused there.
 
 use crate::{Client, Error, project};
@@ -182,10 +182,6 @@ pub fn find_by_name(name: &str) -> Option<&'static Tool> {
 
 fn tool_schema(tool: &Tool) -> Value {
     json!({"name": tool.name, "description": tool.description, "inputSchema": (tool.schema)()})
-}
-
-pub(crate) fn skill_tool_schemas() -> Vec<Value> {
-    SKILL_TOOLS.iter().map(tool_schema).collect()
 }
 
 pub fn tools_list() -> Value {

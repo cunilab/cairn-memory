@@ -85,17 +85,30 @@ Grok Build registers `mcp_servers.cairn` and grants `MCPTool(cairn__*)` in `conf
 
 Antigravity CLI registers Cairn in `~/.gemini/config/mcp_config.json` and grants `mcp(cairn/*)` in `~/.gemini/antigravity-cli/settings.json`. Explicit ask and deny rules still apply. Its named Cairn group in `~/.gemini/config/hooks.json` injects the brief on SessionStart, captures the last user input through PreInvocation, captures tool activity on PostToolUse and checkpoints on Stop. The hook API has no compact or session-end event, and PostToolUse supplies neither topic injection nor MCP result contents. Use `agy mcp list` to check the registration. [Antigravity discovery](https://antigravity.google/docs/customization-discovery/), [Antigravity permissions](https://antigravity.google/docs/agent-permissions), [Antigravity hooks](https://antigravity.google/docs/hooks)
 
-Standalone Hermes Agent setup registers `mcp_servers.cairn` in the profile's `config.yaml` with `trust: full` scoped to Cairn. Setup enables `plugins/cairn-memory/` through `plugins.enabled` and adds the marked block to `SOUL.md`. Run setup with `HERMES_HOME` pointing at your profile to target a profile other than the default. The YAML rewrite preserves unrelated settings and may change comments and formatting. Use `hermes mcp list` and `hermes plugins list` to check discovery after restarting Hermes. [Hermes profile paths](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_constants.py), [Hermes MCP](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp), [Hermes MCP trust](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/mcp_tool_registration.py), [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins), [Hermes context files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files)
+Hermes Agent setup makes Cairn the profile's memory provider: it sets `memory.provider: cairn-memory` in `config.yaml`, enables `plugins/cairn-memory/` through `plugins.enabled` and adds the marked block to `SOUL.md`. Hermes allows one external memory provider per profile, so setup replaces another one and saves its exact previous value, including an absent key or `none`. `cairn setup hermes --remove` restores that value while `memory.provider` is still `cairn-memory`; a provider chosen later is kept. Setup removes the Cairn-managed `mcp_servers.cairn` entry from earlier versions, because the provider offers the same tools natively ([Hermes provider tools](cli-and-mcp.md#hermes-provider-tools)); removal does not add it back. Hermes built-in memory (`MEMORY.md`, `USER.md`, `memory.memory_enabled`, `memory.user_profile_enabled`) is left unchanged, and Cairn does not mirror built-in memory writes. Run setup with `HERMES_HOME` pointing at your profile to target a profile other than the default. The YAML rewrite preserves unrelated settings and may change comments and formatting. Use `hermes memory status` and `hermes plugins list` to check discovery after restarting Hermes. [Hermes profile paths](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_constants.py), [one external provider](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_manager.py#L285-L296), [provider interface](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_provider.py#L84-L267), [Hermes plugins](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins), [Hermes context files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files)
 
-The CLI plugin uses `pre_llm_call` to deliver the brief with the first user prompt and deliver prompt recall before model calls. It forwards after tool calls, checkpoints at turn completion and after committed compaction, and closes on session teardown. Capture requires a working directory supplied by Hermes. Per-file notes and continuing the model loop with a Stop reminder are unavailable on Hermes. [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks), [Hermes plugin session context](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins)
+The plugin manifest declares `kind: standalone`. Without it, Hermes treats a folder that defines a memory provider as provider-only and skips its hooks. With it, the folder loads both as a plugin (tool hooks) and as the memory provider. [Kind detection](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/plugins_manifest.py#L529-L551), [dual-kind hooks](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/plugins_ledger.py#L211-L232)
+
+| Provider method | Cairn behaviour |
+| --- | --- |
+| `initialize` | Records the session, working folder and `agent_context`. Only `primary` agents write; subagent, cron and flush agents, and today's background heuristics, turn Cairn off. Raw chat and user IDs are ignored. |
+| `on_turn_start` | Runs every turn: SessionStart once per session, then UserPromptSubmit. |
+| `prefetch` | Delivers the brief and prompt recall with the user message. Hermes skips prefetch for trivial prompts, so a brief waits for the next one. |
+| `sync_turn` | Stop checkpoint for a completed turn. |
+| `on_pre_compress` | PreCompact checkpoint before compaction. |
+| `on_session_end` | SessionEnd at Hermes's session boundaries. |
+| `on_session_switch` | Follows `/new`, `/reset`, `/resume`, `/branch` and compression to the new session ID. A new conversation gets a brief on its next prompt; compression continues without one. |
+| `get_tool_schemas`, `handle_tool_call` | Cairn's memory and skill tools. |
+
+Tool events stay plugin hooks because providers have none. `post_tool_call` captures terminal and file tools and Cairn's own tool calls, looks up command warnings and recalls related memories for failed commands. `transform_tool_result` attaches that recall to the terminal result. Hermes's turn-end hook `on_session_end` checkpoints failed or interrupted turns, which Hermes does not pass to `sync_turn`. Capture requires a working folder supplied by Hermes. Per-file notes and continuing the model loop with a Stop reminder are unavailable on Hermes. [Prompt gate](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/turn_context.py#L1076-L1090), [interrupted turns](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/run_agent.py#L928-L945), [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)
 
 
 ### Hermes gateway
 
 Use a dedicated Hermes profile with `plugins.isolation: in_process`. Stop the gateway, then run
 `HERMES_HOME=/path/to/profile cairn setup hermes --gateway` with Cairn already configured.
-Setup replaces the profile's managed Cairn MCP entry with native `memory_search`,
-`memory_save`, and the four [global skill tools](cli-and-mcp.md#tools). Restart the gateway and use `/new` so Hermes loads the current tool schemas. Run `HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration.
+Setup makes Cairn the profile's memory provider as above. Its provider offers native `memory_search`,
+`memory_save`, and the four [global skill tools](cli-and-mcp.md#tools) instead of the coding tools. Restart the gateway and use `/new` so Hermes loads the current tool schemas. Run `HERMES_HOME=/path/to/profile cairn setup hermes --remove` to remove the integration.
 Keep the profile's chat salt so Cairn can find its existing chat memories.
 [Hermes tool selection](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/hermes_cli/tools_config.py#L737-L757) · [Tool schema restoration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/conversation_loop.py#L769-L788)
 
@@ -104,6 +117,8 @@ characters. It sends salted hashes of the chat and thread route. A missing route
 Cairn in that turn. DMs and groups share the same visibility rules. Each chat hook call first
 checks that the server reports version 0.1.10 or later; otherwise, or when the server does not
 answer, chat memory is off for that call and nothing is sent.
+
+The chat route still comes from the turn's bound gateway context, not from the provider's chat arguments, so Discord threads keep their parent channel's tag. Chat sessions live per gateway profile, across Hermes sessions. Hermes `/new` or `/reset` ends the chat's Cairn session at once; otherwise it ends after 30 minutes without a turn. The gateway's own session teardown does not end it.
 
 On the first prompt of a Cairn chat session, Hermes receives the **Hermes chat instruction**
 from **Settings → Agent instructions**. A server admin can edit it or reset it to the built-in
@@ -124,14 +139,14 @@ Reviewed against NousResearch Hermes Agent commit `f85f33bf`.
 | Delegation | Hermes uses platform and memory-agent context `subagent`, gives the child its own session, and binds the delegated-child marker around the turn. | [Child configuration](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/delegate_tool.py#L317-L332), [child turn](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/delegate_tool_child_run.py#L1011-L1021), [context predicate](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/delegation_context.py#L105-L110) |
 | Flush | Hermes documents `flush` as a memory-provider context. The pinned gateway drains providers during teardown outside interactive turns. Cairn skips callbacks marked as flush as well as cron and delegated turns in CLI and gateway mode. | [Provider contract](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_provider.py#L120-L132), [provider context](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/agent_init_memory_provider.py#L113-L126), [gateway drain](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/gateway/run_shutdown.py#L1226-L1247) |
 
-#### Not yet: Hermes built-in memory
+#### Not changed: Hermes built-in memory
 
 Hermes keeps profile-wide notes in `memories/MEMORY.md` and `memories/USER.md`.
 The entries are separated by `§` and carry no project scope. Both
 `memory.memory_enabled` and `memory.user_profile_enabled` control the built-in tool.
-Import, disabling the native stores, and restoring their previous settings are deferred to
-0.1.11. The open questions are how to select an import scope for untyped entries and how
-removal should restore prior setting values, including omitted flags.
+Cairn's provider leaves both stores and both flags unchanged and does not copy built-in memory
+writes. Import of these entries is not implemented; the open question is how to select an import
+scope for untyped entries.
 [Memory directory](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool.py#L38-L40), [store filenames](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L303-L306), [entry delimiter](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L24-L26), [entry reader](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool_store.py#L695-L704), [native flags and tool](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/tools/memory_tool.py#L306-L318)
 
 ## Command recall by host
@@ -145,7 +160,7 @@ Setup refresh adds the new managed hooks to existing installs. A pre-tool lookup
 | Grok Build | Bash `PreToolUse` looks up the warning before execution. Grok delivers `additionalContext` with the tool batch result. | Bash `PostToolUse` includes nonzero exits and accepts `additionalContext`. [Grok hooks](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md#posttooluse-output) |
 | Antigravity CLI | `run_command` `PreToolUse` returns `allow` with a reason and preserves default permissions. Model delivery of an allow reason is unverified. | `PostToolUse` queues matched cards for a one-time `PreInvocation.injectSteps` system message before the next model call. [Antigravity hooks](https://antigravity.google/docs/hooks#input-and-output-contract) |
 | OpenCode V2 | `ctx.tool.hook("execute.before")` runs before the shell command. Its return is void, so Cairn passes the warning through the next `ctx.session.hook("context")`. | `execute.after` supplies completed and failed results. The next model context receives matched cards. [OpenCode V2 server plugins](https://opencode.ai/docs/build/plugins/server) |
-| Hermes Agent | The `pre_tool_call` policy event has no advisory context return. Cairn looks up warnings in `post_tool_call`. | `post_tool_call` queues cards for `transform_tool_result` to attach to the terminal result. With no result transform, `pre_llm_call` can deliver them on the next user turn. [Hermes hooks](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/hooks.md#transform_tool_result) |
+| Hermes Agent | The `pre_tool_call` policy event has no advisory context return. Cairn looks up warnings in `post_tool_call`. | `post_tool_call` queues cards for `transform_tool_result` to attach to the terminal result. A host without a result transform gets no failed-command recall. [Hermes hooks](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/hooks.md#transform_tool_result) |
 
 
 ## Prompt recall by host
@@ -156,6 +171,6 @@ Setup refresh adds the new managed hooks to existing installs. A pre-tool lookup
 | Grok Build | `UserPromptSubmit` runs the lookup. Grok discards advisory output on that event, so Cairn delivers the cards once with the next `PostToolUse` result. [Grok hooks](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/10-hooks.md#userpromptsubmit-decision-control) |
 | Antigravity CLI | `PreInvocation` supplies the latest user text and injects cards through `injectSteps`. Cairn deduplicates repeated model invocations for the same prompt within one execution. [Antigravity hooks](https://antigravity.google/docs/hooks#preinvocation) |
 | OpenCode V2 | The prompt hook queues matched cards for the next context hook. [OpenCode V2 server plugins](https://opencode.ai/docs/build/plugins/server) |
-| Hermes Agent | `pre_llm_call` includes the cards in the context for the model call. [Hermes hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks) |
+| Hermes Agent | The memory provider's `on_turn_start` runs the lookup and `prefetch` adds the cards to the user message. [Provider prefetch](https://github.com/NousResearch/hermes-agent/blob/f85f33bf534d0a4ac88c348d34a4c9ddb424dcb7/agent/memory_provider.py#L144-L150) |
 
 Refresh managed setup to pick up the OpenCode and Hermes plugin changes and the feedback tool matcher.

@@ -6,7 +6,7 @@ status: draft
 
 # CLI and MCP
 
-The `cairn mcp` stdio server and the `cairn` CLI share five memory tools. MCP and Hermes gateway chats also expose four skill tools. Each tool calls the REST API with the configured device token. The credential model is in
+The `cairn mcp` stdio server and the `cairn` CLI share five memory tools. MCP and Hermes also expose four skill tools. In Hermes, Cairn's memory provider offers the nine tools natively instead of MCP. Each tool calls the REST API with the configured device token. The credential model is in
 [authentication](auth.md).
 
 ## Transport
@@ -112,7 +112,8 @@ Account and device management stay in the web console.
 For a Cairn-managed integration, `doctor` warns if its global instruction block is missing or
 differs from this version. The warning names the file and the `cairn setup <agent>` command that
 refreshes the block. Repair malformed block markers before refreshing. Hermes gateway profiles
-receive their instructions per chat and skip this check.
+receive their instructions per chat and skip this check. For Hermes, `doctor` checks that the profile
+selects Cairn as its memory provider instead of checking for an MCP entry.
 
 For Claude Code, `doctor` also checks the current project's `MEMORY.md` when the memory folder
 exists and setup is managing native memory. Run `cairn import claude-memory` from that project
@@ -121,10 +122,18 @@ index, move the rewritten index out of the memory folder before retrying.
 Setup with `--keep-native-memory` skips the pointer check. These diagnostics only read local files
 and print warnings.
 
+### Hermes provider tools
+
+In a Hermes profile set up with `cairn setup hermes`, Cairn's memory provider offers the five memory
+tools and four skill tools with the same names, descriptions and limits as `tools/list`. Each call runs
+`cairn hook Tool` in the session's working folder, so it gets the same checkout context and result as MCP.
+Hermes shows provider tools only while its `memory` toolset is enabled for the platform; disabling it
+hides Cairn's tools. Subagent, cron and flush agents get no Cairn tools. Other agents keep MCP.
+
 ### Hermes gateway tools
 
-`cairn setup hermes --gateway` installs two native tools in the selected profile.
-`memory_search` accepts `query` and an optional `project` ID or exact name.
+In a profile set up with `--gateway`, the provider offers chat tools instead: the four skill tools and two
+memory tools. `memory_search` accepts `query` and an optional `project` ID or exact name.
 `memory_save` accepts `kind`, `title`, `summary`, `reason`, `fields` and the same optional
 `project`. Use the project only for project knowledge when the gateway account is a member.
 Save preferences without a project. See [gateway setup](hook.md#hermes-gateway).

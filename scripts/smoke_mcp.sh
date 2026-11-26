@@ -165,6 +165,16 @@ try:
     assert "chat_id_hash" not in chat_read and "sender_id" not in chat_read
     assert chat_skill("skill_search", {"query": "crates compilation"})["results"][0]["id"] == first_skill["id"]
     assert chat_skill("skill_feedback", dict(vote, vote="wrong"))["votes"] == {"helpful": 0, "wrong": 1}
+
+    def provider_tool(name, args):
+        # Hermes's memory provider runs the MCP tool of the same name through the hook.
+        payload = {"session_id": "hermes-provider-smoke", "tool_name": name, "arguments": args}
+        reply = subprocess.run([os.environ["CAIRN_BIN"], "hook", "Tool", "--agent", "hermes"],
+                               input=json.dumps(payload), text=True, capture_output=True, check=True)
+        return json.loads(reply.stdout)
+
+    assert provider_tool("memory_get", {"ids": [newer_id]})["missing"] == [newer_id]
+    assert provider_tool("skill_search", {"query": "crates compilation"})["results"][0]["id"] == first_skill["id"]
 finally:
     process.stdin.close()
     process.wait(timeout=10)

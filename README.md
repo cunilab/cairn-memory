@@ -30,7 +30,7 @@ Web console              ──web session───▶       │
 | OpenCode | `--agent opencode` | Plugin hooks and MCP; no continuing Stop reminder |
 | Grok Build | `--agent grok` | Hooks and MCP with a brief on the first tool result |
 | Antigravity CLI | `--agent antigravity` | Hooks and MCP with checkpoints on Stop |
-| Hermes Agent | `--agent hermes` | Plugin hooks and MCP with a brief on the first prompt |
+| Hermes Agent | `--agent hermes` | Memory provider with native Cairn tools, plus tool hooks |
 
 ## Set up Cairn
 

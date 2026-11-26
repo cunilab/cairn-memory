@@ -295,24 +295,20 @@ mcp_servers:
     let initial = load();
     home.ok("hermes", false);
     let mut installed = load();
+    // Cairn's provider tools replace the MCP entry; the plugin settings hold what remove needs.
+    assert!(installed["mcp_servers"]["cairn"].is_null());
+    assert_eq!(installed["memory"], json!({"provider": "cairn-memory"}));
     assert_eq!(
-        installed["mcp_servers"]
-            .as_object_mut()
-            .unwrap()
-            .remove("cairn")
-            .unwrap(),
-        json!({
-            "command": EXE, "args": ["mcp"], "trust": "full",
-            "env": {
-                "XDG_CONFIG_HOME": home.dir.join(".config"), "CAIRN_CONFIG": home.config(),
-                "CAIRN_SETUP_MANAGED": "1", "CAIRN_SETUP_PLUGIN_ENABLED": "1"
-            }
-        }),
+        installed["plugins"]["entries"]["cairn-memory"]["settings"],
+        json!({"CAIRN_SETUP_PLUGIN_ENABLED": true, "previous_memory_provider": []})
     );
     assert_eq!(
         installed["plugins"]["enabled"],
         json!(["code-review", "cairn-memory"])
     );
+    let object = installed.as_object_mut().unwrap();
+    object.remove("memory");
+    object["plugins"].as_object_mut().unwrap().remove("entries");
     installed["plugins"]["enabled"] = json!(["code-review"]);
     assert_eq!(installed, initial);
     assert!(
@@ -321,22 +317,24 @@ mcp_servers:
             .contains("<!-- cairn:begin -->")
     );
     let plugin = home.dir.join(".hermes/plugins/cairn-memory");
-    assert!(
-        fs::read_to_string(plugin.join("__init__.py"))
-            .unwrap()
-            .contains(EXE)
-    );
+    let script = fs::read_to_string(plugin.join("__init__.py")).unwrap();
+    assert!(script.contains(EXE));
+    assert!(script.contains("register_memory_provider") && script.contains("GATEWAY = False"));
     let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
-    for event in ["pre_llm_call", "post_tool_call", "transform_tool_result"] {
+    // Without an explicit kind, Hermes would load a provider file only as the memory provider.
+    assert!(manifest.contains("\nkind: standalone\n"));
+    for event in ["post_tool_call", "transform_tool_result", "on_session_end"] {
         assert!(manifest.contains(event), "{event}");
-        assert!(
-            fs::read_to_string(plugin.join("__init__.py"))
-                .unwrap()
-                .contains(event),
-            "{event}"
-        );
+        assert!(script.contains(event), "{event}");
     }
-    assert!(!manifest.contains("pre_tool_call"));
+    for event in [
+        "pre_tool_call",
+        "pre_llm_call",
+        "post_llm_call",
+        "on_session_finalize",
+    ] {
+        assert!(!manifest.contains(event), "{event}");
+    }
     assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
         text.windows(SECRET.len())
             .any(|part| part == SECRET.as_bytes())
@@ -348,6 +346,83 @@ mcp_servers:
     assert_eq!(fs::read_to_string(&other).unwrap(), "name: code-review\n");
     assert!(!plugin.join("__init__.py").exists());
     assert!(!plugin.join("plugin.yaml").exists());
+}
+
+#[test]
+fn hermes_provider_replaces_the_previous_provider_and_remove_restores_it() {
+    let home = Home::new("hermes-provider", false);
+    let profile = home.dir.join("profile");
+    let config = profile.join("config.yaml");
+    let run = |remove| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+    };
+    let yaml = || yaml_serde::from_str::<Value>(&fs::read_to_string(&config).unwrap()).unwrap();
+    let without_plugins = |mut value: Value| {
+        value.as_object_mut().unwrap().remove("plugins");
+        value
+    };
+    fs::create_dir_all(&profile).unwrap();
+    for previous in [
+        "memory:\n  provider: honcho\n  memory_enabled: true\n  user_profile_enabled: false\n",
+        "memory:\n  provider: none\n",
+        "memory:\n  provider: ''\n",
+        "memory:\n  provider: null\n",
+        "model: test-model\n",
+    ] {
+        fs::write(&config, previous).unwrap();
+        let original = yaml();
+        run(false);
+        let installed = yaml();
+        assert_eq!(
+            installed["memory"]["provider"], "cairn-memory",
+            "{previous}"
+        );
+        for flag in ["memory_enabled", "user_profile_enabled"] {
+            assert_eq!(
+                installed["memory"][flag], original["memory"][flag],
+                "{previous}"
+            );
+        }
+        let before = home.snapshot("profile");
+        run(false);
+        assert_eq!(home.snapshot("profile"), before, "setup is idempotent");
+        run(true);
+        assert_eq!(without_plugins(yaml()), original, "{previous}");
+    }
+
+    // A provider the person picked after setup stays on removal.
+    fs::write(&config, "memory:\n  provider: honcho\n").unwrap();
+    run(false);
+    let mut changed = yaml();
+    changed["memory"]["provider"] = json!("mem0");
+    fs::write(&config, yaml_serde::to_string(&changed).unwrap()).unwrap();
+    run(true);
+    assert_eq!(yaml()["memory"], json!({"provider": "mem0"}));
+
+    // An install from before the provider: its managed MCP entry goes, plugin ownership stays.
+    fs::write(
+        &config,
+        "plugins:\n  enabled: [cairn-memory]\nmcp_servers:\n  cairn:\n    command: cairn\n    env:\n      CAIRN_SETUP_MANAGED: '1'\n      CAIRN_SETUP_PLUGIN_ENABLED: '1'\n  other:\n    command: other\n",
+    )
+    .unwrap();
+    run(false);
+    let migrated = yaml();
+    assert_eq!(
+        migrated["mcp_servers"],
+        json!({"other": {"command": "other"}})
+    );
+    assert_eq!(
+        migrated["plugins"]["entries"]["cairn-memory"]["settings"]["CAIRN_SETUP_PLUGIN_ENABLED"],
+        true
+    );
+    run(true);
+    assert_eq!(
+        yaml(),
+        json!({"plugins": {"enabled": []}, "mcp_servers": {"other": {"command": "other"}}})
+    );
 }
 
 #[test]
@@ -411,8 +486,13 @@ fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
     assert_eq!(home.snapshot(folder), before);
     let doctor = command().arg("doctor").output().unwrap();
     let doctor = String::from_utf8(doctor.stdout).unwrap();
+    let tools = if agent == "hermes" {
+        "memory provider"
+    } else {
+        "MCP entry"
+    };
     assert!(
-        doctor.contains(&format!("{agent} MCP entry present")),
+        doctor.contains(&format!("{agent} {tools} present")),
         "{doctor}"
     );
     assert!(
@@ -1308,7 +1388,7 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
             .unwrap()
     };
     invoke(false, false);
-    assert_eq!(yaml()["mcp_servers"]["cairn"]["trust"], "full");
+    assert_eq!(yaml()["memory"]["provider"], "cairn-memory");
 
     invoke(true, false);
     let converted = yaml();
@@ -1321,11 +1401,6 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
         fs::read_to_string(plugin.join("__init__.py"))
             .unwrap()
             .contains("GATEWAY = True")
-    );
-    assert!(
-        fs::read_to_string(plugin.join("plugin.yaml"))
-            .unwrap()
-            .contains("  - memory_search\n  - memory_save")
     );
     let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
     let doctor = String::from_utf8(doctor.stdout).unwrap();
@@ -1358,6 +1433,7 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
     invoke(false, true);
     let removed = yaml();
     assert!(removed["mcp_servers"]["cairn"].is_null());
+    assert!(removed["memory"].is_null());
     assert!(removed["plugins"]["enabled"].as_array().unwrap().is_empty());
     let settings = &removed["plugins"]["entries"]["cairn-memory"]["settings"];
     assert!(settings["cairn_gateway"].is_null());

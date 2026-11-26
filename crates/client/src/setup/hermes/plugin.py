@@ -1,22 +1,33 @@
 # CAIRN_SETUP_MANAGED
-"""Hermes's native plugin entry point. Capture and retrieval live in the Cairn CLI."""
+"""Hermes's native plugin entry point and memory provider. Capture and retrieval live in the Cairn CLI."""
 
 import hmac
 import json
+import os
 import re
 import subprocess
+import sys
 import threading
 import time
+import types
 import uuid
 from functools import wraps
+
+try:
+    from agent.memory_provider import MemoryProvider
+except ImportError:  # A host without memory providers loads the tool hooks only.
+    MemoryProvider = object
 
 EXE, CONFIG = __CAIRN_PATHS__
 
 
 GATEWAY = __CAIRN_GATEWAY__
-SKILL_TOOLS = json.loads(__CAIRN_SKILL_TOOLS__)
+TOOLS = json.loads(__CAIRN_TOOLS__)
+SKILL_TOOLS = [tool for tool in TOOLS if tool["name"].startswith("skill_")]
+TOOL_NAMES = {tool["name"] for tool in TOOLS}
 IDLE_SECONDS = 30 * 60
 BACKGROUND = ("cron", "subagent", "flush")
+UNAVAILABLE = "Cairn memory is unavailable in this Hermes turn."
 
 
 def background(session_id=None, task_id=None, platform=None, agent_context=None, **_):
@@ -47,9 +58,8 @@ def foreground(callback):
     return call
 
 
-def forward(ctx, event, session_id, **fields):
+def forward(event, session_id, cwd=None, **fields):
     try:
-        cwd = ctx.session_cwd() if not GATEWAY else None
         if not session_id or (not cwd and not GATEWAY):
             return None
         result = subprocess.run(
@@ -59,7 +69,7 @@ def forward(ctx, event, session_id, **fields):
             input=json.dumps({"session_id": session_id, "cwd": cwd, **fields}),
             encoding="utf-8",
             stdout=subprocess.PIPE,
-            timeout=7 if event == "PostToolUse" else 6,
+            timeout={"PostToolUse": 7, "Tool": 65}.get(event, 6),
             check=True,
         )
         if result.stdout:
@@ -74,86 +84,30 @@ def context(reply):
         return reply.get("hookSpecificOutput", {}).get("additionalContext")
 
 
-def register(ctx):
-    if GATEWAY:
-        return register_gateway(ctx)
-    pending = {}
-
-    @foreground
-    def on_prompt(session_id, user_message, is_first_turn=False, **_):
-        # Hermes ignores on_session_start output. Its first prompt can carry the brief.
-        reply = forward(ctx, "SessionStart", session_id) if is_first_turn else None
-        recall = forward(ctx, "UserPromptSubmit", session_id, user_message=user_message)
-        notes = list(pending.pop(session_id, {}).values())
-        if text := context(reply):
-            notes.insert(0, text)
-        if text := context(recall):
-            notes.append(text)
-        if notes:
-            return {"context": "\n".join(notes)}
-
-    def relevant(tool_name):
-        return tool_name in {"terminal", "read_file", "write_file", "patch"} or tool_name.startswith(
-            ("mcp__cairn__", "mcp_cairn_")
-        )
-
-    def before_tool(tool_name, **details):
-        if tool_name in {"mcp__cairn__memory_save", "mcp_cairn_memory_save"} and background(**details):
-            return {"action": "block", "message": "Cairn memory saves require an interactive Hermes turn."}
-
-    @foreground
-    def after_tool(tool_name, args, result, session_id=None, tool_call_id=None, status=None, error_message=None, **_):
-        if relevant(tool_name):
-            reply = forward(ctx, "PostToolUse", session_id, tool_name=tool_name, args=args,
-                            result=result, status=status, error_message=error_message, tool_call_id=tool_call_id)
-            if text := context(reply):
-                pending.setdefault(session_id, {})[tool_call_id] = text
-
-    @foreground
-    def append_recall(tool_name, result, session_id=None, tool_call_id=None, **_):
-        if tool_name != "terminal":
-            return None
-        notes = pending.get(session_id)
-        text = notes.pop(tool_call_id, None) if notes else None
-        if text:
-            try:
-                data = json.loads(result)
-                if isinstance(data, dict):
-                    data["cairn_recall"] = text
-                    return json.dumps(data)
-            except (TypeError, ValueError):
-                pass
-            return result + "\n" + text
-
-    @foreground
-    def after_turn(session_id, assistant_response, **_):
-        forward(ctx, "Stop", session_id, assistant_response=assistant_response)
-
-    @foreground
-    def failed_turn(session_id, failed=False, interrupted=False, **_):
-        if failed or interrupted:
-            forward(ctx, "Stop", session_id)
-
-    @foreground
-    def after_compaction(session_id, old_session_id=None, **_):
-        forward(ctx, "PreCompact", old_session_id or session_id)
-
-    @foreground
-    def end_session(session_id=None, **_):
-        pending.pop(session_id, None)
-        forward(ctx, "SessionEnd", session_id)
-
-    ctx.register_hook("pre_llm_call", on_prompt)
-    ctx.register_hook("pre_tool_call", before_tool)
-    ctx.register_hook("post_tool_call", after_tool)
+def attach(result, text):
     try:
-        ctx.register_hook("transform_tool_result", append_recall)
-    except ValueError:  # Older hosts deliver pending notes on the next user turn.
+        data = json.loads(result)
+        if isinstance(data, dict):
+            data["cairn_recall"] = text
+            return json.dumps(data)
+    except (TypeError, ValueError):
         pass
-    ctx.register_hook("post_llm_call", after_turn)
-    ctx.register_hook("on_session_end", failed_turn)
-    ctx.register_hook("post_compaction", after_compaction)
-    ctx.register_hook("on_session_finalize", end_session)
+    return str(result) + "\n" + text
+
+
+def home_key(home=None):
+    try:
+        from hermes_constants import hermes_home_key
+        return hermes_home_key(home)
+    except ImportError:
+        return str(home or "")
+
+
+def chat_profiles():
+    # Hermes imports this file twice (plugin and memory provider) under different module names, and one
+    # gateway process can serve several profiles: chat sessions live in one table keyed by profile home.
+    shared = sys.modules.setdefault("_cairn_memory_hermes", types.ModuleType("_cairn_memory_hermes"))
+    return shared.__dict__.setdefault("profiles", {})
 
 
 def chat_digest(salt, platform, field, raw):
@@ -161,25 +115,45 @@ def chat_digest(salt, platform, field, raw):
     return hmac.digest(salt.encode(), parts.encode(), "sha256").hex()
 
 
-def register_gateway(ctx):
-    try:
-        from gateway.session_context import bound_session_env
-        from tools.registry import no_cache_check_fn
-    except ImportError:
-        return  # A host without trusted per-turn context cannot use chat memory.
+CHAT_TOOLS = [
+    ("memory_search", "ChatSearch",
+     "Search this chat's memories. Pass a project ID or exact name when you also need memories from that project.",
+     {"query": {"type": "string"}}, ["query"]),
+    ("memory_save", "ChatSave",
+     "Save lasting knowledge for this chat. Pass a project ID or exact name only to share a note, rule, decision, gotcha, procedure, or fact with that project. Save preferences without a project.",
+     {"kind": {"type": "string", "enum": ["note", "decision", "rule", "preference",
+                                         "procedure", "gotcha", "fact"]},
+      "title": {"type": "string", "maxLength": 80},
+      "summary": {"type": "string", "maxLength": 240},
+      "reason": {"type": "string"},
+      "fields": {"type": "object"}}, ["kind", "title", "summary"]),
+]
+for _name, _event, _description, _properties, _required in CHAT_TOOLS:
+    _properties["project"] = {"type": "string", "description": "Project ID or exact name."}
+CHAT_SCHEMAS = [{"name": name, "description": description,
+                 "parameters": {"type": "object", "properties": properties, "required": required}}
+                for name, _, description, properties, required in CHAT_TOOLS]
+CHAT_SCHEMAS += [{"name": skill["name"], "description": skill["description"], "parameters": skill["inputSchema"]}
+                 for skill in SKILL_TOOLS]
+CLI_SCHEMAS = [{"name": tool["name"], "description": tool["description"], "parameters": tool["inputSchema"]}
+               for tool in TOOLS]
 
-    salt = ctx.get_config("chat_salt")
-    if not isinstance(salt, str) or not salt:
-        return
-    sessions = {}
-    lock = threading.Lock()
 
-    def route(session_id=None, **details):
+class Chat:
+    """One gateway profile's Cairn chat sessions: hashed routes and 30-minute idle sessions."""
+
+    def __init__(self, salt, bound_session_env):
+        self.salt = salt
+        self.bound = bound_session_env
+        self.sessions = {}
+        self.lock = threading.Lock()
+
+    def route(self, session_id=None, **details):
         if background(session_id=session_id, **details):
             return None
 
         def value(field):
-            return bound_session_env("HERMES_SESSION_" + field)
+            return self.bound("HERMES_SESSION_" + field)
 
         platform, chat_id, kind = value("PLATFORM"), value("CHAT_ID"), value("CHAT_TYPE")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", platform) or not chat_id or not kind:
@@ -193,154 +167,284 @@ def register_gateway(ctx):
         parent = value("PARENT_CHAT_ID")
         thread = value("THREAD_ID")
         dm = kind in {"dm", "direct", "private"}
-        chat_hash = chat_digest(salt, platform, "chat", parent or chat_id)
-        thread_hash = chat_digest(salt, platform, "thread", thread) if thread else None
+        chat_hash = chat_digest(self.salt, platform, "chat", parent or chat_id)
+        thread_hash = chat_digest(self.salt, platform, "thread", thread) if thread else None
         chat = {"platform": platform, "kind": "dm" if dm else "group",
                 "chat_id_hash": chat_hash, "thread_id_hash": thread_hash}
         return (chat_hash, thread_hash), chat
 
-    def send(event, state, chat, **fields):
-        return forward(ctx, event, state["id"], chat_context=chat, **fields)
+    def send(self, event, state, chat, **fields):
+        return forward(event, state["id"], chat_context=chat, **fields)
 
-    def idle(key, state, timer, chat):
-        with lock:
-            if sessions.get(key) is not state or state["timer"] is not timer:
+    def close(self, state):
+        self.send("Stop", state, state["chat"])
+        self.send("SessionEnd", state, state["chat"])
+
+    def idle(self, key, state, timer):
+        with self.lock:
+            if self.sessions.get(key) is not state or state["timer"] is not timer:
                 return
-            del sessions[key]
-        send("Stop", state, chat)
-        send("SessionEnd", state, chat)
+            del self.sessions[key]
+        self.close(state)
 
-    def on_prompt(session_id, user_message, turn_id=None, **details):
-        current = route(session_id, **details)
+    def end(self, key):
+        """Ends a chat's Cairn session now (Hermes /new or /reset), unless a turn is still running."""
+        with self.lock:
+            state = self.sessions.get(key)
+            if state is None or state["turns"]:
+                return
+            del self.sessions[key]
+            if state["timer"] is not None:
+                state["timer"].cancel()
+        self.close(state)
+
+    def prompt(self, session_id, user_message, **details):
+        """Returns (route key, chat instruction for a new chat session, prompt recall)."""
+        current = self.route(session_id, **details)
         if current is None:
-            return
+            return None, None, None
         key, chat = current
         expired = None
-        with lock:
-            old = sessions.get(key)
+        with self.lock:
+            old = self.sessions.get(key)
             if old is not None and old["timer"] is not None and time.monotonic() >= old["deadline"]:
                 old["timer"].cancel()
-                expired = sessions.pop(key)
-            first = key not in sessions
+                expired = self.sessions.pop(key)
+            first = key not in self.sessions
             if first:
-                sessions[key] = {"id": "hchat_" + uuid.uuid4().hex,
-                                 "turns": set(), "timer": None, "recall": {}}
-            state = sessions[key]
+                self.sessions[key] = {"id": "hchat_" + uuid.uuid4().hex,
+                                      "turns": set(), "timer": None, "recall": {}}
+            state = self.sessions[key]
             if state["timer"] is not None:
                 state["timer"].cancel()
                 state["timer"] = None
-            state["turns"].add(turn_id or session_id)
+            state["turns"].add(session_id)
+            state["chat"] = chat
         if expired is not None:
-            send("Stop", expired, expired["last_chat"])
-            send("SessionEnd", expired, expired["last_chat"])
-        notes = []
-        if first and (text := context(send("SessionStart", state, chat))):
-            notes.append(text)
+            self.close(expired)
+        start = context(self.send("SessionStart", state, chat)) if first else None
+        recall = None
         if isinstance(user_message, str):
-            if text := context(send("UserPromptSubmit", state, chat, user_message=user_message)):
-                notes.append(text)
-        if notes:
-            return {"context": "\n".join(notes)}
+            recall = context(self.send("UserPromptSubmit", state, chat, user_message=user_message))
+        return key, start, recall
 
-    def after_turn(session_id, turn_id=None, **details):
-        current = route(session_id, **details)
+    def turn_end(self, session_id, **details):
+        current = self.route(session_id, **details)
         if current is None:
             return
-        key, chat = current
-        with lock:
-            state = sessions.get(key)
-            turn = turn_id or session_id
-            if state is None or turn not in state["turns"]:
+        key, _ = current
+        with self.lock:
+            state = self.sessions.get(key)
+            if state is None or session_id not in state["turns"]:
                 return
-            state["turns"].remove(turn)
+            state["turns"].remove(session_id)
             if state["turns"]:
                 return
             state["recall"].clear()
-            timer = threading.Timer(IDLE_SECONDS, lambda: idle(key, state, timer, chat))
+            timer = threading.Timer(IDLE_SECONDS, lambda: self.idle(key, state, timer))
             state["timer"] = timer
             state["deadline"] = time.monotonic() + IDLE_SECONDS
-            state["last_chat"] = chat
             timer.daemon = True
             timer.start()
 
-    def active(**details):
-        current = route(**details)
+    def active(self, **details):
+        current = self.route(**details)
         if current is None:
             return None, None
         key, chat = current
-        with lock:
-            return sessions.get(key), chat
+        with self.lock:
+            return self.sessions.get(key), chat
 
-    def after_tool(tool_name, args, result, tool_call_id=None, status=None, error_message=None, **details):
+    def after_tool(self, tool_name, args, result, tool_call_id=None, status=None, error_message=None, **details):
         if tool_name != "terminal":
             return
-        state, chat = active(**details)
+        state, chat = self.active(**details)
         if state is not None:
-            reply = send("PostToolUse", state, chat, tool_name=tool_name, args=args, result=result,
-                         tool_call_id=tool_call_id, status=status, error_message=error_message)
+            reply = self.send("PostToolUse", state, chat, tool_name=tool_name, args=args, result=result,
+                              tool_call_id=tool_call_id, status=status, error_message=error_message)
             if tool_call_id and (text := context(reply)):
-                with lock:
+                with self.lock:
                     state["recall"][tool_call_id] = text
 
-    def append_recall(tool_name, result, tool_call_id=None, **details):
+    def append_recall(self, tool_name, result, tool_call_id=None, **details):
         if tool_name != "terminal":
             return
-        state, _ = active(**details)
+        state, _ = self.active(**details)
         if state is None:
             return
-        with lock:
+        with self.lock:
             text = state["recall"].pop(tool_call_id, None)
         if text:
-            try:
-                data = json.loads(result)
-                if isinstance(data, dict):
-                    data["cairn_recall"] = text
-                    return json.dumps(data)
-            except (TypeError, ValueError):
-                pass
-            return str(result) + "\n" + text
+            return attach(result, text)
 
-    def tool(event, properties, **fields):
-        def call(args, **details):
-            state, chat = active(**details)
-            reply = None
-            if state is not None:
-                arguments = {key: args[key] for key in properties if key in args}
-                reply = send(event, state, chat, arguments=arguments, **fields)
-            return json.dumps(reply or {"error": "Cairn chat memory is unavailable."})
-        return call
+    def tool(self, name, args, session_id):
+        state, chat = self.active(session_id=session_id)
+        reply = None
+        if state is not None and isinstance(args, dict):
+            for tool, event, _, properties, _ in CHAT_TOOLS:
+                if tool == name:
+                    reply = self.send(event, state, chat,
+                                      arguments={key: args[key] for key in properties if key in args})
+            for skill in SKILL_TOOLS:
+                if skill["name"] == name:
+                    properties = skill["inputSchema"]["properties"]
+                    reply = self.send("ChatSkill", state, chat, skill_tool=name,
+                                      arguments={key: args[key] for key in properties if key in args})
+        return json.dumps(reply or {"error": "Cairn chat memory is unavailable."})
 
-    available = no_cache_check_fn(lambda: route() is not None)
-    for name, event, description, properties, required in [
-        ("memory_search", "ChatSearch",
-         "Search this chat's memories. Pass a project ID or exact name when you also need memories from that project.",
-         {"query": {"type": "string"}}, ["query"]),
-        ("memory_save", "ChatSave",
-         "Save lasting knowledge for this chat. Pass a project ID or exact name only to share a note, rule, decision, gotcha, procedure, or fact with that project. Save preferences without a project.",
-         {"kind": {"type": "string", "enum": ["note", "decision", "rule", "preference",
-                                             "procedure", "gotcha", "fact"]},
-          "title": {"type": "string", "maxLength": 80},
-          "summary": {"type": "string", "maxLength": 240},
-          "reason": {"type": "string"},
-          "fields": {"type": "object"}}, ["kind", "title", "summary"]),
-    ]:
-        properties["project"] = {"type": "string", "description": "Project ID or exact name."}
-        schema = {"name": name, "description": description,
-                  "parameters": {"type": "object", "properties": properties, "required": required}}
-        ctx.register_tool(name=name, toolset="cairn-chat", schema=schema, handler=tool(event, properties),
-                          check_fn=available, description=description)
 
-    for skill in SKILL_TOOLS:
-        name, description, parameters = skill["name"], skill["description"], skill["inputSchema"]
-        schema = {"name": name, "description": description, "parameters": parameters}
-        ctx.register_tool(name=name, toolset="cairn-chat", schema=schema,
-                          handler=tool("ChatSkill", parameters["properties"], skill_tool=name),
-                          check_fn=available, description=description)
+class CairnProvider(MemoryProvider):
+    """Hermes's memory provider: brief, prompt recall, checkpoints, session boundaries and Cairn tools.
+    Tool events have no provider method, so they stay plugin hooks."""
 
-    ctx.register_hook("pre_llm_call", on_prompt)
+    name = "cairn-memory"
+
+    def __init__(self):
+        self.session_id = ""
+        self.cwd = None
+        self.primary = True
+        self.chat = None
+        self.key = None
+        self.started = set()
+        self.brief = None
+        self.recall = None
+
+    def is_available(self):
+        return True
+
+    def initialize(self, session_id, **kwargs):
+        self.session_id = session_id
+        self.cwd = kwargs.get("cwd") or os.getcwd()
+        # Older Hermes omits agent_context; the background heuristics still apply on every call.
+        self.primary = (kwargs.get("agent_context") or "primary") == "primary" and not background(
+            session_id=session_id, platform=kwargs.get("platform"))
+        if GATEWAY:
+            # Chat identity kwargs (raw chat and user ids) are ignored: routes come from the bound turn.
+            self.chat = chat_profiles().get(home_key(kwargs.get("hermes_home")))
+
+    def live(self):
+        return self.primary and not background(session_id=self.session_id)
+
+    def get_tool_schemas(self):
+        if self.session_id and not self.live():
+            return []
+        return CHAT_SCHEMAS if GATEWAY else CLI_SCHEMAS
+
+    def handle_tool_call(self, tool_name, args, **kwargs):
+        if not self.live():
+            return json.dumps({"error": UNAVAILABLE})
+        if GATEWAY:
+            return self.chat.tool(tool_name, args, self.session_id) if self.chat else json.dumps(
+                {"error": "Cairn chat memory is unavailable."})
+        if tool_name not in TOOL_NAMES or not isinstance(args, dict):
+            return json.dumps({"error": "unknown Cairn tool"})
+        reply = forward("Tool", self.session_id, self.cwd, tool_name=tool_name, arguments=args)
+        return json.dumps(reply if reply is not None else {"error": UNAVAILABLE})
+
+    def on_turn_start(self, turn_number, message, **kwargs):
+        # Every turn reaches here; prefetch skips trivial prompts, so it only delivers what this stored.
+        if not self.live():
+            return
+        if GATEWAY:
+            if self.chat is not None:
+                key, start, self.recall = self.chat.prompt(self.session_id, message)
+                self.key = key or self.key
+                self.brief = start or self.brief
+            return
+        if self.session_id not in self.started:
+            self.started.add(self.session_id)
+            self.brief = context(forward("SessionStart", self.session_id, self.cwd)) or self.brief
+        self.recall = context(forward("UserPromptSubmit", self.session_id, self.cwd, user_message=message))
+
+    def prefetch(self, query, *, session_id=""):
+        notes = [text for text in (self.brief, self.recall) if text]
+        self.brief = self.recall = None
+        return "\n".join(notes)
+
+    def sync_turn(self, user_content, assistant_content, *, session_id="", **_):
+        if not GATEWAY and self.live():
+            forward("Stop", session_id or self.session_id, self.cwd, assistant_response=assistant_content)
+
+    def on_pre_compress(self, messages, **_):
+        if not GATEWAY and self.live():
+            forward("PreCompact", self.session_id, self.cwd)
+        return ""
+
+    def on_session_end(self, messages):
+        if not GATEWAY and self.live():
+            forward("SessionEnd", self.session_id, self.cwd)
+
+    def on_session_switch(self, new_session_id, *, parent_session_id="", reset=False, rewound=False, **kwargs):
+        if rewound or not new_session_id:
+            return
+        if GATEWAY:
+            if reset and self.chat is not None and self.key is not None:
+                self.chat.end(self.key)
+        elif kwargs.get("reason") == "compression":
+            self.started.add(new_session_id)  # The same conversation continues: no second brief.
+        self.session_id = new_session_id
+
+
+def register(ctx):
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(CairnProvider())
+    if not hasattr(ctx, "get_config"):
+        return  # Hermes's memory loader: the plugin load registers the tool hooks.
+    if GATEWAY:
+        return register_gateway(ctx)
+    pending = {}
+
+    def relevant(tool_name):
+        return tool_name in {"terminal", "read_file", "write_file", "patch"} or tool_name in TOOL_NAMES
+
+    @foreground
+    def after_tool(tool_name, args, result, session_id=None, tool_call_id=None, status=None, error_message=None, **_):
+        if relevant(tool_name):
+            # Cairn's own tools are read as the MCP tools they mirror (saves and lookups).
+            name = "mcp_cairn_" + tool_name if tool_name in TOOL_NAMES else tool_name
+            reply = forward("PostToolUse", session_id, ctx.session_cwd(), tool_name=name, args=args,
+                            result=result, status=status, error_message=error_message, tool_call_id=tool_call_id)
+            if text := context(reply):
+                pending.setdefault(session_id, {})[tool_call_id] = text
+
+    @foreground
+    def append_recall(tool_name, result, session_id=None, tool_call_id=None, **_):
+        if tool_name != "terminal":
+            return None
+        notes = pending.get(session_id)
+        text = notes.pop(tool_call_id, None) if notes else None
+        if text:
+            return attach(result, text)
+
+    @foreground
+    def turn_end(session_id=None, failed=False, interrupted=False, **_):
+        pending.pop(session_id, None)
+        # The provider's sync_turn checkpoints completed turns; Hermes skips it for these.
+        if failed or interrupted:
+            forward("Stop", session_id, ctx.session_cwd())
+
     ctx.register_hook("post_tool_call", after_tool)
     try:
         ctx.register_hook("transform_tool_result", append_recall)
+    except ValueError:  # Older hosts have no result transform.
+        pass
+    ctx.register_hook("on_session_end", turn_end)
+
+
+def register_gateway(ctx):
+    try:
+        from gateway.session_context import bound_session_env
+    except ImportError:
+        return  # A host without trusted per-turn context cannot use chat memory.
+
+    salt = ctx.get_config("chat_salt")
+    if not isinstance(salt, str) or not salt:
+        return
+    chat = Chat(salt, bound_session_env)
+    chat_profiles()[home_key()] = chat
+    ctx.register_hook("post_tool_call", chat.after_tool)
+    try:
+        ctx.register_hook("transform_tool_result", chat.append_recall)
     except ValueError:
         pass
-    ctx.register_hook("on_session_end", after_turn)
+    ctx.register_hook("on_session_end", chat.turn_end)

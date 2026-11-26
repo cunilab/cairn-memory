@@ -211,14 +211,11 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
         stdout.contains("Cairn hermes integration installed"),
         "{stdout}"
     );
-    for path in [
-        ".hermes/config.yaml",
-        ".hermes/plugins/cairn-memory/__init__.py",
-    ] {
-        let installed = std::fs::read_to_string(home.join(path)).unwrap();
-        assert!(installed.contains(copy.to_str().unwrap()));
-        assert!(!installed.contains(env!("CARGO_BIN_EXE_cairn")));
-    }
+    // Hermes has no Cairn MCP entry: only its plugin names the executable.
+    let installed =
+        std::fs::read_to_string(home.join(".hermes/plugins/cairn-memory/__init__.py")).unwrap();
+    assert!(installed.contains(copy.to_str().unwrap()));
+    assert!(!installed.contains(env!("CARGO_BIN_EXE_cairn")));
 
     let settings: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(settings_path).unwrap()).unwrap();

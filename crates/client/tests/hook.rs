@@ -576,6 +576,75 @@ fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
 }
 
 #[test]
+fn hermes_provider_tools_run_the_mcp_tools_in_the_session_folder() {
+    let server = fake_with(|_, request| match request.path.rsplit('/').next() {
+        Some("search") => (200, json!({"results": []}).to_string()),
+        Some("remember") => (
+            400,
+            json!({"error": "reason: required for decision"}).to_string(),
+        ),
+        _ => (200, json!({"ok": true}).to_string()),
+    });
+    let env = Env::new("hermes-provider-tool", &server.url);
+    let invoke = |tool: &str, arguments: Value| {
+        let payload = json!({
+            "session_id": "hermes-session", "cwd": env.repo, "tool_name": tool, "arguments": arguments,
+        });
+        let out = with_stdin(
+            command(&env.home)
+                .current_dir(&env.repo)
+                .args(["hook", "Tool", "--agent", "hermes"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(
+        invoke("memory_search", json!({"query": "widgets"})),
+        json!({"results": []})
+    );
+    let search = &server.to("search")[0];
+    assert_eq!(search.body["query"], "widgets");
+    assert!(
+        search.body["context"]["repository"].is_string(),
+        "{}",
+        search.body
+    );
+    assert!(
+        search.user_agent.contains("hermes"),
+        "{}",
+        search.user_agent
+    );
+    invoke("memory_get", json!({"ids": ["mem_1"]}));
+    assert_eq!(server.to("get")[0].body["session_id"], "hermes-session");
+    invoke(
+        "skill_search",
+        json!({"query": "deploy", "context": "dropped"}),
+    );
+    assert_eq!(
+        server.to("skills/search")[0].body,
+        json!({"query": "deploy"})
+    );
+    assert_eq!(
+        invoke(
+            "memory_save",
+            json!({"kind": "decision", "title": "t", "summary": "s"})
+        ),
+        json!({"error": "HTTP 400: reason: required for decision"})
+    );
+    let before = server.requests().len();
+    assert_eq!(
+        invoke("memory_link", json!({})),
+        json!({"error": "unknown Cairn tool"})
+    );
+    assert_eq!(
+        invoke("memory_search", json!({})),
+        json!({"error": "query is required"})
+    );
+    assert_eq!(server.requests().len(), before);
+}
+
+#[test]
 fn hermes_chat_hook_forwards_project_and_chat_instruction() {
     const PREFERENCE_ERROR: &str = cairn_core::process::prepare::CHAT_PREFERENCE_ERROR;
     let server = fake_with(|_, request| {
