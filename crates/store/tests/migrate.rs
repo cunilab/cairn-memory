@@ -1055,13 +1055,12 @@ async fn fixes_migration_additive() {
     .await
     .unwrap();
     assert_eq!(usage, (7, 2, 1, true, 0, 0, true));
-    let pushes: (i32, i32, bool) = sqlx::query_as(
-        "SELECT pushed, used, muted FROM push_usage WHERE person_id = 'p' AND memory_id = 'm1'",
-    )
-    .fetch_one(store.pool())
-    .await
-    .unwrap();
-    assert_eq!(pushes, (3, 0, true));
+    // Three old ledger rows are not evidence of non-use: the memory starts unmuted, uncounted.
+    let pushes: i64 = sqlx::query_scalar("SELECT count(*) FROM push_usage")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(pushes, 0);
     for (table, expected) in tables.into_iter().zip(before) {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(store.pool())

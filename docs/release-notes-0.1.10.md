@@ -49,7 +49,7 @@ The server applies these migrations on startup:
 | `0018_memory_usage` | Shown and detail-open counters. |
 | `0019_session_shown` | Per-session recall ledger. |
 | `0020_device_agent_hermes` | Device agent CHECK widened for Hermes. |
-| `0021_push_usage` | Per-person push and use counts, backfilled from the ledger. |
+| `0021_push_usage` | Per-person push and use counts; old ledger rows are not counted. |
 | `0022_memory_pins` | Pin timestamp. |
 | `0023_hermes_chat` | Personal chat tag. |
 | `0024_hermes_route_privacy` | Removes obsolete sender metadata from retained chat contexts. |

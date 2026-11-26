@@ -1302,7 +1302,8 @@ async fn prompt_recall_learns_per_person_across_push_sources() {
     }
     let view = app.get(&format!("memories/{id}"), &admin).await;
     assert_eq!(view["usage"]["pushed"], 4);
-    assert_eq!(view["usage"]["push_used"], 1);
+    // One credit for the search hit and one for the session's gets (repeats count once).
+    assert_eq!(view["usage"]["push_used"], 2);
     assert_eq!(view["trust_level"], before["trust_level"]);
 
     let rule_query = "Please preserve quartz isolation";

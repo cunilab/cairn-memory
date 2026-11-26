@@ -111,3 +111,39 @@ fn topic_card_is_one_bounded_line() {
     assert!(long.starts_with("Cairn topic p q.rs "));
     assert!(long.ends_with("(why: file q.rs) [1y]"));
 }
+
+/// Sweep card sizes so a layer lands on every byte of its budget; none may pass it, and each
+/// budget must be reachable exactly (so the reserved suffix is neither short nor too generous).
+#[test]
+fn brief_budgets_are_exact_boundaries() {
+    let make = |prefix: &str, pinned, title: usize, summary: usize| {
+        (0..20)
+            .map(|index| {
+                let mut m = memory(&format!("{prefix}{index}"), Kind::Rule, Scope::Personal);
+                m.pinned_at = pinned;
+                m.title = "t".repeat(title);
+                m.summary = "s".repeat(summary);
+                m
+            })
+            .collect::<Vec<_>>()
+    };
+    let (mut legacy, mut identity, mut extended) = (0, 0, 0);
+    for title in 1..=48 {
+        for summary in 0..=48 {
+            let essentials = make("e", None, title, summary);
+            let brief = session_brief(&[], &essentials, 0, 20, BriefBudget::Legacy);
+            legacy = legacy.max(brief.text.len());
+            let pins = make("p", Some(1), title, summary);
+            for essential_title in (1..=48).step_by(3) {
+                let essentials = make("e", None, essential_title, summary);
+                let brief = session_brief(&pins, &essentials, 0, 20, BriefBudget::Extended);
+                let (head, _) = brief.text.split_once("\"L1 Essential\"").unwrap();
+                identity = identity.max(head.len());
+                extended = extended.max(brief.text.len());
+            }
+        }
+    }
+    assert_eq!(legacy, LEGACY_SESSION_BRIEF_MAX_BYTES);
+    assert_eq!(identity, IDENTITY_MAX_BYTES);
+    assert_eq!(extended, SESSION_BRIEF_MAX_BYTES);
+}

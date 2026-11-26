@@ -2881,6 +2881,107 @@ async fn command_error_uses_settle_and_revoke_without_overwriting_explicit_use()
 }
 
 #[tokio::test]
+async fn explicit_use_before_muting_counts_without_a_session() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("early-use").await;
+    let (project, _) = store
+        .init_project(&person, "local:e2e-early-use", Some("E2E early use"))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (kind, word) in [("search", "alpha"), ("get", "bravo"), ("helpful", "carol")] {
+        let command = format!("make {word}");
+        let failure = format!("Error: {word} cache poisoned");
+        let context = WorkContext {
+            project_id: Some(project.project_id.clone()),
+            commands: vec![command.clone()],
+            ..WorkContext::default()
+        };
+        let memory = store
+            .save(
+                &person,
+                save_input(serde_json::json!({
+                    "kind": "gotcha", "title": format!("Clear the {word} cache"),
+                    "summary": failure, "reason": "A stale lock holds the directory.",
+                    "fields": {"fix": "Delete the stale lock file."}
+                })),
+                &context,
+            )
+            .await
+            .unwrap();
+        let push = |session: &'static str| {
+            store.command_recall(
+                &person,
+                session,
+                context.project_id.as_deref(),
+                &command,
+                Some(&failure),
+            )
+        };
+        assert!(!push("s1").await.unwrap().is_empty());
+        let one = std::slice::from_ref(&memory.id);
+        if kind == "search" {
+            let hits = store
+                .search(
+                    &person,
+                    word,
+                    None,
+                    5,
+                    1200,
+                    &cairn_core::retrieve::filter::Filter::default(),
+                )
+                .await
+                .unwrap();
+            assert!(hits.results.iter().any(|c| c.id == memory.id), "{word}");
+        } else {
+            // Get and helpful votes may carry no session id (a session the ledger never saw too).
+            let session = (kind == "get").then_some("elsewhere");
+            store
+                .record_push_use(&person, session, one, true)
+                .await
+                .unwrap();
+        }
+        assert!(!push("s2").await.unwrap().is_empty());
+        assert!(!push("s3").await.unwrap().is_empty(), "{kind} was muted");
+        ids.push(memory.id);
+    }
+    let rows: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT used, muted FROM push_usage WHERE memory_id = ANY($1) ORDER BY memory_id",
+    )
+    .bind(&ids)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|&(used, muted)| used == 1 && !muted),
+        "{rows:?}"
+    );
+
+    // One session's explicit use is credited once, however often the same call repeats.
+    let again = std::slice::from_ref(&ids[0]);
+    let used = || async {
+        sqlx::query_scalar::<_, i32>("SELECT used FROM push_usage WHERE memory_id = $1")
+            .bind(&ids[0])
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    };
+    let before = used().await;
+    for _ in 0..3 {
+        store
+            .record_push_use(&person, Some("s1"), again, true)
+            .await
+            .unwrap();
+    }
+    assert_eq!(used().await, before + 1);
+    db.finish().await;
+}
+
+#[tokio::test]
 async fn pin_quotas_are_atomic_and_scoped() {
     let Some(db) = TestDb::new().await else {
         return;

@@ -15,7 +15,5 @@ CREATE TABLE push_usage (
 );
 CREATE INDEX push_usage_memory_idx ON push_usage (memory_id);
 
-INSERT INTO push_usage (person_id, memory_id, pushed, muted)
-SELECT person_id, memory_id, count(*), count(*) >= 3
-  FROM session_shown GROUP BY person_id, memory_id
-ON CONFLICT DO NOTHING;
+-- No backfill: the ledger shows pushes but not earlier gets or votes, so old rows would mute memories
+-- on missing evidence. Every memory starts with a fresh observation window on its next push.

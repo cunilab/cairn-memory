@@ -95,8 +95,9 @@ async fn refresh_mutes(
 }
 
 impl Store {
-    /// Charge a use only to its known session. Explicit hits can restore a muted card
-    /// even when no host session identifier was supplied or the ledger already expired.
+    /// An explicit search hit, get or helpful vote is a use of a push, muted or not. It is charged
+    /// once to its session's ledger row; with no session, or no row for it, each call credits one
+    /// use. It also restores a muted card.
     pub async fn record_push_use(
         &self,
         person_id: &str,
@@ -135,17 +136,20 @@ impl Store {
         }
         if revive || !used.is_empty() {
             sqlx::query(&format!(
-                "UPDATE push_usage pu SET used = pu.used + (pu.memory_id = ANY($2))::int,
+                "UPDATE push_usage pu SET used = pu.used + (pu.memory_id = ANY($2) OR ($4 AND NOT EXISTS (
+                            SELECT 1 FROM session_shown s
+                             WHERE s.person_id = $1 AND s.session_id = $5 AND s.memory_id = pu.memory_id)))::int,
                         revived = pu.revived OR ($4 AND pu.muted), muted = false
                   FROM memories m
                  WHERE pu.person_id = $1 AND pu.memory_id = m.memory_id AND {}
-                   AND (pu.memory_id = ANY($2) OR ($4 AND pu.memory_id = ANY($3) AND pu.muted))",
+                   AND (pu.memory_id = ANY($2) OR ($4 AND pu.memory_id = ANY($3)))",
                 visible("m", "$1")
             ))
             .bind(person_id)
             .bind(used)
             .bind(ids)
             .bind(revive)
+            .bind(session_id)
             .execute(&mut *tx)
             .await?;
         }

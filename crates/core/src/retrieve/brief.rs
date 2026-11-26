@@ -26,6 +26,10 @@ impl BriefBudget {
 
 pub const TOPIC_MAX_BYTES: usize = 300;
 
+/// What closes each layer; its length is reserved so the layer never passes its budget.
+const IDENTITY_CLOSE: &str = "],\n";
+const ESSENTIAL_CLOSE: &str = "]\n}\n```";
+
 fn bounded(text: &str, bytes: usize) -> &str {
     &text[..text.floor_char_boundary(bytes)]
 }
@@ -134,10 +138,10 @@ pub fn session_brief(
         pins,
         now,
         limit,
-        IDENTITY_MAX_BYTES - 3,
+        IDENTITY_MAX_BYTES - IDENTITY_CLOSE.len(),
         &mut memory_ids,
     );
-    text.push_str("],\n");
+    text.push_str(IDENTITY_CLOSE);
 
     let ceiling = (text.len() + ESSENTIAL_MAX_BYTES).min(budget.max_bytes());
     text.push_str("\"L1 Essential\":[");
@@ -146,10 +150,10 @@ pub fn session_brief(
         essentials,
         now,
         limit,
-        ceiling - 6,
+        ceiling - ESSENTIAL_CLOSE.len(),
         &mut memory_ids,
     );
-    text.push_str("]\n}\n```");
+    text.push_str(ESSENTIAL_CLOSE);
     if memory_ids.is_empty() {
         text.clear();
     }
