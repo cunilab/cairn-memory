@@ -150,7 +150,7 @@ In the project folder on the first device run `cairn init "Project name"` and co
 
 ### 4. Update
 
-Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.9.md) before upgrading. There is no database downgrade path.
+Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.10.md) before upgrading. There is no database downgrade path.
 
 ## Use Cairn
 
@@ -221,7 +221,7 @@ Cairn is pre-1.0. Use disposable databases for tests and read the migration rule
 | [Deployment](docs/deploy.md) | Server, console and reverse proxy |
 | [Development](docs/development.md) | Build, checks, migrations and docs |
 | [Release process](docs/release.md) | Releases and updates |
-| [Release notes](docs/release-notes-0.1.9.md) | Version-specific changes and upgrade steps |
+| [Release notes](docs/release-notes-0.1.10.md) | Version-specific changes and upgrade steps |
 
 ## Acknowledgements and licence
 

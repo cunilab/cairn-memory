@@ -16,7 +16,7 @@ Cairn is a self-hosted memory service. A Rust server owns durable state in Postg
 | `cairn-store` | PostgreSQL queries, authorization, transactions, migrations and jobs. |
 | `cairn-server` | HTTP routes, authentication and background workers. |
 | `cairn-client` | CLI, MCP, hook, setup and updates; communicates over HTTP. |
-| `apps/web` | Console for accounts, devices, memories, projects, activity, graph and Fixes. |
+| `apps/web` | Console for accounts, devices, memories, skills, projects, activity, graph and Fixes. |
 
 ```mermaid
 flowchart LR
@@ -69,7 +69,7 @@ Capture stays personal when project attachment fails. A mixed or indeterminate s
 - **Linked corrections:** a replacement links to the previous record, preserving provenance and making both searchable.
 - **Scopes and hybrid recall:** personal, project and global scopes set visibility; text, entities, links and local embeddings improve retrieval without broadening access.
 - Hooks and agent tools send the same opaque worktree ID derived from the canonical checkout path. This lets explicit search find personal handoffs captured in that checkout.
-- **Small agent surface:** five MCP tools, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
+- **Small agent surface:** five memory tools and four skill tools over MCP, Rust hooks and no server LLM keep operation predictable and avoid an external model dependency.
 - Setup and client updates use each host's server-scoped permission format for Cairn MCP in Claude Code, Codex, Grok Build and Antigravity CLI. Grok delivers the brief through PostToolUse, and Antigravity checkpoints through Stop. The device agent CHECK accepts both new host identifiers and preserves existing device rows.
 - Hermes setup uses full trust scoped to the Cairn MCP server. Its plugin bridges native lifecycle callbacks to the Rust hook and injects the session brief before the first inference. Migration 0020 widens the device agent CHECK to include Hermes and preserves existing rows.
 - Dedicated Hermes gateways replace the managed MCP entry with native chat search and save. Cairn hashes the bound chat and thread route with a profile salt. Every chat has the same personal-memory boundary. A tool request may select a project by ID or exact name, with current membership required for search and save. Explicit project saves have no chat tag. Group saves start as candidates. Migration 0023 adds the nullable personal chat tag, and migration 0024 removes obsolete sender metadata from retained contexts. Dedupe, consolidation, handoff chains, and JSON export and import preserve the tag. The global chat instruction lives in `server_state` and rides with the first prompt after each chat session starts. Hermes handles owner confirmation and conversation. The plugin skips background turns and reuses Cairn's recall ledger and distillation for interactive turns.

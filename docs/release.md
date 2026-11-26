@@ -20,7 +20,7 @@ How changes reach `main`, how a release is cut, and how installed clients update
   - `Documentation validation`
   - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
   - `Docker images build` (builds `docker/server.Dockerfile` and `docker/web.Dockerfile` without pushing, so an image breaks in the pull request, not at tag time)
-  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.65 --max-weak-hits 0`, then on v1, `--min-hit5 0.88`; uploads the result JSON; the 0.1.9 run is hit@5 0.674, see `bench/analysis-0.1.9.md`)
+  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.65 --max-weak-hits 0`, then on v1, `--min-hit5 0.88 --min-link-ratio 0.60`, then `scripts/bench_write.py`; uploads the result JSON; see [the benchmark](../bench/README.md))
 - Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
 - The acceptance smokes do not download the embedding model. They use the server's lexical, entity, and link recall. The pinned model stays on the Rust tests and Bench jobs.
 
