@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --color-fd-background: oklch(0.985 0.003 255);
+  --color-fd-foreground: oklch(0.20 0.018 255);
+  --color-fd-card: oklch(0.97 0.005 255);
+  --color-fd-muted: oklch(0.95 0.007 255);
+  --color-fd-muted-foreground: oklch(0.45 0.02 255);
+  --color-fd-border: oklch(0.88 0.01 255);
+  --color-fd-primary: oklch(0.45 0.105 64);
+  --color-fd-ring: var(--color-fd-primary);
+  --hero-amber: oklch(0.795 0.165 78);
+}
+
+.dark {
+  --color-fd-background: oklch(0.17 0.013 255);
+  --color-fd-foreground: oklch(0.95 0.005 255);
+  --color-fd-card: oklch(0.22 0.016 255);
+  --color-fd-muted: oklch(0.24 0.016 255);
+  --color-fd-muted-foreground: oklch(0.72 0.018 255);
+  --color-fd-border: oklch(0.31 0.019 255);
+  --color-fd-primary: oklch(0.82 0.165 80);
+  --hero-amber: var(--color-fd-primary);
+}
+
+.pele {
+  --pele-font: var(--font-sans);
+  --pele-font-mono: var(--font-mono);
+  --pele-bg: var(--color-fd-background);
+  --pele-fg: var(--color-fd-foreground);
+  --pele-muted: var(--color-fd-muted-foreground);
+  --pele-line: var(--color-fd-muted-foreground);
+  --pele-surface: var(--color-fd-card);
+  --pele-surface-alt: var(--color-fd-muted);
+  --pele-border: var(--color-fd-border);
+  --pele-accent: var(--color-fd-primary);
+}
+
+.prose .pele {
+  max-width: 100%;
+  height: auto;
+}

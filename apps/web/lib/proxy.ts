@@ -26,7 +26,7 @@ export function isNoBodyStatus(status: number): boolean {
 }
 
 const COOKIE = "cairn_token";
-/** Where the deploy layout (docs/deploy.md) routes agents on the console's own host. */
+/** Where the deploy layout (apps/docs/content/technical/deployment.md) routes agents on the console's own host. */
 const AGENT_PREFIX = "/agent";
 
 const first = (value: string | null): string | null => value?.split(",")[0].trim() || null;

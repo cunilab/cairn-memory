@@ -1,5 +1,5 @@
 //! `cairn hook <Event> [--agent a] [--config p] [--cairn-managed]`: the capture and injection
-//! hook of every agent host (docs/reference/hook.md#events). The host's event arrives as JSON on stdin; stdout
+//! hook of every agent host (apps/docs/content/technical/hooks/index.md#events). The host's event arrives as JSON on stdin; stdout
 //! carries only an injection reply or a native memory write decision. A failure writes one
 //! stderr line and still exits 0.
 

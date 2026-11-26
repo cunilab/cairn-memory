@@ -1,0 +1,44 @@
+---
+id: CM-DOC-USERS-INSTALL-CLI
+title: "Install the CLI"
+status: accepted
+description: "Verify the Cairn binary for your operating system and put it on PATH."
+---
+
+# Install the CLI
+
+Download the binary and `SHA256SUMS` from the same [GitHub release](https://github.com/cunilab/cairn-memory/releases/latest). Use the [repository installation commands](../../../../README.md#2-install-and-configure-the-first-device) for a copyable download, verification and install on each platform.
+
+| Platform | Release asset | Checksum tool |
+| --- | --- | --- |
+| macOS Apple silicon | `cairn-aarch64-apple-darwin` | `shasum -a 256` |
+| Linux x86-64 | `cairn-x86_64-unknown-linux-musl` | `sha256sum` |
+| Linux arm64 | `cairn-aarch64-unknown-linux-musl` | `sha256sum` |
+| Windows x86-64 | `cairn-x86_64-pc-windows-msvc.exe` | `Get-FileHash -Algorithm SHA256` |
+
+## Confirm the installed binary
+
+Open a fresh terminal after changing PATH. Confirm which binary it finds and print the version.
+
+<Tabs items={['Shell', 'PowerShell']}>
+<Tab value="Shell">
+
+```sh
+command -v cairn
+cairn --version
+```
+
+</Tab>
+<Tab value="PowerShell">
+
+```powershell
+Get-Command cairn
+cairn --version
+```
+
+</Tab>
+</Tabs>
+
+The Shell commands in the README install to `~/.local/bin`. The PowerShell example installs to `%LOCALAPPDATA%\cairn\bin` and adds that directory to the user PATH. If the command cannot be found, check the relevant PATH entry and open a new terminal.
+
+You can also compile with `cargo build --release -p cairn-client` from the repository. With the CLI on PATH, [connect an agent](agents/index.md).

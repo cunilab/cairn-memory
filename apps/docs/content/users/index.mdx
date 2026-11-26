@@ -1,0 +1,56 @@
+---
+id: CM-GUIDE-004
+title: "Quickstart"
+status: accepted
+description: "Connect a coding agent, save a project decision, and verify that Cairn can find it."
+---
+
+# Quickstart
+
+<Steps>
+
+<Step>
+## Start Cairn and create a device
+
+[Run the server and console](install-server.md), or use an existing Cairn server. Sign in to the console and create a token under **Settings → Devices**. The console shows the token once.
+</Step>
+
+<Step>
+## Install and connect an agent
+
+[Install the CLI](install-cli.mdx). Use the agent API address from Settings. Use this command to connect Claude Code to a local server.
+
+```sh
+cairn setup http://localhost:3111 --agent claude
+cairn doctor
+```
+
+Supply the token when setup reads stdin. [Choose your agent](agents/index.md) for its exact setup and restart steps. Resolve failing [doctor checks](help/doctor.md) before continuing.
+</Step>
+
+<Step>
+## Initialize a project
+
+Initialize Cairn in your project folder.
+
+```sh
+cairn init "Example project"
+```
+
+Keep the generated `.cairn/project.json` for this project. Commit it when you intend to share the project with teammates on the same server. [Read how membership works](memory/scopes.md#init-and-membership).
+</Step>
+
+<Step>
+## Save and find a decision
+
+In the same folder, save a decision and search for it.
+
+```sh
+cairn save '{"kind":"decision","title":"Run database tests in a disposable schema","summary":"Give each test suite its own disposable PostgreSQL schema.","reason":"Test cleanup must leave the shared development database intact.","fields":{"context":"Integration test isolation"}}'
+cairn search "disposable PostgreSQL schema"
+```
+
+The search should return the decision with the ID printed by save. Pass that ID to `cairn get` for the full record or open **Memories** in the console. Continue with [daily use](daily-use.md).
+</Step>
+
+</Steps>

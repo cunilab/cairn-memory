@@ -1,5 +1,5 @@
 //! `cairn setup --agent`: installs or removes Cairn's MCP entry, permissions, instructions and
-//! hooks in supported agents (docs/reference/hook.md#setup). Cairn marks its own
+//! hooks in supported agents (apps/docs/content/users/agents/index.md#setup). Cairn marks its own
 //! MCP registrations and hooks. Setup checks for conflicts before running a native MCP command
 //! and applying the file edits. Credentials stay in the Cairn config.
 

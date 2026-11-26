@@ -2,7 +2,7 @@
 # breaks branch protection until the rule is updated.
 # Jobs that need PostgreSQL (rust-tests, acceptance-smokes) each run the same
 # pgvector/pgvector:pg17 service and the same CAIRN_TEST_DATABASE_URL. Tests and smokes isolate
-# themselves in a schema, so one database serves all of them (see docs/development.md).
+# themselves in a schema, so one database serves all of them (see apps/docs/content/technical/contributing.md).
 name: CI
 
 on:
@@ -58,7 +58,7 @@ jobs:
             echo "cairn-core must not depend on sqlx, tokio, axum or reqwest" >&2
             exit 1
           fi
-      - name: migrations do not destroy data (docs/development.md#migrations)
+      - name: migrations do not destroy data (apps/docs/content/technical/contributing.md#migrations)
         run: |
           python3 scripts/check_migrations.py
           python3 scripts/test_check_migrations.py
@@ -125,7 +125,7 @@ jobs:
           New-Item -ItemType Directory -Force $dir | Out-Null
           $env:HOME = $dir; $env:USERPROFILE = $dir; $env:APPDATA = $dir
           $env:XDG_CONFIG_HOME = "$dir\.config"; $env:CAIRN_NO_UPDATE_CHECK = "1"
-          # No config: doctor prints fail lines and exits 1 (docs/reference/cli-and-mcp.md); a crash exits otherwise.
+          # No config: doctor prints fail lines and exits 1 (apps/docs/content/users/reference/cli.md); a crash exits otherwise.
           $out = & target\debug\cairn.exe doctor
           $code = $LASTEXITCODE
           $out
@@ -237,3 +237,17 @@ jobs:
       - run: python3 scripts/validate_phase0.py
       - run: python3 scripts/check_update_assets.py
       - run: python3 scripts/check_web_version.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/docs/package-lock.json
+      - name: Typecheck, build and validate the prefixed documentation export
+        working-directory: apps/docs
+        env:
+          NEXT_PUBLIC_BASE_PATH: /cairn-memory
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run check:export

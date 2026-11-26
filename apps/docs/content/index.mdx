@@ -1,0 +1,18 @@
+---
+id: CM-INDEX-001
+title: "Shared memory for coding agents"
+status: accepted
+description: "Cairn captures useful work, recalls it in later sessions, and lets people inspect, correct and share it from a self-hosted web console."
+---
+
+# Shared memory for coding agents
+
+```mermaid
+flowchart TD
+  Work["Agent prompt, edit or command"] --> Server["Cairn server"]
+  Server --> DB[("PostgreSQL")]
+  DB --> Recall["Recall in a later session"]
+  Console["Web console"] <--> Server
+```
+
+Agent hooks capture work. Cairn stores memories and delivers relevant context to later sessions. People review and correct those records in the console.

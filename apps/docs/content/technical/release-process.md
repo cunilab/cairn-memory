@@ -1,0 +1,67 @@
+---
+id: CM-REL-001
+title: "Cairn Memory Release Process"
+status: draft
+description: "Cut a release from main, publish binaries and images, and update installed clients."
+---
+
+# Cairn Memory Release Process
+
+How changes reach `main`, how a release is cut, and how installed clients update. The workflows are `.github/workflows/ci.yml` and `.github/workflows/release.yml`; this document describes them and does not claim they have run until a release exists.
+
+## Trunk-based flow
+
+- `main` is the trunk and is always releasable. Nobody pushes to it directly.
+- Work happens on a short-lived branch named `feat/`, `fix/`, `docs/`, or `chore/` plus a short name (for example `fix/CM-123-outbox-retry`), merged by pull request and then deleted.
+- A pull request needs every required check green. The required checks are the CI job names:
+  - `Rust format and clippy` (also checks that `cairn-core` has no `sqlx`, `tokio`, `axum` or `reqwest` dependency)
+  - `Rust tests` (a `pgvector/pgvector:pg17` service and the pinned MiniLM model; `CAIRN_TEST_REQUIRE_DB=1`, so a missing database fails instead of skipping)
+  - `Build on macos-15` and `Build on windows-latest`
+  - `Web console typecheck, lint, build`
+  - `Documentation validation`
+  - `Acceptance smokes` (`scripts/smoke_mcp.sh` and `scripts/smoke_web.sh`)
+  - `Docker images build` (builds `docker/server.Dockerfile` and `docker/web.Dockerfile` without pushing, so an image breaks in the pull request, not at tag time)
+  - `Bench` (`scripts/bench.py` on bench v2 with 2,000 distractors, `--min-hit5 0.65 --max-weak-hits 0`, then on v1, `--min-hit5 0.88 --min-link-ratio 0.60`, then `scripts/bench_write.py`; uploads the result JSON; see [the benchmark](../../../../bench/README.md))
+- Renaming a job in `ci.yml` detaches it from the branch protection rule; update the rule in the same change.
+- Acceptance smokes download the pinned MiniLM model and pass its path in `CAIRN_EMBEDDING_MODEL_DIR` to both smoke scripts.
+
+## Cut a release
+
+Releases are tags `vMAJOR.MINOR.PATCH` on `main`. The version lives once, in `[workspace.package]` of the root `Cargo.toml`.
+
+1. On a branch (for example `chore/release-0.2.0`), change `version` in `[workspace.package]`, set the same `version` in `apps/web/package.json` and in the two places of `apps/web/package-lock.json` (`scripts/check_web_version.py` fails the documentation check when they differ), and let `Cargo.lock` follow (`cargo check`). Put migration notes, upgrade guidance, and compatibility or rollback notes for operators in the pull request description.
+   Write the version notes in `apps/docs/content/users/releases/<version>.md` and add an entry to the [release notes index](../users/releases/index.md) and its sidebar metadata.
+2. Open the pull request, wait for the required checks, merge it.
+3. Tag the merge commit on `main` and push the tag:
+
+   ```bash
+   git switch main && git pull --ff-only
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+4. The `Release` workflow then:
+   - fails unless the tag equals the workspace version, is `MAJOR.MINOR.PATCH` (no pre-release suffix), and points at a commit on `main`;
+   - builds the CLI natively for `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`; the server uses the same macOS/Windows targets and `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` on Linux, because ONNX Runtime requires glibc;
+   - creates the GitHub Release with generated notes prefixed by server runtime/upgrade requirements and these assets: `cairn-<target>[.exe]`, `cairn-server-<target>[.exe]`, and `SHA256SUMS` covering every other asset. Binaries are raw files, not archives;
+   - after the release exists, pushes the container images `ghcr.io/cunilab/cairn-memory-server` and `ghcr.io/cunilab/cairn-memory-web` for `linux/amd64` and `linux/arm64`, tagged `vMAJOR.MINOR.PATCH` and `latest` (each platform is built natively, then merged into one multi-arch manifest). How to run them: [deploy](deployment.md).
+5. A bad release is not edited in place: delete the release and tag, fix on a branch, and release the next patch version. Clients never install a version lower than their own.
+
+Only the `Publish release` job has `contents: write`, and only the image and manifest jobs have `packages: write`.
+
+## Publish the documentation
+
+The Pages workflow builds the tagged documentation for `https://cunilab.github.io/cairn-memory/`. It accepts the highest stable version tag only when that tag points to a commit on main. A manual run accepts the latest tag. The repository administrator selects **Settings → Pages → Source → GitHub Actions** once.
+
+## Decisions and why
+
+Changes use short-lived branches and checked pull requests so main stays releasable. Clients update from GitHub releases using checksums and a staged binary; this detects corruption but does not protect against a compromised release and checksum together. Operators update the server separately and follow the release notes.
+
+## How clients update
+
+- `cairn --version` prints the installed version.
+- `cairn update --check` reports whether a newer release exists. `cairn update` downloads the binary for the compile-time target, verifies it against the release's `SHA256SUMS`, stages the binary next to the running one with the same permission bits, runs `<staged> --version` (2 second limit) and requires it to print `cairn <new version>`, and only then replaces the running executable (an atomic rename on unix; on Windows the old file is renamed to `cairn.exe.old`, or `cairn.exe.old-<time>` if that name is stuck, and removed on a later run). Any failure leaves the installed `cairn` untouched; an unwritable directory fails with a message to re-run with permission to write there.
+- The hook is the `cairn` binary itself (`cairn hook <Event>`), so there are no scripts to match. `cairn setup --agent` writes the hook commands with the absolute path of the running executable, and after replacing the binary `cairn update` runs `<installed> update --refresh`, so the new executable's own setup rewrites those commands for every agent that already has a Cairn hook and they follow the executable. A 0.1.9 updater refreshes in its own process with the old setup code; after updating from 0.1.9, run `cairn setup <agent>` once.
+- Interactive commands print one line to stderr when a newer release is known, for example `cairn 0.2.0 is available (you have 0.1.0) — run `cairn update``. The release check runs at most once every 24 hours (2 second timeout, failures silent, result cached in `update-check.json` beside the config). It never runs for `cairn mcp`, `cairn update`, when stderr is not a terminal, or when `CAIRN_NO_UPDATE_CHECK=1`. The hook and the MCP server never check or update.
+- `CAIRN_UPDATE_URL` replaces the GitHub latest-release API URL (it must end in `/latest`) in debug builds only, for tests; a release build ignores it. Update URLs must be https; plain http to loopback is accepted in debug builds only.
+- `cairn-server` is not self-updating: operators download it from the release and follow the migration notes.

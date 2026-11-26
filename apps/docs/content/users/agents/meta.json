@@ -1,0 +1,14 @@
+{
+  "title": "Agents",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "claude-code",
+    "codex",
+    "opencode",
+    "grok",
+    "antigravity",
+    "hermes",
+    "hermes-gateway"
+  ]
+}

@@ -1,21 +1,11 @@
----
-id: CM-INDEX-001
-title: "Cairn Memory documentation"
-status: draft
----
-
 # Cairn Memory documentation
 
-- [User guide](user-guide.md): setup, usage, privacy and troubleshooting.
-- [Architecture](architecture.md): components, data flow and decisions.
-- [CLI and MCP](reference/cli-and-mcp.md): commands, tools and records.
-- [Hook](reference/hook.md): events, redaction, setup and outbox.
-- [Projects](reference/projects.md): scopes, membership and trust.
-- [Recall](reference/recall.md): retrieval, handoffs and jobs.
-- [Authentication](reference/auth.md): accounts, devices and admin API.
-- [Deployment](deploy.md): services and routing.
-- [Development](development.md): checks, migrations and documentation rules.
-- [Release process](release.md): release flow and client updates.
-- [Release notes 0.1.6](release-notes-0.1.6.md), [0.1.7](release-notes-0.1.7.md), [0.1.8](release-notes-0.1.8.md), [0.1.9](release-notes-0.1.9.md), [0.1.10](release-notes-0.1.10.md), [0.1.11](release-notes-0.1.11.md): version-specific changes.
-- [Rust idioms](RUST_IDIOMS.md): Rust quality rules.
-- [Hook examples](examples/README.md): manual Claude Code wiring.
+- [Website](https://cunilab.github.io/cairn-memory/)
+- [Quickstart](../apps/docs/content/users/index.mdx) and [agent setup](../apps/docs/content/users/agents/index.md)
+- [CLI](../apps/docs/content/users/reference/cli.md) and [MCP](../apps/docs/content/users/reference/mcp.md)
+- [Architecture](../apps/docs/content/technical/index.mdx) and [hook protocol](../apps/docs/content/technical/hooks/index.md)
+- [Deployment](../apps/docs/content/technical/deployment.md) and [backup and restore](../apps/docs/content/technical/backups.md)
+- [Contributing](../apps/docs/content/technical/contributing.md) and [Rust idioms](../apps/docs/content/technical/rust-idioms.md)
+- [Release notes](../apps/docs/content/users/releases/index.md) and [release process](../apps/docs/content/technical/release-process.md)
+
+Edit documentation in [apps/docs/content](../apps/docs/content).

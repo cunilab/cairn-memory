@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/cairn-logo.svg" alt="Cairn logo" width="96">
+  <img src="apps/docs/public/cairn-logo.svg" alt="Cairn logo" width="96">
   <h1>Cairn Memory</h1>
   <p>Shared memory for coding agents and the people who run them.</p>
 
@@ -76,7 +76,7 @@ volumes:
   cairn_data:
 ```
 
-Set `POSTGRES_PASSWORD` in your environment before starting Compose; use a URL-safe password in this example. Open `http://localhost:3000` and create the first account immediately: it is the only administrator. The administrator creates additional accounts. The server also accepts `CAIRN_PUBLIC_URL`, `CAIRN_SCHEMA` and `CAIRN_EMBEDDING_MODEL_DIR`; the console uses `CAIRN_API_URL` for its internal server connection. For remote access, TLS, reverse-proxy routing, backups and deployment limits, follow the [deployment guide](docs/deploy.md). Agents accept HTTP only for loopback hosts.
+Set `POSTGRES_PASSWORD` in your environment before starting Compose; use a URL-safe password in this example. Open `http://localhost:3000` and create the first account immediately: it is the only administrator. The administrator creates additional accounts. The server also accepts `CAIRN_PUBLIC_URL`, `CAIRN_SCHEMA` and `CAIRN_EMBEDDING_MODEL_DIR`; the console uses `CAIRN_API_URL` for its internal server connection. For remote access, TLS, reverse-proxy routing, backups and deployment limits, follow the [deployment guide](apps/docs/content/technical/deployment.md). Agents accept HTTP only for loopback hosts.
 
 ### 2. Install and configure the first device
 
@@ -87,11 +87,11 @@ macOS (Apple silicon):
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
 asset=cairn-aarch64-apple-darwin
-curl -fLO "$base/$asset"
-curl -fLO "$base/SHA256SUMS"
-grep "  $asset$" SHA256SUMS | shasum -a 256 -c -
-chmod +x "$asset"
-mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+curl -fLO "$base/$asset" &&
+curl -fLO "$base/SHA256SUMS" &&
+grep "  $asset$" SHA256SUMS | shasum -a 256 -c - &&
+chmod +x "$asset" &&
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn &&
 cairn --version
 ```
 
@@ -100,11 +100,11 @@ Linux (x86-64 or arm64; `uname -m` picks the right binary):
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
 asset=cairn-$(uname -m)-unknown-linux-musl
-curl -fLO "$base/$asset"
-curl -fLO "$base/SHA256SUMS"
-grep "  $asset$" SHA256SUMS | sha256sum -c -
-chmod +x "$asset"
-mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+curl -fLO "$base/$asset" &&
+curl -fLO "$base/SHA256SUMS" &&
+grep "  $asset$" SHA256SUMS | sha256sum -c - &&
+chmod +x "$asset" &&
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn &&
 cairn --version
 ```
 
@@ -138,19 +138,19 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Hermes must be v2026.4.23 or newer; setup warns about an older or unknown version. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries (a memory provider for Hermes) and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
+Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Hermes must be v2026.4.23 or newer; setup warns about an older or unknown version. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries (a memory provider for Hermes) and a block in the agent's global instructions. See [hook setup](apps/docs/content/technical/hooks/index.md#setup).
 
-In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
+In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](apps/docs/content/users/agents/claude-code.md#import-claude-code-memory).
 
 ### 3. Add a device, agent or teammate
 
 Create a separate device token in the web for each machine, install the CLI there, and run `cairn setup <server-url> --agent <agent>` with that token on stdin. Run setup for each agent you use on that machine. A teammate signs into their own account, creates their own device token and configures their agent the same way.
 
-In the project folder on the first device run `cairn init "Project name"` and commit `.cairn/project.json`. Teammates with an account on the same server get that file in their checkout and run `cairn init` to join. **Anyone with a server account and the project ID can join and read project memories and member emails**; protect the file accordingly. Project memories are shared with members, personal memories remain private to their owner, and global memories are visible to authenticated server users. See [projects and scopes](docs/reference/projects.md).
+In the project folder on the first device run `cairn init "Project name"` and commit `.cairn/project.json`. Teammates with an account on the same server get that file in their checkout and run `cairn init` to join. **Anyone with a server account and the project ID can join and read project memories and member emails**; protect the file accordingly. Project memories are shared with members, personal memories remain private to their owner, and global memories are visible to authenticated server users. See [projects and scopes](apps/docs/content/users/memory/scopes.md).
 
 ### 4. Update
 
-Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.11.md) before upgrading. There is no database downgrade path.
+Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](apps/docs/content/users/releases/index.md) before upgrading. There is no database downgrade path.
 
 ## Use Cairn
 
@@ -168,7 +168,7 @@ At session start the hook requests a brief and an instruction. During work it ca
 | `skill_save` | Create a skill or publish a new version. |
 | `skill_feedback` | Vote on a skill version. |
 
-The CLI also offers `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`. Use `cairn fixes` to list device fixes, `cairn fixes apply [id]` to apply them, and `cairn doctor` to diagnose setup. See [CLI and MCP](docs/reference/cli-and-mcp.md) for arguments.
+The CLI also offers `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`. Use `cairn fixes` to list device fixes, `cairn fixes apply [id]` to apply them, and `cairn doctor` to diagnose setup. See [CLI and MCP](apps/docs/content/users/reference/mcp.md) for arguments.
 
 In the web console:
 
@@ -183,9 +183,9 @@ In the web console:
 
 ### Privacy and configuration
 
-Cairn runs on your infrastructure. Redaction before persistence is best effort, not a guarantee: avoid sharing secrets and rotate any exposed credential. Administrators can inspect redacted recent search phrases and rewrite memories; project membership and scope determine visibility. Raw observations are retained for processing and expire separately from memories. Read the [privacy guide](docs/user-guide.md#privacy-and-data).
+Cairn runs on your infrastructure. Redaction before persistence is best effort, not a guarantee: avoid sharing secrets and rotate any exposed credential. Administrators can inspect redacted recent search phrases and rewrite memories; project membership and scope determine visibility. Raw observations are retained for processing and expire separately from memories. Read the [privacy guide](apps/docs/content/technical/security.md#privacy-and-data).
 
-The CLI, MCP server and hook use the selected config file: `CAIRN_CONFIG`, otherwise `$XDG_CONFIG_HOME/cairn/config.json`, otherwise `~/.config/cairn/config.json` (or the Windows app-data location). `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored. Set `nudge` to `false` in the client config or `CAIRN_NO_NUDGE=1` to disable reminders; assistant messages are captured only with `CAIRN_CAPTURE_ASSISTANT=1`. Set `CAIRN_SESSION_ORIGIN=automation` for automated sessions. A `.cairnignore` file disables hook capture for the checkout. See [hook details](docs/reference/hook.md).
+The CLI, MCP server and hook use the selected config file: `CAIRN_CONFIG`, otherwise `$XDG_CONFIG_HOME/cairn/config.json`, otherwise `~/.config/cairn/config.json` (or the Windows app-data location). `CAIRN_URL` and `CAIRN_DEVICE_TOKEN` are ignored. Set `nudge` to `false` in the client config or `CAIRN_NO_NUDGE=1` to disable reminders; assistant messages are captured only with `CAIRN_CAPTURE_ASSISTANT=1`. Set `CAIRN_SESSION_ORIGIN=automation` for automated sessions. A `.cairnignore` file disables hook capture for the checkout. See [hook details](apps/docs/content/technical/hooks/index.md).
 
 ### Troubleshooting
 
@@ -196,7 +196,7 @@ The CLI, MCP server and hook use the selected config file: `CAIRN_CONFIG`, other
 
 ## Development
 
-For contributors, the local development stack uses Docker. The project instructions and commands are in [AGENTS.md](AGENTS.md) and [development](docs/development.md).
+For contributors, the local development stack uses Docker. The project instructions and commands are in [AGENTS.md](AGENTS.md) and [development](apps/docs/content/technical/contributing.md).
 
 ```sh
 ./scripts/dev_up.sh
@@ -209,19 +209,21 @@ Cairn is pre-1.0. Use disposable databases for tests and read the migration rule
 
 ## Documentation
 
+Read the [documentation website](https://cunilab.github.io/cairn-memory/) or browse the sources below.
+
 | Guide | Covers |
 | --- | --- |
-| [User guide](docs/user-guide.md) | Setup, daily use, projects, Fixes and privacy |
-| [Architecture](docs/architecture.md) | Components, data flows and decisions |
-| [CLI and MCP](docs/reference/cli-and-mcp.md) | Commands, tools and records |
-| [Hook](docs/reference/hook.md) | Capture, redaction, setup and outbox |
-| [Projects](docs/reference/projects.md) | Scopes, membership and trust |
-| [Recall](docs/reference/recall.md) | Ranking, jobs and handoffs |
-| [Authentication](docs/reference/auth.md) | Accounts, devices and admin API |
-| [Deployment](docs/deploy.md) | Server, console and reverse proxy |
-| [Development](docs/development.md) | Build, checks, migrations and docs |
-| [Release process](docs/release.md) | Releases and updates |
-| [Release notes](docs/release-notes-0.1.11.md) | Version-specific changes and upgrade steps |
+| [User guide](apps/docs/content/users/index.mdx) | Setup, daily use, projects, Fixes and privacy |
+| [Architecture](apps/docs/content/technical/index.mdx) | Components, data flows and decisions |
+| [CLI](apps/docs/content/users/reference/cli.md) and [MCP](apps/docs/content/users/reference/mcp.md) | Commands, tools and records |
+| [Hook](apps/docs/content/technical/hooks/index.md) | Capture, redaction, setup and outbox |
+| [Projects](apps/docs/content/users/memory/scopes.md) | Scopes, membership and trust |
+| [Recall](apps/docs/content/technical/retrieval.md) | Ranking, jobs and handoffs |
+| [Authentication](apps/docs/content/technical/security.md) | Accounts, devices and admin API |
+| [Deployment](apps/docs/content/technical/deployment.md) | Server, console and reverse proxy |
+| [Development](apps/docs/content/technical/contributing.md) | Build, checks, migrations and docs |
+| [Release process](apps/docs/content/technical/release-process.md) | Releases and updates |
+| [Release notes](apps/docs/content/users/releases/index.md) | Version-specific changes and upgrade steps |
 
 ## Acknowledgements and licence
 

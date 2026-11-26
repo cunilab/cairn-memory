@@ -35,7 +35,7 @@ pub struct Side<'a> {
     pub origin: Origin,
 }
 
-/// The band actually applied (docs/reference/recall.md). A supersede becomes a plain `relates` when the two
+/// The band actually applied (apps/docs/content/technical/retrieval.md). A supersede becomes a plain `relates` when the two
 /// memories belong to different branches (branch-specific knowledge), when an `agent` memory would
 /// be replaced by a `system` one, or when their rare tokens differ.
 pub fn guard(band: Band, newer: Side, older: Side, newer_text: &str, older_text: &str) -> Band {
