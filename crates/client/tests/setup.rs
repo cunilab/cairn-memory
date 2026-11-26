@@ -516,6 +516,13 @@ fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
         // Created by setup: removal deletes it.
         let home = Home::new(&format!("leftovers-{agent}"), true);
         home.ok(agent, false);
+        if agent == "hermes" {
+            // Hermes's Python writes this when it loads the plugin.
+            home.write(
+                ".hermes/plugins/cairn-memory/__pycache__/__init__.cpython-314.pyc",
+                "bytecode",
+            );
+        }
         assert!(home.dir.join(instructions).exists(), "{agent}");
         home.ok(agent, true);
         for path in std::iter::once(instructions).chain(created.iter().copied()) {
@@ -601,8 +608,19 @@ fn remove_leaves_no_empty_files_or_plugin_folders_behind() {
     let home = Home::new("leftovers-plugin-user-file", false);
     home.ok("hermes", false);
     let note = home.write(".hermes/plugins/cairn-memory/notes.txt", "mine\n");
+    let cache = ".hermes/plugins/cairn-memory/__pycache__";
+    home.write(&format!("{cache}/__init__.cpython-314.pyc"), "bytecode");
+    let user_cache = home.write(&format!("{cache}/notes.cpython-314.pyc"), "mine");
     home.ok("hermes", true);
     assert_eq!(fs::read_to_string(note).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(user_cache).unwrap(), "mine");
+    assert!(
+        !home
+            .dir
+            .join(cache)
+            .join("__init__.cpython-314.pyc")
+            .exists()
+    );
     assert!(
         !home
             .dir

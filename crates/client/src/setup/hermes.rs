@@ -117,8 +117,17 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
                         .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
                 }
             }
+            // Hermes's Python caches bytecode for our __init__.py; drop only that cache.
+            let cache = hook.with_file_name("__pycache__");
+            for entry in fs::read_dir(&cache).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("__init__.") && name.ends_with(".pyc") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
             // Only empty folders go; one holding the user's files stays.
-            for folder in hook.ancestors().skip(1).take(2) {
+            for folder in std::iter::once(cache.as_path()).chain(hook.ancestors().skip(1).take(2)) {
                 let _ = fs::remove_dir(folder);
             }
             Ok(())
