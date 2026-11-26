@@ -94,13 +94,19 @@ impl Store {
             note_quarantine(&mut tx, row).await?;
         }
         tx.commit().await?;
+        let active = crate::memory::active_project_memory("m");
         let rows = sqlx::query(&format!(
             "UPDATE jobs SET status = 'running', claim_id = $2, attempts = attempts + 1, updated_at = now(),
                     lease_expires_at = now() + make_interval(secs => {JOB_LEASE_SECONDS})
               WHERE job_id IN (
-                    SELECT job_id FROM jobs
-                     WHERE kind = $1 AND ((status = 'pending' AND not_before <= now())
-                                       OR (status = 'running' AND lease_expires_at <= now()))
+                    SELECT j.job_id FROM jobs j
+                     WHERE j.kind = $1 AND ((j.status = 'pending' AND j.not_before <= now())
+                                       OR (j.status = 'running' AND j.lease_expires_at <= now()))
+                       AND CASE WHEN j.kind = 'distill' THEN NOT EXISTS (
+                           SELECT 1 FROM sessions s JOIN projects p ON p.project_id = s.context->>'capture_project_id'
+                            WHERE p.archived_at IS NOT NULL
+                              AND (octet_length(s.person_id)::text || ':' || s.person_id || s.session_id) = j.job_key)
+                       ELSE NOT EXISTS (SELECT 1 FROM memories m WHERE m.memory_id = j.job_key AND NOT {active}) END
                      ORDER BY not_before, job_id LIMIT $3 FOR UPDATE SKIP LOCKED)
               RETURNING {JOB_COLUMNS}"
         ))

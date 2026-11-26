@@ -10,7 +10,7 @@ brief and the memory graph.
 - `filter::{Filter, matches}`; `hybrid::{fuse, RRF_K}`; `gate::{keep, relevance, GateInput}` (the score is the absolute relevance times `1 + adjust`).
 - The store applies the request's project and kind inside every channel (`Narrow`) and caps the lexical legs; only a name in the query text can pass the gate through the entity channel.
 - `rank::{adjust, status_after_votes}` (adjustments capped at ±30 %); `pack::{pack, Cards, Hit}`.
-- `brief::session_brief` (at most 1,200 bytes); `graph::{build, node_cap, Graph}`.
+- `brief::session_brief` (at most 1,800 bytes); `graph::{build, node_cap, Graph}`.
 
 ## Depends on
 `memory`, `capture`, `process`.

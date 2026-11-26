@@ -26,4 +26,4 @@ score: number,
 /**
  * How many times this knowledge was saved. Omitted the first time.
  */
-seen?: number, };
+seen?: number, trust: string, };

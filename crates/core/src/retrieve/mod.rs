@@ -3,9 +3,12 @@
 //! (for the handoff id).
 
 pub mod brief;
+pub mod command;
 pub mod filter;
 pub mod gate;
 pub mod graph;
 pub mod hybrid;
 pub mod pack;
+pub mod prompt;
+
 pub mod rank;

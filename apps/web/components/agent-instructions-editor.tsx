@@ -11,10 +11,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { SOURCE_LABEL, byteCounter, changedFields, overLimit, sampleStart, sampleStop } from "@/lib/agent-instructions";
 import { cairn } from "@/lib/cairn";
 import type { AgentInstructions } from "@/lib/generated/AgentInstructions";
-import type { InstructionField } from "@/lib/generated/InstructionField";
 import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
 
-type Key = "session_instruction" | "stop_nudge";
+type Key = keyof Omit<AgentInstructions, "max_bytes">;
 
 const COPY: Record<Key, { title: string; help: string; preview: (text: string) => string; where: string }> = {
   session_instruction: {
@@ -29,10 +28,16 @@ const COPY: Record<Key, { title: string; help: string; preview: (text: string) =
     preview: (text) => sampleStop(text),
     where: "Shown to the agent at Stop (with 3 edited files here)",
   },
+  chat_instruction: {
+    title: "Hermes chat instruction",
+    help: "Hermes receives this on the first prompt of each Cairn gateway chat session.",
+    preview: sampleStart,
+    where: "Added after the chat brief",
+  },
 };
 
 /**
- * The two agent instruction texts at one scope: the global ones (`agent-instructions`) or a
+ * The agent instruction texts at one scope: the global ones (`agent-instructions`) or a
  * project's overrides (`projects/<id>/agent-instructions`). Everyone reads; `canEdit` is only what
  * the server will accept, and the server checks it again.
  */
@@ -47,14 +52,20 @@ export function AgentInstructionsEditor({
 }) {
   const router = useRouter();
   const [data, setData] = useState<AgentInstructions | null>(null);
-  const [draft, setDraft] = useState<Record<Key, string>>({ session_instruction: "", stop_nudge: "" });
+  const [draft, setDraft] = useState<Record<Key, string>>({
+    session_instruction: "", stop_nudge: "", chat_instruction: "",
+  });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   const adopt = useCallback((next: AgentInstructions) => {
     setData(next);
-    setDraft({ session_instruction: next.session_instruction.own ?? "", stop_nudge: next.stop_nudge.own ?? "" });
+    setDraft({
+      session_instruction: next.session_instruction.own ?? "",
+      stop_nudge: next.stop_nudge.own ?? "",
+      chat_instruction: next.chat_instruction?.own ?? "",
+    });
   }, []);
 
   useEffect(() => {
@@ -96,6 +107,7 @@ export function AgentInstructionsEditor({
   const changes = changedFields(draft, {
     session_instruction: data.session_instruction.own,
     stop_nudge: data.stop_nudge.own,
+    chat_instruction: data.chat_instruction?.own ?? null,
   });
   const invalid = (Object.keys(draft) as Key[]).some((key) => overLimit(draft[key], data.max_bytes));
   const clearLabel = scope === "project" ? "Clear override" : "Reset to default";
@@ -105,7 +117,7 @@ export function AgentInstructionsEditor({
       <p className="text-sm text-muted-foreground">
         {scope === "project"
           ? "These apply to agents working in this project. A field you leave empty uses the global text, then the built-in default."
-          : "These apply to every project unless a project sets its own. A field you leave empty uses the built-in default."}{" "}
+          : "Projects can override the session start line and Stop reminder. A field you leave empty uses the built-in default."}{" "}
         {canEdit
           ? ""
           : scope === "project"
@@ -113,7 +125,8 @@ export function AgentInstructionsEditor({
             : "Only a server admin can change them."}
       </p>
       {(Object.keys(COPY) as Key[]).map((key) => {
-        const field: InstructionField = data[key];
+        const field = data[key];
+        if (!field) return null;
         const copy = COPY[key];
         const typed = draft[key].trim();
         const shown = typed || field.inherited;

@@ -13,6 +13,8 @@ pub struct Project {
     pub created_at: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub archived_at: Option<i64>,
 }
 
 /// Repository and project names: non-empty after trimming, at most 512 bytes.

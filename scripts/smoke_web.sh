@@ -227,7 +227,7 @@ curl -fsS -H 'content-type: application/json' \
 
 project_json="$(curl -fsS -H 'content-type: application/json' \
   -H "authorization: Bearer ${device_token}" \
-  -d '{"repository":"cairn-demo","name":"Cairn Demo"}' \
+  -d '{"repository":"cairn-demo","name":"E2E Cairn Demo"}' \
   "${api}/cairn-memory/projects/init")"
 project_id="$(printf '%s' "$project_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project_id"])')"
 
@@ -332,6 +332,13 @@ PY
 curl -fsS -b "$owner_jar" -o "$workdir/fixes-page" "${web}/fixes"
 grep -q 'Fixes' "$workdir/fixes-page"
 curl -fsS -b "$owner_jar" "${web}/api/cairn/admin/fixes" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
+
+curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d '{"chat_instruction":"Check with the owner in this conversation."}' \
+  "${web}/api/cairn/agent-instructions" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["chat_instruction"]["source"] == "global"'
+curl -fsS -b "$owner_jar" "${web}/api/cairn/agent-instructions" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["chat_instruction"]["text"] == "Check with the owner in this conversation."'
 
 # An admin session creates accounts without its own cookie changing or the new token returned.
 register_headers="$workdir/register.headers"
@@ -450,7 +457,7 @@ projects = json.load(open(os.environ["PROJECTS_BODY"], encoding="utf-8"))
 match = [item for item in projects if item["project_id"] == os.environ["PROJECT_ID"]]
 assert len(match) == 1
 assert match[0]["role"] == "owner"
-assert match[0]["name"] == "Cairn Demo"
+assert match[0]["name"] == "E2E Cairn Demo"
 PY
 
 # The member list the Team & sharing tab reads: owner first, then members who joined by capturing.
@@ -543,8 +550,29 @@ owner_ok() {
     exit 1
   fi
 }
-owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Console decision\",\"summary\":\"Decision saved from the web console\",\"reason\":\"Web smoke verification\",\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
+owner_ok "save project memory" remember "{\"kind\":\"decision\",\"scope\":\"project\",\"title\":\"Preserve console branch history\",\"summary\":\"Display memories under their save branch in the console\",\"reason\":\"Web smoke verification\",\"fields\":{\"context\":\"Project branch history\"},\"context\":{\"project_id\":\"${project_id}\",\"repository\":\"cairn-demo\",\"branch\":\"feature-merge\"}}"
 console_promoted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$workdir/owner-post.body")"
+memories_url="${web}/api/cairn/memories?projectId=${project_id}&scope=project&branch=feature-merge"
+normal_body="$workdir/normal.body"
+doubted_body="$workdir/doubted.body"
+curl -fsS -o "$normal_body" -b "$owner_jar" "${memories_url}&trust=normal"
+curl -fsS -o "$doubted_body" -b "$owner_jar" "${memories_url}&trust=doubted"
+python3 - "$normal_body" "$doubted_body" "$console_promoted" <<'PY'
+import json, sys
+normal, doubted = [json.load(open(path)) for path in sys.argv[1:3]]
+assert [row["id"] for row in normal] == [sys.argv[3]], normal
+assert normal[0]["trust"] == normal[0]["trust_level"] == "normal"
+assert normal[0]["usage"] == dict(fetched=0, shown=0, pushed=0, push_used=0,
+                                  helpful=0, wrong=0, detail_opened=0,
+                                  last_used_at=None, last_shown_at=None)
+assert doubted == [], doubted
+PY
+owner_ok "pin memory" "memories/${console_promoted}/pin" '{"pinned":true}'
+python3 -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1]))["pinned_at"], int)' "$workdir/owner-post.body"
+curl -fsS -b "$owner_jar" "$memories_url" \
+  | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[0]["pinned_at"], int)'
+owner_ok "unpin memory" "memories/${console_promoted}/pin" '{"pinned":false}'
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["pinned_at"] is None' "$workdir/owner-post.body"
 branches_body="$workdir/branches.body"
 curl -fsS -o "$branches_body" -b "$owner_jar" "${web}/api/cairn/projects/${project_id}/branches"
 BRANCHES="$branches_body" python3 - <<'PY'
@@ -617,13 +645,31 @@ if [ "$dotdot_code" = "200" ]; then
   printf '%s\n' "a dot segment escaped the allowlist" >&2
   exit 1
 fi
-for page in dashboard memories activity graph projects settings "projects/${project_id}"; do
+for page in dashboard memories skills activity graph projects settings "projects/${project_id}"; do
   page_code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$owner_jar" "${web}/${page}")"
   if [ "$page_code" != "200" ]; then
     printf '%s\n' "${page} page status: ${page_code}" >&2
     exit 1
   fi
 done
+
+skill_api="${web}/api/cairn/skills"
+skill_id="$(curl -fsS -b "$owner_jar" -H 'content-type: application/json' \
+  -d '{"name":"e2e-web-skill","title":"E2E Web skill","description":"Rehearse project cutover","body":"Run the drill.","change_note":"E2E first version"}' \
+  "${skill_api}/create" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+curl -fsS -b "$owner_jar" "${skill_api}?query=cutover" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["results"][0]["name"] == "e2e-web-skill"'
+for action in archive restore; do
+  skill_status="$(curl -sS -o /dev/null -w '%{http_code}' -b "$member_accounts_jar" -X POST "${skill_api}/${skill_id}/${action}")"
+  if [ "$skill_status" != "403" ]; then
+    printf '%s\n' "a non-admin must not ${action} skills: ${skill_status}" >&2
+    exit 1
+  fi
+done
+curl -fsS -b "$owner_jar" -X POST "${skill_api}/${skill_id}/archive"
+curl -fsS -b "$owner_jar" "${skill_api}?archived=true" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["results"][0]["version"] == 1'
+curl -fsS -b "$owner_jar" -X POST "${skill_api}/${skill_id}/restore"
 
 if ! curl -fsS "${web}/" | grep -q 'cairn-theme'; then
   printf '%s\n' "the page does not carry the theme script" >&2

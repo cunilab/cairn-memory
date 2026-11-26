@@ -30,6 +30,17 @@ async fn migrate_twice_is_a_no_op() {
             "0012_always_active",
             "0013_link_origin_system",
             "0014_memory_owner_project_created",
+            "0015_memory_detail",
+            "0016_project_archive",
+            "0017_device_agents",
+            "0018_memory_usage",
+            "0019_session_shown",
+            "0020_device_agent_hermes",
+            "0021_push_usage",
+            "0022_memory_pins",
+            "0023_hermes_chat",
+            "0024_hermes_route_privacy",
+            "0025_skills",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -38,9 +49,9 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 20);
+    assert_eq!(tables, 27);
     // Everything lives in the test schema, nothing leaks into public.
-    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs')")
+    let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs','session_shown','push_usage','skills','skill_versions','session_skill_shown')")
         .fetch_one(db.store.pool())
         .await
         .unwrap();
@@ -934,6 +945,10 @@ async fn fixes_migration_additive() {
             "0014_memory_owner_project_created",
             include_str!("../../../migrations/0014_memory_owner_project_created.sql"),
         ),
+        (
+            "0019_session_shown",
+            include_str!("../../../migrations/0019_session_shown.sql"),
+        ),
     ] {
         sqlx::raw_sql(sql).execute(store.pool()).await.unwrap();
         sqlx::query("INSERT INTO schema_version(version) VALUES ($1)")
@@ -944,16 +959,18 @@ async fn fixes_migration_additive() {
     }
     sqlx::raw_sql("INSERT INTO accounts (person_id,email,password_hash) VALUES ('p','a@a','x');
         INSERT INTO web_sessions (session_id,person_id,token_hash,expires_at) VALUES ('w','p','hash',now());
-        INSERT INTO devices (device_id,person_id,name,token_hash) VALUES ('d','p','device','hash');
+        INSERT INTO devices (device_id,person_id,name,token_hash,agent) VALUES ('d','p','device','hash','claude');
         INSERT INTO audit_events (audit_id,person_id,action) VALUES ('a','p','test');
         INSERT INTO projects (project_id,owner_id,repository,name) VALUES ('pr','p','repo','project');
         INSERT INTO project_members (project_id,person_id) VALUES ('pr','p');
         INSERT INTO memories (memory_id,owner_id,scope,kind,title,summary,evidence_hash,identity_hash) VALUES
             ('m1','p','personal','fact','one','one','e1','i1'),('m2','p','personal','fact','two','two','e2','i2');
+        INSERT INTO session_shown(person_id,session_id,memory_id,source) VALUES
+            ('p','session1','m1','brief'),('p','session2','m1','topic'),('p','session3','m1','recall');
         INSERT INTO memory_aliases(memory_id,ord,source,text) VALUES ('m1',1,'agent','one');
         INSERT INTO entities(memory_id,kind,name) VALUES ('m1','term','one');
         INSERT INTO links(source_id,target_id,relation,origin) VALUES ('m1','m2','relates','agent');
-        INSERT INTO usage(memory_id) VALUES ('m1');
+        INSERT INTO usage(memory_id,fetched,helpful,wrong,last_used_at) VALUES ('m1',7,2,1,now());
         INSERT INTO usage_votes(memory_id,person_id,vote) VALUES ('m1','p','helpful');
         INSERT INTO sessions(person_id,session_id) VALUES ('p','s');
         INSERT INTO observations(person_id,event_id,session_id,role,source,content,content_hash,expires_at) VALUES ('p','e','s','user','hook','text','h',now());
@@ -1000,7 +1017,23 @@ async fn fixes_migration_additive() {
             .unwrap();
     store.migrate().await.unwrap();
     store.migrate().await.unwrap();
+    let pins: i64 = sqlx::query_scalar("SELECT count(*) FROM memories WHERE pinned_at IS NOT NULL")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(pins, 0, "existing memories start unpinned");
+
     versions.push("0011_fixes".into());
+    versions.push("0015_memory_detail".into());
+    versions.push("0016_project_archive".into());
+    versions.push("0017_device_agents".into());
+    versions.push("0018_memory_usage".into());
+    versions.push("0020_device_agent_hermes".into());
+    versions.push("0021_push_usage".into());
+    versions.push("0022_memory_pins".into());
+    versions.push("0023_hermes_chat".into());
+    versions.push("0024_hermes_route_privacy".into());
+    versions.push("0025_skills".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1008,6 +1041,26 @@ async fn fixes_migration_additive() {
             .await
             .unwrap();
     assert_eq!(versions, after_versions);
+    let project_is_active: bool =
+        sqlx::query_scalar("SELECT archived_at IS NULL FROM projects WHERE project_id = 'pr'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(project_is_active);
+    let usage: (i32, i32, i32, bool, i32, i32, bool) = sqlx::query_as(
+        "SELECT fetched, helpful, wrong, last_used_at IS NOT NULL, shown, detail_opened,
+                last_shown_at IS NULL FROM usage WHERE memory_id = 'm1'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(usage, (7, 2, 1, true, 0, 0, true));
+    // Three old ledger rows are not evidence of non-use: the memory starts unmuted, uncounted.
+    let pushes: i64 = sqlx::query_scalar("SELECT count(*) FROM push_usage")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(pushes, 0);
     for (table, expected) in tables.into_iter().zip(before) {
         let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
             .fetch_one(store.pool())
@@ -1015,12 +1068,40 @@ async fn fixes_migration_additive() {
             .unwrap();
         assert_eq!(count, expected, "{table}");
     }
+    let device: (String, String, String, String) = sqlx::query_as(
+        "SELECT person_id, name, token_hash, agent FROM devices WHERE device_id = 'd'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        device,
+        ("p".into(), "device".into(), "hash".into(), "claude".into())
+    );
+    for agent in ["grok", "antigravity", "hermes"] {
+        sqlx::query("INSERT INTO devices (device_id,person_id,name,token_hash,agent) VALUES ($1,'p',$1,$1,$1)")
+            .bind(agent)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    assert!(
+        sqlx::query("UPDATE devices SET agent = 'unknown' WHERE device_id = 'd'")
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
     let after: Vec<String> =
         sqlx::query_scalar("SELECT memory_id FROM memories ORDER BY memory_id")
             .fetch_all(store.pool())
             .await
             .unwrap();
     assert_eq!(ids, after);
+    let details: Vec<String> = sqlx::query_scalar("SELECT detail FROM memories ORDER BY memory_id")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(details, ["", ""]);
     let version: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version='0011_fixes')",
     )

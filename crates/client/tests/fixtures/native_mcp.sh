@@ -8,6 +8,7 @@ state="$HOME/.$agent-fixture-state"
 action=$2
 if [ "$agent" = codex ]; then
   [ -d "${CODEX_HOME:-$HOME/.codex}" ] || { echo "no codex home" >&2; exit 9; }
+  config="${CODEX_HOME:-$HOME/.codex}/config.toml"
 fi
 if [ "$action" = list ]; then
   [ "$agent" = codex ] && [ "$3" = --json ] || exit 2
@@ -15,6 +16,10 @@ if [ "$action" = list ]; then
   exit 0
 fi
 [ "$3" = cairn ] || exit 2
+if [ "$agent" = codex ] && [ -f "$config" ]; then
+  awk '/^\[/ { managed = /^\[mcp_servers\.cairn[.\]]/ } !managed' "$config" > "$config.tmp"
+  mv "$config.tmp" "$config"
+fi
 if [ "$action" = remove ]; then rm -f "$state"; exit 0; fi
 [ "$action" = add ] || exit 2
 shift 3
@@ -29,6 +34,9 @@ while [ "$1" != -- ]; do
 done
 shift
 printf '{"type":"stdio","command":"%s","args":["%s"],"env":{%s}}\n' "$1" "$2" "$env" > "$state"
+if [ "$agent" = codex ]; then
+  printf '\n[mcp_servers.cairn]\ncommand = "%s"\nargs = ["%s"]\nenv = { CAIRN_SETUP_MANAGED = "1" }\n' "$1" "$2" >> "$config"
+fi
 if [ "$agent" = opencode ]; then
   dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
   if [ ! -e "$dir/opencode.json" ] && [ ! -e "$dir/opencode.jsonc" ]; then

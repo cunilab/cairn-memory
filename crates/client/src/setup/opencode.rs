@@ -1,8 +1,7 @@
 //! OpenCode: `AGENTS.md` block, the plugin that runs `cairn hook`, and the MCP entry through
 //! `opencode mcp add`. Removal edits `opencode.json[c]` by token span, keeping its comments.
 
-use super::{Ctx, Plan, R, add_args, block, jsonc, owned, read, require_cli};
-use crate::tools;
+use super::{Ctx, Plan, R, add_args, instruction_file, jsonc, owned, read, require_cli};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
@@ -71,11 +70,7 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
             ctx,
         ));
     }
-    let agents = base.join("AGENTS.md");
-    files.push((
-        agents.clone(),
-        block(&read(&agents)?, tools::instructions(), ctx.remove)?,
-    ));
+    files.push(instruction_file(base.join("AGENTS.md"), ctx.remove)?);
     let (remove, rendered) = (ctx.remove, render(ctx.exe, &ctx.config.to_string_lossy()));
     let after: super::After = Box::new(move |files| {
         // The native command may have rewritten the file: read what is there now.

@@ -4,6 +4,7 @@
 
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::Kind;
+use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::filter::Filter;
 use cairn_store::testing::{TestDb, save_input};
 
@@ -201,14 +202,14 @@ async fn a_context_entity_does_not_pass_the_gate() {
 }
 
 #[tokio::test]
-async fn brief_keeps_handoff_preferences_and_file_rules_under_newer_rules() {
+async fn brief_keeps_proven_essentials_ahead_of_hundreds_of_newer_rules() {
     let Some(db) = TestDb::new().await else {
         return;
     };
     let store = &db.store;
     let me = db.person("me").await;
     let (project, _) = store
-        .init_project(&me, "github.com/acme/brief", None)
+        .init_project(&me, "github.com/acme/brief", Some("E2E Brief ranking"))
         .await
         .unwrap();
     let ctx = WorkContext {
@@ -239,7 +240,12 @@ async fn brief_keeps_handoff_preferences_and_file_rules_under_newer_rules() {
     .unwrap();
     let preference = save(serde_json::json!({"kind":"preference","scope":"personal","title":"Terse replies","summary":"Keep answers short. is a summary of the test","reason":"r and the test says why"})).await;
     let file_rule = save(serde_json::json!({"kind":"rule","scope":"project","title":"Queue retries are capped","summary":"Never retry a job more than five times.","reason":"r and the test says why"})).await;
-    // 350 newer rules with no file: the old single `LIMIT 300` query never saw the three above.
+    // These proven memories must outrank every normal candidate, even past the old SQL limits.
+    sqlx::query("UPDATE memories SET proof_count = 3 WHERE memory_id = ANY($1)")
+        .bind([&handoff, &preference, &file_rule].map(String::as_str))
+        .execute(store.pool())
+        .await
+        .unwrap();
     bulk(
         &db,
         &me,
@@ -253,9 +259,10 @@ async fn brief_keeps_handoff_preferences_and_file_rules_under_newer_rules() {
     .await;
 
     let brief = store
-        .brief(&me, &ctx, &["src/jobs/queue.rs".to_owned()])
+        .brief(&me, &ctx, None, BriefBudget::Extended)
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     for (what, id) in [
         ("handoff", &handoff),
         ("preference", &preference),

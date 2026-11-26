@@ -146,6 +146,9 @@ pub fn isolate(command: &mut Command, config_home: &Path) {
         .env("XDG_CONFIG_HOME", config_home)
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("GROK_HOME")
+        .env_remove("HERMES_HOME")
+        .env_remove("HERMES_DATA_DIR_SUFFIX")
         .env("CAIRN_NO_UPDATE_CHECK", "1");
 }
 

@@ -196,6 +196,7 @@ impl Store {
     ) -> Result<bool> {
         validate_vector(vector)?;
         let mut tx = self.pool.begin().await?;
+        crate::project::lock_memory_projects(&mut tx, &[memory_id]).await?;
         if let Some((ord, content_hash)) = parse_alias_hash(source_hash) {
             let text: Option<String> = sqlx::query_scalar("SELECT a.text FROM memory_aliases a JOIN memories m ON m.memory_id=a.memory_id WHERE a.memory_id=$1 AND a.ord=$2 AND m.status <> 'forgotten' FOR UPDATE OF a")
                 .bind(memory_id).bind(ord).fetch_optional(&mut *tx).await?;

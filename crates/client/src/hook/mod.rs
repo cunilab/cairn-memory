@@ -1,37 +1,46 @@
 //! `cairn hook <Event> [--agent a] [--config p] [--cairn-managed]`: the capture and injection
 //! hook of every agent host (docs/reference/hook.md#events). The host's event arrives as JSON on stdin; stdout
-//! carries only an injection reply. A failure writes one stderr line and still exits 0, so a
-//! hook can never break the host.
+//! carries only an injection reply or a native memory write decision. A failure writes one
+//! stderr line and still exits 0.
 
 mod event;
-mod git;
+pub(crate) mod git;
 mod inject;
 mod outbox;
 mod readonly;
 mod state;
 
-use crate::{Client, Config, Error, selected_config_path, write_private};
+use crate::{Client, Config, Error, claude_memory, selected_config_path, update, write_private};
 use cairn_core::account::ClientKind;
-use cairn_core::capture::{CaptureKind, WorkContext, redact_work_context};
+use cairn_core::capture::{
+    CaptureKind, ChatContext, WorkContext, redact_sensitive_content, redact_work_context,
+};
 use cairn_core::id::{new_id, now_seconds, sha256_hex};
 use cairn_core::instructions::{
-    DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE, fill_correction_nudge, fill_stop_nudge,
+    DEFAULT_CHAT_INSTRUCTION, DEFAULT_SESSION_INSTRUCTION, DEFAULT_STOP_NUDGE,
+    fill_correction_nudge, fill_stop_nudge,
 };
 use cairn_core::process::distill::{
     HANDOFF_FILES_MAX, first_correction, has_typed_line, is_test_command,
 };
+use cairn_core::process::entities::{ENTITY_CAP, is_symbol, normalize_command};
+use cairn_core::retrieve::command::error_tail;
+use cairn_core::retrieve::prompt::{PROMPT_QUERY_MAX_BYTES, should_recall};
 use event::{Capture, Payload};
 use serde_json::{Value, json};
 use state::{Locked, SessionState};
 use std::cell::OnceCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const OBSERVE: &str = "/cairn-memory/observe";
+const RECALL_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
 const DOWN_SECONDS: i64 = 30;
+/// The first server version that keeps chat memory separate (`context.chat`).
+const CHAT_SCOPE_SERVER: update::Version = (0, 1, 10);
 const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 /// Already-dirty paths recorded at SessionStart.
@@ -74,6 +83,7 @@ struct Options {
     agent: String,
     config: Option<PathBuf>,
     managed: bool,
+    keep_native_memory: bool,
 }
 
 impl Options {
@@ -86,6 +96,7 @@ impl Options {
             agent: String::new(),
             config: None,
             managed: false,
+            keep_native_memory: false,
         };
         let mut rest = rest.iter();
         while let Some(flag) = rest.next() {
@@ -97,6 +108,11 @@ impl Options {
                 "--agent" => options.agent = value()?.clone(),
                 "--config" => options.config = Some(PathBuf::from(value()?)),
                 "--cairn-managed" => options.managed = true,
+                crate::setup::KEEP_NATIVE_MEMORY
+                    if matches!(options.event.as_str(), "SessionStart" | "PreToolUse") =>
+                {
+                    options.keep_native_memory = true;
+                }
                 other => return Err(Error::Input(format!("unexpected hook option {other:?}"))),
             }
         }
@@ -117,14 +133,73 @@ impl Options {
 /// Returns the exit code. `args` is everything after `hook`.
 pub fn run(args: &[String]) -> Result<i32, Error> {
     let options = Options::parse(args)?;
-    if let Err(message) = session(&options) {
+    // Grok imports Claude's hooks. Its native Cairn hooks own capture when installed.
+    if options.agent == "claude"
+        && options.managed
+        && std::env::var_os("GROK_HOOK_EVENT").is_some()
+        && std::env::home_dir().is_some_and(|home| crate::setup::grok::hooks_installed(&home))
+    {
+        return Ok(0);
+    }
+    let handle = session(&options);
+    if let Err(message) = handle {
         eprintln!("cairn hook: {message}");
     }
     Ok(0)
 }
 
+fn guard_native_memory(payload: &Payload, tool: &event::Tool<'_>) {
+    let key = match payload.text("tool_name") {
+        Some("Write" | "Edit" | "MultiEdit") => "file_path",
+        Some("NotebookEdit") => "notebook_path",
+        _ => return,
+    };
+    if let Some(path) = tool.input_text(key)
+        && claude_memory::is_memory_path(Path::new(path), payload.cwd().map(Path::new))
+    {
+        println!(
+            "{}",
+            json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Claude memory files are replaced by Cairn; save this with memory_save instead."
+            }})
+        );
+    }
+}
+
 fn session(options: &Options) -> Result<(), String> {
-    crate::warn_ignored_legacy_config();
+    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
+    let mut payload = Payload::parse(&raw)?;
+    if options.agent == "hermes" {
+        payload.normalize_hermes();
+    }
+    let chat = if options.agent == "hermes" {
+        payload
+            .value("chat_context")
+            .map(|value| serde_json::from_value::<ChatContext>(value.clone()))
+            .transpose()
+            .map_err(|_| "invalid Hermes chat context")?
+    } else {
+        None
+    };
+    if options.event == "PreToolUse" {
+        // A running Hermes plugin from before the update may still call this and discard stdout.
+        if options.agent == "hermes" {
+            return Ok(());
+        }
+        let Some(tool) = payload.tool() else {
+            return Ok(());
+        };
+        if tool.shell_command().is_none() {
+            if options.agent == "claude" && !options.keep_native_memory {
+                guard_native_memory(&payload, &tool);
+            }
+            return Ok(());
+        }
+    } else {
+        crate::warn_ignored_legacy_config();
+    }
     let path = options.config_path().map_err(|e| e.to_string())?;
     let config = match Config::load_from(&path) {
         Ok(config) => config,
@@ -139,14 +214,12 @@ fn session(options: &Options) -> Result<(), String> {
     {
         return Err("device credential must be one header token".to_owned());
     }
-    let raw = std::io::read_to_string(std::io::stdin()).map_err(|_| "cannot read hook input")?;
-    let payload = Payload::parse(&raw)?;
     let cwd = match payload.cwd() {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().map_err(|e| format!("no working folder: {e}"))?,
     };
-    let top = git::top_level(&cwd);
-    if git::ignored(&cwd, top.as_deref()) {
+    let top = chat.is_none().then(|| git::top_level(&cwd)).flatten();
+    if chat.is_none() && git::ignored(&cwd, top.as_deref()) {
         return Ok(());
     }
     let session_id = payload
@@ -163,6 +236,7 @@ fn session(options: &Options) -> Result<(), String> {
         agent: &options.agent,
         config,
         config_dir,
+        chat,
         key,
         session_id,
         cwd,
@@ -171,8 +245,39 @@ fn session(options: &Options) -> Result<(), String> {
         check: OnceCell::new(),
         payload,
     };
-    if let Some(text) = hook.handle()? {
-        println!("{}", inject::output(hook.event, &text));
+    let chat_tool = matches!(hook.event, "ChatSearch" | "ChatSave" | "ChatSkill");
+    // Fail closed: a server older than 0.1.10 ignores `context.chat` and would treat chat
+    // content as ordinary personal memory, so chat memory stays off until support is confirmed.
+    if hook.chat.is_some() && !hook.chat_scope_supported() {
+        if chat_tool {
+            println!(
+                "{}",
+                json!({"error": "Cairn chat memory is off: this server does not keep chats separate."})
+            );
+        }
+        return Ok(());
+    }
+    if chat_tool {
+        if hook.chat.is_none() {
+            return Err("Hermes chat tools require chat context".into());
+        }
+        let reply = hook.chat_tool().unwrap_or_else(|error| {
+            let message = match error {
+                Error::Input(message)
+                | Error::Status {
+                    status: 400 | 404 | 409,
+                    message,
+                } => redact_sensitive_content(&message),
+                _ => "Cairn could not complete this chat request.".into(),
+            };
+            json!({"error": message})
+        });
+        println!("{reply}");
+        return Ok(());
+    }
+    let text = hook.handle()?;
+    if let Some(reply) = inject::output(hook.agent, hook.event, text.as_deref()) {
+        println!("{reply}");
     }
     hook.report_repo_state();
     Ok(())
@@ -180,10 +285,11 @@ fn session(options: &Options) -> Result<(), String> {
 
 struct Hook<'a> {
     event: &'a str,
-    /// `claude`, `codex` or `opencode`: sent in the user agent so the console knows the device.
+    /// Sent in the user agent so the console knows the device's host.
     agent: &'a str,
     config: Config,
     config_dir: PathBuf,
+    chat: Option<ChatContext>,
     key: String,
     session_id: String,
     cwd: PathBuf,
@@ -198,10 +304,14 @@ struct Hook<'a> {
 impl Hook<'_> {
     /// The text to inject, if the event injects any.
     fn handle(&self) -> Result<Option<String>, String> {
-        self.note_automation();
+        if !matches!(self.event, "PreToolUse" | "PostToolUseFailure") {
+            self.note_automation();
+        }
         match self.event {
+            "PreToolUse" => Ok(self.command_recall(false)),
+            "PostToolUseFailure" => Ok(self.command_recall(true)),
             "SessionStart" => Ok(self.start()),
-            "UserPromptSubmit" => {
+            "UserPromptSubmit" | "PreInvocation" => {
                 let prompt = self.payload.prompt();
                 if let Some(capture) = &prompt {
                     if has_typed_line(&capture.content) {
@@ -209,10 +319,64 @@ impl Hook<'_> {
                     }
                     self.note_correction(&capture.content);
                 }
-                self.capture(prompt).map(|()| None)
+                let capture_result = self.capture(prompt);
+                let mut recall = self
+                    .payload
+                    .prompt_text()
+                    .and_then(|text| self.prompt_recall(text));
+                let mut pending = Vec::new();
+                if self.agent == "grok" && recall.is_some() {
+                    self.with_state(|s| s.pending_prompt_recall = recall.take());
+                }
+                if self.event == "PreInvocation" {
+                    pending = self
+                        .with_state(|s| std::mem::take(&mut s.pending_command_recall))
+                        .unwrap_or_default();
+                }
+                pending.extend(recall);
+                if pending.is_empty() {
+                    capture_result?;
+                    Ok(None)
+                } else {
+                    if let Err(error) = capture_result {
+                        eprintln!("cairn hook: {error}");
+                    }
+                    Ok(Some(pending.join("\n")))
+                }
             }
-            "PostToolUse" => self.tool(),
+            "PostToolUse" => {
+                let brief = (self.agent == "grok"
+                    && self
+                        .with_state(|s| !std::mem::replace(&mut s.grok_brief_shown, true))
+                        .unwrap_or(false))
+                .then(|| self.brief())
+                .flatten();
+                let topic = self.tool()?;
+                let prompt = (self.agent == "grok")
+                    .then(|| {
+                        self.with_state(|s| s.pending_prompt_recall.take())
+                            .flatten()
+                    })
+                    .flatten();
+                let warning = (self.agent == "hermes")
+                    .then(|| self.command_recall(false))
+                    .flatten();
+                let mut recall = self.command_recall(true);
+                if self.agent == "antigravity"
+                    && let Some(text) = recall.take()
+                {
+                    self.with_state(|s| s.pending_command_recall.push(text));
+                }
+                let text: Vec<_> = [brief, prompt, topic, warning, recall]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                Ok((!text.is_empty()).then(|| text.join("\n")))
+            }
             "Stop" | "SubagentStop" => {
+                if self.agent == "antigravity" && self.payload.flag("fullyIdle") {
+                    self.with_state(|s| s.last_prompt_recall = None);
+                }
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
                 }
@@ -245,7 +409,85 @@ impl Hook<'_> {
         }
     }
 
+    fn chat_tool(&self) -> Result<Value, Error> {
+        let arguments = self
+            .payload
+            .value("arguments")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Error::Input("chat tool arguments must be an object".into()))?;
+        if self.event == "ChatSkill" {
+            let tool = self
+                .payload
+                .value("skill_tool")
+                .and_then(Value::as_str)
+                .and_then(|name| {
+                    crate::tools::SKILL_TOOLS
+                        .iter()
+                        .find(|tool| tool.name == name)
+                })
+                .ok_or_else(|| Error::Input("unknown chat skill tool".into()))?;
+            let schema = (tool.schema)();
+            let body: serde_json::Map<_, _> = arguments
+                .iter()
+                .filter(|(key, _)| schema["properties"].get(key.as_str()).is_some())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            return self.post(
+                &format!("/cairn-memory{}", tool.route),
+                &Value::Object(body),
+            );
+        }
+        let (route, keys): (&str, &[&str]) = if self.event == "ChatSearch" {
+            ("/cairn-memory/search", &["query"])
+        } else {
+            (
+                "/cairn-memory/remember",
+                &["kind", "title", "summary", "reason", "fields"],
+            )
+        };
+        let mut body = serde_json::Map::new();
+        for key in keys {
+            if let Some(value) = arguments.get(*key) {
+                body.insert((*key).to_owned(), value.clone());
+            }
+        }
+        let mut work = self.work_context();
+        if let Some(project) = arguments.get("project") {
+            work.project_id = Some(
+                project
+                    .as_str()
+                    .ok_or_else(|| {
+                        Error::Input("project must be a project ID or exact name".into())
+                    })?
+                    .to_owned(),
+            );
+        }
+        body.insert("context".into(), json!(work));
+        self.post(route, &Value::Object(body))
+    }
+
+    /// Asked on every chat hook call, so a server rollback turns chat memory off at once.
+    fn chat_scope_supported(&self) -> bool {
+        !self.server_is_down()
+            && Client::identified(
+                self.config.clone(),
+                RECALL_TIMEOUT,
+                self.agent,
+                ClientKind::Hook,
+            )
+            .get("/cairn-memory/health")
+            .ok()
+            .and_then(|health| health["version"].as_str().and_then(update::parse_version))
+            .is_some_and(|version| version >= CHAT_SCOPE_SERVER)
+    }
+
     fn work_context(&self) -> WorkContext {
+        if let Some(chat) = &self.chat {
+            return WorkContext {
+                chat: Some(chat.clone()),
+                ..WorkContext::default()
+            };
+        }
         self.context
             .get_or_init(|| git::work_context(&self.cwd, self.top.as_deref()))
             .clone()
@@ -323,12 +565,24 @@ impl Hook<'_> {
 
     fn start(&self) -> Option<String> {
         state::sweep(&self.state_dir());
-        let dirty = git::dirty_files(&self.cwd, BASELINE_MAX);
-        self.with_state(|state| state.baseline_dirty = dirty);
+        let dirty = if self.chat.is_some() {
+            Vec::new()
+        } else {
+            git::dirty_files(&self.cwd, BASELINE_MAX)
+        };
+        self.with_state(|state| {
+            state.baseline_dirty = dirty;
+            state.grok_brief_shown = false;
+        });
+        (self.agent != "grok").then(|| self.brief()).flatten()
+    }
+
+    fn brief(&self) -> Option<String> {
         let body = json!({
             "session_id": self.session_id,
             "context": self.work_context(),
-            "recent_files": git::recent_files(&self.cwd),
+            "recent_files": if self.chat.is_some() { Vec::new() } else { git::recent_files(&self.cwd) },
+            "extended_brief": true,
         });
         let reply = match self.post("/cairn-memory/session/brief", &body) {
             Ok(reply) => reply,
@@ -337,10 +591,14 @@ impl Hook<'_> {
                     "Cairn brief unavailable; use memory tools when connected",
                     &error,
                 );
+                if self.chat.is_some() {
+                    return Some(DEFAULT_CHAT_INSTRUCTION.to_owned());
+                }
                 return self
                     .config
                     .nudge()
-                    .then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
+                    .then_some(DEFAULT_SESSION_INSTRUCTION)
+                    .map(str::to_owned);
             }
         };
         if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
@@ -369,7 +627,13 @@ impl Hook<'_> {
         if let Some(id) = resolved.clone() {
             self.with_state(|s| s.project_id = Some(id));
         }
-        let line = if !self.config.nudge() {
+        let line = if self.chat.is_some() {
+            Some(inject::server_text(
+                &reply,
+                "chat_instruction",
+                DEFAULT_CHAT_INSTRUCTION,
+            ))
+        } else if !self.config.nudge() {
             None
         } else {
             let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
@@ -462,6 +726,7 @@ impl Hook<'_> {
         self.session_automated()
             || self.payload.text("agent_id").is_some()
             || self.payload.text("agent_type").is_some()
+            || self.payload.text("subagentType").is_some()
             || self.event == "SubagentStop"
     }
 
@@ -486,8 +751,15 @@ impl Hook<'_> {
     /// subagent session, not for OpenCode, and not when the stop text is `off`.
     fn stop_nudge(&self) -> Option<String> {
         if self.payload.flag("stop_hook_active")
+            || self.payload.flag("stopHookActive")
+            || (self.agent == "grok"
+                && matches!(
+                    self.payload.text("reason"),
+                    Some("channel_closed" | "shutdown")
+                ))
+            || (self.agent == "antigravity" && !self.payload.flag("fullyIdle"))
             || self.automated()
-            || self.agent == "opencode"
+            || matches!(self.agent, "opencode" | "hermes")
             || !self.nudging()
         {
             return None;
@@ -562,6 +834,12 @@ impl Hook<'_> {
         let Some(tool) = self.payload.tool() else {
             return Ok(None);
         };
+        if matches!(self.agent, "antigravity" | "hermes")
+            && tool.is_file_tool()
+            && tool.ok() == Some(false)
+        {
+            return Ok(None);
+        }
         if let Some(mut lookup) = tool.lookup() {
             lookup["session_id"] = json!(self.session_id);
             let _ = self.post("/cairn-memory/session/lookup", &lookup);
@@ -580,7 +858,13 @@ impl Hook<'_> {
         // and per-session caps.
         if let Some(given) = tool.read_path() {
             let path = git::repo_relative(given, &self.cwd, self.top.as_deref());
-            return Ok(path.and_then(|path| self.topic(&path)));
+            return Ok(path.and_then(|path| {
+                let symbol = tool
+                    .input_text("symbol")
+                    .filter(|symbol| symbol.len() <= 200);
+                let text = symbol.map(redact_sensitive_content).unwrap_or_default();
+                self.topic(&path, &text)
+            }));
         }
         if tool.is_read_only() {
             return Ok(None);
@@ -609,66 +893,177 @@ impl Hook<'_> {
                     continue;
                 };
                 self.with_state(|s| s.remember_edit(&path));
-                self.capture(Some(tool.edit(&path, &new_text)))?;
-                notes.extend(self.topic(&path));
+                let capture = tool.edit(&path, &new_text);
+                let text = capture
+                    .content
+                    .split_once('\n')
+                    .map_or("", |(_, text)| text)
+                    .to_owned();
+                self.capture(Some(capture))?;
+                notes.extend(self.topic(&path, &text));
             }
             return Ok((!notes.is_empty()).then(|| notes.join("\n")));
         }
         self.capture(tool.command()).map(|()| None)
     }
 
+    fn prompt_recall(&self, text: &str) -> Option<String> {
+        if !should_recall(text) || self.server_is_down() {
+            return None;
+        }
+        let prompt = redact_sensitive_content(text);
+        let prompt = event::truncate(&prompt, PROMPT_QUERY_MAX_BYTES);
+        let wanted = self.with_state(|s| {
+            if s.prompt_budget_spent {
+                return false;
+            }
+            if self.event == "PreInvocation" {
+                let key = sha256_hex(&[prompt]);
+                if s.last_prompt_recall.as_ref() == Some(&key) {
+                    return false;
+                }
+                s.last_prompt_recall = Some(key);
+            }
+            true
+        })?;
+        if !wanted {
+            return None;
+        }
+        let mut context = self.work_context();
+        // Only this project's identity is needed; prompt text never goes through capture here.
+        context = WorkContext {
+            project_id: context.project_id.take(),
+            branch: context.branch.take(),
+            chat: context.chat.take(),
+            ..WorkContext::default()
+        };
+        let body = json!({"prompt": prompt, "session_id": self.session_id, "context": context});
+        let reply = Client::identified(
+            self.config.clone(),
+            RECALL_TIMEOUT,
+            self.agent,
+            ClientKind::Hook,
+        )
+        .post("/cairn-memory/session/prompt-recall", &body)
+        .ok()?;
+        if reply["budget_spent"] == true {
+            self.with_state(|s| s.prompt_budget_spent = true);
+        }
+        let text = reply["text"].as_str()?;
+        (!text.is_empty() && text.len() <= inject::TOPIC_MAX_BYTES).then(|| text.to_owned())
+    }
+
+    /// This lookup has a short independent deadline and never queues observations or logs.
+    fn command_recall(&self, failed: bool) -> Option<String> {
+        let tool = self.payload.tool()?;
+        let command = tool.shell_command()?;
+        let error_tail = if failed {
+            Some(error_tail(
+                tool.failure_text(self.event == "PostToolUseFailure")?,
+            ))
+        } else {
+            None
+        };
+        let command = normalize_command(&redact_sensitive_content(command));
+        if command.is_empty() || command.chars().count() > 200 || self.server_is_down() {
+            return None;
+        }
+        let project_id = if self.chat.is_some() {
+            self.payload.text("project_id").map(str::to_owned)
+        } else {
+            self.top.as_deref().and_then(git::project_id)
+        };
+        let mut body = json!({
+            "command": command,
+            "session_id": self.session_id,
+            "project_id": project_id,
+            "error_tail": error_tail,
+        });
+        if let Some(chat) = &self.chat {
+            body["chat"] = json!(chat);
+        }
+        let reply = Client::identified(
+            self.config.clone(),
+            RECALL_TIMEOUT,
+            self.agent,
+            ClientKind::Hook,
+        )
+        .post("/cairn-memory/session/command-recall", &body)
+        .ok()?;
+        let text = reply["text"].as_str()?;
+        if failed && !text.is_empty() {
+            self.with_state(|s| s.command_error_recalled = true);
+        }
+        (!text.is_empty() && text.len() <= inject::TOPIC_MAX_BYTES).then(|| text.to_owned())
+    }
+
     /// The note text for the first edit of `path`, within the per-session caps.
-    fn topic(&self, path: &str) -> Option<String> {
+    fn topic(&self, path: &str, tool_text: &str) -> Option<String> {
+        if matches!(self.agent, "antigravity" | "hermes") {
+            return None; // The host discards context returned from PostToolUse.
+        }
         // The lookup is reserved before the request, so a failing server is not asked without end.
         let wanted = self.with_state(|s| {
             let wanted = !s.topics.iter().any(|seen| seen == path)
                 && s.topics_injected < inject::TOPICS_PER_SESSION
                 && s.topic_lookups < inject::TOPIC_LOOKUPS_PER_SESSION;
-            s.topic_lookups += u8::from(wanted);
+            if wanted {
+                s.topic_lookups += 1;
+                s.topics_injected += 1;
+                s.remember_topic(path);
+            }
             wanted
         })?;
         if !wanted {
             return None;
         }
-        let body = json!({"path": path, "context": self.work_context()});
+        let mut context = self.work_context();
+        for token in tool_text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':') {
+            let token = token.trim_matches(':');
+            if token.len() <= 200
+                && is_symbol(token)
+                && !context.symbols.iter().any(|symbol| symbol == token)
+            {
+                context.symbols.push(token.to_owned());
+                if context.symbols.len() == ENTITY_CAP {
+                    break;
+                }
+            }
+        }
+        let body = json!({"path": path, "session_id": self.session_id, "context": context});
         let reply = match self.post("/cairn-memory/session/topic", &body) {
             Ok(reply) => reply,
-            // Not marked seen: the next edit of this path asks again, while lookups remain.
             Err(error) => {
+                self.with_state(|s| {
+                    s.topics.retain(|seen| seen != path);
+                    s.topics_injected = s.topics_injected.saturating_sub(1);
+                });
                 self.warn("Cairn topic notes unavailable", &error);
                 return None;
             }
         };
-        let notes: Vec<(String, String)> = reply["notes"]
+        let notes: Vec<(&str, &str, &str, &str)> = reply["notes"]
             .as_array()
             .map(|notes| {
                 notes
                     .iter()
                     .filter_map(|note| {
-                        let text = |key: &str| note[key].as_str().unwrap_or_default().to_owned();
-                        Some((text("title"), text("summary")))
-                            .filter(|(title, _)| !title.is_empty())
+                        let text = |key: &str| note[key].as_str().unwrap_or_default();
+                        Some((text("title"), text("summary"), text("why"), text("age")))
+                            .filter(|(title, ..)| !title.is_empty())
                     })
                     .collect()
             })
             .unwrap_or_default();
         let text = match reply["card"].as_str().filter(|card| !card.is_empty()) {
             Some(card) => inject::card(card),
-            None => inject::topic(path, &notes),
+            None => inject::topic(path, &notes).0,
         };
-        let keep = self.with_state(|s| {
-            // A parallel hook of this session may have answered first: one note per path.
-            if s.topics.iter().any(|seen| seen == path) {
-                return false;
-            }
-            s.remember_topic(path);
-            let fits = !text.is_empty() && s.topics_injected < inject::TOPICS_PER_SESSION;
-            if fits {
-                s.topics_injected += 1;
-            }
-            fits
-        });
-        keep.unwrap_or(false).then_some(text)
+        if text.is_empty() {
+            self.with_state(|s| s.topics_injected = s.topics_injected.saturating_sub(1));
+            return None;
+        }
+        Some(text)
     }
 
     /// Sends one typed capture unless this session already sent the same content. A transient
@@ -682,6 +1077,9 @@ impl Hook<'_> {
     /// Paths dirty since SessionStart, plus tool edits, capped. Skipped when that set is empty
     /// or the same set was already sent. `outside_edits` rides along as a count.
     fn capture_changed_files(&self) {
+        if self.chat.is_some() {
+            return;
+        }
         let cwd = self.cwd.clone();
         let Some(Some((files, outside, hash))) = self.with_state(|state| {
             let files = changed_paths(state, &cwd);
@@ -714,7 +1112,7 @@ impl Hook<'_> {
         };
         let (event_id, hash) = if capture.kind == CaptureKind::Command {
             // A repeat execution has a new tool id. The outbox retains the id assigned here.
-            let event_id = self.payload.text("tool_use_id").map_or_else(
+            let event_id = self.payload.tool_use_id().map_or_else(
                 || new_id("hk"),
                 |id| {
                     format!(
@@ -765,7 +1163,7 @@ impl Hook<'_> {
                 }
                 remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
-                    outbox.replay(&self.config, self.agent, &event_id);
+                    outbox.replay(&self.config, self.agent, &event_id, self.chat.is_some());
                 }
                 return Ok(());
             }
@@ -791,7 +1189,10 @@ impl Hook<'_> {
     /// Keeps the session's work: on a stored result `dirty` clears unless more work arrived
     /// while the request ran.
     fn checkpoint(&self, generation: u64) {
-        let body = json!({"session_id": self.session_id});
+        let mut body = json!({"session_id": self.session_id});
+        if let Some(chat) = &self.chat {
+            body["chat"] = json!(chat);
+        }
         match self.post("/cairn-memory/session/checkpoint", &body) {
             Ok(reply)
                 if matches!(
@@ -820,12 +1221,14 @@ impl Hook<'_> {
             .map_err(|message| eprintln!("cairn hook: {message}"))
             .ok()?;
         let worked = locked.state.worked;
+        let used_recall = locked.state.command_error_recalled;
         let nudged = locked.state.nudged;
         let saved = locked.state.saved;
         let automated = locked.state.automated
             || Self::env_automated()
             || self.payload.text("agent_id").is_some()
-            || self.payload.text("agent_type").is_some();
+            || self.payload.text("agent_type").is_some()
+            || self.payload.text("subagentType").is_some();
         drop(locked);
         if worked {
             self.capture_changed_files();
@@ -833,9 +1236,11 @@ impl Hook<'_> {
         if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
             locked.delete();
         }
-        if worked {
+        if worked || used_recall || self.chat.is_some() {
             let mut body = json!({"session_id": self.session_id});
-            if !automated {
+            if let Some(chat) = &self.chat {
+                body["chat"] = json!(chat);
+            } else if !automated {
                 body["nudge_asked"] = json!(nudged);
                 body["nudge_saved"] = json!(saved);
             }

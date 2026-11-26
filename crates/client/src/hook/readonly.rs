@@ -110,12 +110,12 @@ pub fn shell_command_is_readonly(command: &str) -> bool {
 /// OpenCode uses lower-case tool ids; Claude and Codex use the names above.
 pub fn canonical_tool(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
-        "bash" | "shell" | "exec" => "Bash",
-        "edit" => "Edit",
-        "write" => "Write",
-        "multiedit" => "MultiEdit",
+        "bash" | "shell" | "exec" | "run_command" | "run_terminal_command" => "Bash",
+        "edit" | "search_replace" | "replace_file_content" => "Edit",
+        "write" | "write_to_file" => "Write",
+        "multiedit" | "multi_replace_file_content" => "MultiEdit",
         "apply_patch" | "applypatch" => "apply_patch",
-        "read" | "read_file" => "Read",
+        "read" | "read_file" | "view_file" => "Read",
         "grep" => "Grep",
         "glob" => "Glob",
         "list_dir" => "list_dir",

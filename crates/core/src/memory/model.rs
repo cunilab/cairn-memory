@@ -37,6 +37,7 @@ text_enum!(Status {
     Active => "active", Stale => "stale", Superseded => "superseded", Forgotten => "forgotten",
 });
 text_enum!(Rank { Candidate => "candidate", Normal => "normal" });
+text_enum!(TrustLevel { Doubted => "doubted", New => "new", Proven => "proven", Normal => "normal" });
 text_enum!(Relation {
     Relates => "relates", Causes => "causes", Fixes => "fixes", DependsOn => "depends_on",
     Supersedes => "supersedes", Contradicts => "contradicts",
@@ -69,6 +70,9 @@ pub struct SaveInput {
     /// Required (non-empty) unless `kind` is `note`.
     #[serde(default)]
     pub reason: String,
+    /// Optional long context, up to 8,000 characters.
+    #[serde(default)]
+    pub detail: Option<String>,
     /// Parsed by `Fields::parse(kind, ..)`.
     #[serde(default)]
     pub fields: Option<serde_json::Value>,
@@ -99,6 +103,8 @@ pub struct Memory {
     pub summary: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    #[serde(skip)]
+    pub detail: String,
     /// Serialized as the bare per-kind object.
     pub fields: Fields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -114,6 +120,8 @@ pub struct Memory {
     pub rank: Rank,
     #[serde(skip)]
     pub faded_at: Option<i64>,
+    #[serde(skip)]
+    pub pinned_at: Option<i64>,
     /// Whether an administrator edited this memory; the editor's identity stays private.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
@@ -142,6 +150,8 @@ pub struct Memory {
     pub evidence_hash: String,
     #[serde(skip)]
     pub identity_hash: String,
+    #[serde(skip)]
+    pub chat_id_hash: Option<crate::capture::ChatHash>,
     /// Internal only; never shown to agents.
     #[serde(skip)]
     pub usage: Usage,
@@ -151,7 +161,7 @@ fn proof_once(n: &u32) -> bool {
     *n < 2
 }
 
-/// What an agent sees of a stored memory (`memory_get`): no owner, project or usage.
+/// What an agent sees of a stored memory (`memory_get`), including its trust reason.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Record {
@@ -164,8 +174,15 @@ pub struct Record {
     pub stale_cause: Option<String>,
     pub title: String,
     pub summary: String,
+    pub trust: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Fields::is_empty")]
     pub fields: Fields,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -188,7 +205,10 @@ impl From<&Memory> for Record {
             stale_cause: m.stale_cause.clone(),
             title: m.title.clone(),
             summary: m.summary.clone(),
+            trust: m.trust().1,
             reason: m.reason.clone(),
+            detail_chars: (!m.detail.is_empty()).then(|| m.detail.chars().count()),
+            detail: None,
             fields: m.fields.clone(),
             evidence: m.evidence.clone(),
             links: m.links.clone(),
@@ -217,7 +237,10 @@ pub struct Link {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
     pub fetched: u32,
+    pub shown: u32,
+    pub detail_opened: u32,
     pub helpful: u32,
     pub wrong: u32,
     pub last_used_at: Option<i64>,
+    pub last_shown_at: Option<i64>,
 }

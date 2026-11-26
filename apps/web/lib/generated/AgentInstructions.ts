@@ -2,6 +2,6 @@
 import type { InstructionField } from "./InstructionField";
 
 /**
- * Both fields at one scope; the global scope or one project.
+ * The fields at one scope. The chat instruction is global.
  */
-export type AgentInstructions = { session_instruction: InstructionField, stop_nudge: InstructionField, max_bytes: number, };
+export type AgentInstructions = { session_instruction: InstructionField, stop_nudge: InstructionField, chat_instruction?: InstructionField, max_bytes: number, };

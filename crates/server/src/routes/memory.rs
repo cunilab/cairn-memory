@@ -6,8 +6,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status};
-use cairn_store::memory::{ListFilter, Vote};
+use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
+use cairn_store::memory::{ListFilter, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
 use cairn_store::view::MemoryView;
@@ -20,6 +20,23 @@ pub struct Receipt {
     id: String,
     status: Status,
     deduplicated: bool,
+    #[serde(flatten)]
+    coaching: Option<Coaching>,
+}
+
+#[derive(Serialize)]
+struct Coaching {
+    hints: Vec<String>,
+    improve: String,
+}
+
+impl Coaching {
+    fn from_saved(saved: &mut Saved) -> Option<Self> {
+        (!saved.hints.is_empty()).then(|| Self {
+            hints: std::mem::take(&mut saved.hints),
+            improve: format!("Improve it: save again with supersedes={}.", saved.id),
+        })
+    }
 }
 
 /// An id, under any of the names the console, the CLI and the hook use.
@@ -39,11 +56,15 @@ pub struct Feedback {
     #[serde(alias = "memoryId", alias = "memory_id")]
     id: String,
     vote: String,
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct GetMany {
     ids: Vec<String>,
+    #[serde(default)]
+    detail: bool,
+    session_id: Option<String>,
 }
 
 /// `missing` holds ids that do not exist or that the person cannot see.
@@ -64,6 +85,7 @@ pub struct ListQuery {
     project_id: Option<String>,
     /// A memory status. `forgotten` is listed only for an admin.
     status: Option<String>,
+    trust: Option<TrustLevel>,
     branch: Option<String>,
     /// A web search over title, summary, reason and fields.
     q: Option<String>,
@@ -83,6 +105,8 @@ struct ItemResult {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(flatten)]
+    coaching: Option<Coaching>,
 }
 
 #[derive(Serialize)]
@@ -120,7 +144,7 @@ pub async fn remember(
     }
     let input: SaveInput =
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
-    let saved = state
+    let mut saved = state
         .store
         .save_from(
             &account.person_id,
@@ -130,6 +154,7 @@ pub async fn remember(
         )
         .await?;
     Ok(Json(Receipt {
+        coaching: Coaching::from_saved(&mut saved),
         id: saved.id,
         status: saved.status,
         deduplicated: saved.deduplicated,
@@ -165,8 +190,10 @@ async fn save_items(
         return Err(ApiError::invalid("items: at most 3 notes"));
     }
     let mut results = Vec::with_capacity(items.len());
-    for item in items {
-        results.push(save_item(state, person_id, device_id, context, item).await);
+    for (index, item) in items.iter().enumerate() {
+        let mut result = save_item(state, person_id, device_id, context, item).await;
+        result.error = result.error.map(|error| format!("items[{index}]: {error}"));
+        results.push(result);
     }
     Ok(Json(ItemResults { results }).into_response())
 }
@@ -185,6 +212,7 @@ async fn save_item(
                 id: None,
                 status: "error",
                 error: Some(error.to_string()),
+                coaching: None,
             };
         }
     };
@@ -193,7 +221,8 @@ async fn save_item(
         .save_from(person_id, input, context, device_id)
         .await
     {
-        Ok(saved) => ItemResult {
+        Ok(mut saved) => ItemResult {
+            coaching: Coaching::from_saved(&mut saved),
             id: Some(saved.id),
             status: if saved.deduplicated {
                 "duplicate"
@@ -206,6 +235,7 @@ async fn save_item(
             id: None,
             status: "error",
             error: Some(error.to_string()),
+            coaching: None,
         },
     }
 }
@@ -213,9 +243,10 @@ async fn save_item(
 /// Newest update first. The next cursor, when there is one, is in the `x-next-cursor` header.
 pub async fn list(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
+    let account = caller.account;
     let status = query.status.as_deref().filter(|status| !status.is_empty());
     let statuses = match status {
         None => Vec::new(),
@@ -230,11 +261,14 @@ pub async fn list(
                 scope: query.scope,
                 kind: query.kind,
                 statuses,
+                trust: query.trust,
                 limit: query.limit,
                 cursor: query.cursor,
                 branch: query.branch.filter(|b| !b.is_empty()),
                 q: query.q,
                 see_forgotten: account.is_admin && status == Some("forgotten"),
+                include_archived: caller.device_id.is_none(),
+                exclude_chat: caller.device_id.is_some(),
             },
         )
         .await?;
@@ -254,15 +288,25 @@ pub async fn list(
 /// One memory for the console; never counts as a fetch.
 pub async fn get(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<MemoryView> {
-    let memory = state.store.get(&account.person_id, &id).await?;
+    let account = caller.account;
+    let mut memory = state
+        .store
+        .get_visible(&account.person_id, &id, caller.device_id.is_none())
+        .await?;
+    if caller.device_id.is_some() && memory.chat_id_hash.is_some() {
+        return Err(cairn_store::StoreError::NotFound(format!("memory {id}")).into());
+    }
+    let detail = (!memory.detail.is_empty()).then(|| std::mem::take(&mut memory.detail));
     let mut views = state
         .store
         .memory_views(&account.person_id, vec![memory])
         .await?;
-    Ok(Json(views.remove(0)))
+    let mut view = views.remove(0);
+    view.detail = detail;
+    Ok(Json(view))
 }
 
 /// The agent read: up to 10 records in request order, each counted as a fetch.
@@ -271,10 +315,14 @@ pub async fn get_many(
     Agent(account): Agent,
     Json(body): Json<GetMany>,
 ) -> ApiResult<Got> {
+    let session = super::retrieve::push_session_id(body.session_id.as_deref())?;
     if body.ids.is_empty() || body.ids.len() > 10 || body.ids.iter().any(|id| id.len() > 128) {
         return Err(ApiError::invalid(
             "ids: 1 to 10 ids of at most 128 characters",
         ));
+    }
+    if body.detail && body.ids.len() != 1 {
+        return Err(ApiError::invalid("request detail for one memory at a time"));
     }
     let mut found: HashMap<String, Memory> = state
         .store
@@ -290,12 +338,22 @@ pub async fn get_many(
             continue;
         }
         match found.remove(&id) {
-            Some(memory) => memories.push(Record::from(&memory)),
+            Some(memory) => {
+                let mut record = Record::from(&memory);
+                if body.detail {
+                    record.detail = Some(memory.detail);
+                }
+                memories.push(record);
+            }
             None => missing.push(id),
         }
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
-    state.store.mark_fetched(&fetched).await?;
+    state.store.mark_agent_read(&fetched, body.detail).await?;
+    state
+        .store
+        .record_push_use(&account.person_id, session, &fetched, true)
+        .await?;
     let reply = Got { memories, missing };
     let bytes = serde_json::to_string(&reply).map_or(0, |text| text.len());
     state
@@ -316,6 +374,7 @@ pub async fn feedback(
     Agent(account): Agent,
     Json(body): Json<Feedback>,
 ) -> ApiResult<Value> {
+    let session = super::retrieve::push_session_id(body.session_id.as_deref())?;
     let vote = match body.vote.as_str() {
         "helpful" => Vote::Helpful,
         "wrong" | "stale" => Vote::Wrong,
@@ -324,6 +383,15 @@ pub async fn feedback(
     let status = state
         .store
         .feedback(&account.person_id, &body.id, vote)
+        .await?;
+    state
+        .store
+        .record_push_use(
+            &account.person_id,
+            session,
+            std::slice::from_ref(&body.id),
+            vote == Vote::Helpful,
+        )
         .await?;
     let mut reply = json!({"id": body.id, "status": status});
     // A vote cannot lift a stale that came from the repo check: say why it is still stale.
@@ -334,6 +402,26 @@ pub async fn feedback(
         }
     }
     Ok(Json(reply))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pin {
+    pinned: bool,
+}
+
+/// Pinning is a console action, restricted to the memory's owner.
+pub async fn pin(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Path(id): Path<String>,
+    Json(body): Json<Pin>,
+) -> ApiResult<Value> {
+    let pinned_at = state
+        .store
+        .set_pinned(&account.person_id, &id, body.pinned)
+        .await?;
+    Ok(Json(json!({ "pinned_at": pinned_at })))
 }
 
 /// Forget: the owner's memory stays, hidden from search, with its text kept.

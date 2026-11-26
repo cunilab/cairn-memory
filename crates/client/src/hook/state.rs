@@ -1,5 +1,5 @@
-//! Per-session hook state: delivery flags, repeat hashes and injection counters, never memory
-//! text or credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
+//! Per-session hook state: delivery flags, repeat hashes and injection counters, never
+//! credentials. One JSON file per session under `<config_dir>/hook-state/`, changed
 //! only while holding `<file>.lock` (docs/reference/hook.md).
 
 use crate::{create_private_dir, write_private};
@@ -35,6 +35,21 @@ pub struct SessionState {
     /// Paths already dirty at SessionStart (`git status --porcelain`), at most 200.
     #[serde(default)]
     pub baseline_dirty: Vec<String>,
+    /// Grok can deliver the brief through PostToolUse only.
+    #[serde(default)]
+    pub grok_brief_shown: bool,
+    /// Rendered Antigravity cards held until the next model invocation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_command_recall: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_prompt_recall: Option<String>,
+    /// Antigravity repeats the same user input across its model invocations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_recall: Option<String>,
+    #[serde(default)]
+    pub prompt_budget_spent: bool,
+    #[serde(default)]
+    pub command_error_recalled: bool,
     /// Edits outside the project root. A count only; the paths are not stored.
     #[serde(default)]
     pub outside_edits: u32,

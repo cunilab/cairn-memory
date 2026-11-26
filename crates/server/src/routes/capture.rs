@@ -3,7 +3,7 @@ use crate::auth::{Agent, Device, DeviceCaller};
 use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
-use cairn_core::capture::ObservationInput;
+use cairn_core::capture::{ChatContext, ObservationInput};
 use cairn_store::repo::RepoState;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ pub struct SessionRef {
     session_id: String,
     nudge_asked: Option<bool>,
     nudge_saved: Option<bool>,
+    chat: Option<ChatContext>,
 }
 
 /// A typed capture. Unknown keys are a 400, so a client learns about a misnamed field.
@@ -66,6 +67,7 @@ async fn capture(
     input: ObservationInput,
 ) -> Result<Json<Value>, ApiError> {
     let context = input.context.clone();
+    super::retrieve::validate_chat_session(&input.session_id, context.chat.as_ref())?;
     let result = state
         .store
         .capture_from(&account.person_id, input, Some(&device_id))
@@ -96,6 +98,7 @@ pub async fn end(
     Agent(account): Agent,
     Json(body): Json<SessionRef>,
 ) -> Result<Json<Value>, ApiError> {
+    super::retrieve::validate_chat_session(&body.session_id, body.chat.as_ref())?;
     let queued = state
         .store
         .end_session_with_nudge(
@@ -117,6 +120,7 @@ pub async fn checkpoint(
     Agent(account): Agent,
     Json(body): Json<SessionRef>,
 ) -> Result<Json<Value>, ApiError> {
+    super::retrieve::validate_chat_session(&body.session_id, body.chat.as_ref())?;
     let queued = state
         .store
         .checkpoint_session(&account.person_id, &body.session_id)
@@ -142,7 +146,10 @@ pub struct Lookup {
     session_id: String,
     kind: String,
     query: Option<String>,
+    #[serde(default)]
     result_ids: Vec<String>,
+    #[serde(default)]
+    used_ids: Vec<String>,
     hit: Option<bool>,
 }
 
@@ -151,8 +158,29 @@ pub async fn lookup(
     DeviceCaller { account, device_id }: DeviceCaller,
     Json(body): Json<Lookup>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    if !matches!(body.kind.as_str(), "search" | "get") {
+    super::retrieve::push_session_id(Some(&body.session_id))?;
+    if !matches!(body.kind.as_str(), "search" | "get" | "feedback") {
         return Err(ApiError::invalid("invalid lookup kind"));
+    }
+    let used_ids: Vec<String> = body
+        .used_ids
+        .into_iter()
+        .filter(|id| id.len() <= 128)
+        .take(10)
+        .collect();
+    if matches!(body.kind.as_str(), "get" | "feedback") {
+        state
+            .store
+            .record_push_use(
+                &account.person_id,
+                Some(&body.session_id),
+                &used_ids,
+                body.kind == "get",
+            )
+            .await?;
+    }
+    if body.kind == "feedback" {
+        return Ok(axum::http::StatusCode::NO_CONTENT);
     }
     let query = body
         .query

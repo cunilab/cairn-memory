@@ -95,9 +95,22 @@ impl Outbox {
         let Ok(text) = fs::read_to_string(&self.path) else {
             return (!self.path.exists()).then(empty);
         };
-        let queue: Queue = serde_json::from_str(&text).ok()?;
-        (queue.version == VERSION && queue.origin == self.origin && queue.device == self.device)
-            .then_some(queue)
+        let mut queue: Queue = serde_json::from_str(&text).ok()?;
+        if queue.version != VERSION || queue.origin != self.origin || queue.device != self.device {
+            return None;
+        }
+        // An older gateway may have queued a capture before sender metadata was removed.
+        for event in &mut queue.events {
+            if let Some(chat) = event
+                .body
+                .pointer_mut("/context/chat")
+                .and_then(Value::as_object_mut)
+            {
+                chat.remove("sender_id_hash");
+                chat.remove("owner");
+            }
+        }
+        Some(queue)
     }
 
     /// Waits up to `wait` for the lock; the holder only reads or writes one small file.
@@ -217,8 +230,8 @@ impl Outbox {
     /// Best effort after a delivered capture: oldest first, at most 20 events, at most 2 s,
     /// skipping the event just sent. Never an error. The lock covers the read and the final
     /// write only; an event queued meanwhile stays, and one delivered twice is dropped by the
-    /// server (same event id).
-    pub fn replay(&self, config: &Config, agent: &str, skip_event_id: &str) {
+    /// server (same event id). Chat captures wait for a caller that confirmed chat support.
+    pub fn replay(&self, config: &Config, agent: &str, skip_event_id: &str, chat_ok: bool) {
         if !self.path.exists() {
             return;
         }
@@ -231,6 +244,7 @@ impl Outbox {
                 .events
                 .into_iter()
                 .filter(|pending| pending.event_id != skip_event_id)
+                .filter(|pending| chat_ok || pending.body["context"].get("chat").is_none())
                 .take(REPLAY_LIMIT)
                 .collect()
         };

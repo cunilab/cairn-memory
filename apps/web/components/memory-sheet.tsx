@@ -1,5 +1,6 @@
 "use client";
 
+import { Pin } from "lucide-react";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -131,6 +132,12 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
           <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.reason}</p>
         </div>
       ) : null}
+      {memory.detail ? (
+        <details className="flex flex-col gap-2 text-sm">
+          <summary className="cursor-pointer font-medium">Full detail</summary>
+          <p className="mt-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.detail}</p>
+        </details>
+      ) : null}
       {fields.length > 0 ? (
         <dl className="flex flex-col gap-2 text-sm">
           {fields.map(([key, value]) => (
@@ -187,18 +194,18 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
       ) : null}
       <Section title="Details">
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <>
-              <dt className="text-muted-foreground">Usage</dt>
-              <dd className="tabular-nums">
-                Fetched {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong}
-                {memory.usage.last_used_at ? (
-                  <>
-                    {" "}
-                    · last used <Time value={memory.usage.last_used_at} />
-                  </>
-                ) : null}
-              </dd>
-            </>
+          <dt className="text-muted-foreground">Trust</dt>
+          <dd>{memory.trust}</dd>
+          <dt className="text-muted-foreground">Usage</dt>
+          <dd className="tabular-nums">
+            Fetched {memory.usage.fetched} · helpful {memory.usage.helpful} · wrong {memory.usage.wrong} · detail opened {memory.usage.detail_opened}
+          </dd>
+          <dt className="text-muted-foreground">Automatic recall</dt>
+          <dd className="tabular-nums">pushed {memory.usage.pushed ?? 0}× · used {memory.usage.push_used ?? 0}×</dd>
+          <dt className="text-muted-foreground">Last shown</dt>
+          <dd><Time value={memory.usage.last_shown_at} /></dd>
+          <dt className="text-muted-foreground">Last used</dt>
+          <dd><Time value={memory.usage.last_used_at} /></dd>
           <dt className="text-muted-foreground">Created</dt>
           <dd>
             <Time value={memory.created_at} />
@@ -283,10 +290,37 @@ export function MemorySheet() {
   // A result for another id is stale: show loading until the current one lands.
   const current = loaded && loaded.id === id ? loaded : null;
   const memory = current?.memory ?? null;
-  const canForget = memory?.owner_is_me === true;
+  const canForget = memory?.owner_is_me === true && !memory.project_archived;
+
+  const canPin = canForget && memory !== null && memory.scope !== "global"
+    && (memory.status !== "superseded" || memory.pinned_at != null);
+
+  async function togglePin() {
+    if (!canPin || !memory) return;
+    setPending(true);
+    try {
+      const result = await cairn<{ pinned_at: number | null }>(`memories/${encodeURIComponent(memory.id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned: memory.pinned_at == null }),
+      });
+      setLoaded((previous) => previous?.id === memory.id && previous.memory
+        ? { ...previous, memory: { ...previous.memory, pinned_at: result.pinned_at } }
+        : previous);
+      announceMemoriesChanged();
+      toast.success(result.pinned_at == null ? "Memory unpinned" : "Memory pinned");
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) {
+        router.replace(LOGIN_PATH);
+        return;
+      }
+      toast.error(cause instanceof Error ? cause.message : "Could not change the pin.");
+    } finally {
+      setPending(false);
+    }
+  }
 
   async function forget() {
-    if (!memory) return;
+    if (!canForget || !memory) return;
     setPending(true);
     try {
       await cairn("forget", { method: "POST", body: JSON.stringify({ id: memory.id }) });
@@ -306,7 +340,7 @@ export function MemorySheet() {
   }
 
   async function rewrite() {
-    if (!id) return;
+    if (!id || memory?.project_archived) return;
     setPending(true);
     try {
       const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
@@ -327,6 +361,7 @@ export function MemorySheet() {
               {memory ? (
                 <>
                   <KindBadge kind={memory.kind} />
+                  {memory.pinned_at != null ? <Badge variant="outline"><Pin aria-hidden="true" />Pinned</Badge> : null}
                   <StatusBadge status={memory.status} cause={memory.stale_cause} />
                   {(() => {
                     const label = memoryLabel({
@@ -386,15 +421,21 @@ export function MemorySheet() {
           {memory ? (
             <>
               <Body memory={memory} open={(next) => set({ memory: next }, "push")} />
-              {account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
+              {account?.is_admin && !memory.project_archived && editing ? <div className="space-y-3 px-4 pb-4">
                 <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
                 <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
                 <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
                 <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>
                 <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
-              </div> : account?.is_admin ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
+              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
               {canForget ? (
-                <div className="mt-auto px-4 pb-4">
+                <div className="mt-auto flex flex-wrap gap-2 px-4 pb-4">
+                  {canPin ? (
+                    <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
+                      <Pin aria-hidden="true" />
+                      {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
+                    </Button>
+                  ) : null}
                   <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
                     Forget memory…
                   </Button>

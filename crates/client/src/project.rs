@@ -3,6 +3,7 @@
 //! the id makes the capturer a member of the project.
 
 use crate::Error;
+use cairn_core::id::sha256_hex;
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
@@ -29,6 +30,12 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Option<String> {
 /// The top-level directory of the git checkout that contains `dir`.
 pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+}
+
+/// Opaque identity of the canonical checkout root, shared by capture and recall.
+pub(crate) fn worktree_id(top: &Path) -> String {
+    let hash = sha256_hex(&[&top.to_string_lossy()]);
+    format!("wt-{}", &hash[..16])
 }
 
 /// Without git: the nearest ancestor of `cwd` (inclusive) that contains `.cairn/project.json`,

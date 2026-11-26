@@ -1,33 +1,38 @@
-//! `cairn setup --agent`: installs or removes the Cairn MCP entry, instructions and hook
-//! commands in Claude Code, Codex and OpenCode (docs/reference/hook.md#setup). Only Cairn-marked entries are
-//! ever replaced. All files are read and checked first; a native MCP command runs next, then the
-//! files are written, so a conflict leaves every file as it was. Credentials stay in the Cairn
-//! config; no host file holds one.
+//! `cairn setup --agent`: installs or removes Cairn's MCP entry, permissions, instructions and
+//! hooks in supported agents (docs/reference/hook.md#setup). Cairn marks its own
+//! MCP registrations and hooks. Setup checks for conflicts before running a native MCP command
+//! and applying the file edits. Credentials stay in the Cairn config.
 
-mod claude;
+pub(crate) mod antigravity;
+pub(crate) mod claude;
 mod codex;
+pub(crate) mod grok;
+pub(crate) mod hermes;
 mod jsonc;
 mod opencode;
 
 use crate::{Error, create_private_dir, selected_config_path, write_private};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io};
 
-pub const AGENTS: [&str; 3] = ["claude", "codex", "opencode"];
-const MARKER: &str = "CAIRN_SETUP_MANAGED";
-const MANAGED_FLAG: &str = "--cairn-managed";
+pub use cairn_core::account::AGENTS;
+pub(crate) const MARKER: &str = "CAIRN_SETUP_MANAGED";
+// The host can rewrite its config. Keep grant ownership with the marked MCP registration.
+const APPROVAL_MARKER: &str = "CAIRN_SETUP_APPROVAL";
+pub(crate) const MANAGED_FLAG: &str = "--cairn-managed";
+pub(crate) const KEEP_NATIVE_MEMORY: &str = "--keep-native-memory";
 pub(crate) const UNMARKED: &str =
     "an unmarked cairn MCP entry exists; rename or remove it explicitly";
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 type R<T> = Result<T, String>;
 
-/// What one agent needs: files to write, an optional native MCP command, and a step that runs
-/// after it (OpenCode's native command edits the file the plugin cleanup then reads).
+/// Files to write, an optional native MCP command, and a follow-up step that can read its output files.
 struct Plan {
     files: Vec<(PathBuf, String)>,
     native: Option<Vec<String>>,
@@ -42,6 +47,8 @@ pub(crate) struct Ctx<'a> {
     exe: &'a str,
     config: &'a Path,
     home: PathBuf,
+    keep_native_memory: bool,
+    gateway: bool,
 }
 
 impl Ctx<'_> {
@@ -68,7 +75,7 @@ impl Ctx<'_> {
     /// `<exe> hook <Event> --agent <a> --config <cfg> --cairn-managed`, shell quoted.
     fn hook_command(&self, event: &str) -> String {
         let config = self.config.to_string_lossy();
-        [
+        let mut command = [
             self.exe,
             "hook",
             event,
@@ -79,7 +86,13 @@ impl Ctx<'_> {
             MANAGED_FLAG,
         ]
         .map(quote)
-        .join(" ")
+        .join(" ");
+        // Remember the opt-out on an owned handler so refresh can preserve it.
+        if self.keep_native_memory && matches!(event, "SessionStart" | "PreToolUse") {
+            command.push(' ');
+            command.push_str(KEEP_NATIVE_MEMORY);
+        }
+        command
     }
 }
 
@@ -177,10 +190,20 @@ pub(crate) fn hooks_text(path: &Path, ctx: &Ctx, events: &[(&str, u32)]) -> R<St
             let handler =
                 json!({"type": "command", "command": ctx.hook_command(event), "timeout": timeout});
             let mut group = json!({"hooks": [handler]});
-            if event == "PostToolUse" {
+            if event == "PostToolUse" && ctx.agent != "grok" {
                 group["matcher"] = json!(
-                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
+                    "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get|mcp__cairn__memory_feedback"
                 );
+            }
+            if event == "PreToolUse" {
+                group["matcher"] = json!(match ctx.agent {
+                    "claude" if !ctx.keep_native_memory =>
+                        format!("Bash|{}", crate::claude_memory::WRITE_TOOLS),
+                    _ => "Bash".to_owned(),
+                });
+            }
+            if event == "PostToolUseFailure" {
+                group["matcher"] = json!("Bash");
             }
             Some(group)
         }
@@ -195,10 +218,12 @@ fn edit_hooks(
     ours: &dyn Fn(&Value) -> bool,
     wanted: &dyn Fn(&str) -> Option<Value>,
 ) -> R<String> {
-    const ALL: [&str; 6] = [
+    const ALL: [&str; 8] = [
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
         "PostToolUse",
+        "PostToolUseFailure",
         "Stop",
         "PreCompact",
         "SessionEnd",
@@ -259,32 +284,56 @@ fn edit_hooks(
     })
 }
 
-/// The instruction block between markers; one block at most, replaced in place on re-setup.
-pub(crate) fn block(text: &str, content: &str, remove: bool) -> R<String> {
-    const BEGIN: &str = "<!-- cairn:begin -->";
-    const END: &str = "<!-- cairn:end -->";
-    let count = text.matches(BEGIN).count();
-    if count != text.matches(END).count() || count > 1 {
-        return Err("malformed Cairn markers; repair the marked block first".into());
+const INSTRUCTION_BEGIN: &str = "<!-- cairn:begin -->";
+const INSTRUCTION_END: &str = "<!-- cairn:end -->";
+
+fn instruction_span(text: &str) -> Result<Option<Range<usize>>, &'static str> {
+    let mut begins = text.match_indices(INSTRUCTION_BEGIN);
+    let mut ends = text.match_indices(INSTRUCTION_END);
+    match (begins.next(), ends.next()) {
+        (None, None) => Ok(None),
+        (Some((start, _)), Some((end, _)))
+            if start < end && begins.next().is_none() && ends.next().is_none() =>
+        {
+            Ok(Some(start..end + INSTRUCTION_END.len()))
+        }
+        _ => Err("malformed Cairn markers; repair the marked block first"),
     }
-    let mut text = text.to_owned();
-    if let Some(start) = text.find(BEGIN) {
-        let mut finish = text.find(END).map_or(0, |end| end + END.len());
-        if finish <= start {
-            return Err("malformed Cairn markers".into());
+}
+
+fn instruction_block() -> String {
+    let content = crate::tools::instructions().trim_end();
+    format!("{INSTRUCTION_BEGIN}\n{content}\n{INSTRUCTION_END}")
+}
+
+pub(crate) fn instruction_issue(path: &Path) -> Option<&'static str> {
+    let Ok(text) = read(path) else {
+        return Some("could not read the Cairn instruction file");
+    };
+    match instruction_span(&text) {
+        Ok(Some(span)) => (text[span] != instruction_block())
+            .then_some("Cairn instruction block is edited or stale"),
+        Ok(None) => Some("Cairn instruction block is missing"),
+        Err(problem) => Some(problem),
+    }
+}
+
+fn instruction_file(path: PathBuf, remove: bool) -> R<(PathBuf, String)> {
+    let mut text = read(&path)?;
+    if let Some(mut span) = instruction_span(&text)? {
+        if text[span.end..].starts_with('\n') {
+            span.end += 1;
         }
-        if text[finish..].starts_with('\n') {
-            finish += 1;
-        }
-        text.replace_range(start..finish, "");
+        text.replace_range(span, "");
     }
     if !remove {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!("{BEGIN}\n{}\n{END}\n", content.trim_end()));
+        text.push_str(&instruction_block());
+        text.push('\n');
     }
-    Ok(text)
+    Ok((path, text))
 }
 
 /// The executable of a native agent CLI on `PATH`.
@@ -361,7 +410,10 @@ fn plan(ctx: &Ctx) -> R<Plan> {
         "claude" => claude::plan(ctx),
         "codex" => codex::plan(ctx),
         "opencode" => opencode::plan(ctx),
-        _ => Err("agent must be claude, codex or opencode".into()),
+        "grok" => grok::plan(ctx),
+        "antigravity" => antigravity::plan(ctx),
+        "hermes" => hermes::plan(ctx),
+        _ => Err(format!("agent must be one of {}", AGENTS.join(", "))),
     }
 }
 
@@ -395,7 +447,14 @@ fn apply(ctx: &Ctx) -> R<String> {
     ))
 }
 
-fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Result<String, Error> {
+fn configure_with(
+    agent: &str,
+    remove: bool,
+    keep_native_memory: Option<bool>,
+    gateway: bool,
+    exe: &Path,
+    config: &Path,
+) -> Result<String, Error> {
     let home = env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .or_else(|| env::var_os("USERPROFILE"))
@@ -408,6 +467,13 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
         remove,
         exe: &exe,
         config: &config,
+        gateway,
+        keep_native_memory: keep_native_memory.unwrap_or_else(|| {
+            agent == "claude"
+                && claude::keeps_native_memory(
+                    &crate::claude_memory::config_dir(&home).join("settings.json"),
+                )
+        }),
         home,
     };
     apply(&ctx).map_err(|e| Error::Config(format!("Cairn agent setup failed: {e}")))
@@ -416,11 +482,24 @@ fn configure_with(agent: &str, remove: bool, exe: &Path, config: &Path) -> Resul
 /// Installs or removes one agent's integration for this executable and the selected config.
 pub fn configure(agent: &str, remove: bool) -> Result<String, Error> {
     let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
-    configure_with(agent, remove, &exe, &selected_config_path()?)
+    configure_with(agent, remove, None, false, &exe, &selected_config_path()?)
+}
+
+/// Installs one agent with the caller's choice about Claude's built-in memory writes.
+pub fn install(agent: &str, keep_native_memory: bool, gateway: bool) -> Result<String, Error> {
+    let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
+    configure_with(
+        agent,
+        false,
+        Some(keep_native_memory),
+        gateway,
+        &exe,
+        &selected_config_path()?,
+    )
 }
 
 /// Where each agent keeps the file that proves a Cairn hook is installed.
-pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
+pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); AGENTS.len()] {
     let dir = |var: &str, default: PathBuf| {
         env::var_os(var)
             .filter(|v| !v.is_empty())
@@ -429,7 +508,7 @@ pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
     [
         (
             "claude",
-            dir("CLAUDE_CONFIG_DIR", home.join(".claude")).join("settings.json"),
+            crate::claude_memory::config_dir(home).join("settings.json"),
         ),
         (
             "codex",
@@ -439,6 +518,9 @@ pub fn hook_files(home: &Path) -> [(&'static str, PathBuf); 3] {
             "opencode",
             dir("XDG_CONFIG_HOME", home.join(".config")).join("opencode/plugins/cairn/index.js"),
         ),
+        ("grok", grok::hook_file(home)),
+        ("antigravity", antigravity::hook_file(home)),
+        ("hermes", hermes::hook_file(home)),
     ]
 }
 
@@ -459,12 +541,14 @@ pub fn refresh(exe: &Path) -> Vec<String> {
         if !fs::read_to_string(file).is_ok_and(|text| text.contains(MANAGED_FLAG)) {
             continue;
         }
-        lines.push(match configure_with(agent, false, exe, &config) {
-            Ok(done) => done,
-            Err(error) => format!(
-                "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"
-            ),
-        });
+        lines.push(
+            match configure_with(agent, false, None, false, exe, &config) {
+                Ok(done) => done,
+                Err(error) => format!(
+                    "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"
+                ),
+            },
+        );
     }
     retire_python(config.parent().unwrap_or(Path::new(".")));
     lines
@@ -479,7 +563,7 @@ pub fn retire_python(config_dir: &Path) {
     if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         for (agent, file) in hook_files(Path::new(&home)) {
             let Ok(before) = read(&file) else { continue };
-            if agent == "opencode" || !before.contains("run-hook") {
+            if !matches!(agent, "claude" | "codex") || !before.contains("run-hook") {
                 continue;
             }
             let written = edit_hooks(&file, &legacy_run_hook, &|_| None).and_then(|body| {

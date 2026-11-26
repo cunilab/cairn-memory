@@ -2,7 +2,7 @@
 //! why it is stale and what it is linked to. Agents never see this shape (`Record` is theirs).
 
 use crate::{Result, Store, epoch};
-use cairn_core::memory::{Link, Memory, Relation};
+use cairn_core::memory::{Link, Memory, Relation, TrustLevel};
 use cairn_core::process::Origin;
 use serde::Serialize;
 use sqlx::Row;
@@ -12,10 +12,16 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, Serialize)]
 pub struct UsageView {
     pub fetched: u32,
+    pub shown: u32,
+    pub pushed: u32,
+    pub push_used: u32,
+    pub detail_opened: u32,
     pub helpful: u32,
     pub wrong: u32,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub last_used_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub last_shown_at: Option<i64>,
 }
 
 /// The memory at the other end of a link, as far as the reader may know it.
@@ -62,14 +68,25 @@ pub struct MemoryView {
     /// Files and symbols the last check found gone: the "why stale" detail.
     pub missing_entities: Vec<String>,
     pub links: Vec<LinkView>,
+    pub project_archived: bool,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub pinned_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub detail: Option<String>,
+    pub trust_level: TrustLevel,
+    pub trust: String,
 }
 
 struct Extra {
     project_name: Option<String>,
+    project_archived: bool,
     device_name: Option<String>,
     checked_at: Option<i64>,
     status_changed_at: i64,
     missing: Vec<String>,
+    pushed: u32,
+    push_used: u32,
 }
 
 impl Store {
@@ -86,11 +103,14 @@ impl Store {
         let mut extras: HashMap<String, Extra> = HashMap::new();
         for row in sqlx::query(&format!(
             "SELECT m.memory_id, p.name AS project_name,
+                    (m.scope = 'project' AND p.archived_at IS NOT NULL) AS project_archived,
                     CASE WHEN m.owner_id = $2 THEN d.name END AS device_name,
-                    {} AS checked_at, {} AS status_changed_at, m.missing_entities
+                    {} AS checked_at, {} AS status_changed_at, m.missing_entities,
+                    coalesce(pu.pushed, 0) AS pushed, coalesce(pu.used, 0) AS push_used
                FROM memories m
                LEFT JOIN projects p ON p.project_id = m.project_id
                LEFT JOIN devices d ON d.device_id = m.device_id AND d.person_id = m.owner_id
+               LEFT JOIN push_usage pu ON pu.person_id = $2 AND pu.memory_id = m.memory_id
               WHERE m.memory_id = ANY($1)",
             epoch!("m.checked_at"),
             epoch!("m.status_changed_at")
@@ -104,10 +124,13 @@ impl Store {
                 row.try_get("memory_id")?,
                 Extra {
                     project_name: row.try_get("project_name")?,
+                    project_archived: row.try_get("project_archived")?,
                     device_name: row.try_get("device_name")?,
                     checked_at: row.try_get("checked_at")?,
                     status_changed_at: row.try_get("status_changed_at")?,
                     missing: row.try_get("missing_entities")?,
+                    pushed: row.try_get::<i32, _>("pushed")?.max(0) as u32,
+                    push_used: row.try_get::<i32, _>("push_used")?.max(0) as u32,
                 },
             );
         }
@@ -168,33 +191,48 @@ impl Store {
                     memory.owner.clear();
                 }
                 let extra = extras.remove(&memory.id);
-                let (project_name, device_name, checked_at, changed, missing) = match extra {
-                    Some(e) => (
-                        e.project_name,
-                        e.device_name,
-                        e.checked_at,
-                        e.status_changed_at,
-                        e.missing,
-                    ),
-                    None => (None, None, None, memory.updated_at, Vec::new()),
-                };
+                let (pushed, push_used) =
+                    extra.as_ref().map_or((0, 0), |e| (e.pushed, e.push_used));
+                let (project_name, project_archived, device_name, checked_at, changed, missing) =
+                    match extra {
+                        Some(e) => (
+                            e.project_name,
+                            e.project_archived,
+                            e.device_name,
+                            e.checked_at,
+                            e.status_changed_at,
+                            e.missing,
+                        ),
+                        None => (None, false, None, None, memory.updated_at, Vec::new()),
+                    };
+                let (trust_level, trust) = memory.trust();
                 MemoryView {
                     origin: memory.origin,
                     owner_is_me,
                     project_name,
+                    project_archived,
+                    pinned_at: memory.pinned_at,
                     device_name,
                     checked_at,
                     status_changed_at: changed,
                     fetched: memory.usage.fetched,
+                    trust_level,
+                    trust,
                     usage: UsageView {
                         fetched: memory.usage.fetched,
+                        shown: memory.usage.shown,
+                        pushed,
+                        push_used,
+                        detail_opened: memory.usage.detail_opened,
                         helpful: memory.usage.helpful,
                         wrong: memory.usage.wrong,
                         last_used_at: memory.usage.last_used_at,
+                        last_shown_at: memory.usage.last_shown_at,
                     },
                     missing_entities: missing,
                     links: memory.links.iter().map(|l| link_view(&memory, l)).collect(),
                     memory,
+                    detail: None,
                 }
             })
             .collect())

@@ -1,4 +1,5 @@
 use cairn_core::capture::WorkContext;
+use cairn_store::fixes::f12_candidates_sql;
 use cairn_store::testing::{TestDb, save_input};
 use sqlx::Row;
 
@@ -47,7 +48,7 @@ async fn f12_searches_are_counted_once_per_project() {
     let person = db.person("owner").await;
     let (project, _) = db
         .store
-        .init_project(&person, "github.com/example/counts", None)
+        .init_project(&person, "github.com/example/counts", Some("E2E F12 Counts"))
         .await
         .unwrap();
     let context = WorkContext {
@@ -63,32 +64,14 @@ async fn f12_searches_are_counted_once_per_project() {
         .unwrap();
     sqlx::query("INSERT INTO sessions (person_id,session_id,project_id,started_at) VALUES ($1,'searches',$2,now())").bind(&person).bind(&project.project_id).execute(db.store.pool()).await.unwrap();
     sqlx::query("INSERT INTO lookup_log (person_id,session_id,kind,query,hit) SELECT $1,'searches','search','ordinary',false FROM generate_series(1,30)").bind(&person).execute(db.store.pool()).await.unwrap();
-    let mut lock = db.store.pool().begin().await.unwrap();
-    sqlx::query("LOCK TABLE lookup_log IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
-    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *lock)
-        .await
-        .unwrap();
-    let store = db.store.clone();
-    let nightly = tokio::spawn(async move { store.fixes_nightly(true, "0.1.9").await });
-    let query = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let query: Option<String> = sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%lookup_log%' LIMIT 1").bind(pid).fetch_optional(db.store.pool()).await.unwrap();
-            if let Some(query) = query { break query; }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }).await.expect("nightly F12 query did not reach lookup_log");
-    lock.rollback().await.unwrap();
-    nightly.await.unwrap().unwrap();
+    db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let query = f12_candidates_sql();
     let explain = format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}");
-    let mut statement = sqlx::query_scalar::<_, serde_json::Value>(&explain);
-    if query.contains("$1") {
-        statement = statement.bind(None::<&str>);
-    }
-    let plan = statement.fetch_one(db.store.pool()).await.unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(&explain)
+        .bind(None::<&str>)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
     fn max_rows(node: &serde_json::Value) -> u64 {
         let rows =
             node["Actual Rows"].as_u64().unwrap_or(0) * node["Actual Loops"].as_u64().unwrap_or(0);
@@ -100,6 +83,17 @@ async fn f12_searches_are_counted_once_per_project() {
         max_rows(&plan[0]["Plan"]) < 100,
         "search rows were multiplied by memories: {plan}"
     );
+    assert_eq!(plan[0]["Plan"]["Actual Rows"], 12);
+    db.store
+        .set_project_archived(&person, true, &project.project_id, true)
+        .await
+        .unwrap();
+    let archived = sqlx::query(&query)
+        .bind(None::<&str>)
+        .fetch_all(db.store.pool())
+        .await
+        .unwrap();
+    assert!(archived.is_empty());
     db.finish().await;
 }
 

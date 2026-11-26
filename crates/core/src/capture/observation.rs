@@ -16,6 +16,8 @@ fn is_zero(value: &u32) -> bool {
 /// The client's work context. Unknown keys are ignored.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<super::ChatContext>,
     /// The committed `.cairn/project.json` project id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,

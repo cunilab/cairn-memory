@@ -234,6 +234,7 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                 reason:
                     "Seen in one session: the command failed, files were edited, then it passed."
                         .to_owned(),
+                detail: None,
                 fields: Some(json!({
                     "symptom": clip(&symptom, FIELD_TEXT_MAX),
                     "fix": clip(&fix, FIELD_TEXT_MAX),
@@ -363,6 +364,7 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
                 SUMMARY_MAX,
             ),
             reason: "Observed a passing run in a session.".to_owned(),
+            detail: None,
             fields: Some(json!({ "source": "session capture" })),
             evidence: vec![passed.event_id.clone()],
             supersedes: None,
@@ -466,6 +468,7 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
             SUMMARY_MAX,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
+        detail: None,
         fields: None,
         evidence,
         supersedes: None,
@@ -574,6 +577,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
             SUMMARY_MAX,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
+        detail: None,
         fields: Some(json!({ "next_steps": next_steps, "open_questions": open, "files": files })),
         evidence,
         supersedes: None,
@@ -718,6 +722,7 @@ impl Draft {
             } else {
                 self.reason
             },
+            detail: None,
             fields: Some(Value::Object(self.fields)),
             evidence: vec![self.event_id],
             supersedes: None,

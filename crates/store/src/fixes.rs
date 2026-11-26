@@ -35,6 +35,32 @@ struct Candidate {
     data: Fix,
 }
 
+/// The nightly F12 query, also used by the integration test to explain the plan.
+#[doc(hidden)]
+pub fn f12_candidates_sql() -> String {
+    let active = crate::memory::active_project_memory("m");
+    format!(
+        "WITH ps AS MATERIALIZED (
+             SELECT s.project_id, count(*)::bigint AS searches
+               FROM lookup_log l JOIN sessions s ON l.person_id = s.person_id AND l.session_id = s.session_id
+              WHERE l.kind = 'search' AND l.at >= now() - interval '90 days'
+                AND ($1::text IS NULL OR s.project_id = (SELECT project_id FROM memories WHERE memory_id = $1))
+              GROUP BY s.project_id HAVING count(*) >= 20
+         )
+         SELECT m.memory_id, m.owner_id, m.project_id, ps.searches
+           FROM memories m LEFT JOIN usage u USING (memory_id) JOIN ps ON ps.project_id = m.project_id
+          WHERE m.status IN ('active','stale') AND m.scope <> 'global' AND m.origin <> 'system'
+            AND m.kind NOT IN ('decision','rule','procedure','gotcha','preference','handoff')
+            AND m.faded_at IS NULL AND m.created_at < now() - interval '90 days'
+            AND (u.last_used_at IS NULL OR u.last_used_at <= now() - interval '90 days')
+            AND ($1::text IS NULL OR m.memory_id = $1)
+            AND m.memory_id NOT IN (SELECT subject_id FROM fixes
+                                     WHERE detector = 'F12' AND status = 'ignored' AND ignored_until > now())
+            AND {active}
+          ORDER BY m.created_at, m.memory_id LIMIT 100"
+    )
+}
+
 impl Store {
     pub async fn fixes_due(&self) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT COALESCE((SELECT value <> CURRENT_DATE::text FROM server_state WHERE key='fixes_last_run'), true)")
@@ -89,8 +115,9 @@ async fn detect_candidates(
     scope: Option<(&str, &str, &serde_json::Value, Option<&str>)>,
 ) -> Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
+    let active = crate::memory::active_project_memory("m");
     if scope.is_none_or(|(detector, _, _, _)| detector == "F2" || detector == "F3") {
-        let rows = sqlx::query("SELECT m.memory_id,m.owner_id,m.project_id,m.stale_cause, floor(EXTRACT(EPOCH FROM now()-m.status_changed_at)/86400)::bigint AS days, u.last_used_at > m.status_changed_at AS fetched, m.checked_at > m.status_changed_at AS checked FROM memories m LEFT JOIN usage u USING(memory_id) WHERE m.status='stale' AND m.scope <> 'global' AND m.origin <> 'system' AND m.stale_cause IN ('feedback','missing')")
+        let rows = sqlx::query(&format!("SELECT m.memory_id,m.owner_id,m.project_id,m.stale_cause, floor(EXTRACT(EPOCH FROM now()-m.status_changed_at)/86400)::bigint AS days, u.last_used_at > m.status_changed_at AS fetched, m.checked_at > m.status_changed_at AS checked FROM memories m LEFT JOIN usage u USING(memory_id) WHERE m.status='stale' AND m.scope <> 'global' AND m.origin <> 'system' AND m.stale_cause IN ('feedback','missing') AND {active}"))
             .fetch_all(&mut **tx).await?;
         for row in rows {
             let id: String = row.try_get("memory_id")?;
@@ -385,8 +412,10 @@ async fn detect_candidates(
     }
     if scope.is_none_or(|(detector, _, _, _)| detector == "F12") {
         // Oldest 100, skipping an ignore that is still cooling. shortcut: a failed or expired F12 can occupy a slot until the activity-query cap allows the longer predicate.
-        let rows = sqlx::query("WITH ps AS MATERIALIZED (SELECT s.project_id,count(*)::bigint AS searches FROM lookup_log l JOIN sessions s ON l.person_id=s.person_id AND l.session_id=s.session_id WHERE l.kind='search' AND l.at >= now()-interval '90 days' AND ($1::text IS NULL OR s.project_id=(SELECT project_id FROM memories WHERE memory_id=$1)) GROUP BY s.project_id HAVING count(*) >= 20) SELECT m.memory_id,m.owner_id,m.project_id,ps.searches FROM memories m LEFT JOIN usage u USING(memory_id) JOIN ps ON ps.project_id=m.project_id WHERE m.status IN ('active','stale') AND m.scope <> 'global' AND m.origin <> 'system' AND m.kind NOT IN ('decision','rule','procedure','gotcha','preference','handoff') AND m.faded_at IS NULL AND m.created_at < now()-interval '90 days' AND (u.last_used_at IS NULL OR u.last_used_at <= now()-interval '90 days') AND ($1::text IS NULL OR m.memory_id=$1) AND m.memory_id NOT IN(SELECT subject_id FROM fixes WHERE detector='F12' AND status='ignored' AND ignored_until>now()) ORDER BY m.created_at,m.memory_id LIMIT 100")
-            .bind(scope.map(|(_, subject, _, _)| subject)).fetch_all(&mut **tx).await?;
+        let rows = sqlx::query(&f12_candidates_sql())
+            .bind(scope.map(|(_, subject, _, _)| subject))
+            .fetch_all(&mut **tx)
+            .await?;
         for row in rows {
             let id: String = row.try_get("memory_id")?;
             if let Some(data) =
@@ -663,6 +692,7 @@ async fn apply_server_action(
             let source = action_str(action, "source_id")?;
             let target = action_str(action, "target_id")?;
             crate::consolidate::lock_cohort(tx, source).await?;
+            crate::project::lock_memory_projects(tx, &[source, target]).await?;
             let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM links WHERE source_id=$1 AND target_id=$2 AND relation='relates')")
                 .bind(source).bind(target).fetch_one(&mut **tx).await?;
             let sql = if exists {
@@ -721,11 +751,13 @@ async fn apply_server_action(
         }
         "add_alias" => {
             let id = action_str(action, "memory_id")?;
+            crate::project::lock_memory_projects(tx, &[id]).await?;
             apply_add_alias(tx, id, action_str(action, "phrase")?).await?;
             Ok(json!({}))
         }
         "fade" => {
             let id = action_str(action, "memory_id")?;
+            crate::project::lock_memory_projects(tx, &[id]).await?;
             sqlx::query("UPDATE memories SET faded_at=now() WHERE memory_id=$1")
                 .bind(id)
                 .execute(&mut **tx)
@@ -746,6 +778,11 @@ async fn redact_versions(
     use cairn_core::memory::{Kind, identity::identity_hash};
     let rows = sqlx::query("WITH RECURSIVE chain(id) AS (SELECT $1::text UNION SELECT CASE WHEN l.source_id=c.id THEN l.target_id ELSE l.source_id END FROM links l JOIN chain c ON l.source_id=c.id OR l.target_id=c.id WHERE l.relation='supersedes') SELECT m.memory_id,m.kind,m.title,m.summary,m.reason,m.fields,m.status FROM memories m JOIN chain c ON c.id=m.memory_id ORDER BY (m.status IN ('active','stale')),m.memory_id FOR UPDATE OF m")
         .bind(head).fetch_all(&mut **tx).await?;
+    let ids = rows
+        .iter()
+        .map(|row| row.try_get("memory_id"))
+        .collect::<std::result::Result<Vec<&str>, _>>()?;
+    crate::project::lock_memory_projects(tx, &ids).await?;
     let mut entities_removed = 0;
     for row in rows {
         let id: String = row.try_get("memory_id")?;

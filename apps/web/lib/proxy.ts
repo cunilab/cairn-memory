@@ -1,6 +1,6 @@
 // Pure proxy rules, kept free of Next so node:test can run them.
 /** The first path segment the console may reach; a new top-level route the web needs goes here. */
-export const ALLOWED = ["health", "auth", "devices", "admin", "projects", "memories", "graph", "stats", "forget", "agent-instructions"] as const;
+export const ALLOWED = ["health", "auth", "devices", "admin", "projects", "memories", "graph", "stats", "forget", "agent-instructions", "skills"] as const;
 
 const MAX_COOKIE_SECONDS = 60 * 60 * 24 * 30;
 const NO_BODY_STATUSES = new Set([101, 204, 205, 304]);

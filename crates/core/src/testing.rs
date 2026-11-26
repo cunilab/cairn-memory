@@ -14,6 +14,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         title: format!("title {id}"),
         summary: format!("summary {id}"),
         reason: String::new(),
+        detail: String::new(),
         fields: Fields::Note(fields::Note {}),
         evidence: Vec::new(),
         evidence_count: 0,
@@ -23,6 +24,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         status: Status::Active,
         rank: Rank::Normal,
         faded_at: None,
+        pinned_at: None,
         edited_by: false,
         proof_count: 1,
         stale_cause: None,
@@ -33,6 +35,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         updated_at: 0,
         evidence_hash: String::new(),
         identity_hash: String::new(),
+        chat_id_hash: None,
         usage: Usage::default(),
     }
 }

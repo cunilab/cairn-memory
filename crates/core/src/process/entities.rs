@@ -184,7 +184,7 @@ fn ident(part: &str) -> bool {
 }
 
 /// `a::b`, camelCase, PascalCase with two humps, or snake_case with two parts.
-fn is_symbol(name: &str) -> bool {
+pub fn is_symbol(name: &str) -> bool {
     let alnum = name.chars().all(|c| c.is_ascii_alphanumeric());
     let mut chars = name.chars();
     let (first, second) = (chars.next(), chars.next());

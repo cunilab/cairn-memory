@@ -31,9 +31,8 @@ fn squash(text: &str) -> String {
         .to_lowercase()
 }
 
-/// SHA-256 of `kind, title, summary, fields` (title and summary squashed). The reason is not
-/// part of the identity: the same note saved again with another reason is a duplicate, not a
-/// new version. Inputs must already be redacted.
+/// SHA-256 of `kind, title, summary, fields` (title and summary squashed). Changes to the
+/// reason or detail retain the same identity. Inputs must already be redacted.
 pub fn identity_hash(kind: Kind, title: &str, summary: &str, fields: &Value) -> String {
     sha256_hex(&[
         kind.as_str(),

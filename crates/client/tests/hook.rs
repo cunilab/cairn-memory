@@ -22,6 +22,90 @@ const TOKEN: &str = "cdt_testtoken1234567890";
 const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 
+#[test]
+fn claude_pre_tool_use_denies_only_writes_inside_native_memory() {
+    let home = temp_dir("claude-pre-tool-use");
+    let config = home.join("custom-claude");
+    let project = config.join("projects/encoded-project");
+    let memory = project.join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    let invoke = |host: &str, name: &str, key: &str, path: &Path, custom: bool| {
+        let mut cmd = command(&home);
+        if custom {
+            cmd.env("CLAUDE_CONFIG_DIR", &config);
+        }
+        let output = with_stdin(
+            cmd.args(["hook", "PreToolUse", "--agent", host]),
+            &json!({
+                "cwd": project, "hook_event_name": "PreToolUse",
+                "tool_name": name, "tool_input": {key: path}
+            })
+            .to_string(),
+        );
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        output.stdout
+    };
+    let denied = json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "Claude memory files are replaced by Cairn; save this with memory_save instead."
+    }});
+    for (name, key) in [
+        ("Write", "file_path"),
+        ("Edit", "file_path"),
+        ("MultiEdit", "file_path"),
+        ("NotebookEdit", "notebook_path"),
+    ] {
+        assert_eq!(
+            serde_json::from_slice::<Value>(&invoke(
+                "claude",
+                name,
+                key,
+                &memory.join("note.md"),
+                true
+            ))
+            .unwrap(),
+            denied
+        );
+    }
+    for path in [
+        Path::new("memory/subdir/note.md"),
+        Path::new("memory/../memory/note.md"),
+    ] {
+        assert!(!invoke("claude", "Write", "file_path", path, true).is_empty());
+    }
+    assert!(
+        !invoke(
+            "claude",
+            "Write",
+            "file_path",
+            Path::new("~/.claude/projects/default/memory/note.md"),
+            false
+        )
+        .is_empty()
+    );
+    #[cfg(unix)]
+    {
+        let alias = project.join("alias");
+        std::os::unix::fs::symlink(&memory, &alias).unwrap();
+        assert!(!invoke("claude", "Write", "file_path", &alias.join("new.md"), true).is_empty());
+    }
+    for (host, name, path) in [
+        ("claude", "Read", "memory/note.md"),
+        ("claude", "Bash", "memory/note.md"),
+        ("claude", "Write", "memory-other/note.md"),
+        ("claude", "Write", "memory/../src/note.md"),
+        ("claude", "Write", "../../other/projects/id/memory/note.md"),
+        ("codex", "Write", "memory/note.md"),
+    ] {
+        assert!(invoke(host, name, "file_path", Path::new(path), true).is_empty());
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 fn brief_and_hint() -> String {
     format!("BRIEF\n{DEFAULT_SESSION_INSTRUCTION}\n{NO_PROJECT_HINT}")
 }
@@ -50,6 +134,7 @@ fn default_reply(request: &Req) -> (u16, String) {
                             "project_attachment": {"status": "personal"}})
         }
         "brief" => json!({"brief": "BRIEF"}),
+        "health" => json!({"ok": true, "version": env!("CARGO_PKG_VERSION")}),
         "topic" => json!({"notes": []}),
         "checkpoint" => json!({"status": "stored"}),
         _ => json!({"status": "queued"}),
@@ -262,6 +347,456 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn grok_hooks_capture_native_payloads_and_deliver_one_deferred_brief() {
+    let fake = fake();
+    let env = Env::new("grok-native-hook", &fake.url);
+    let setup = command(&env.home).args(["setup", "grok"]).output().unwrap();
+    assert!(setup.status.success(), "{setup:?}");
+    let invoke = |event, extra: Value| {
+        let mut payload = json!({"sessionId": "grok-session", "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "grok"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        out
+    };
+    assert!(invoke("SessionStart", json!({})).stdout.is_empty());
+    assert!(fake.to("brief").is_empty());
+    let imported = with_stdin(
+        command(&env.home)
+            .env("GROK_HOOK_EVENT", "user_prompt_submit")
+            .args([
+                "hook",
+                "UserPromptSubmit",
+                "--agent",
+                "claude",
+                "--cairn-managed",
+            ]),
+        &json!({"sessionId": "grok-session", "cwd": env.repo, "prompt": "Run the tests"})
+            .to_string(),
+    );
+    assert!(imported.status.success(), "{imported:?}");
+    assert!(fake.observed().is_empty());
+    invoke("UserPromptSubmit", json!({"prompt": "Run the tests"}));
+    let tool = json!({
+        "toolName": "run_terminal_command",
+        "toolUseId": "grok-tool-1",
+        "toolInput": {"command": "cargo test"},
+        "toolResult": {"exit_code": 101, "stderr": "first error\nand other output"},
+    });
+    assert_eq!(
+        injected(&invoke("PostToolUse", tool.clone())).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
+    assert!(invoke("PostToolUse", tool).stdout.is_empty());
+    let observed = fake.observed();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0]["content"], "Run the tests");
+    assert_eq!(observed[1]["content"], "cargo test\nexit 101: first error");
+    assert_eq!(observed[1]["session_id"], "grok-session");
+    assert_eq!(fake.to("brief").len(), 1);
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(grok; hook)"))
+    );
+    invoke("PreCompact", json!({}));
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    invoke("SessionEnd", json!({}));
+    assert!(!fake.to("end").is_empty());
+}
+
+#[test]
+fn antigravity_hooks_capture_native_payloads_and_checkpoint_on_stop() {
+    let fake = fake();
+    let env = Env::new("antigravity-native-hook", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload =
+            json!({"conversationId": "agy-conversation", "workspacePaths": [env.repo]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).current_dir(&env.home).args([
+                "hook",
+                event,
+                "--agent",
+                "antigravity",
+            ]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null)
+    };
+    let start = invoke("SessionStart", json!({}));
+    assert_eq!(
+        start["injectSteps"][0]["systemMessage"]["systemMessage"],
+        brief_and_hint()
+    );
+    for invocation in 0..2 {
+        invoke(
+            "PreInvocation",
+            json!({"invocationNum": invocation, "lastUserInput": "Edit the file"}),
+        );
+    }
+    let edit = json!({
+        "toolCall": {"name": "multi_replace_file_content", "args": {
+            "TargetFile": env.repo.join("src.rs"),
+            "ReplacementChunks": [{"ReplacementContent": "first"}, {"ReplacementContent": "second"}]
+        }}
+    });
+    assert_eq!(invoke("PostToolUse", edit), json!({}));
+    invoke(
+        "PostToolUse",
+        json!({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "cargo test"}},
+            "error": "exit status 1",
+        }),
+    );
+    let out = invoke(
+        "Stop",
+        json!({"fullyIdle": true, "terminationReason": "model_stop"}),
+    );
+    assert_eq!(out, json!({"decision": "stop"}));
+    let observed = fake.observed();
+    assert_eq!(observed.len(), 4, "{observed:?}");
+    assert_eq!(observed[0]["content"], "Edit the file");
+    assert_eq!(observed[1]["content"], "MultiEdit src.rs\nfirst\nsecond");
+    assert_eq!(observed[2]["content"], "cargo test\nfailed: exit status 1");
+    assert_eq!(observed[2]["session_id"], "agy-conversation");
+    assert_eq!(observed[3]["content"], "changed files\nsrc.rs");
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    assert!(fake.to("topic").is_empty());
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(antigravity; hook)"))
+    );
+}
+
+#[test]
+fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
+    let fake = fake();
+    let env = Env::new("hermes-native-hook", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload = json!({"session_id": "hermes-session", "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home)
+                .env("CAIRN_CAPTURE_ASSISTANT", "1")
+                .args(["hook", event, "--agent", "hermes"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+        out
+    };
+    assert_eq!(
+        injected(&invoke("SessionStart", json!({}))).as_deref(),
+        Some(brief_and_hint().as_str())
+    );
+    invoke(
+        "UserPromptSubmit",
+        json!({"user_message": "Edit and test the widget"}),
+    );
+    let terminal = json!({
+        "tool_name": "terminal", "tool_call_id": "cmd-1", "args": {"command": "cargo test"},
+        "result": r#"{"exit_code":101,"output":"","error":"first error"}"#,
+        "status": "error", "error_message": "first error",
+    });
+    assert!(invoke("PreToolUse", terminal.clone()).stdout.is_empty());
+    assert_eq!(fake.observed().len(), 1);
+    invoke("PostToolUse", terminal);
+    for (status, path) in [("blocked", "blocked.rs"), ("ok", "widget.rs")] {
+        invoke(
+            "PostToolUse",
+            json!({
+                "tool_name": "write_file", "tool_call_id": path,
+                "args": {"path": path, "content": "written contents"}, "result": "{}", "status": status,
+            }),
+        );
+    }
+    invoke(
+        "PostToolUse",
+        json!({
+            "tool_name": "mcp__cairn__memory_search", "tool_call_id": "search-1",
+            "args": {"query": "widgets"}, "result": json!({"result": r#"{"results":[]}"#}).to_string(),
+            "status": "ok",
+        }),
+    );
+    assert!(
+        invoke("Stop", json!({"assistant_response": "Verified the patch"}))
+            .stdout
+            .is_empty()
+    );
+    let observed = fake.observed();
+    assert_eq!(
+        observed
+            .iter()
+            .map(|row| row["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "Edit and test the widget",
+            "cargo test\nexit 101: first error",
+            "Write widget.rs\nwritten contents",
+            "Verified the patch",
+            "changed files\nwidget.rs",
+        ]
+    );
+    assert!(
+        fake.to("observe")
+            .iter()
+            .all(|req| req.user_agent.contains("(hermes; hook)"))
+    );
+    assert_eq!(fake.to("brief").len(), 1);
+    assert_eq!(fake.to("lookup").len(), 1);
+    assert_eq!(fake.to("checkpoint").len(), 1);
+    assert!(fake.to("topic").is_empty());
+    invoke(
+        "PostToolUse",
+        json!({
+            "tool_name": "mcp__cairn__memory_save", "tool_call_id": "save-1",
+            "args": {}, "result": json!({"result": r#"{"id":"mem_test","deduplicated":false}"#}).to_string(),
+            "status": "ok",
+        }),
+    );
+    invoke("PreCompact", json!({}));
+    invoke("SessionEnd", json!({}));
+    assert_eq!(fake.to("end").len(), 1);
+    assert_eq!(fake.to("end")[0].body["nudge_saved"], true);
+}
+
+#[test]
+fn hermes_chat_hook_forwards_project_and_chat_instruction() {
+    const PREFERENCE_ERROR: &str = cairn_core::process::prepare::CHAT_PREFERENCE_ERROR;
+    let server = fake_with(|_, request| {
+        match request.path.rsplit('/').next() {
+        Some("brief") => (200, json!({"brief": "Chat recall", "instructions": {
+            "chat_instruction": "Custom chat line.", "session_instruction": "Private instruction"
+        }}).to_string()),
+        Some("remember") => (400, json!({"error": PREFERENCE_ERROR}).to_string()),
+        _ => default_reply(request),
+    }
+    });
+    let env = Env::new("hermes-chat-hook", &server.url);
+    let chat = json!({"platform": "matrix", "kind": "group", "chat_id_hash": "a".repeat(64)});
+    let invoke = |event, context: &Value, arguments: Value| {
+        let mut body = json!({
+            "session_id": format!("hchat_{}", "b".repeat(32)),
+            "project_id": "implicit project must be ignored",
+            "arguments": arguments,
+        });
+        if !context.is_null() {
+            body["chat_context"] = context.clone();
+        }
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        out
+    };
+    let start = invoke("SessionStart", &chat, Value::Null);
+    assert_eq!(
+        injected(&start).as_deref(),
+        Some("Chat recall\nCustom chat line.")
+    );
+    let scope = &server.to("brief")[0].body["context"];
+    assert_eq!(scope["chat"]["chat_id_hash"], chat["chat_id_hash"]);
+    assert!(scope.get("project_id").is_none());
+    for key in ["owner", "sender_id_hash"] {
+        assert!(scope["chat"].get(key).is_none());
+    }
+    invoke(
+        "ChatSearch",
+        &chat,
+        json!({"query":"tour", "project": "E2E Tours"}),
+    );
+    assert_eq!(
+        server.to("search")[0].body["context"]["project_id"],
+        "E2E Tours"
+    );
+    let save = invoke(
+        "ChatSave",
+        &chat,
+        json!({
+            "kind":"preference", "title":"User preference", "project":"E2E Tours"
+        }),
+    );
+    let reply: Value = serde_json::from_slice(&save.stdout).unwrap();
+    assert_eq!(reply["error"], PREFERENCE_ERROR);
+    assert_eq!(
+        server.to("remember")[0].body["context"]["project_id"],
+        "E2E Tours"
+    );
+    invoke("ChatSearch", &Value::Null, json!({"query":"tour"}));
+    assert_eq!(server.to("search").len(), 1);
+}
+
+/// A 0.1.9 server ignores `context.chat`: chat memory must stay off, not fall back to personal
+/// memory. A rollback mid-session turns it off at once, and queued chat captures wait.
+#[test]
+fn hermes_chat_memory_stays_off_against_a_server_without_chat_scope() {
+    let version = Arc::new(Mutex::new("0.1.9".to_owned()));
+    let observe_down = Arc::new(AtomicBool::new(false));
+    let server = fake_with({
+        let (version, observe_down) = (version.clone(), observe_down.clone());
+        move |_, request| match request.path.rsplit('/').next() {
+            Some("observe") if observe_down.load(Ordering::Relaxed) => (503, "{}".into()),
+            Some("health") => (
+                200,
+                json!({"ok": true, "version": *version.lock().unwrap()}).to_string(),
+            ),
+            // What a legacy server answers: the untagged personal preference.
+            Some("brief") => (200, json!({"brief": "Prefers window seats"}).to_string()),
+            Some("search") => (
+                200,
+                json!({"results": [{"title": "Prefers window seats"}]}).to_string(),
+            ),
+            _ => default_reply(request),
+        }
+    });
+    let env = Env::new("hermes-chat-legacy", &server.url);
+    let invoke = |event: &str, chat: char, extra: Value| {
+        let mut body = json!({
+            "session_id": format!("hchat_{}", chat.to_string().repeat(32)),
+            "chat_context": {"platform": "matrix", "kind": "group",
+                             "chat_id_hash": chat.to_string().repeat(64)},
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for chat in ['a', 'b'] {
+        assert_eq!(invoke("SessionStart", chat, json!({})), "");
+        assert_eq!(
+            invoke(
+                "UserPromptSubmit",
+                chat,
+                json!({"user_message": "where should I sit on the flight"})
+            ),
+            ""
+        );
+        let search = invoke("ChatSearch", chat, json!({"arguments": {"query": "seats"}}));
+        assert!(search.contains("chat memory is off"), "{search}");
+        let save = invoke(
+            "ChatSave",
+            chat,
+            json!({"arguments": {"kind": "fact", "title": format!("chat {chat} secret"), "summary": "s"}}),
+        );
+        assert!(save.contains("chat memory is off"), "{save}");
+        invoke("Stop", chat, json!({"assistant_response": "ok"}));
+        invoke("SessionEnd", chat, json!({}));
+    }
+    let paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+    assert!(
+        paths.iter().all(|path| path.ends_with("/health")),
+        "only the version check reaches a legacy server: {paths:?}"
+    );
+
+    // Supported, then rolled back: the next chat call sends nothing.
+    *version.lock().unwrap() = env!("CARGO_PKG_VERSION").to_owned();
+    invoke("ChatSearch", 'a', json!({"arguments": {"query": "seats"}}));
+    assert_eq!(server.to("search").len(), 1);
+    *version.lock().unwrap() = "0.1.9".to_owned();
+    invoke(
+        "ChatSave",
+        'a',
+        json!({"arguments": {"kind": "fact", "title": "t", "summary": "s"}}),
+    );
+    assert!(server.to("remember").is_empty());
+
+    // A chat capture queued while the server was supported is not replayed after a rollback
+    // by an ordinary session on the same device.
+    *version.lock().unwrap() = env!("CARGO_PKG_VERSION").to_owned();
+    observe_down.store(true, Ordering::Relaxed);
+    invoke(
+        "UserPromptSubmit",
+        'a',
+        json!({"user_message": "queued chat text"}),
+    );
+    assert_eq!(queued_ids(&env.outbox()).len(), 1);
+    *version.lock().unwrap() = "0.1.9".to_owned();
+    observe_down.store(false, Ordering::Relaxed);
+    env.prompt("ordinary", "an ordinary prompt with enough words in it");
+    assert_eq!(
+        server
+            .observed()
+            .iter()
+            .filter(|b| b["context"]["chat"].is_object())
+            .count(),
+        1,
+        "only the first, failed chat capture attempt reached the server"
+    );
+    assert_eq!(
+        queued_ids(&env.outbox()).len(),
+        1,
+        "the chat capture stays queued"
+    );
+}
+
+#[test]
+fn hermes_chat_replays_legacy_captures_without_sender_metadata() {
+    let offline = Arc::new(AtomicBool::new(true));
+    let server = fake_with({
+        let offline = offline.clone();
+        move |_, request| {
+            if request.path.ends_with("/observe") && offline.load(Ordering::Relaxed) {
+                (503, "{}".into())
+            } else {
+                default_reply(request)
+            }
+        }
+    });
+    let env = Env::new("hermes-chat-outbox", &server.url);
+    let prompt = |message| {
+        with_stdin(
+            command(&env.home).args(["hook", "UserPromptSubmit", "--agent", "hermes"]),
+            &json!({
+                "session_id": format!("hchat_{}", "b".repeat(32)),
+                "chat_context": {"platform": "matrix", "kind": "group", "chat_id_hash": "a".repeat(64)},
+                "user_message": message,
+            }).to_string(),
+        )
+    };
+    let first = prompt("Keep the older capture");
+    assert!(first.status.success(), "{first:?}");
+    let outbox = env.outbox();
+    let mut queue: Value = serde_json::from_slice(&std::fs::read(&outbox).unwrap()).unwrap();
+    let body = &mut queue["events"][0]["body"];
+    body["context"]["chat"]["sender_id_hash"] = "c".repeat(64).into();
+    body["context"]["chat"]["owner"] = true.into();
+    let original_id = body["event_id"].clone();
+    std::fs::write(&outbox, queue.to_string()).unwrap();
+
+    offline.store(false, Ordering::Relaxed);
+    let second = prompt("Replay when connected");
+    assert!(second.status.success(), "{second:?}");
+    let sent = server.observed();
+    assert_eq!(sent.len(), 3);
+    let replay = &sent[2];
+    assert_eq!(replay["event_id"], original_id);
+    assert_eq!(replay["content"], "Keep the older capture");
+    assert!(replay["context"]["chat"].get("sender_id_hash").is_none());
+    assert!(replay["context"]["chat"].get("owner").is_none());
+    assert!(queued_ids(&outbox).is_empty());
+}
+
 fn injected(output: &Output) -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     if text.trim().is_empty() {
@@ -349,6 +884,7 @@ fn start_injects_brief_only_and_end_after_work() {
     assert_eq!(brief.body["session_id"], "s1");
     assert_eq!(brief.body["context"]["repository"], "local:repo");
     assert_eq!(brief.body["recent_files"], json!([]));
+    assert_eq!(brief.body["extended_brief"], true);
 
     // No work: SessionEnd closes nothing on the server and removes the state.
     env.run("SessionEnd", &env.payload("s1", json!({})));
@@ -678,11 +1214,115 @@ fn compact_reinjects_brief_and_precompact_checkpoints() {
     );
 }
 
+fn mcp_instructions(home: &Path, checkout: &Path, session_id: Option<&str>) -> String {
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "_meta": {"sessionId": session_id}}
+    });
+    let output = with_stdin(
+        command(home).current_dir(checkout).arg("mcp"),
+        &request.to_string(),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    reply["result"]["instructions"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn mcp_initialize_falls_back_to_static_instructions_on_brief_timeout() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/brief") {
+            thread::sleep(Duration::from_secs(4));
+        }
+        default_reply(request)
+    });
+    let env = Env::new("mcp-brief-timeout", &server.url);
+    let start = Instant::now();
+    let instructions = mcp_instructions(&env.home, &env.repo, Some("timeout"));
+    assert_eq!(instructions, cairn_client::tools::instructions());
+    assert!(start.elapsed() < Duration::from_secs(3));
+    let requests = server.to("brief");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["session_id"], "timeout");
+    assert_eq!(requests[0].body["extended_brief"], true);
+    assert_eq!(requests[0].body["context"]["repository"], "local:repo");
+}
+
+#[test]
+fn mcp_and_hermes_session_start_deduplicate_the_same_brief() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "mcp-hermes");
+    let dir = checkout("mcp-hermes");
+    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"preference","title":"Keep the queue visible","summary":"Show the queue when reviewing worker health.","reason":"Operators spot blocked work in that view."}"#]);
+    let id = saved["id"].as_str().unwrap();
+    let pin = team.owner.json_in(&dir, &["save", r#"{"kind":"preference","title":"Show outages in local time","summary":"Put the local timezone beside each outage timestamp.","reason":"Support hands incidents off between time zones."}"#]);
+    let pin = pin["id"].as_str().unwrap();
+    team.owner_web
+        .post(
+            &format!("/cairn-memory/memories/{pin}/pin"),
+            &json!({"pinned": true}),
+        )
+        .unwrap();
+
+    let initialize = |session| mcp_instructions(&team.owner.home, &dir, session);
+    let hermes_start = |session| {
+        let output = with_stdin(
+            command(&team.owner.home).current_dir(&dir).args([
+                "hook",
+                "SessionStart",
+                "--agent",
+                "hermes",
+            ]),
+            &json!({"session_id": session, "cwd": dir}).to_string(),
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        injected(&output).unwrap()
+    };
+    let text = initialize(Some("mcp-first"));
+    let brief = text
+        .strip_prefix(cairn_client::tools::instructions())
+        .unwrap()
+        .trim_start();
+    assert!(
+        brief.contains(id) && brief.contains(r#""why":"personal preference""#),
+        "{text}"
+    );
+    assert!(brief.len() <= cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES);
+    assert!(brief.contains("L0 Identity") && brief.contains(pin));
+    assert!(brief.contains("L1 Essential"));
+    let same_session = hermes_start("mcp-first");
+    assert!(!same_session.contains(id) && !same_session.contains(pin));
+    let hermes_first = hermes_start("hermes-first");
+    assert!(hermes_first.contains(id) && hermes_first.contains(pin));
+    assert_eq!(
+        initialize(Some("hermes-first")),
+        cairn_client::tools::instructions()
+    );
+    assert!(initialize(None).contains(id));
+    assert!(initialize(None).contains(id));
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"_meta":{"sessionId":"mcp-first"}}});
+    let get = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"memory_get","arguments":{"ids":[id]}}});
+    let output = with_stdin(
+        command(&team.owner.home).current_dir(&dir).arg("mcp"),
+        &format!("{initialize}\n{get}"),
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let view = team
+        .owner_web
+        .get(&format!("/cairn-memory/memories/{id}"))
+        .unwrap();
+    assert_eq!(view["usage"]["push_used"], 1);
+}
+
 #[test]
 fn topic_note_once_per_path_within_caps() {
     let server = fake_with(|_, request| notes_reply(request));
     let env = Env::new("hook-topic", &server.url);
-    let first = env.edit("s1", "src/a.rs", "x");
+    let first = env.edit("s1", "src/a.rs", "fn start_queue() { queue::take_lock(); }");
     let text = injected(&first).unwrap();
     assert!(
         text.starts_with(
@@ -708,6 +1348,12 @@ fn topic_note_once_per_path_within_caps() {
         server.to("topic").len(),
         2 + 3,
         "no lookups once the cap is spent"
+    );
+    let request = &server.to("topic")[0].body;
+    assert_eq!(request["session_id"], "s1");
+    assert_eq!(
+        request["context"]["symbols"],
+        json!(["start_queue", "queue::take_lock"])
     );
     assert_eq!(
         server.to("topic")[0].body["context"]["repository"],
@@ -1437,12 +2083,11 @@ fn a_dead_server_costs_one_timeout_not_one_per_call() {
 
 #[test]
 fn parallel_edits_of_one_file_inject_one_note() {
-    // Neither topic request is answered before both have arrived, so both hooks passed the
-    // "first edit of this path" check before either one recorded it.
+    // Release both edits from capture together so they compete to reserve the topic lookup.
     let gate = Arc::new((Mutex::new(0usize), Condvar::new()));
     let wait = gate.clone();
     let server = fake_with(move |_, request| {
-        if request.path.ends_with("/topic") {
+        if request.path.ends_with("/observe") {
             let (count, arrived) = &*wait;
             let mut count = count.lock().unwrap();
             *count += 1;
@@ -1466,6 +2111,7 @@ fn parallel_edits_of_one_file_inject_one_note() {
         .filter(Option::is_some)
         .count();
     assert_eq!(notes, 1, "the note is injected once");
+    assert_eq!(server.to("topic").len(), 1, "one hook reserves the lookup");
 }
 
 #[test]
@@ -1604,6 +2250,61 @@ fn a_hanging_git_does_not_hold_the_hook() {
 // ---- real server ------------------------------------------------------------------------
 
 #[test]
+fn mcp_search_finds_a_checkpoint_note_and_handoff_in_the_same_checkout() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-recall");
+    let dir = checkout("hook-recall");
+    let init = team.owner.run_in(&dir, &["init", "E2E Hook Recall"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+
+    let run = |event, session, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        assert_eq!(stderr(&output), "", "{event}");
+        output
+    };
+    run(
+        "UserPromptSubmit",
+        "recall",
+        json!({"prompt": "Decision: bound queue concurrency\nReason: protect the worker pool\nTODO: verify exponential backoff"}),
+    );
+    run(
+        "PostToolUse",
+        "recall",
+        edit_call("src/queue.rs", "fn run() {}", "edit"),
+    );
+    run("Stop", "recall", json!({}));
+    assert_eq!(server.distill(&team.owner_id, "recall"), 1);
+    run("SessionEnd", "recall", json!({}));
+    server.distill(&team.owner_id, "recall");
+
+    let brief = injected(&run("SessionStart", "next-session", json!({}))).unwrap();
+    assert!(brief.contains("verify exponential backoff"), "{brief}");
+    assert!(!brief.contains("bound queue concurrency"), "{brief}");
+
+    let mut mcp = team.owner.mcp_in(&dir);
+    let note = mcp.ok("memory_search", json!({"query": "bound queue concurrency"}));
+    assert_eq!(note["results"][0]["kind"], "decision", "{note}");
+    let handoff = mcp.ok(
+        "memory_search",
+        json!({"query": "verify exponential backoff"}),
+    );
+    assert_eq!(handoff["results"][0]["kind"], "handoff", "{handoff}");
+}
+
+#[test]
 fn real_hook_switches_context_within_one_session_without_sharing_notes() {
     let Some(server) = Server::start() else {
         return;
@@ -1708,13 +2409,13 @@ fn digest_uses_last_command_execution_even_when_its_failure_is_identical() {
 }
 
 #[test]
-fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
+fn a_real_server_accepts_every_capture_kind_and_serves_hook_recall() {
     let Some(server) = Server::start() else {
         return;
     };
     let team = team(&server.url, "hook-real");
     let dir = checkout("hook-real-repo");
-    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Queue lock order","summary":"Take the queue lock before the row lock.","reason":"Deadlock otherwise.","fields":{"symptom":"hang","cause":"lock order","fix":"queue lock first"},"context":{"files":["src/queue.rs"]}}"#]);
+    let saved = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Queue lock order","summary":"Take the queue lock before the row lock.","reason":"Inverting the order can deadlock workers.","fields":{"symptom":"hang","cause":"lock order","fix":"queue lock first"},"context":{"symbols":["queue::take_lock"]}}"#]);
     assert_eq!(saved["status"], "active");
     let config = team.owner.home.join("cairn").join("config.json");
     let run = |event: &str, payload: Value| {
@@ -1739,11 +2440,15 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
     run("UserPromptSubmit", base(json!({"prompt": "fix the queue"})));
     let edit = run(
         "PostToolUse",
-        base(edit_call("src/queue.rs", "fn lock() {}", "t1")),
+        base(edit_call(
+            "src/queue.rs",
+            "fn lock() { queue::take_lock(); }",
+            "t1",
+        )),
     );
     let note = injected(&edit).expect("the file note is injected");
     assert!(
-        note.contains("Queue lock order: Take the queue lock before the row lock."),
+        note.contains("Queue lock order: Take the queue lock before the row lock. (why: symbol queue::take_lock)"),
         "{note}"
     );
     assert!(
@@ -1759,6 +2464,22 @@ fn a_real_server_accepts_every_capture_kind_and_serves_topic_notes() {
             json!({"tool_name": "Bash", "tool_input": {"command": "cargo test"}, "tool_response": {"exit_code": 1, "stderr": "boom"}}),
         ),
     );
+    let command_note = team.owner.json_in(&dir, &["save", r#"{"kind":"gotcha","title":"Stale Rust linker cache","summary":"Error: stale linker resource cache","reason":"A linker restart removes the broken cached lock.","fields":{"symptom":"The linker errors during the workspace build.","cause":"An older linker process still holds the resource.","fix":"Restart the linker and rerun the workspace tests."},"context":{"commands":["cargo test --workspace"]}}"#]);
+    assert_eq!(command_note["status"], "active", "{command_note}");
+    let shell =
+        base(json!({"tool_name": "Bash", "tool_input": {"command": "cargo test --workspace"}}));
+    let warning = injected(&run("PreToolUse", shell.clone())).expect("command warning");
+    assert!(
+        warning.contains("why: gotcha for `cargo test --workspace`"),
+        "{warning}"
+    );
+    assert!(run("PreToolUse", shell.clone()).stdout.is_empty());
+    let mut failed = shell;
+    failed["session_id"] = json!("real-2");
+    failed["error"] = json!("Exit code 1\nError: stale linker resource cache");
+    let recall = injected(&run("PostToolUseFailure", failed)).expect("failed-command recall");
+    assert!(recall.contains("why: same error seen before"), "{recall}");
+
     run("Stop", base(json!({})));
     run("SessionEnd", base(json!({})));
 }
@@ -2231,7 +2952,30 @@ fn lookup_recorded_silently() {
         assert_eq!(body["query"], Value::Null);
         assert_eq!(body["result_ids"], json!(["m"]));
         assert_eq!(body["hit"], expected);
+        assert_eq!(
+            body["used_ids"],
+            if expected == true {
+                json!(["m"])
+            } else {
+                json!([])
+            }
+        );
     }
+    let output = env.run(
+        "PostToolUse",
+        &env.payload(
+            "lookup",
+            json!({
+                "tool_name":"cairn_memory_feedback", "tool_input":{"id":"m","vote":"helpful"},
+                "tool_response":{"id":"m","status":"active"}
+            }),
+        ),
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        server.to("lookup").last().unwrap().body["used_ids"],
+        json!(["m"])
+    );
 }
 
 #[test]
@@ -2431,4 +3175,229 @@ fn rename_notice_marks_a_long_name_as_truncated() {
         .unwrap();
     assert!(notice.contains('…'));
     assert!(notice.len() <= 120, "{notice}");
+}
+
+#[test]
+fn command_recall_sends_only_a_redacted_error_tail_and_never_blocks() {
+    let fake = fake_with(|_, request| {
+        if request.path.ends_with("/command-recall") {
+            if request.body["command"] == "cargo test timeout" {
+                thread::sleep(Duration::from_millis(1_300));
+            }
+            return (
+                200,
+                json!({"text": "Cairn notes (why: same error seen before)"}).to_string(),
+            );
+        }
+        default_reply(request)
+    });
+    let env = Env::new("command-recall-wire", &fake.url);
+    let call = |command: &str, fields: Value| {
+        let mut extra = json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        extra
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        env.payload("command-recall", extra)
+    };
+    let warning = env.run(
+        "PreToolUse",
+        &call("cargo   test --workspace && echo private", json!({})),
+    );
+    assert!(injected(&warning).is_some());
+    let output: Value = serde_json::from_slice(&warning.stdout).unwrap();
+    assert!(output.get("decision").is_none());
+    assert!(
+        output["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+    let timed_out = env.run("PreToolUse", &call("cargo test timeout", json!({})));
+    assert!(
+        timed_out.stdout.is_empty() && timed_out.stderr.is_empty(),
+        "{timed_out:?}"
+    );
+
+    let long = format!(
+        "Exit code 101\nfirst-output\n{}\nError: poisoned target directory\ntoken=known-test-secret",
+        "é".repeat(1_200)
+    );
+    let failed = env.run(
+        "PostToolUseFailure",
+        &call(
+            "cargo test --workspace",
+            json!({"error": long, "is_interrupt": false}),
+        ),
+    );
+    assert!(injected(&failed).is_some());
+    let requests = fake.to("command-recall");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].body["command"], "cargo test --workspace");
+    assert!(requests[0].body["error_tail"].is_null());
+    let tail = requests[2].body["error_tail"].as_str().unwrap();
+    assert!(tail.len() <= 2_048 && tail.len() >= 2_046, "{}", tail.len());
+    assert!(
+        tail.ends_with("Error: poisoned target directory\ntoken=[REDACTED]"),
+        "{tail}"
+    );
+    assert!(!tail.contains("first-output") && !tail.contains("known-test-secret"));
+    assert!(fake.observed().is_empty());
+
+    assert!(
+        env.run(
+            "PostToolUseFailure",
+            &call(
+                "cargo test --workspace",
+                json!({"error": "Error: command interrupted", "is_interrupt": true})
+            )
+        )
+        .stdout
+        .is_empty()
+    );
+    assert!(
+        env.bash(
+            "command-recall",
+            "cargo test --workspace",
+            json!({"exit_code": 0, "stdout": "Error: a fixture string"})
+        )
+        .stdout
+        .is_empty()
+    );
+    assert_eq!(fake.to("command-recall").len(), 3);
+}
+
+#[test]
+fn antigravity_command_recall_allows_the_tool_and_delivers_failures_once() {
+    let fake = fake_with(|_, request| {
+        if request.path.ends_with("/command-recall") {
+            let text = if request.body["error_tail"].is_null() {
+                "Cairn pre-command warning"
+            } else {
+                "Cairn failed-command recall"
+            };
+            return (200, json!({"text": text}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("command-recall-antigravity", &fake.url);
+    let invoke = |event, extra: Value| {
+        let mut payload =
+            json!({"conversationId": "antigravity-recall", "workspacePaths": [env.repo]});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "antigravity"]),
+            &payload.to_string(),
+        );
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        output.stdout
+    };
+    let tool = json!({"name": "run_command", "args": {"CommandLine": "cargo test --workspace"}});
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke("PreToolUse", json!({"toolCall": tool}))).unwrap(),
+        json!({"decision": "allow", "reason": "Cairn pre-command warning"}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke(
+            "PostToolUse",
+            json!({"toolCall": tool, "error": "exit status 1"})
+        ))
+        .unwrap(),
+        json!({}),
+    );
+    assert_eq!(fake.to("command-recall")[1].body["error_tail"], "");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke("PreInvocation", json!({}))).unwrap(),
+        json!({"injectSteps": [{"systemMessage": {"systemMessage": "Cairn failed-command recall"}}]}),
+    );
+    assert!(invoke("PreInvocation", json!({})).is_empty());
+    assert_eq!(fake.to("command-recall").len(), 2);
+}
+
+#[test]
+fn prompt_hook_skips_noise_and_spent_budget_and_fails_silently_on_timeout() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/prompt-recall") {
+            let reply = match request.body["session_id"].as_str().unwrap() {
+                "match" => json!({"text": "Sol preference (why: matches \"sol\" in your prompt)"}),
+                "spent" => json!({"text": "", "budget_spent": true}),
+                "timeout" => {
+                    thread::sleep(Duration::from_millis(1_300));
+                    json!({"text": "This arrived after the deadline"})
+                }
+                _ => json!({"text": ""}),
+            };
+            return (200, reply.to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("prompt-recall-wire", &server.url);
+    let run = |session, prompt| {
+        env.run(
+            "UserPromptSubmit",
+            &env.payload(session, json!({"prompt": prompt})),
+        )
+    };
+    let matched = run("match", "Please continue the work with sol");
+    assert!(
+        injected(&matched)
+            .unwrap()
+            .contains(r#"why: matches "sol""#)
+    );
+    assert!(injected(&run("no-match", "Inspect the cedar leaves tomorrow")).is_none());
+    assert!(injected(&run("short", "with sol")).is_none());
+    assert!(injected(&run("slash", "/run this job with sol")).is_none());
+    assert!(injected(&run("spent", "Please proceed with sol")).is_none());
+    assert!(injected(&run("spent", "Explain the linker failure afterwards")).is_none());
+    let start = Instant::now();
+    let secret = format!("ghp_{}", "a".repeat(40));
+    let out = run("timeout", &format!("Please continue with sol {secret}"));
+    assert!(start.elapsed() < Duration::from_millis(1_300));
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "{out:?}"
+    );
+    let calls = server.to("prompt-recall");
+    assert_eq!(calls.len(), 4);
+    assert!(!calls.last().unwrap().body.to_string().contains(&secret));
+    assert_eq!(server.observed().len(), 7);
+}
+
+#[test]
+fn grok_delivers_prompt_recall_once_on_the_next_tool_result() {
+    let server = fake_with(|_, request| {
+        if request.path.ends_with("/prompt-recall") {
+            return (200, json!({"text":"Sol preference"}).to_string());
+        }
+        default_reply(request)
+    });
+    let env = Env::new("grok-prompt-recall", &server.url);
+    let run = |event, extra| {
+        env.run_with(
+            event,
+            &env.payload("grok", extra),
+            &["--agent", "grok"],
+            &[],
+        )
+    };
+    assert!(
+        run(
+            "UserPromptSubmit",
+            json!({"prompt":"Can you proceed with sol?"})
+        )
+        .stdout
+        .is_empty()
+    );
+    let tool = json!({"tool_name":"Bash", "tool_input":{"command":"pwd"}, "tool_response":{"exit_code":0}});
+    assert!(
+        injected(&run("PostToolUse", tool.clone()))
+            .unwrap()
+            .contains("Sol preference")
+    );
+    assert!(run("PostToolUse", tool).stdout.is_empty());
 }

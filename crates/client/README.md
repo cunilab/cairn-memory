@@ -6,7 +6,7 @@ token from one shared tool table; the crate holds no account session and opens n
 `.cairn/project.json`, runs `cairn hook` (capture and injection), configures agents and runs `cairn update`.
 
 ## Entry points
-- `bin/cairn.rs` (commands), `mcp::run_stdio`, `tools` (the five-tool table: `tools/list`, CLI verbs,
+- `bin/cairn.rs` (commands), `mcp::run_stdio`, `tools` (the memory and skill tool table: `tools/list`, CLI verbs,
   instruction text, REST mapping).
 - `present` (MCP result envelope), `doctor` (read-only health checks), `hook` (`cairn hook <Event>`: events, outbox,
   state, injection), `project` (project file and repository identity).

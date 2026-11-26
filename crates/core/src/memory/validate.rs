@@ -6,6 +6,7 @@ use serde_json::Value;
 pub const TITLE_MAX: usize = 80;
 pub const SUMMARY_MAX: usize = 240;
 pub const REASON_MAX: usize = 1_000;
+pub const DETAIL_MAX: usize = 8_000;
 pub const FIELD_TEXT_MAX: usize = 1_000;
 pub const LIST_MAX_ITEMS: usize = 20;
 pub const LIST_ITEM_MAX: usize = 300;
@@ -22,24 +23,56 @@ fn chars(text: &str) -> usize {
     text.chars().count()
 }
 
+fn validate_length(
+    name: impl std::fmt::Display,
+    text: &str,
+    limit: usize,
+    hint: &str,
+) -> Result<(), Error> {
+    let length = chars(text);
+    if length > limit {
+        return bad(format!(
+            "{name} is {length} characters, limit {limit}: cut {}{hint}",
+            length - limit
+        ));
+    }
+    Ok(())
+}
+
 /// Checks everything that needs no IO. Runs after redaction, so the stored text is what is checked.
 /// `allow_handoff` is the system path (distill); agents never write a handoff.
 pub fn validate_save(input: &SaveInput, fields: &Fields, allow_handoff: bool) -> Result<(), Error> {
     if input.kind == Kind::Handoff && !allow_handoff {
         return bad("kind handoff is written by the system only");
     }
-    if input.title.trim().is_empty() || chars(&input.title) > TITLE_MAX {
-        return bad(format!("title must be 1..={TITLE_MAX} characters"));
+    if input.title.trim().is_empty() {
+        return bad("title must not be empty");
     }
-    if input.summary.trim().is_empty() || chars(&input.summary) > SUMMARY_MAX {
-        return bad(format!("summary must be 1..={SUMMARY_MAX} characters"));
+    validate_length("title", &input.title, TITLE_MAX, "")?;
+    if input.summary.trim().is_empty() {
+        return bad("summary must not be empty");
     }
-    if chars(&input.reason) > REASON_MAX {
-        return bad(format!("reason must be at most {REASON_MAX} characters"));
-    }
+    validate_length(
+        "summary",
+        &input.summary,
+        SUMMARY_MAX,
+        ", or move extra context into reason or detail",
+    )?;
+    validate_length(
+        "reason",
+        &input.reason,
+        REASON_MAX,
+        ", or move background into detail",
+    )?;
+    validate_length(
+        "detail",
+        input.detail.as_deref().unwrap_or_default(),
+        DETAIL_MAX,
+        "",
+    )?;
     if input.kind != Kind::Note && input.reason.trim().is_empty() {
         return bad(format!(
-            "reason is required for kind {}",
+            "reason must not be empty for kind {}",
             input.kind.as_str()
         ));
     }
@@ -68,10 +101,8 @@ pub fn validate_fields(fields: &Fields) -> Result<(), Error> {
     };
     for (key, item) in map {
         match item {
-            Value::String(text) if chars(text) > FIELD_TEXT_MAX => {
-                return bad(format!(
-                    "fields.{key} must be at most {FIELD_TEXT_MAX} characters"
-                ));
+            Value::String(text) => {
+                validate_length(format_args!("fields.{key}"), text, FIELD_TEXT_MAX, "")?;
             }
             Value::Array(items) => {
                 let texts: Vec<String> = items
@@ -108,10 +139,8 @@ fn validate_list(name: &str, items: &[String]) -> Result<(), Error> {
     if items.len() > LIST_MAX_ITEMS {
         return bad(format!("{name} must have at most {LIST_MAX_ITEMS} items"));
     }
-    if items.iter().any(|item| chars(item) > LIST_ITEM_MAX) {
-        return bad(format!(
-            "each {name} item must be at most {LIST_ITEM_MAX} characters"
-        ));
+    for (index, item) in items.iter().enumerate() {
+        validate_length(format_args!("{name}[{index}]"), item, LIST_ITEM_MAX, "")?;
     }
     Ok(())
 }
@@ -156,87 +185,4 @@ pub fn validate_quality(input: &SaveInput, fields: &Fields) -> Result<(), Error>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn check(value: serde_json::Value) -> Result<(), Error> {
-        let input: SaveInput = serde_json::from_value(value).expect("shape");
-        let fields = Fields::parse(input.kind, input.fields.clone()).expect("fields");
-        validate_quality(&input, &fields)
-    }
-
-    fn base(kind: &str) -> serde_json::Value {
-        json!({"kind": kind, "title": "Webhook handlers dedupe", "summary": "Handlers keep an event id table so replays do nothing.", "reason": "Providers retry deliveries."})
-    }
-
-    fn with(kind: &str, key: &str, value: serde_json::Value) -> serde_json::Value {
-        let mut v = base(kind);
-        v[key] = value;
-        v
-    }
-
-    #[test]
-    fn quality_messages() {
-        let mut gotcha = base("gotcha");
-        gotcha["fields"] = json!({"fix": "dedupe by event id"});
-        let mut procedure = base("procedure");
-        procedure["fields"] = json!({"steps": ["a", "b"]});
-        for ok in [
-            base("decision"),
-            gotcha.clone(),
-            procedure.clone(),
-            with("note", "reason", json!("")),
-        ] {
-            assert_eq!(check(ok.clone()), Ok(()), "{ok}");
-        }
-        let cases = [
-            (
-                with("rule", "title", json!("short")),
-                "title: use 8-80 characters that name the knowledge",
-            ),
-            (
-                with("rule", "title", json!("x".repeat(81))),
-                "title: use 8-80 characters that name the knowledge",
-            ),
-            (
-                with("rule", "summary", json!("short summary")),
-                "summary: use 20-240 characters saying what is true",
-            ),
-            (
-                with("rule", "summary", json!("x".repeat(241))),
-                "summary: use 20-240 characters saying what is true",
-            ),
-            (
-                {
-                    let mut v = base("rule");
-                    v["summary"] = json!("WEBHOOK handlers dedupe!!  ");
-                    v["title"] = json!("Webhook handlers dedupe");
-                    v["summary"] = json!("webhook handlers dedupe.");
-                    v
-                },
-                "summary: repeats the title; say what is true in 1-3 sentences",
-            ),
-            (
-                with("rule", "reason", json!("because")),
-                "reason: say why this is true or was chosen (10+ characters)",
-            ),
-            (base("gotcha"), "fields.fix: say how the gotcha was fixed"),
-            (
-                with("procedure", "fields", json!({"steps": ["only one"]})),
-                "fields.steps: list at least 2 ordered steps",
-            ),
-        ];
-        for (input, message) in cases {
-            assert_eq!(
-                check(input.clone()),
-                Err(Error::Quality(message.to_owned())),
-                "{input}"
-            );
-        }
-        // the first failing rule wins
-        let mut both = with("rule", "title", json!("short"));
-        both["summary"] = json!("short");
-        assert!(matches!(check(both), Err(Error::Quality(m)) if m.starts_with("title:")));
-    }
-}
+mod tests;

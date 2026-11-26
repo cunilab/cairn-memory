@@ -852,3 +852,83 @@ async fn lookup_log_swept_after_14_days() {
     assert_eq!(count, 1);
     db.finish().await;
 }
+
+#[tokio::test]
+async fn hermes_chat_distill_keeps_the_tag_on_every_derived_memory() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let person = db.person("chat-owner").await;
+    let chat_id = "a".repeat(64);
+    let thread_id = "c".repeat(64);
+    let session_id = format!("hchat_{}", "d".repeat(32));
+    let chat = serde_json::json!({
+        "platform": "discord", "kind": "group", "chat_id_hash": chat_id,
+        "thread_id_hash": thread_id,
+    });
+    let mut input = prompt(
+        "e1",
+        &session_id,
+        "Decision: use pgvector for the chat archive\nReason: keep one database\nTODO: wire the chat worker",
+    );
+    input.context = serde_json::from_value(serde_json::json!({"chat": chat})).unwrap();
+    db.store.capture(&person, input).await.unwrap();
+    for table in ["sessions", "observations"] {
+        let context =
+            format!("SELECT context->'chat' FROM {table} WHERE person_id = $1 AND session_id = $2");
+        let stored: serde_json::Value = sqlx::query_scalar(&context)
+            .bind(&person)
+            .bind(&session_id)
+            .fetch_one(db.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, chat);
+        let mut legacy = chat.clone();
+        legacy["sender_id_hash"] = "b".repeat(64).into();
+        legacy["owner"] = true.into();
+        sqlx::query(&format!(
+            "UPDATE {table} SET context = jsonb_set(context, '{{chat}}', $1)"
+        ))
+        .bind(legacy)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    }
+    for _ in 0..2 {
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0024_hermes_route_privacy.sql"
+        ))
+        .execute(db.store.pool())
+        .await
+        .unwrap();
+    }
+    for table in ["sessions", "observations"] {
+        let stored: serde_json::Value =
+            sqlx::query_scalar(&format!("SELECT context->'chat' FROM {table}"))
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored, chat);
+    }
+    assert!(db.store.end_session(&person, &session_id).await.unwrap());
+    let report = db
+        .store
+        .distill_session(&person, &session_id)
+        .await
+        .unwrap();
+    assert!(report.notes > 0 && report.handoff, "{report:?}");
+    let tags: Vec<(Option<String>, String, String)> =
+        sqlx::query_as("SELECT chat_id_hash, scope, rank FROM memories WHERE owner_id = $1")
+            .bind(&person)
+            .fetch_all(db.store.pool())
+            .await
+            .unwrap();
+    assert!(tags.len() >= 2);
+    assert!(
+        tags.iter()
+            .all(|(id, scope, rank)| id.as_deref() == Some(chat_id.as_str())
+                && scope == "personal"
+                && rank == "candidate")
+    );
+    db.finish().await;
+}

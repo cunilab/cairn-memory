@@ -43,6 +43,15 @@ impl Home {
         self.dir.join(".config/cairn/config.json")
     }
 
+    fn doctor(&self) -> std::process::Command {
+        let mut cmd = command(&self.dir.join(".config"));
+        cmd.env("HOME", &self.dir)
+            .env("USERPROFILE", &self.dir)
+            .current_dir(&self.dir)
+            .arg("doctor");
+        cmd
+    }
+
     fn setup(&self, agent: &str, remove: bool) -> Output {
         let mut cmd = self.command(agent, remove);
         cmd.env("CLAUDE_CONFIG_DIR", self.dir.join(".claude"));
@@ -133,13 +142,449 @@ fn expected(event: &str, agent: &str, home: &Home) -> String {
 }
 
 #[test]
+fn grok_setup_round_trips_config_hooks_and_instructions() {
+    let home = Home::new("grok", false);
+    let original = concat!(
+        "# Keep this comment\n",
+        "[permission]\nallow = [\"Read\"]\ndeny = [\"Bash(rm *)\"]\n",
+        "[mcp_servers.other]\ncommand = \"user-mcp\"\n",
+    );
+    let config = home.write(".grok/config.toml", original);
+    let hooks = home.write(".grok/hooks/user.json", r#"{"hooks":{"Stop":[]}}"#);
+    let instructions = home.write(".grok/AGENTS.md", "Grok user instructions\n");
+    home.ok("grok", false);
+
+    let read_config = || fs::read_to_string(&config).unwrap();
+    let installed = read_config().parse::<toml_edit::DocumentMut>().unwrap();
+    let server = &installed["mcp_servers"]["cairn"];
+    assert_eq!(server["command"].as_str(), Some(EXE));
+    assert_eq!(server["args"][0].as_str(), Some("mcp"));
+    assert_eq!(server["env"]["CAIRN_SETUP_MANAGED"].as_str(), Some("1"));
+    assert_eq!(
+        server["env"]["XDG_CONFIG_HOME"].as_str(),
+        home.dir.join(".config").to_str()
+    );
+    let allow = installed["permission"]["allow"].as_array().unwrap();
+    assert_eq!(
+        allow
+            .iter()
+            .filter_map(toml_edit::Value::as_str)
+            .collect::<Vec<_>>(),
+        ["Read", "MCPTool(cairn__*)"]
+    );
+    let installed = home.json(".grok/hooks/cairn.json");
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "PreCompact",
+        "SessionEnd",
+    ] {
+        assert_eq!(
+            command_of(&installed["hooks"][event][0]),
+            expected(event, "grok", &home)
+        );
+    }
+    assert!(
+        fs::read_to_string(&instructions)
+            .unwrap()
+            .contains(cairn_client::tools::instructions())
+    );
+    check_existing_setup(&home, "grok", ".grok");
+    assert_eq!(read_config().trim_end(), original.trim_end());
+    assert_eq!(
+        fs::read_to_string(hooks).unwrap(),
+        r#"{"hooks":{"Stop":[]}}"#
+    );
+    assert_eq!(
+        fs::read_to_string(instructions).unwrap(),
+        "Grok user instructions\n"
+    );
+    assert!(home.json(".grok/hooks/cairn.json").get("hooks").is_none());
+}
+
+#[test]
+fn antigravity_setup_round_trips_config_hooks_and_instructions() {
+    let home = Home::new("antigravity", false);
+    let mcp = ".gemini/config/mcp_config.json";
+    let hooks = ".gemini/config/hooks.json";
+    let settings = ".gemini/antigravity-cli/settings.json";
+    let user_mcp = json!({"mcpServers": {"other": {"command": "user-mcp", "disabled": true}}});
+    let user_hooks = json!({"user-hook": {"Stop": [{"command": "user-hook"}]}});
+    let user_settings = json!({"toolPermission": "request-review", "permissions": {
+        "allow": ["mcp(other/*)"], "deny": ["mcp(cairn/memory_forget)"]
+    }});
+    home.write(mcp, &user_mcp.to_string());
+    home.write(hooks, &user_hooks.to_string());
+    home.write(settings, &user_settings.to_string());
+    let rules = home.write(
+        ".gemini/config/AGENTS.md",
+        "Antigravity user instructions\n",
+    );
+    home.ok("antigravity", false);
+
+    let server = &home.json(mcp)["mcpServers"]["cairn"];
+    assert_eq!(server["command"], EXE);
+    assert_eq!(server["args"], json!(["mcp"]));
+    assert_eq!(server["env"]["CAIRN_SETUP_MANAGED"], "1");
+    assert_eq!(
+        server["env"]["XDG_CONFIG_HOME"],
+        json!(home.dir.join(".config"))
+    );
+    assert_eq!(
+        home.json(settings)["permissions"],
+        json!({
+            "allow": ["mcp(other/*)", "mcp(cairn/*)"], "deny": ["mcp(cairn/memory_forget)"]
+        })
+    );
+    let installed = home.json(hooks);
+    for event in ["SessionStart", "PreInvocation", "Stop"] {
+        assert_eq!(
+            installed["cairn"][event][0]["command"],
+            expected(event, "antigravity", &home)
+        );
+    }
+    for event in ["PreToolUse", "PostToolUse"] {
+        assert_eq!(
+            command_of(&installed["cairn"][event][0]),
+            expected(event, "antigravity", &home)
+        );
+    }
+    assert_eq!(
+        installed["cairn"]["PreToolUse"][0]["matcher"],
+        "^run_command$"
+    );
+    assert!(
+        fs::read_to_string(&rules)
+            .unwrap()
+            .contains(cairn_client::tools::instructions())
+    );
+    check_existing_setup(&home, "antigravity", ".gemini");
+    assert_eq!(home.json(mcp), user_mcp);
+    assert_eq!(home.json(hooks), user_hooks);
+    assert_eq!(home.json(settings), user_settings);
+    assert_eq!(
+        fs::read_to_string(rules).unwrap(),
+        "Antigravity user instructions\n"
+    );
+}
+
+#[test]
+fn hermes_setup_preserves_existing_settings_and_removes_only_cairn() {
+    let home = Home::new("hermes", false);
+    let original = "+model: test-model
+approvals:
+  mode: manual
+plugins:
+  enabled: [code-review]
+  disabled: [scheduler]
+mcp_servers:
+  other:
+    command: other
+    trust: untrusted
+";
+    let config = home.write(".hermes/config.yaml", original);
+    let soul = home.write(".hermes/SOUL.md", "User personality\n");
+    let other = home.write(
+        ".hermes/plugins/code-review/plugin.yaml",
+        "name: code-review\n",
+    );
+    let load = || yaml_serde::from_str::<Value>(&fs::read_to_string(&config).unwrap()).unwrap();
+    let initial = load();
+    home.ok("hermes", false);
+    let mut installed = load();
+    assert_eq!(
+        installed["mcp_servers"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cairn")
+            .unwrap(),
+        json!({
+            "command": EXE, "args": ["mcp"], "trust": "full",
+            "env": {
+                "XDG_CONFIG_HOME": home.dir.join(".config"), "CAIRN_CONFIG": home.config(),
+                "CAIRN_SETUP_MANAGED": "1", "CAIRN_SETUP_PLUGIN_ENABLED": "1"
+            }
+        }),
+    );
+    assert_eq!(
+        installed["plugins"]["enabled"],
+        json!(["code-review", "cairn-memory"])
+    );
+    installed["plugins"]["enabled"] = json!(["code-review"]);
+    assert_eq!(installed, initial);
+    assert!(
+        fs::read_to_string(&soul)
+            .unwrap()
+            .contains("<!-- cairn:begin -->")
+    );
+    let plugin = home.dir.join(".hermes/plugins/cairn-memory");
+    assert!(
+        fs::read_to_string(plugin.join("__init__.py"))
+            .unwrap()
+            .contains(EXE)
+    );
+    let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
+    for event in ["pre_llm_call", "post_tool_call", "transform_tool_result"] {
+        assert!(manifest.contains(event), "{event}");
+        assert!(
+            fs::read_to_string(plugin.join("__init__.py"))
+                .unwrap()
+                .contains(event),
+            "{event}"
+        );
+    }
+    assert!(!manifest.contains("pre_tool_call"));
+    assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
+        text.windows(SECRET.len())
+            .any(|part| part == SECRET.as_bytes())
+    }));
+
+    check_existing_setup(&home, "hermes", ".hermes");
+    assert_eq!(load(), initial);
+    assert_eq!(fs::read_to_string(&soul).unwrap(), "User personality\n");
+    assert_eq!(fs::read_to_string(&other).unwrap(), "name: code-review\n");
+    assert!(!plugin.join("__init__.py").exists());
+    assert!(!plugin.join("plugin.yaml").exists());
+}
+
+#[test]
+fn hermes_custom_home_preserves_unowned_entries_and_plugin_preferences() {
+    let home = Home::new("hermes-custom", false);
+    let profile = home.dir.join("custom profile");
+    let config = home.write(
+        "custom profile/config.yaml",
+        "plugins:\n  enabled: [cairn-memory]\n",
+    );
+    let run = |remove| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        with_stdin(&mut cmd, SECRET)
+    };
+    for remove in [false, true] {
+        let output = run(remove);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(!home.dir.join(".hermes").exists());
+    let read = || fs::read_to_string(&config).unwrap();
+    let remaining: Value = yaml_serde::from_str(&read()).unwrap();
+    assert_eq!(remaining, json!({"plugins": {"enabled": ["cairn-memory"]}}));
+
+    for (input, expected) in [
+        (
+            "mcp_servers:\n  cairn:\n    command: user-owned\n",
+            "unmarked cairn MCP entry",
+        ),
+        (
+            "plugins:\n  disabled: [cairn-memory]\n",
+            "disabled in Hermes plugins.disabled",
+        ),
+    ] {
+        fs::write(&config, input).unwrap();
+        let before = home.snapshot("custom profile");
+        let output = run(false);
+        assert!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{output:?}"
+        );
+        assert_eq!(home.snapshot("custom profile"), before);
+    }
+}
+
+fn check_existing_setup(home: &Home, agent: &str, folder: &str) {
+    let command = || {
+        let mut cmd = command(&home.dir.join(".config"));
+        cmd.env("HOME", &home.dir).env("USERPROFILE", &home.dir);
+        cmd
+    };
+    let before = home.snapshot(folder);
+    assert!(
+        command()
+            .args(["setup", agent])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(home.snapshot(folder), before);
+    let doctor = command().arg("doctor").output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        doctor.contains(&format!("{agent} MCP entry present")),
+        "{doctor}"
+    );
+    assert!(
+        doctor.contains(&format!("{agent} hook present")),
+        "{doctor}"
+    );
+    assert!(!doctor.contains("warn  instructions"), "{doctor}");
+    let removed = command()
+        .args(["setup", agent, "--remove"])
+        .output()
+        .unwrap();
+    assert!(removed.status.success(), "{removed:?}");
+}
+
+#[test]
+fn doctor_checks_managed_instructions_in_the_hermes_profile() {
+    let home = Home::new("doctor-instructions", false);
+    let profile = home.dir.join("custom profile");
+    let soul = home.write("custom profile/SOUL.md", "User personality\n");
+    let mut setup = home.command("hermes", false);
+    setup.env("HERMES_HOME", &profile);
+    let setup = with_stdin(&mut setup, SECRET);
+    assert!(setup.status.success(), "{setup:?}");
+
+    let doctor = || {
+        let before = home.snapshot(".");
+        let output = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+        assert_eq!(home.snapshot("."), before);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let clean = fs::read_to_string(&soul).unwrap();
+    fs::write(&soul, format!("{clean}\nAnother user instruction\n")).unwrap();
+    assert!(!doctor().contains("warn  instructions"));
+
+    let instructions = cairn_client::tools::instructions();
+    for (content, issue) in [
+        (None, "Cairn instruction block is missing"),
+        (
+            Some("User personality\n".to_owned()),
+            "Cairn instruction block is missing",
+        ),
+        (
+            Some(clean.replace(instructions.trim_end(), "Older Cairn instructions")),
+            "Cairn instruction block is edited or stale",
+        ),
+        (
+            Some(clean.replace("<!-- cairn:end -->", "")),
+            "malformed Cairn markers; repair the marked block first",
+        ),
+    ] {
+        if let Some(content) = content {
+            fs::write(&soul, content).unwrap();
+        } else {
+            fs::remove_file(&soul).unwrap();
+        }
+        let text = doctor();
+        assert!(
+            text.contains(&format!(
+                "warn  instructions  hermes {}: {issue}; run cairn setup hermes",
+                soul.display()
+            )),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn doctor_checks_the_claude_index_unless_native_memory_is_kept() {
+    let home = Home::new("doctor-claude-memory", false);
+    let profile = home.dir.join("custom claude");
+    let settings = home.write(
+        "custom claude/settings.json",
+        "{\"autoMemoryEnabled\": true}\n",
+    );
+    let install = |keep: bool| {
+        let mut setup = home.command("claude", false);
+        setup.env("CLAUDE_CONFIG_DIR", &profile);
+        if keep {
+            setup.arg("--keep-native-memory");
+        }
+        let output = with_stdin(&mut setup, SECRET);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            home.json("custom claude/settings.json")["autoMemoryEnabled"],
+            true
+        );
+    };
+    let command = |args: &[&str]| {
+        let mut cmd = command(&home.dir.join(".config"));
+        cmd.env("HOME", &home.dir)
+            .env("USERPROFILE", &home.dir)
+            .env("CLAUDE_CONFIG_DIR", &profile)
+            .env("CLAUDE_CODE_PROJECT_DIR_NAME", "test-checkout")
+            .current_dir(&home.dir)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let doctor = || {
+        let before = home.snapshot(".");
+        let output = command(&["doctor"]);
+        assert_eq!(home.snapshot("."), before);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    install(false);
+    assert!(!doctor().contains("warn  claude-memory"));
+
+    let folder = profile.join("projects/test-checkout/memory");
+    fs::create_dir_all(&folder).unwrap();
+    let index = folder.join("MEMORY.md");
+    let warning = format!(
+        "warn  claude-memory  {} is missing the Cairn pointer; run cairn import claude-memory",
+        index.display()
+    );
+    let text = doctor();
+    assert!(text.contains(&warning), "{text}");
+
+    let imported = command(&["import", "claude-memory", "--yes"]);
+    assert!(imported.status.success(), "{imported:?}");
+    assert!(!doctor().contains("warn  claude-memory"));
+
+    fs::write(&index, "# Native memory\n").unwrap();
+    let text = doctor();
+    assert!(text.contains(&warning), "{text}");
+
+    install(true);
+    let text = fs::read_to_string(&settings).unwrap();
+    fs::write(settings, format!("// User settings\n{text}")).unwrap();
+    assert!(!doctor().contains("warn  claude-memory"));
+}
+
+#[test]
+fn new_hosts_keep_preexisting_grants_and_refuse_unmarked_servers() {
+    let grok = Home::new("grok-existing", false);
+    let agy = Home::new("antigravity-existing", false);
+    let allow = "[permission]\nallow = [\"MCPTool(cairn__*)\"]\n";
+    let toml = grok.write(".grok/config.toml", allow);
+    let permissions = r#"{"permissions":{"allow":["mcp(cairn/*)"]}}"#;
+    let agy_settings = agy.write(".gemini/antigravity-cli/settings.json", permissions);
+    for (home, agent) in [(&grok, "grok"), (&agy, "antigravity")] {
+        home.ok(agent, false);
+        home.ok(agent, true);
+    }
+    assert_eq!(
+        fs::read_to_string(&toml).unwrap().trim_end(),
+        allow.trim_end()
+    );
+    assert_eq!(fs::read_to_string(agy_settings).unwrap(), permissions);
+
+    let other_grok = "[mcp_servers.cairn]\ncommand = \"user-mcp\"\n";
+    fs::write(&toml, other_grok).unwrap();
+    let other_agy = r#"{"mcpServers":{"cairn":{"command":"user-mcp"}}}"#;
+    let mcp = agy.write(".gemini/config/mcp_config.json", other_agy);
+    grok.err("grok", "unmarked cairn MCP entry");
+    agy.err("antigravity", "unmarked cairn MCP entry");
+    assert_eq!(fs::read_to_string(toml).unwrap(), other_grok);
+    assert_eq!(fs::read_to_string(mcp).unwrap(), other_agy);
+}
+
+#[test]
 fn claude_install_remove_keeps_others() {
     let home = Home::new("claude", false);
+    let instructions = "User's Claude instructions.\n";
+    let global = home.write(".claude/CLAUDE.md", instructions);
     let other = json!({"matcher": "Read", "hooks": [{"type": "command", "command": "my-helper"}]});
-    home.write(
-        ".claude/settings.json",
-        &json!({"theme": "dark", "hooks": {"PostToolUse": [other]}}).to_string(),
-    );
+    let permissions = json!({
+        "allow": ["WebFetch", "mcp__another__*"],
+        "deny": ["Read(./.env)"]
+    });
+    let original =
+        json!({"theme": "dark", "hooks": {"PostToolUse": [other]}, "permissions": permissions});
+    home.write(".claude/settings.json", &original.to_string());
     home.write(
         ".claude/.claude.json",
         r#"{"mcpServers":{"other":{"command":"other"}}}"#,
@@ -147,9 +592,16 @@ fn claude_install_remove_keeps_others() {
     home.ok("claude", false);
 
     let settings = home.json(".claude/settings.json");
+    assert_eq!(settings.as_object().unwrap().len(), 3);
+    assert_eq!(
+        settings["permissions"],
+        json!({"allow": ["WebFetch", "mcp__another__*", "mcp__cairn"], "deny": ["Read(./.env)"]})
+    );
     for event in [
         "SessionStart",
         "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUseFailure",
         "Stop",
         "PreCompact",
         "SessionEnd",
@@ -160,6 +612,13 @@ fn claude_install_remove_keeps_others() {
             "{event}"
         );
     }
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["matcher"],
+        "Bash|Write|Edit|MultiEdit|NotebookEdit"
+    );
+    let block = fs::read_to_string(&global).unwrap();
+    assert!(block.starts_with(instructions));
+    assert!(block.contains(cairn_client::tools::instructions()));
     let post = settings["hooks"]["PostToolUse"].as_array().unwrap();
     assert_eq!(post[0], other);
     assert_eq!(
@@ -168,7 +627,7 @@ fn claude_install_remove_keeps_others() {
     );
     assert_eq!(
         post[1]["matcher"],
-        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get"
+        "Bash|bash|Edit|edit|Write|write|MultiEdit|apply_patch|Read|read|mcp__cairn__memory_save|mcp__cairn__memory_search|mcp__cairn__memory_get|mcp__cairn__memory_feedback"
     );
     let mcp = &home.json(".claude/.claude.json")["mcpServers"];
     assert_eq!(mcp["cairn"]["command"], EXE);
@@ -183,14 +642,81 @@ fn claude_install_remove_keeps_others() {
     assert_eq!(before, home.snapshot(".claude"));
 
     home.ok("claude", true);
-    assert_eq!(
-        home.json(".claude/settings.json"),
-        json!({"theme": "dark", "hooks": {"PostToolUse": [other]}})
-    );
+    assert_eq!(fs::read_to_string(global).unwrap(), instructions);
+    assert_eq!(home.json(".claude/settings.json"), original);
     assert_eq!(
         home.json(".claude/.claude.json"),
         json!({"mcpServers": {"other": {"command": "other"}}})
     );
+}
+
+#[test]
+fn claude_native_memory_opt_out_removes_only_cairns_guard() {
+    let home = Home::new("claude-keep-native", false);
+    let custom = home.dir.join("custom-claude");
+    let user = json!({"matcher": "Write", "hooks": [{"type": "command", "command": "user-hook"}]});
+    home.write(
+        "custom-claude/settings.json",
+        &json!({"hooks": {"PreToolUse": [user]}}).to_string(),
+    );
+    let setup = |option: Option<&str>| {
+        let mut cmd = home.command("claude", false);
+        cmd.env("CLAUDE_CONFIG_DIR", &custom).args(option);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+    };
+    setup(None);
+    assert_eq!(
+        home.json("custom-claude/settings.json")["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    setup(Some("--keep-native-memory"));
+    let settings = home.json("custom-claude/settings.json");
+    assert_eq!(settings["hooks"]["PreToolUse"][0], user);
+    assert_eq!(settings["hooks"]["PreToolUse"][1]["matcher"], "Bash");
+    assert!(command_of(&settings["hooks"]["PreToolUse"][1]).ends_with(" --keep-native-memory"));
+    assert!(command_of(&settings["hooks"]["SessionStart"][0]).ends_with(" --keep-native-memory"));
+    assert!(custom.join("CLAUDE.md").is_file());
+    assert!(!home.dir.join(".claude/CLAUDE.md").exists());
+}
+
+#[test]
+fn claude_remove_keeps_allow_array_and_wildcard() {
+    for (i, (before, installed, removed)) in [
+        (json!([]), json!(["mcp__cairn"]), json!([])),
+        (json!(["mcp__cairn"]), json!(["mcp__cairn"]), json!([])),
+        (
+            json!(["mcp__cairn__*"]),
+            json!(["mcp__cairn__*"]),
+            json!(["mcp__cairn__*"]),
+        ),
+        (
+            json!(["mcp__cairn", "mcp__cairn__*", "mcp__cairn"]),
+            json!(["mcp__cairn", "mcp__cairn__*", "mcp__cairn"]),
+            json!(["mcp__cairn__*"]),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let home = Home::new(&format!("claude-permissions-{i}"), false);
+        let original = json!({"permissions": {"allow": before}});
+        home.write(".claude/settings.json", &original.to_string());
+
+        home.ok("claude", false);
+        assert_eq!(
+            home.json(".claude/settings.json")["permissions"]["allow"],
+            installed
+        );
+        home.ok("claude", true);
+        assert_eq!(
+            home.json(".claude/settings.json"),
+            json!({"permissions": {"allow": removed}})
+        );
+    }
 }
 
 #[test]
@@ -389,10 +915,13 @@ fn codex_native_missing_dir() {
     assert!(!home.dir.join(".codex").exists());
     home.ok("codex", false);
     let hooks = home.json(".codex/hooks.json");
-    assert_eq!(
-        command_of(&hooks["hooks"]["Stop"][0]),
-        expected("Stop", "codex", &home)
-    );
+    for event in ["PreToolUse", "Stop"] {
+        assert_eq!(
+            command_of(&hooks["hooks"][event][0]),
+            expected(event, "codex", &home)
+        );
+    }
+    assert_eq!(hooks["hooks"]["PreToolUse"][0]["matcher"], "Bash");
     assert!(
         hooks["hooks"].get("PreCompact").is_none(),
         "Codex has no PreCompact"
@@ -402,17 +931,42 @@ fn codex_native_missing_dir() {
         state.contains(EXE) && state.contains("CAIRN_SETUP_MANAGED"),
         "{state}"
     );
+    let config = read(&home, ".codex/config.toml");
+    assert!(
+        config.contains("default_tools_approval_mode = \"approve\""),
+        "{config}"
+    );
     let before = home.snapshot(".codex");
+    let block = read(&home, ".codex/AGENTS.md");
+    assert!(block.contains(cairn_client::tools::instructions()));
     home.ok("codex", false);
     assert_eq!(before, home.snapshot(".codex"));
+    let user = "User's Codex instructions.\n";
+    let global = home.write(".codex/AGENTS.md", &format!("{user}{block}"));
+
+    // Reuse an existing managed server from before approval was configured.
+    let other = "approval_policy = \"on-request\"\n\n[mcp_servers.other]\ncommand = \"other\"\ndefault_tools_approval_mode = \"prompt\"\n";
+    let legacy = config.replace("default_tools_approval_mode = \"approve\"\n", "");
+    let config_path = home.write(".codex/config.toml", &format!("{other}{legacy}"));
+    home.ok("codex", false);
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        format!("{other}{config}")
+    );
+
     home.ok("codex", true);
     home.ok("codex", true);
+    assert_eq!(fs::read_to_string(global).unwrap(), user);
     assert!(
         !fs::read_to_string(home.dir.join(".codex/hooks.json"))
             .unwrap()
             .contains("--cairn-managed")
     );
     assert!(!home.dir.join(".codex-fixture-state").exists());
+    assert_eq!(
+        fs::read_to_string(config_path).unwrap().trim_end(),
+        other.trim_end()
+    );
 }
 
 #[test]
@@ -455,6 +1009,7 @@ fn opencode_plugin_install_and_remove() {
         "CAIRN_CONFIG",
         "session.hook",
         "compaction",
+        "execute.before",
         "execute.after",
     ] {
         assert!(plugin.contains(needle), "{needle}");
@@ -561,7 +1116,13 @@ fn claude_setup_edits_only_its_own_bytes_in_the_default_files() {
     );
 
     assert!(home.setup_default_claude(true).status.success());
-    assert_eq!(read(&home, ".claude/settings.json"), settings);
+    let mut remaining = home.json(".claude/settings.json");
+    assert_eq!(
+        remaining.as_object_mut().unwrap().remove("permissions"),
+        Some(json!({"allow": []}))
+    );
+    assert_eq!(remaining, serde_json::from_str::<Value>(settings).unwrap());
+    assert!(read(&home, ".claude/settings.json").contains("\"zeta\": 1e3"));
     assert_eq!(read(&home, ".claude.json"), state);
 }
 
@@ -572,20 +1133,17 @@ fn claude_remove_leaves_nothing_behind_and_creates_nothing() {
     assert!(home.setup_default_claude(true).status.success());
     assert!(!home.dir.join(".claude").exists() && !home.dir.join(".claude.json").exists());
 
-    // Install into files with nothing of ours, then remove: the objects Cairn created go too.
+    // Remove the installed entries while retaining an empty allow array.
     home.write(".claude/settings.json", "{\"theme\": \"dark\"}\n");
     home.write(".claude.json", "{\"userID\": \"u1\"}\n");
     assert!(home.setup_default_claude(false).status.success());
     assert!(read(&home, ".claude/settings.json").contains("\"hooks\""));
     assert!(home.setup_default_claude(true).status.success());
-    for (file, keep) in [
-        (".claude/settings.json", "theme"),
-        (".claude.json", "userID"),
-    ] {
-        let value: Value = serde_json::from_str(&read(&home, file)).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 1, "{file}: {value}");
-        assert!(value.get(keep).is_some());
-    }
+    assert_eq!(
+        home.json(".claude/settings.json"),
+        json!({"theme": "dark", "permissions": {"allow": []}})
+    );
+    assert_eq!(home.json(".claude.json"), json!({"userID": "u1"}));
 }
 
 #[test]
@@ -627,4 +1185,184 @@ fn setup_keeps_a_run_hook_that_is_not_the_python_wrapper() {
     home.ok("claude", false);
     assert!(home.dir.join(".config/cairn/hook/run-hook").exists());
     assert!(home.dir.join(".config/cairn/hook/README.txt").exists());
+}
+
+#[test]
+fn refresh_adds_command_hooks_to_every_existing_install() {
+    // Refresh reads the process environment. Re-enter this test with an isolated home.
+    if std::env::var_os("CAIRN_TEST_SETUP_REFRESH").is_some() {
+        let lines = cairn_client::setup::refresh(std::path::Path::new(EXE));
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.ends_with("integration installed")),
+            "{lines:?}"
+        );
+        return;
+    }
+    let home = Home::new("command-refresh", true);
+    let hooks = [
+        ("claude", ".claude/settings.json", "hooks"),
+        ("codex", ".codex/hooks.json", "hooks"),
+        ("grok", ".grok/hooks/cairn.json", "hooks"),
+        ("antigravity", ".gemini/config/hooks.json", "cairn"),
+    ];
+    for (agent, path, group) in hooks {
+        home.ok(agent, false);
+        let mut legacy = home.json(path);
+        let events = legacy[group].as_object_mut().unwrap();
+        if agent == "claude" {
+            events.get_mut("PreToolUse").unwrap()[0]["matcher"] =
+                json!("Write|Edit|MultiEdit|NotebookEdit");
+            events.remove("PostToolUseFailure");
+        } else {
+            events.remove("PreToolUse");
+        }
+        home.write(path, &legacy.to_string());
+    }
+    let plugins = [
+        (
+            "opencode",
+            ".config/opencode/plugins/cairn/index.js",
+            "execute.before",
+        ),
+        (
+            "hermes",
+            ".hermes/plugins/cairn-memory/__init__.py",
+            "transform_tool_result",
+        ),
+    ];
+    for (agent, path, _) in plugins {
+        home.ok(agent, false);
+        let marker = if agent == "opencode" {
+            "// cairn:continuity"
+        } else {
+            "# CAIRN_SETUP_MANAGED"
+        };
+        home.write(path, &format!("{marker}\n--cairn-managed\n"));
+    }
+    let mut executable = std::process::Command::new(std::env::current_exe().unwrap());
+    for (key, value) in home.command("claude", false).get_envs() {
+        match value {
+            Some(value) => executable.env(key, value),
+            None => executable.env_remove(key),
+        };
+    }
+    executable
+        .env("CLAUDE_CONFIG_DIR", home.dir.join(".claude"))
+        .env("CAIRN_TEST_SETUP_REFRESH", "1");
+    let result = executable
+        .args([
+            "--exact",
+            "refresh_adds_command_hooks_to_every_existing_install",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    for (agent, path, group) in hooks {
+        let installed = home.json(path);
+        assert_eq!(
+            command_of(&installed[group]["PreToolUse"][0]),
+            expected("PreToolUse", agent, &home)
+        );
+        if agent == "claude" {
+            assert_eq!(
+                installed[group]["PreToolUse"][0]["matcher"],
+                "Bash|Write|Edit|MultiEdit|NotebookEdit"
+            );
+            assert_eq!(
+                command_of(&installed[group]["PostToolUseFailure"][0]),
+                expected("PostToolUseFailure", agent, &home)
+            );
+        }
+    }
+    for (_, path, event) in plugins {
+        assert!(read(&home, path).contains(event), "{path}");
+    }
+}
+
+#[test]
+fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
+    let home = Home::new("hermes-gateway", false);
+    let profile = home.dir.join("gateway-profile");
+    let invoke = |gateway: bool, remove: bool| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        if gateway {
+            cmd.arg("--gateway");
+        }
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let yaml = || {
+        yaml_serde::from_str::<Value>(&fs::read_to_string(profile.join("config.yaml")).unwrap())
+            .unwrap()
+    };
+    invoke(false, false);
+    assert_eq!(yaml()["mcp_servers"]["cairn"]["trust"], "full");
+
+    invoke(true, false);
+    let converted = yaml();
+    assert!(converted["mcp_servers"]["cairn"].is_null());
+    let settings = &converted["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert_eq!(settings["cairn_gateway"], true);
+    let salt = settings["chat_salt"].as_str().unwrap();
+    let plugin = profile.join("plugins/cairn-memory");
+    assert!(
+        fs::read_to_string(plugin.join("__init__.py"))
+            .unwrap()
+            .contains("GATEWAY = True")
+    );
+    assert!(
+        fs::read_to_string(plugin.join("plugin.yaml"))
+            .unwrap()
+            .contains("  - memory_search\n  - memory_save")
+    );
+    let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(!doctor.contains("warn  instructions"), "{doctor}");
+    let before = home.snapshot("gateway-profile");
+    invoke(true, false);
+    assert_eq!(before, home.snapshot("gateway-profile"));
+    invoke(false, false);
+    assert_eq!(
+        before,
+        home.snapshot("gateway-profile"),
+        "routine setup preserves gateway mode"
+    );
+    let mut legacy = yaml();
+    let settings = &mut legacy["plugins"]["entries"]["cairn-memory"]["settings"];
+    settings["chat_owner_hashes"] = json!({"telegram": "b".repeat(64)});
+    settings["chat_projects"] = json!({"c".repeat(64): "proj_obsolete"});
+    fs::write(
+        profile.join("config.yaml"),
+        yaml_serde::to_string(&legacy).unwrap(),
+    )
+    .unwrap();
+    invoke(false, false);
+    let refreshed = yaml();
+    let settings = &refreshed["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert!(settings.get("chat_owner_hashes").is_none());
+    assert!(settings.get("chat_projects").is_none());
+    assert_eq!(settings["chat_salt"], salt);
+
+    invoke(false, true);
+    let removed = yaml();
+    assert!(removed["mcp_servers"]["cairn"].is_null());
+    assert!(removed["plugins"]["enabled"].as_array().unwrap().is_empty());
+    let settings = &removed["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert!(settings["cairn_gateway"].is_null());
+    assert_eq!(settings["chat_salt"], salt);
+    assert!(!plugin.join("__init__.py").exists());
+    assert!(!plugin.join("plugin.yaml").exists());
+    assert!(!home.dir.join(".hermes").exists());
 }

@@ -12,8 +12,8 @@ part of the `cairn` binary. Events, fields and limits are in the
 
 | Event | What `cairn hook` does |
 | --- | --- |
-| `SessionStart` | injects the bounded server brief (at most 1,200 B) |
-| `UserPromptSubmit` | captures the prompt |
+| `SessionStart` | injects the bounded server brief (at most 1,800 B) |
+| `UserPromptSubmit` | captures the prompt and may add matching preferences or project memories |
 | `PostToolUse` (`Bash`, `Edit`, `Write`, `MultiEdit`, `apply_patch`) | captures edits and non-read-only commands; the first edit of a file may inject a short note about it |
 | `Stop`, `PreCompact` | save a checkpoint after new work; assistant capture stays opt-in |
 | `SessionEnd` | best-effort rule-based session distillation |
@@ -26,7 +26,7 @@ Cairn-managed entry. The manual example below is for a custom project-only integ
 ## Setup
 
 1. Start the Cairn server and sign in to the web console.
-2. On the Devices page, create a device for this machine and copy its token. It is shown once. Use a
+2. In **Settings → Devices**, create a device for this machine and copy its token. It is shown once. Use a
    device token, not an account or web session token. Install the `cairn` CLI from a
    [release](../release.md), put it on `PATH`, and run `cairn setup <server-url>` with the token on
    stdin. That writes the config file (`~/.config/cairn/config.json`, or under `$XDG_CONFIG_HOME` /

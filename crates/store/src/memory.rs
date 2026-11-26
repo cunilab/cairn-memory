@@ -3,17 +3,56 @@ use crate::project::join_member;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::WorkContext;
 use cairn_core::id::{new_id, now_seconds};
+use cairn_core::memory::coaching::save_hints;
 use cairn_core::memory::model::Rank;
 use cairn_core::memory::{
     Context, Entity, EntityKind, Fields, Kind, Link, Memory, Relation, SaveInput, Scope, Status,
-    Usage,
+    TrustLevel, Usage,
 };
 use cairn_core::process::jobs::JobKind;
+use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
-use sqlx::{PgConnection, Row};
+use sqlx::{Executor, PgConnection, PgExecutor, Postgres, Row};
 use std::collections::{HashMap, HashSet};
+
+async fn resolve_chat_project<'e>(
+    db: impl PgExecutor<'e>,
+    person_id: &str,
+    project: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(project) = project.map(str::trim) else {
+        return Ok(None);
+    };
+    cairn_core::project::validate_project_text(project, "project")?;
+    let matches: Vec<String> = sqlx::query_scalar(
+        "SELECT p.project_id FROM projects p
+          JOIN project_members m USING (project_id)
+         WHERE m.person_id = $1 AND (p.project_id = $2 OR p.name = $2)
+         ORDER BY (p.project_id = $2) DESC, p.project_id LIMIT 2 FOR SHARE OF m",
+    )
+    .bind(person_id)
+    .bind(project)
+    .fetch_all(db)
+    .await?;
+    match matches.as_slice() {
+        [id] => Ok(Some(id.clone())),
+        [id, ..] if id == project => Ok(Some(id.clone())),
+        [] => Err(StoreError::NotFound("member project".into())),
+        _ => Err(StoreError::Validation(
+            "more than one member project has that name; use the project ID".into(),
+        )),
+    }
+}
+
+fn pin_limit(scope: Scope) -> Option<i64> {
+    match scope {
+        Scope::Personal => Some(5),
+        Scope::Project => Some(10),
+        Scope::Global => None,
+    }
+}
 
 fn owned(alias: &str, me: &str) -> String {
     format!(
@@ -24,24 +63,34 @@ fn owned(alias: &str, me: &str) -> String {
     )
 }
 
-/// The visibility rule, reused by every read: not forgotten, and owned, global, or in a project
-/// the reader belongs to. Age does not hide a row. `alias` is the memories table alias, `me` a
-/// bind like `$1`.
-pub(crate) fn visible(alias: &str, me: &str) -> String {
+/// Archive applies only to project scope, even when the reader owns the memory.
+pub(crate) fn active_project_memory(alias: &str) -> String {
     format!(
-        "({a}.status <> 'forgotten' AND {owned})",
-        a = alias,
-        owned = owned(alias, me)
+        "({alias}.scope <> 'project' OR NOT EXISTS
+            (SELECT 1 FROM projects p WHERE p.project_id = {alias}.project_id AND p.archived_at IS NOT NULL))"
     )
 }
 
-/// The search rule: `active`, `stale` or `superseded`, and owned, global, or in one of the
-/// reader's projects. `me` is a person bind (`$1`), `projects` a `text[]` bind of the reader's
-/// project ids, loaded once per request. A plain column predicate, so the vector channel can
-/// apply it inside the HNSW scan. Forgotten rows stay out. Age does not.
+pub(crate) fn visible(alias: &str, me: &str) -> String {
+    visible_with_archive(alias, me, false)
+}
+
+pub(crate) fn visible_with_archive(alias: &str, me: &str, include_archived: bool) -> String {
+    let owned = owned(alias, me);
+    let active = if include_archived {
+        "TRUE".to_owned()
+    } else {
+        active_project_memory(alias)
+    };
+    format!("({alias}.status <> 'forgotten' AND {owned} AND {active})")
+}
+
+/// Search uses the caller's project ids loaded once and the shared archive predicate.
 pub(crate) fn searchable(alias: &str, me: &str, projects: &str) -> String {
+    let active = active_project_memory(alias);
     format!(
         "({a}.status IN ('active','stale','superseded')
+          AND {active}
           AND ({a}.owner_id = {me} OR {a}.scope = 'global'
                OR ({a}.scope = 'project' AND {a}.project_id = ANY({projects}))))",
         a = alias
@@ -54,28 +103,70 @@ pub(crate) fn visible_even_if_expired(alias: &str, me: &str) -> String {
 }
 
 macro_rules! memory_columns {
-    () => {
-        "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
-    m.title, m.summary, m.reason, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
-    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
+    ($detail:literal) => {
+        concat!(
+            "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
+    m.title, m.summary, m.reason, ", $detail, " AS detail, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
+    m.identity_hash, m.chat_id_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
+    EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
     (EXTRACT(EPOCH FROM m.created_at) * 1000000)::bigint AS created_us,
     EXTRACT(EPOCH FROM m.updated_at)::bigint AS updated_at,
     to_char(m.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_ts,
     COALESCE(u.fetched, 0) AS fetched, COALESCE(u.helpful, 0) AS helpful,
-    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at"
+    COALESCE(u.wrong, 0) AS wrong, EXTRACT(EPOCH FROM u.last_used_at)::bigint AS last_used_at,
+    COALESCE(u.shown, 0) AS shown, COALESCE(u.detail_opened, 0) AS detail_opened,
+    EXTRACT(EPOCH FROM u.last_shown_at)::bigint AS last_shown_at")
     };
 }
 
 /// The columns of `memory_from_row`, for a caller that adds its own columns and joins.
-pub(crate) const MEMORY_COLUMNS: &str = memory_columns!();
+pub(crate) const MEMORY_COLUMNS: &str = memory_columns!("''");
 pub(crate) const MEMORY_SELECT: &str = concat!(
-    memory_columns!(),
+    memory_columns!("''"),
     " FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id"
 );
+pub(crate) const MEMORY_SELECT_WITH_DETAIL: &str = concat!(
+    memory_columns!("m.detail"),
+    " FROM memories m LEFT JOIN usage u ON u.memory_id = m.memory_id"
+);
+
+pub(crate) const SEARCH_VECTOR: &str = "(m.search_tsv || to_tsvector('english', m.detail))";
+
+/// Uses the original GIN for old rows and the partial GIN for detail-bearing rows.
+pub(crate) fn search_matches(terms: &str) -> String {
+    format!(
+        "((m.detail = '' AND m.search_tsv @@ {terms})
+           OR (m.detail <> '' AND {SEARCH_VECTOR} @@ {terms}))"
+    )
+}
+
+pub(crate) async fn entities_for<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<Entity>>> {
+    let mut entities: HashMap<String, Vec<Entity>> = HashMap::new();
+    for row in sqlx::query(
+        "SELECT memory_id, kind, name FROM entities WHERE memory_id = ANY($1) ORDER BY kind, name",
+    )
+    .bind(ids)
+    .fetch_all(executor)
+    .await?
+    {
+        let kind: EntityKind = parse(&row, "kind")?;
+        entities
+            .entry(row.try_get("memory_id")?)
+            .or_default()
+            .push(Entity {
+                kind,
+                name: row.try_get("name")?,
+            });
+    }
+    Ok(entities)
+}
 
 fn parse<T: std::str::FromStr<Err = String>>(row: &PgRow, column: &str) -> Result<T> {
     row.try_get::<String, _>(column)?
@@ -96,6 +187,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         title: row.try_get("title")?,
         summary: row.try_get("summary")?,
         reason: row.try_get("reason")?,
+        detail: row.try_get("detail")?,
         fields,
         evidence: row.try_get("evidence")?,
         evidence_count: row.try_get::<i32, _>("evidence_count")?.max(0) as u32,
@@ -110,6 +202,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         status: parse(row, "status")?,
         rank: parse(row, "rank")?,
         faded_at: row.try_get("faded_at")?,
+        pinned_at: row.try_get("pinned_at")?,
         edited_by: row.try_get("edited_by")?,
         proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
@@ -120,11 +213,19 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         updated_at: row.try_get("updated_at")?,
         evidence_hash: row.try_get("evidence_hash")?,
         identity_hash: row.try_get("identity_hash")?,
+        chat_id_hash: row
+            .try_get::<Option<String>, _>("chat_id_hash")?
+            .map(cairn_core::capture::ChatHash::try_from)
+            .transpose()
+            .map_err(|error| StoreError::Validation(error.into()))?,
         usage: Usage {
             fetched: row.try_get::<i32, _>("fetched")?.max(0) as u32,
+            shown: row.try_get::<i32, _>("shown")?.max(0) as u32,
+            detail_opened: row.try_get::<i32, _>("detail_opened")?.max(0) as u32,
             helpful: row.try_get::<i32, _>("helpful")?.max(0) as u32,
             wrong: row.try_get::<i32, _>("wrong")?.max(0) as u32,
             last_used_at: row.try_get("last_used_at")?,
+            last_shown_at: row.try_get("last_shown_at")?,
         },
     })
 }
@@ -164,6 +265,15 @@ pub struct Saved {
     pub status: Status,
     /// True when an identical memory already existed; nothing new was written.
     pub deduplicated: bool,
+    pub hints: Vec<String>,
+}
+
+#[derive(Clone)]
+pub(crate) enum SaveSource {
+    Agent,
+    StrictAgent,
+    ImportedChat(cairn_core::capture::ChatHash),
+    System,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,15 +289,20 @@ pub struct ListFilter {
     pub kind: Option<Kind>,
     /// Empty means every visible status.
     pub statuses: Vec<Status>,
+    pub trust: Option<TrustLevel>,
     /// 1..=500, default 100.
     pub limit: Option<i64>,
     pub cursor: Option<String>,
     /// The branch the memory was saved on.
     pub branch: Option<String>,
-    /// A web search over title, summary, reason and fields. Never counts a fetch.
+    /// A web search over title, summary, reason, fields and detail. Never counts a fetch.
     pub q: Option<String>,
     /// An admin listing `forgotten` rows. Everyone else stays on `visible`.
     pub see_forgotten: bool,
+    /// A console list filtered to an explicitly selected project.
+    pub include_archived: bool,
+    /// A device listing cannot browse chat-tagged personal memories.
+    pub exclude_chat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -197,17 +312,18 @@ pub struct Page {
 }
 
 impl Store {
-    /// An agent's save. Project membership comes from the work context's project id.
+    /// A strictly validated agent save. Project membership comes from the work context.
     pub async fn save(
         &self,
         person_id: &str,
         input: SaveInput,
         work: &WorkContext,
     ) -> Result<Saved> {
-        self.save_from(person_id, input, work, None).await
+        self.save_as(person_id, input, work, SaveSource::StrictAgent, None)
+            .await
     }
 
-    /// `save`, remembering which of the person's devices made it (the console shows its name).
+    /// Explicit agent save with advisory coaching and optional device provenance.
     pub async fn save_from(
         &self,
         person_id: &str,
@@ -215,7 +331,7 @@ impl Store {
         work: &WorkContext,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        self.save_as(person_id, input, work, Origin::Agent, device_id)
+        self.save_as(person_id, input, work, SaveSource::Agent, device_id)
             .await
     }
 
@@ -224,43 +340,29 @@ impl Store {
         person_id: &str,
         input: SaveInput,
         work: &WorkContext,
-        origin: Origin,
+        source: SaveSource,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        let project_id = self.context_project(person_id, work, device_id).await?;
-        self.save_with_project(
+        let mut project_id = if work.chat.is_none() {
+            self.context_project(person_id, work, device_id).await?
+        } else {
+            None
+        };
+        let mut tx = self.pool.begin().await?;
+        if work.chat.is_some() {
+            project_id =
+                resolve_chat_project(&mut *tx, person_id, work.project_id.as_deref()).await?;
+        }
+        let saved = save_in_tx(
+            &mut tx,
             person_id,
             input,
             work,
-            origin,
+            source,
             device_id,
             project_id.as_deref(),
         )
-        .await
-    }
-
-    pub(crate) async fn save_with_project(
-        &self,
-        person_id: &str,
-        input: SaveInput,
-        work: &WorkContext,
-        origin: Origin,
-        device_id: Option<&str>,
-        project_id: Option<&str>,
-    ) -> Result<Saved> {
-        let mut input = input;
-        input.aliases = input
-            .aliases
-            .iter()
-            .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
-            .collect();
-        let aliases = input.aliases.clone();
-        let new = prepare_save(input, work, project_id.is_some(), origin, now_seconds())?;
-        let mut tx = self.pool.begin().await?;
-        let saved = insert_memory(&mut tx, person_id, project_id, &new, None, device_id).await?;
-        if !saved.deduplicated {
-            insert_agent_aliases(&mut tx, &saved.id, &aliases).await?;
-        }
+        .await?;
         tx.commit().await?;
         Ok(saved)
     }
@@ -273,6 +375,9 @@ impl Store {
         work: &WorkContext,
         device_id: Option<&str>,
     ) -> Result<Option<String>> {
+        if work.chat.is_some() {
+            return Ok(self.resolve_project(person_id, work).await?.project_id);
+        }
         if let Some(project_id) = work
             .project_id
             .as_deref()
@@ -297,6 +402,13 @@ impl Store {
         person_id: &str,
         work: &WorkContext,
     ) -> Result<ProjectResolution> {
+        if work.chat.is_some() {
+            return Ok(ProjectResolution {
+                project_id: resolve_chat_project(&self.pool, person_id, work.project_id.as_deref())
+                    .await?,
+                by_repository: false,
+            });
+        }
         if let Some(project_id) = work
             .project_id
             .as_deref()
@@ -337,9 +449,18 @@ impl Store {
     }
 
     pub async fn get(&self, person_id: &str, memory_id: &str) -> Result<Memory> {
+        self.get_visible(person_id, memory_id, false).await
+    }
+
+    pub async fn get_visible(
+        &self,
+        person_id: &str,
+        memory_id: &str,
+        include_archived: bool,
+    ) -> Result<Memory> {
         let row = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id = $2 AND {}",
-            visible("m", "$1")
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id = $2 AND {}",
+            visible_with_archive("m", "$1", include_archived)
         ))
         .bind(person_id)
         .bind(memory_id)
@@ -347,26 +468,42 @@ impl Store {
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
         let mut memories = vec![memory_from_row(&row)?];
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, include_archived)
+            .await?;
         Ok(memories.remove(0))
     }
 
-    /// Counts an explicit fetch by an agent (`get` or search). Internal usage; never shown.
+    /// Counts an explicit fetch by an agent (`get` or search).
     pub async fn mark_fetched(&self, memory_ids: &[String]) -> Result<()> {
+        self.mark_agent_read(memory_ids, false).await
+    }
+
+    /// A full-detail get is also a fetch. Count both in the same transaction.
+    pub async fn mark_agent_read(&self, memory_ids: &[String], detail: bool) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
         let mut tx = self.pool.begin().await?;
+        let ids: Vec<&str> = memory_ids.iter().map(String::as_str).collect();
+        match crate::project::lock_memory_projects(&mut tx, &ids).await {
+            Err(StoreError::Conflict(_)) => return Ok(()),
+            result => result?,
+        }
         sqlx::query("UPDATE memories SET faded_at = NULL WHERE memory_id = ANY($1) AND faded_at IS NOT NULL")
             .bind(memory_ids)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO usage (memory_id, fetched, last_used_at)
-             SELECT id, 1, now() FROM unnest($1::text[]) AS id WHERE EXISTS (SELECT 1 FROM memories WHERE memory_id = id)
-             ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now()",
+            "INSERT INTO usage (memory_id, fetched, last_used_at, detail_opened)
+             SELECT memory_id, 1, now(), $2 FROM memories WHERE memory_id = ANY($1) ORDER BY memory_id
+             ON CONFLICT (memory_id) DO UPDATE SET fetched = usage.fetched + 1, last_used_at = now(),
+                 detail_opened = usage.detail_opened + EXCLUDED.detail_opened",
         )
         .bind(memory_ids)
+        .bind(i32::from(detail))
         .execute(&mut *tx)
         .await?;
-        promote_candidates(&mut *tx, memory_ids).await?;
+        promote_candidates(&mut *tx, memory_ids, false).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -388,12 +525,26 @@ impl Store {
             .iter()
             .map(|s| s.as_str().to_owned())
             .collect();
+        let include_archived = filter.include_archived && filter.project_id.is_some();
         let scope = if filter.see_forgotten {
-            owned("m", "$1")
+            let owned = owned("m", "$1");
+            if include_archived {
+                owned
+            } else {
+                format!("{owned} AND {}", active_project_memory("m"))
+            }
         } else {
-            visible("m", "$1")
+            visible_with_archive("m", "$1", include_archived)
         };
         let q = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        let matches = search_matches("websearch_to_tsquery('english', $10)");
+        // Match Memory::trust before LIMIT so the filter covers every page.
+        let trust = "CASE
+            WHEN m.status = 'stale' OR u.wrong > 0 THEN 'doubted'
+            WHEN m.rank = 'candidate' THEN 'new'
+            WHEN u.helpful >= 2 OR m.proof_count >= 3 THEN 'proven'
+            ELSE 'normal'
+        END";
         let rows = sqlx::query(&format!(
             "{MEMORY_SELECT}
              WHERE {scope} AND ($2::text IS NULL OR m.project_id = $2)
@@ -401,7 +552,9 @@ impl Store {
                AND (cardinality($5::text[]) = 0 OR m.status = ANY($5))
                AND ($6::text IS NULL OR (m.updated_at, m.memory_id) < ($6::timestamptz, $7::text))
                AND ($9::text IS NULL OR m.repo_branch = $9)
-               AND ($10::text IS NULL OR m.search_tsv @@ websearch_to_tsquery('english', $10))
+               AND ($10::text IS NULL OR {matches})
+               AND ($11::text IS NULL OR ({trust}) = $11)
+               AND (NOT $12 OR m.chat_id_hash IS NULL)
              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8"
         ))
         .bind(person_id)
@@ -414,6 +567,8 @@ impl Store {
         .bind(limit + 1)
         .bind(&filter.branch)
         .bind(q)
+        .bind(filter.trust.map(TrustLevel::as_str))
+        .bind(filter.exclude_chat)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| match &error {
@@ -439,7 +594,8 @@ impl Store {
             .iter()
             .filter_map(|row| collection_memory(row).transpose())
             .collect::<Result<Vec<_>>>()?;
-        self.attach(person_id, &mut memories).await?;
+        self.attach(person_id, &mut memories, include_archived)
+            .await?;
         Ok(Page {
             memories,
             next_cursor,
@@ -448,20 +604,17 @@ impl Store {
 
     /// Fills `entities` and `links` (outgoing and incoming). A link whose other end the reader
     /// cannot see is left out, so links never reveal a hidden memory.
-    pub(crate) async fn attach(&self, person_id: &str, memories: &mut [Memory]) -> Result<()> {
+    pub(crate) async fn attach(
+        &self,
+        person_id: &str,
+        memories: &mut [Memory],
+        include_archived: bool,
+    ) -> Result<()> {
         if memories.is_empty() {
             return Ok(());
         }
         let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
-        let mut entities: HashMap<String, Vec<Entity>> = HashMap::new();
-        for row in sqlx::query("SELECT memory_id, kind, name FROM entities WHERE memory_id = ANY($1) ORDER BY kind, name")
-            .bind(&ids)
-            .fetch_all(&self.pool)
-            .await?
-        {
-            let kind: EntityKind = parse(&row, "kind")?;
-            entities.entry(row.try_get("memory_id")?).or_default().push(Entity { kind, name: row.try_get("name")? });
-        }
+        let mut entities = entities_for(&self.pool, &ids).await?;
         let link_rows = sqlx::query(
             "SELECT source_id, target_id, relation, origin FROM links
               WHERE source_id = ANY($1) OR target_id = ANY($1) ORDER BY created_at, source_id, target_id",
@@ -482,7 +635,7 @@ impl Store {
             .collect();
         let readable: HashSet<String> = sqlx::query_scalar(&format!(
             "SELECT m.memory_id FROM memories m WHERE m.memory_id = ANY($2) AND {}",
-            visible("m", "$1")
+            visible_with_archive("m", "$1", include_archived)
         ))
         .bind(person_id)
         .bind(&others)
@@ -526,7 +679,7 @@ impl Store {
     pub async fn feedback(&self, person_id: &str, memory_id: &str, vote: Vote) -> Result<Status> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
-            "SELECT m.owner_id, m.status, m.stale_cause FROM memories m WHERE m.memory_id = $2 AND {} FOR UPDATE OF m",
+            "SELECT m.owner_id, m.status, m.stale_cause, m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND {} FOR UPDATE OF m",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -534,6 +687,7 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        lock_project_memory(&mut tx, parse(&row, "scope")?, row.try_get("project_id")?).await?;
         let owner: String = row.try_get("owner_id")?;
         let status: Status = parse(&row, "status")?;
         let by_feedback =
@@ -587,7 +741,7 @@ impl Store {
         }
         if vote == Vote::Helpful {
             let ids = [memory_id.to_owned()];
-            promote_candidates(&mut *tx, &ids).await?;
+            promote_candidates(&mut *tx, &ids, true).await?;
         }
         tx.commit().await?;
         Ok(new_status)
@@ -596,20 +750,99 @@ impl Store {
     /// Owner only. The row stays as `forgotten` with its text, fields, embedding, entities and
     /// links kept, so saving the same thing again is a 409. Pending jobs are cancelled. A memory
     /// this one superseded comes back unless another non-forgotten memory also supersedes it.
-    /// True when this call forgot it, false when it already was forgotten.
-    pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<bool> {
+    /// Toggle the owner's pin. All writers in a quota bucket share a transaction lock.
+    pub async fn set_pinned(
+        &self,
+        person_id: &str,
+        memory_id: &str,
+        pinned: bool,
+    ) -> Result<Option<i64>> {
         let mut tx = self.pool.begin().await?;
-        let status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM memories WHERE memory_id = $1 AND owner_id = $2 FOR UPDATE",
+        let row = sqlx::query(
+            "SELECT m.scope, m.project_id, m.status, EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at
+               FROM memories m WHERE m.memory_id = $1 AND m.owner_id = $2 AND m.status <> 'forgotten'
+                 AND (m.scope <> 'project' OR EXISTS (
+                     SELECT 1 FROM project_members pm
+                     WHERE pm.project_id = m.project_id AND pm.person_id = $2))
+               FOR UPDATE OF m",
         )
         .bind(memory_id)
         .bind(person_id)
         .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        let project_id: Option<String> = row.try_get("project_id")?;
+        let scope = parse(&row, "scope")?;
+        let limit = pin_limit(scope).ok_or_else(|| {
+            StoreError::Validation("only personal and project memories can be pinned".into())
+        })?;
+        let bucket = match scope {
+            Scope::Project => project_id
+                .as_deref()
+                .ok_or_else(|| StoreError::Validation("project memory has no project".into()))?,
+            _ => person_id,
+        };
+        lock_project_memory(&mut tx, scope, project_id.as_deref()).await?;
+        if pinned && parse::<Status>(&row, "status")? == Status::Superseded {
+            return Err(StoreError::Validation(
+                "superseded memories cannot be pinned".into(),
+            ));
+        }
+        let old: Option<i64> = row.try_get("pinned_at")?;
+        if old.is_some() == pinned {
+            return Ok(old);
+        }
+
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':pins:' || $1), hashtext($2))",
+        )
+        .bind(scope.as_str())
+        .bind(bucket)
+        .execute(&mut *tx)
         .await?;
-        match status.as_deref() {
-            None => return Err(StoreError::NotFound("memory".into())),
-            Some("forgotten") => return Ok(false),
-            _ => {}
+        if pinned {
+            // Keep superseded pins in the quota so restoring a correction cannot exceed it.
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM memories WHERE pinned_at IS NOT NULL AND scope = $1
+                   AND CASE WHEN $1 = 'project' THEN project_id = $2 ELSE owner_id = $2 END",
+            )
+            .bind(scope.as_str())
+            .bind(bucket)
+            .fetch_one(&mut *tx)
+            .await?;
+            if count >= limit {
+                return Err(StoreError::Conflict(format!(
+                    "{} pin limit of {limit} memories reached",
+                    scope.as_str()
+                )));
+            }
+        }
+        let timestamp = sqlx::query_scalar(
+            "UPDATE memories SET pinned_at = CASE WHEN $2 THEN now() END
+               WHERE memory_id = $1 RETURNING EXTRACT(EPOCH FROM pinned_at)::bigint",
+        )
+        .bind(memory_id)
+        .bind(pinned)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(timestamp)
+    }
+
+    /// True when this call forgot it, false when it already was forgotten.
+    pub async fn forget(&self, person_id: &str, memory_id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT status, scope, project_id FROM memories WHERE memory_id = $1 AND owner_id = $2 FOR UPDATE",
+        )
+        .bind(memory_id)
+        .bind(person_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        lock_project_memory(&mut tx, parse(&row, "scope")?, row.try_get("project_id")?).await?;
+        if row.try_get::<String, _>("status")? == "forgotten" {
+            return Ok(false);
         }
         let restored: Vec<String> = sqlx::query_scalar(
             "SELECT target_id FROM links WHERE source_id = $1 AND relation = 'supersedes'",
@@ -618,7 +851,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE memories SET status = 'forgotten', status_changed_at = now(), updated_at = now()
+            "UPDATE memories SET status = 'forgotten', pinned_at = NULL, status_changed_at = now(), updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
@@ -629,6 +862,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         for target in restored {
+            crate::project::lock_memory_projects(&mut tx, &[&target]).await?;
             restore_if_unsuperseded(&mut tx, &target).await?;
         }
         tx.commit().await?;
@@ -667,14 +901,17 @@ pub(crate) async fn link_tx(
         ));
     }
     let row = sqlx::query(&format!(
-        "SELECT m.owner_id, m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND {}",
+        "SELECT m.owner_id, m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND {}
+           AND m.chat_id_hash IS NOT DISTINCT FROM (SELECT chat_id_hash FROM memories WHERE memory_id = $3)",
         visible("m", "$1")
     ))
     .bind(person_id)
     .bind(target)
+    .bind(source)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| StoreError::NotFound(format!("memory {target}")))?;
+    lock_project_memory(tx, parse(&row, "scope")?, row.try_get("project_id")?).await?;
     if relation == Relation::Supersedes {
         let owner: String = row.try_get("owner_id")?;
         let same_project = parse::<Scope>(&row, "scope")? == Scope::Project
@@ -704,20 +941,89 @@ pub(crate) async fn link_tx(
     Ok(())
 }
 
-/// A fetch, a helpful vote, a duplicate save, or a consolidate re-statement confirms a candidate.
+/// A read confirms system candidates. Agent candidates need a correction or a helpful vote.
 pub(crate) async fn promote_candidates<'e>(
     db: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     memory_ids: &[String],
+    include_agent: bool,
 ) -> Result<()> {
     if memory_ids.is_empty() {
         return Ok(());
     }
     sqlx::query(
-        "UPDATE memories SET rank = 'normal' WHERE memory_id = ANY($1) AND rank = 'candidate'",
+        "UPDATE memories SET rank = 'normal'
+          WHERE memory_id = ANY($1) AND rank = 'candidate' AND ($2 OR origin = 'system')",
     )
     .bind(memory_ids)
+    .bind(include_agent)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+pub(crate) async fn save_in_tx(
+    tx: &mut PgConnection,
+    person_id: &str,
+    mut input: SaveInput,
+    work: &WorkContext,
+    source: SaveSource,
+    device_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<Saved> {
+    let aliases: Vec<String> = input
+        .aliases
+        .iter()
+        .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
+        .collect();
+    input.aliases = aliases.clone();
+    let mut new = match &source {
+        SaveSource::Agent => {
+            prepare_coached_save(input, work, project_id.is_some(), now_seconds())?
+        }
+        SaveSource::StrictAgent | SaveSource::ImportedChat(_) => prepare_save(
+            input,
+            work,
+            project_id.is_some(),
+            Origin::Agent,
+            now_seconds(),
+        )?,
+        SaveSource::System => prepare_save(
+            input,
+            work,
+            project_id.is_some(),
+            Origin::System,
+            now_seconds(),
+        )?,
+    };
+    if let SaveSource::ImportedChat(hash) = &source {
+        new.tag_chat(hash.clone(), true);
+    }
+    let saved = insert_memory(
+        tx,
+        person_id,
+        project_id,
+        &new,
+        None,
+        device_id,
+        matches!(source, SaveSource::Agent),
+    )
+    .await?;
+    if !saved.deduplicated {
+        insert_agent_aliases(tx, &saved.id, &aliases).await?;
+    }
+    Ok(saved)
+}
+
+async fn lock_project_memory(
+    tx: &mut PgConnection,
+    scope: Scope,
+    project_id: Option<&str>,
+) -> Result<()> {
+    if scope == Scope::Project
+        && let Some(id) = project_id
+    {
+        crate::project::lock_active_project(tx, id).await?;
+    }
     Ok(())
 }
 
@@ -731,17 +1037,32 @@ pub(crate) async fn insert_memory(
     new: &NewMemory,
     fixed_id: Option<&str>,
     device_id: Option<&str>,
+    coach: bool,
 ) -> Result<Saved> {
-    let project_id = if new.scope == Scope::Global {
+    lock_project_memory(tx, new.scope, project_id).await?;
+    let project_id = if new.scope == Scope::Global || new.chat_id_hash.is_some() {
         None
     } else {
         project_id
     };
     let id = fixed_id.map_or_else(|| new_id("mem"), str::to_owned);
-    // A distilled note starts low. Handoffs and promoted global copies stay at the normal rank.
-    let rank = if new.origin == Origin::System
-        && new.kind != Kind::Handoff
-        && new.scope != Scope::Global
+    let mut hints = if coach && new.kind != Kind::Handoff {
+        let duplicate = crate::consolidate::save_duplicate(tx, person_id, project_id, new).await?;
+        save_hints(
+            &new.title,
+            &new.summary,
+            &new.reason,
+            &new.fields,
+            duplicate
+                .as_ref()
+                .map(|(id, title)| (id.as_str(), title.as_str())),
+        )
+    } else {
+        Vec::new()
+    };
+    let rank = if new.chat_candidate
+        || !hints.is_empty()
+        || (new.origin == Origin::System && new.kind != Kind::Handoff && new.scope != Scope::Global)
     {
         Rank::Candidate
     } else {
@@ -750,8 +1071,8 @@ pub(crate) async fn insert_memory(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank, detail, chat_id_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21, $22, $23)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -776,11 +1097,13 @@ pub(crate) async fn insert_memory(
     .bind(new.origin.as_str())
     .bind(device_id)
     .bind(rank.as_str())
+    .bind(new.detail.as_deref().unwrap_or_default())
+    .bind(new.chat_id_hash.as_ref().map(|hash| hash.as_str()))
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
         let existing = sqlx::query(
-            "SELECT memory_id, status FROM memories
+            "SELECT memory_id, status, origin, rank FROM memories
               WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '') AND identity_hash = $4",
         )
         .bind(person_id)
@@ -794,28 +1117,43 @@ pub(crate) async fn insert_memory(
             return Err(StoreError::Conflict("forgotten".into()));
         }
         let id: String = existing.try_get("memory_id")?;
-        if new.origin != Origin::System {
-            // Saving the same note again confirms it and counts as another sighting.
-            promote_candidates(&mut *tx, std::slice::from_ref(&id)).await?;
+        let coached = parse::<Origin>(&existing, "origin")? == Origin::Agent
+            && parse::<Rank>(&existing, "rank")? == Rank::Candidate;
+        let self_correction = new.supersedes.as_deref() == Some(id.as_str());
+        if !new.chat_candidate
+            && new.origin != Origin::System
+            && (!coached || (self_correction && coach && hints.is_empty()))
+        {
+            promote_candidates(&mut *tx, std::slice::from_ref(&id), true).await?;
             sqlx::query("UPDATE memories SET proof_count = proof_count + 1 WHERE memory_id = $1")
                 .bind(&id)
                 .execute(&mut *tx)
                 .await?;
         }
-        // Identity ignores the reason, so a correction that only changes it dedupes onto its own
-        // target: keep the new reason and skip the self-link.
-        if new.supersedes.as_deref() == Some(id.as_str()) {
-            sqlx::query("UPDATE memories SET reason = $2, updated_at = now() WHERE memory_id = $1")
+        // A correction to non-identifying text dedupes onto its own target.
+        if self_correction {
+            sqlx::query("UPDATE memories SET reason = $2, detail = coalesce($3, detail), updated_at = now() WHERE memory_id = $1")
                 .bind(&id)
                 .bind(&new.reason)
+                .bind(&new.detail)
                 .execute(&mut *tx)
                 .await?;
+        } else if let Some(detail) = new.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            sqlx::query("UPDATE memories SET detail = $2 WHERE memory_id = $1 AND detail = ''")
+                .bind(&id)
+                .bind(detail)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if !coached {
+            hints.clear();
         }
         save_links(tx, person_id, &id, project_id, new).await?;
         return Ok(Saved {
             id,
             status,
             deduplicated: true,
+            hints,
         });
     };
     let (kinds, names): (Vec<&str>, Vec<&str>) = new
@@ -842,6 +1180,7 @@ pub(crate) async fn insert_memory(
         id,
         status: Status::Active,
         deduplicated: false,
+        hints,
     })
 }
 
@@ -897,7 +1236,7 @@ impl Store {
     ) -> Result<String> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
-            "{MEMORY_SELECT} WHERE m.memory_id=$1 FOR UPDATE OF m"
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
         ))
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -925,6 +1264,7 @@ impl Store {
             title,
             summary,
             reason,
+            detail: Some(old.detail),
             fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
             evidence: old.evidence.clone(),
             supersedes: Some(id.to_owned()),
@@ -932,13 +1272,16 @@ impl Store {
             scope: Some(old.scope),
             aliases: Vec::new(),
         };
-        let prepared = prepare_save(
+        let mut prepared = prepare_save(
             input,
             &context,
             old.project_id.is_some(),
             old.origin,
             now_seconds(),
         )?;
+        if let Some(hash) = old.chat_id_hash {
+            prepared.tag_chat(hash, old.rank == Rank::Candidate);
+        }
         if prepared.identity_hash == old.identity_hash {
             return Err(StoreError::Conflict(
                 "nothing to rewrite: title, summary and fields are unchanged".into(),
@@ -951,6 +1294,7 @@ impl Store {
             &prepared,
             None,
             None,
+            false,
         )
         .await?;
         if saved.deduplicated {
@@ -976,3 +1320,6 @@ impl Store {
         Ok(saved.id)
     }
 }
+
+#[cfg(test)]
+mod tests;

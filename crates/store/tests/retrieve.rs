@@ -1,6 +1,7 @@
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Scope, Status};
 use cairn_core::process::jobs::JobKind;
+use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::hybrid::fuse;
 use cairn_store::retrieve::{ALIASES_IN_SEARCH, Narrow};
 use cairn_store::testing::{TestDb, rule, save_input};
@@ -782,7 +783,7 @@ async fn visibility_matrix_for_all_four_channels() {
 }
 
 #[tokio::test]
-async fn search_counts_usage_but_topic_and_brief_do_not() {
+async fn hook_context_counts_shown_and_search_counts_fetched() {
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -793,20 +794,56 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
         ..WorkContext::default()
     };
     let id = store
-        .save(&me, save_input(serde_json::json!({"kind":"rule","scope":"personal","title":"Usage probe words","summary":"ledger audit trail is a summary of the test","reason":"r and the test says why"})), &work)
+        .save(&me, save_input(serde_json::json!({"kind":"preference","scope":"personal","title":"Usage probe words","summary":"ledger audit trail is a summary of the test","reason":"r and the test says why"})), &work)
         .await
         .unwrap()
         .id;
-    let fetched = || async {
-        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
-            .fetch_one(store.pool())
-            .await
-            .unwrap()
+    let usage = || async {
+        sqlx::query_as::<_, (i32, i32, bool, bool)>(
+            "SELECT shown, fetched, last_shown_at IS NOT NULL, last_used_at IS NOT NULL
+             FROM usage WHERE memory_id = $1",
+        )
+        .bind(&id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
     };
-    assert_eq!(fetched().await, 0);
-    store.topic(&me, "src/usage.rs", &work).await.unwrap();
-    store.brief(&me, &work, &[]).await.unwrap();
-    assert_eq!(fetched().await, 0, "topic and brief never count");
+    assert_eq!(usage().await, (0, 0, false, false));
+    let brief = store
+        .brief(&me, &work, Some("s1"), BriefBudget::Extended)
+        .await
+        .unwrap();
+    assert_eq!(brief.memory_ids, std::slice::from_ref(&id));
+    assert!(
+        brief.text.contains(r#""why":"personal preference""#),
+        "{}",
+        brief.text
+    );
+    assert_eq!(usage().await, (1, 0, true, false));
+    let repeat = store
+        .brief(&me, &work, Some("s1"), BriefBudget::Extended)
+        .await
+        .unwrap();
+    assert!(repeat.text.is_empty());
+    let topic = store
+        .topic(&me, "src/usage.rs", &work, Some("s1"))
+        .await
+        .unwrap();
+    assert!(topic.notes.is_empty() && topic.card.is_none());
+    assert_eq!(usage().await, (1, 0, true, false));
+
+    let topic = store
+        .topic(&me, "src/usage.rs", &work, Some("s2"))
+        .await
+        .unwrap();
+    assert_eq!(topic.memory_ids, std::slice::from_ref(&id));
+    assert_eq!(topic.notes[0].why, "file src/usage.rs");
+    let repeat = store
+        .topic(&me, "src/usage.rs", &work, Some("s2"))
+        .await
+        .unwrap();
+    assert!(repeat.notes.is_empty() && repeat.card.is_none());
+    assert_eq!(usage().await, (2, 0, true, false));
     let cards = store
         .search(
             &me,
@@ -819,7 +856,22 @@ async fn search_counts_usage_but_topic_and_brief_do_not() {
         .await
         .unwrap();
     assert_eq!(cards.results.first().map(|c| &c.id), Some(&id));
-    assert_eq!(fetched().await, 1, "search counts the returned card");
+    assert_eq!(usage().await, (2, 1, true, true));
+    sqlx::query(
+        "UPDATE session_shown SET shown_at = now() - interval '8 days' WHERE session_id = 's1'",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.sweep().await.unwrap();
+    let retained: Vec<String> =
+        sqlx::query_scalar("SELECT session_id FROM session_shown WHERE person_id = $1")
+            .bind(&me)
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(retained, ["s2"]);
+    assert_eq!(usage().await, (2, 1, true, true));
     db.finish().await;
 }
 
@@ -1225,7 +1277,11 @@ async fn brief_keeps_project_rules_among_many_global_rules() {
     };
     store.save(&me, rule("keep me"), &work).await.unwrap();
     bulk_memories(&db, &other, ("global", None), "rule", 520, 60).await;
-    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    let brief = store
+        .brief(&me, &work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(brief.contains("keep me"), "{brief}");
     db.finish().await;
 }
@@ -1399,15 +1455,15 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         ..WorkContext::default()
     };
     // Four memories name the file, so one card names the first two: project first, newest next.
-    let topic = store.topic(&me, "src/a.rs", &context).await.unwrap();
+    let topic = store.topic(&me, "src/a.rs", &context, None).await.unwrap();
     assert!(topic.notes.is_empty());
     let card = topic.card.expect("card");
     assert!(
-        card.contains("4 memories \u{2014} rule Project rule; fact Personal three"),
+        card.contains("4 memories \u{2014} rule Project rule (why: file src/a.rs) [0d]; fact Personal three (why: file src/a.rs) [0d]"),
         "{card}"
     );
     for (who, path) in [(&me, "src/a"), (&stranger, "src/a.rs")] {
-        let topic = store.topic(who, path, &context).await.unwrap();
+        let topic = store.topic(who, path, &context, None).await.unwrap();
         assert!(topic.notes.is_empty() && topic.card.is_none());
     }
 
@@ -1423,7 +1479,7 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .await
         .unwrap();
     let topic = store
-        .topic(&me, "src/a.rs", &WorkContext::default())
+        .topic(&me, "src/a.rs", &WorkContext::default(), None)
         .await
         .unwrap();
     assert!(topic.card.is_none() && topic.notes.len() == 2);
@@ -1433,6 +1489,66 @@ async fn topic_notes_match_the_file_entity_exactly_and_prefer_the_project() {
         .await
         .unwrap();
     assert_eq!(fetched, 0);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn topic_ranks_kind_then_votes_then_recency_and_matches_symbols() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("topic-ranking").await;
+    let work = WorkContext {
+        symbols: vec!["queue::take_lock".into()],
+        ..WorkContext::default()
+    };
+    let mut ids = Vec::new();
+    for (title, kind) in [
+        ("Helpful queue rule", "rule"),
+        ("Older queue rule", "rule"),
+        ("Newest queue rule", "rule"),
+        ("Queue decision", "decision"),
+        ("Queue fact", "fact"),
+    ] {
+        ids.push(store.save(&me, save_input(serde_json::json!({
+            "kind":kind, "scope":"personal", "title":title, "summary":"Hold the state lock before claiming a job.",
+            "reason":"Concurrent claims share one queue.",
+            "fields": if kind == "decision" { serde_json::json!({"context": "Worker lock ordering"}) } else { serde_json::json!({}) }
+        })), &work).await.unwrap().id);
+    }
+    for id in [&ids[0], &ids[4]] {
+        store
+            .feedback(&me, id, cairn_store::memory::Vote::Helpful)
+            .await
+            .unwrap();
+    }
+    let session = Some("symbols");
+    let first = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(first.memory_ids, [ids[0].clone(), ids[2].clone()]);
+    assert!(first.card.unwrap().contains("why: symbol queue::take_lock"));
+    let second = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(second.memory_ids, [ids[1].clone(), ids[3].clone()]);
+    let third = store
+        .topic(&me, "src/unrelated.rs", &work, session)
+        .await
+        .unwrap();
+    assert_eq!(third.memory_ids, [ids[4].clone()]);
+    assert_eq!(third.notes[0].why, "symbol queue::take_lock");
+    assert!(
+        store
+            .topic(&me, "src/unrelated.rs", &WorkContext::default(), None)
+            .await
+            .unwrap()
+            .notes
+            .is_empty()
+    );
     db.finish().await;
 }
 
@@ -1563,7 +1679,11 @@ async fn brief_skips_candidates() {
         .execute(store.pool())
         .await
         .unwrap();
-    let brief = store.brief(&me, &work, &[]).await.unwrap();
+    let brief = store
+        .brief(&me, &work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(brief.contains("Keep this rule visible"), "{brief}");
     assert!(!brief.contains("Candidate gotcha stays out"), "{brief}");
     db.finish().await;
@@ -1661,9 +1781,10 @@ async fn digest_searchable_not_in_brief() {
         ..WorkContext::default()
     };
     let brief = store
-        .brief(&person, &work, &["LedControls".into()])
+        .brief(&person, &work, None, BriefBudget::Extended)
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(!brief.contains("LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
@@ -1944,9 +2065,10 @@ async fn forget_keeps_content_but_hides() {
     assert_eq!(admin.memories[0].status, Status::Forgotten);
     let brief = db
         .store
-        .brief(&me, &WorkContext::default(), &[])
+        .brief(&me, &WorkContext::default(), None, BriefBudget::Extended)
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(!brief.contains("Forget keeps this rule"), "{brief}");
     db.finish().await;
 }
@@ -1988,10 +2110,12 @@ async fn brief_picks_newest_rich_handoff_past_fifty_chain_rows() {
                 worktree: Some("wt-1".into()),
                 ..WorkContext::default()
             },
-            &[],
+            None,
+            BriefBudget::Extended,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .text;
     assert!(
         brief.contains("chain_rich"),
         "brief shows the newest rich handoff: {brief}"
@@ -2038,7 +2162,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let brief = db.store.brief(&me, &non_git_work, &[]).await.unwrap();
+    let brief = db
+        .store
+        .brief(&me, &non_git_work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(
         brief.contains("nongit_handoff"),
         "non-git brief must show the handoff: {brief}"
@@ -2052,7 +2181,12 @@ async fn brief_shows_handoff_without_git() {
         worktree: None,
         ..WorkContext::default()
     };
-    let git_brief = db.store.brief(&me, &git_work, &[]).await.unwrap();
+    let git_brief = db
+        .store
+        .brief(&me, &git_work, None, BriefBudget::Extended)
+        .await
+        .unwrap()
+        .text;
     assert!(
         !git_brief.contains("nongit_handoff"),
         "git brief must only show matching branch's handoff: {git_brief}"
@@ -2442,5 +2576,504 @@ async fn alias_matching_embed_text_keeps_its_own_vector() {
     assert!(memory_dist < 0.01, "memory vector {memory_dist}");
     assert!(alias_dist < 0.01, "alias vector {alias_dist}");
     assert!(cross > 0.5, "alias kept its own vector, cross {cross}");
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn command_recall_uses_strict_matches_and_the_shared_session_ledger() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("recall-owner").await;
+    let outsider = db.person("recall-outsider").await;
+    let (project, _) = store
+        .init_project(&me, "local:e2e-command-recall", Some("E2E command recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    let remember = |kind: &str, title: &str, summary: &str, command: &str| {
+        let work = WorkContext {
+            project_id: Some(project.clone()),
+            files: vec!["src/recall.rs".into()],
+            commands: vec![command.to_owned()],
+            ..WorkContext::default()
+        };
+        let fields = if kind == "gotcha" {
+            serde_json::json!({"fix": "Regenerate build artifacts before retrying"})
+        } else {
+            serde_json::json!({"steps": ["Remove the old build artifacts", "Run the build again"]})
+        };
+        let input = save_input(serde_json::json!({
+            "kind": kind, "scope": "project", "title": title, "summary": summary,
+            "reason": "A specific build failure has a reproducible recovery step", "fields": fields
+        }));
+        let me = &me;
+        async move { store.save(me, input, &work).await.unwrap().id }
+    };
+    let command = "cargo test --workspace";
+    let gotcha = remember(
+        "gotcha",
+        "Rust target cache",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    remember(
+        "procedure",
+        "Clear target directory",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    remember(
+        "procedure",
+        "Rebuild the target",
+        "Remove the build cache before retrying",
+        command,
+    )
+    .await;
+    remember(
+        "gotcha",
+        "Ignore second line",
+        "Error: unhappy network proxy",
+        command,
+    )
+    .await;
+    let candidate = remember(
+        "gotcha",
+        "Fresh suggestion",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    let doubted = remember(
+        "gotcha",
+        "Bad suggestion",
+        "Error: poisoned target directory",
+        command,
+    )
+    .await;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&candidate)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE usage SET wrong = 1 WHERE memory_id = $1")
+        .bind(&doubted)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let recall = async |session: &str, command: &str, failure: Option<&str>| {
+        store
+            .command_recall(&me, session, Some(&project), command, failure)
+            .await
+            .unwrap()
+    };
+    let (one, two) = tokio::join!(
+        recall("warning", "cargo  test --workspace && echo done", None),
+        recall("warning", command, None),
+    );
+    assert_ne!(one.is_empty(), two.is_empty(), "{one:?} {two:?}");
+    let warning = if one.is_empty() { two } else { one };
+    assert!(warning.contains("Rust target cache"), "{warning}");
+    assert!(
+        warning.contains("why: gotcha for `cargo test --workspace`"),
+        "{warning}"
+    );
+    assert_eq!(warning.matches("\n- ").count(), 2, "{warning}");
+    assert!(recall("warning", command, None).await.is_empty());
+    assert!(recall("prefix", "cargo test", None).await.is_empty());
+    assert!(
+        store
+            .command_recall(&outsider, "warning", Some(&project), command, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let tail = "build starting\nError: poisoned target directory\nError: unhappy network proxy";
+    let failed = recall("failed", command, Some(tail)).await;
+    assert!(
+        failed.contains(
+            "Rust target cache: Error: poisoned target directory (why: same error seen before)"
+        ),
+        "{failed}"
+    );
+    assert!(failed.contains("Clear target directory"), "{failed}");
+    for title in [
+        "Ignore second line",
+        "Rebuild the target",
+        "Fresh suggestion",
+        "Bad suggestion",
+    ] {
+        assert!(!failed.contains(title), "{failed}");
+    }
+    assert!(recall("failed", command, Some(tail)).await.is_empty());
+    assert!(
+        recall("wrong command", "npm test", Some(tail))
+            .await
+            .is_empty()
+    );
+    assert!(
+        recall(
+            "second error alone",
+            command,
+            Some("Error: unhappy network proxy")
+        )
+        .await
+        .contains("Ignore second line")
+    );
+    assert!(
+        recall("weak", command, Some("error: failed"))
+            .await
+            .is_empty()
+    );
+    assert!(
+        recall(
+            "other error",
+            command,
+            Some("Error: completely unknown failure")
+        )
+        .await
+        .is_empty()
+    );
+    assert!(
+        recall("no output", command, Some(""))
+            .await
+            .contains("Rust target cache")
+    );
+
+    let context = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    let topic = store
+        .topic(&me, "src/recall.rs", &context, Some("budget"))
+        .await
+        .unwrap();
+    assert_eq!(topic.memory_ids.len(), 2);
+    for i in 0..7 {
+        let command = format!("make check-{i}");
+        remember(
+            "procedure",
+            &format!("Check build {i}"),
+            "Regenerate dependencies before building",
+            &command,
+        )
+        .await;
+        let text = recall("budget", &command, None).await;
+        assert_eq!(text.is_empty(), i == 6, "{i}: {text}");
+    }
+    let used: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_shown WHERE person_id = $1 AND session_id = 'budget'",
+    )
+    .bind(&me)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(used, 8);
+    assert!(recall("budget", command, Some(tail)).await.is_empty());
+
+    let shown: i32 = sqlx::query_scalar("SELECT shown FROM usage WHERE memory_id = $1")
+        .bind(&gotcha)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(shown >= 3, "{shown}");
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn command_error_uses_settle_and_revoke_without_overwriting_explicit_use() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("error-use").await;
+    let (project, _) = store
+        .init_project(&person, "local:e2e-error-use", Some("E2E error use"))
+        .await
+        .unwrap();
+    let context = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        commands: vec!["cargo test --workspace".into()],
+        ..WorkContext::default()
+    };
+    let memory = store
+        .save(
+            &person,
+            save_input(serde_json::json!({
+                "kind": "gotcha", "title":"Linker target cache",
+                "summary": "Error: poisoned target directory",
+                "reason": "A stale locker holds the build directory.",
+                "fields":{"fix":"Restart the linker to remove its stale lock."}
+            })),
+            &context,
+        )
+        .await
+        .unwrap();
+    let failure = "Error: poisoned target directory";
+    let recall = |session| {
+        store.command_recall(
+            &person,
+            session,
+            context.project_id.as_deref(),
+            "cargo test --workspace",
+            Some(failure),
+        )
+    };
+    let state = |session| {
+        sqlx::query_as::<_, (bool, bool, bool)>(
+        "SELECT used_at IS NOT NULL, inferred_use, error_repeated FROM session_shown WHERE session_id = $1"
+    ).bind(session).fetch_one(store.pool())
+    };
+    assert!(!recall("repeated").await.unwrap().is_empty());
+    assert!(recall("repeated").await.unwrap().is_empty());
+    store.end_session(&person, "repeated").await.unwrap();
+    assert_eq!(state("repeated").await.unwrap(), (false, false, true));
+
+    assert!(!recall("resolved").await.unwrap().is_empty());
+    store.end_session(&person, "resolved").await.unwrap();
+    assert_eq!(state("resolved").await.unwrap(), (true, true, false));
+    let later_command = store
+        .command_recall(
+            &person,
+            "resolved",
+            context.project_id.as_deref(),
+            "cargo build",
+            Some(failure),
+        )
+        .await
+        .unwrap();
+    assert!(later_command.is_empty());
+    assert_eq!(state("resolved").await.unwrap(), (false, false, true));
+
+    assert!(!recall("explicit").await.unwrap().is_empty());
+    assert!(recall("muted").await.unwrap().is_empty());
+    store
+        .record_push_use(
+            &person,
+            Some("explicit"),
+            std::slice::from_ref(&memory.id),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(recall("explicit").await.unwrap().is_empty());
+    store.end_session(&person, "explicit").await.unwrap();
+    assert_eq!(state("explicit").await.unwrap(), (true, false, true));
+    assert!(!recall("idle").await.unwrap().is_empty());
+    sqlx::query("UPDATE session_shown SET shown_at = now() - interval '8 days'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.sweep().await.unwrap();
+    let counts: (i32, i32, bool) =
+        sqlx::query_as("SELECT pushed, used, muted FROM push_usage WHERE memory_id = $1")
+            .bind(&memory.id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(counts, (4, 2, false));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn explicit_use_before_muting_counts_without_a_session() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let person = db.person("early-use").await;
+    let (project, _) = store
+        .init_project(&person, "local:e2e-early-use", Some("E2E early use"))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (kind, word) in [("search", "alpha"), ("get", "bravo"), ("helpful", "carol")] {
+        let command = format!("make {word}");
+        let failure = format!("Error: {word} cache poisoned");
+        let context = WorkContext {
+            project_id: Some(project.project_id.clone()),
+            commands: vec![command.clone()],
+            ..WorkContext::default()
+        };
+        let memory = store
+            .save(
+                &person,
+                save_input(serde_json::json!({
+                    "kind": "gotcha", "title": format!("Clear the {word} cache"),
+                    "summary": failure, "reason": "A stale lock holds the directory.",
+                    "fields": {"fix": "Delete the stale lock file."}
+                })),
+                &context,
+            )
+            .await
+            .unwrap();
+        let push = |session: &'static str| {
+            store.command_recall(
+                &person,
+                session,
+                context.project_id.as_deref(),
+                &command,
+                Some(&failure),
+            )
+        };
+        assert!(!push("s1").await.unwrap().is_empty());
+        let one = std::slice::from_ref(&memory.id);
+        if kind == "search" {
+            let hits = store
+                .search(
+                    &person,
+                    word,
+                    None,
+                    5,
+                    1200,
+                    &cairn_core::retrieve::filter::Filter::default(),
+                )
+                .await
+                .unwrap();
+            assert!(hits.results.iter().any(|c| c.id == memory.id), "{word}");
+        } else {
+            // Get and helpful votes may carry no session id (a session the ledger never saw too).
+            let session = (kind == "get").then_some("elsewhere");
+            store
+                .record_push_use(&person, session, one, true)
+                .await
+                .unwrap();
+        }
+        assert!(!push("s2").await.unwrap().is_empty());
+        assert!(!push("s3").await.unwrap().is_empty(), "{kind} was muted");
+        ids.push(memory.id);
+    }
+    let rows: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT used, muted FROM push_usage WHERE memory_id = ANY($1) ORDER BY memory_id",
+    )
+    .bind(&ids)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|&(used, muted)| used == 1 && !muted),
+        "{rows:?}"
+    );
+
+    // One session's explicit use is credited once, however often the same call repeats.
+    let again = std::slice::from_ref(&ids[0]);
+    let used = || async {
+        sqlx::query_scalar::<_, i32>("SELECT used FROM push_usage WHERE memory_id = $1")
+            .bind(&ids[0])
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    };
+    let before = used().await;
+    for _ in 0..3 {
+        store
+            .record_push_use(&person, Some("s1"), again, true)
+            .await
+            .unwrap();
+    }
+    assert_eq!(used().await, before + 1);
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn pin_quotas_are_atomic_and_scoped() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let owner = db.person("pins-owner").await;
+    let other = db.person("pins-other").await;
+    let store = &db.store;
+    let (project, _) = store
+        .init_project(&owner, "local:e2e-pins", Some("E2E Pin limits"))
+        .await
+        .unwrap();
+    let project_id = &project.project_id;
+    sqlx::query("INSERT INTO project_members (project_id, person_id) VALUES ($1, $2)")
+        .bind(project_id)
+        .bind(&other)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash)
+         SELECT scope || i, CASE WHEN scope = 'project' AND i % 2 = 0 THEN $2 ELSE $1 END,
+                CASE WHEN scope = 'project' THEN $3 END, scope, 'rule', 'Pin fixture', 'Pin summary',
+                'e', scope || i
+           FROM unnest(ARRAY['personal','project']) scope
+           CROSS JOIN generate_series(1, 11) i",
+    )
+    .bind(&owner)
+    .bind(&other)
+    .bind(project_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    for (scope, limit) in [("personal", 5), ("project", 10)] {
+        let person = |i| {
+            if scope == "project" && i % 2 == 0 {
+                &other
+            } else {
+                &owner
+            }
+        };
+        for i in 1..limit {
+            assert!(
+                store
+                    .set_pinned(person(i), &format!("{scope}{i}"), true)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let id1 = format!("{scope}{limit}");
+        let id2 = format!("{scope}{}", limit + 1);
+        let first = store.set_pinned(person(limit), &id1, true);
+        let second = store.set_pinned(person(limit + 1), &id2, true);
+        let (first, second) = tokio::join!(first, second);
+        assert_ne!(first.is_ok(), second.is_ok());
+        let (winner, loser) = if first.is_ok() {
+            ((limit, &id1), (limit + 1, &id2))
+        } else {
+            ((limit + 1, &id2), (limit, &id1))
+        };
+        let conflict = first.err().or(second.err()).unwrap();
+        assert!(
+            matches!(conflict, cairn_store::StoreError::Conflict(message) if message.contains(&format!("limit of {limit}")))
+        );
+        let pinned_at = store
+            .set_pinned(person(winner.0), winner.1, true)
+            .await
+            .unwrap();
+        assert!(pinned_at.is_some());
+        assert_eq!(
+            store
+                .set_pinned(person(winner.0), winner.1, true)
+                .await
+                .unwrap(),
+            pinned_at
+        );
+        assert_eq!(
+            store
+                .set_pinned(person(winner.0), winner.1, false)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            store
+                .set_pinned(person(loser.0), loser.1, true)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     db.finish().await;
 }

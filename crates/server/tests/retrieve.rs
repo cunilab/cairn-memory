@@ -179,9 +179,19 @@ async fn brief_shows_the_caller_their_own_rules_only() {
     let context = json!({"project_id": id, "repository": "brief-repo", "branch": "feature"});
     let device = app.device(&admin, "brief").await;
     for (title, scope, kind, owner) in [
-        ("personal-visible", "personal", "preference", &admin),
-        ("private-hidden", "personal", "preference", &other),
-        ("project-visible", "project", "rule", &admin),
+        (
+            "Keep personal-visible preference",
+            "personal",
+            "preference",
+            &admin,
+        ),
+        (
+            "Keep private-hidden preference",
+            "personal",
+            "preference",
+            &other,
+        ),
+        ("Keep project-visible rule", "project", "rule", &admin),
     ] {
         // Saving with a project context joins the project (as `init` would), so the other
         // person saves without one and stays a non-member.
@@ -287,7 +297,7 @@ async fn search_ranks_filters_and_never_leaks() {
         .await;
     assert_eq!(ids(&found), vec![queue.clone()]);
     let keys: Vec<_> = found["results"][0].as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["id", "kind", "score", "summary", "title"]);
+    assert_eq!(keys, ["id", "kind", "score", "summary", "title", "trust"]);
     let got = app.post("get", json!({"ids": [&queue]}), &bob_device).await;
     assert_eq!(got["memories"][0]["fields"]["alternatives"][0], "Redis");
     assert!(got["memories"][0].get("usage").is_none());
@@ -518,6 +528,7 @@ async fn get_returns_requested_records_and_names_the_rest() {
             "status",
             "summary",
             "title",
+            "trust",
             "updated_at"
         ]
     );
@@ -662,7 +673,7 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock", "summary": "Hold the lock first.", "reason": "r and the test says why",
+        json!({"kind": "gotcha", "scope": "personal", "title": "Queue lock order", "summary": "Hold the queue lock before claiming jobs.", "reason": "r and the test says why",
                "fields": {"symptom": "hang", "cause": "order", "fix": "lock first"},
                "context": {"files": ["src/queue.rs"]}}),
     )
@@ -683,8 +694,8 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         ),
         (
             Some(id.as_str()),
-            Some("Queue lock"),
-            Some("Hold the lock first.")
+            Some("Queue lock order"),
+            Some("Hold the queue lock before claiming jobs.")
         )
     );
     let none = app
@@ -726,8 +737,14 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
             &device,
         )
         .await;
-    assert!(brief["brief"].as_str().unwrap().len() <= 1200);
-    assert_eq!(brief["max_bytes"], 1200);
+    assert!(
+        brief["brief"].as_str().unwrap().len()
+            <= cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
+    );
+    assert_eq!(
+        brief["max_bytes"],
+        cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
+    );
     let files: serde_json::Value =
         sqlx::query_scalar("SELECT context->'recent_files' FROM sessions WHERE session_id = 's9'")
             .fetch_one(app.db.store.pool())
@@ -738,11 +755,18 @@ async fn session_topic_returns_file_notes_and_brief_records_recent_files() {
         .send(
             "POST",
             "session/brief",
-            json!({"context": {}}),
+            json!({"session_id": " ", "context": {}}),
             Some(&device),
         )
         .await;
-    assert!((400..500).contains(&status), "a brief needs a session id");
+    assert_eq!(status, 400, "an explicitly empty session ID is invalid");
+    let untracked = app
+        .post("session/brief", json!({"context": {}}), &device)
+        .await;
+    assert_eq!(
+        untracked["max_bytes"],
+        cairn_core::retrieve::brief::LEGACY_SESSION_BRIEF_MAX_BYTES
+    );
     app.finish().await;
 }
 
@@ -790,55 +814,225 @@ async fn search_budget_caps_bytes_and_kind_filters() {
 }
 
 #[tokio::test]
-async fn only_search_and_get_count_usage() {
+async fn hook_replies_count_shown_and_agent_search_and_get_count_used() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let id = save(
         &app,
         &device,
-        json!({"kind": "gotcha", "scope": "personal", "title": "Usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
-               "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": {"files": ["src/usage.rs"]}}),
+        json!({"kind": "preference", "scope": "personal", "title": "Track usage probe", "summary": "Ledger audit trail. is a summary of the test", "reason": "r and the test says why",
+               "detail": "Ledger audit history.", "context": {"files": ["src/usage.rs"]}}),
     )
     .await;
-    let fetched = || async {
-        sqlx::query_scalar::<_, i64>("SELECT coalesce(sum(fetched), 0)::bigint FROM usage")
-            .fetch_one(app.db.store.pool())
-            .await
-            .unwrap()
-    };
-    app.post(
-        "session/topic",
-        json!({"path": "src/usage.rs", "context": {}}),
-        &device,
-    )
-    .await;
-    app.post(
-        "session/brief",
-        json!({"session_id": "s1", "context": {}, "recent_files": ["src/usage.rs"]}),
-        &device,
-    )
-    .await;
+    let usage = || async { app.get(&format!("memories/{id}"), &admin).await["usage"].clone() };
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "s1", "context": {}, "recent_files": ["src/usage.rs"]}),
+            &device,
+        )
+        .await;
+    assert!(brief["brief"].as_str().unwrap().contains(&id));
+    let after_brief = usage().await;
+    assert_eq!(after_brief["shown"], 1);
+    assert_eq!(after_brief["fetched"], 0);
+    assert!(after_brief["last_shown_at"].is_number());
+    assert!(after_brief["last_used_at"].is_null());
+    let topic = app
+        .post(
+            "session/topic",
+            json!({"path": "src/usage.rs", "context": {}}),
+            &device,
+        )
+        .await;
+    assert_eq!(topic["notes"][0]["id"], id);
     app.get("memories", &admin).await;
     app.get("graph", &admin).await;
-    assert_eq!(fetched().await, 0, "topic, brief and web reads never count");
-    app.post("search", json!({"query": "ledger audit"}), &device)
+    let after_topic = usage().await;
+    assert_eq!(after_topic["shown"], 2);
+    assert_eq!(after_topic["fetched"], 0);
+    let search = app
+        .post("search", json!({"query": "ledger audit"}), &device)
         .await;
-    assert_eq!(fetched().await, 1);
-    app.post("get", json!({"ids": [&id]}), &device).await;
-    assert_eq!(fetched().await, 2);
+    assert_eq!(search["results"][0]["trust"], "normal");
+    let after_search = usage().await;
+    assert_eq!(after_search["shown"], 2);
+    assert_eq!(after_search["fetched"], 1);
+    let get = app.post("get", json!({"ids": [&id]}), &device).await;
+    assert_eq!(get["memories"][0]["trust"], "normal · used 1×");
+    let after_get = usage().await;
+    assert_eq!(after_get["fetched"], 2);
+    assert_eq!(after_get["detail_opened"], 0);
+    app.post("get", json!({"ids": [&id], "detail": true}), &device)
+        .await;
+    let after_detail = usage().await;
+    assert_eq!(after_detail["shown"], 2);
+    assert_eq!(after_detail["fetched"], 3);
+    assert_eq!(after_detail["detail_opened"], 1);
+    assert!(after_detail["last_used_at"].is_number());
     app.finish().await;
 }
 
 #[tokio::test]
-async fn brief_uses_recent_files() {
+async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("push-budget").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "example.test/e2e/push", "name": "E2E Push budget"}),
+            &device,
+        )
+        .await;
+    let project_id = project["project_id"].as_str().unwrap();
+    let shared = save(&app, &device, json!({
+        "kind": "rule", "scope": "project", "title": "Shared lookup rule",
+        "summary": "Set the timeout before the request.", "reason": "Every request has a deadline.",
+        "context": {"project_id": project_id, "files": ["src/shared.rs"]}
+    })).await;
+    for (label, rank, wrong) in [
+        ("Candidate rule", "candidate", 0),
+        ("Doubted rule", "normal", 1),
+    ] {
+        let id = save(&app, &device, json!({
+            "kind": "rule", "scope": "project", "title": label,
+            "summary": "Use the service request counters.", "reason": "Counters help with incident triage.",
+            "context": {"project_id": project_id, "files": ["src/shared.rs"]}
+        })).await;
+        sqlx::query("UPDATE memories SET rank = $2 WHERE memory_id = $1")
+            .bind(&id)
+            .bind(rank)
+            .execute(app.db.store.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE usage SET wrong = $2 WHERE memory_id = $1")
+            .bind(&id)
+            .bind(wrong)
+            .execute(app.db.store.pool())
+            .await
+            .unwrap();
+    }
+    let brief_body = json!({"session_id": "shared", "context": {"project_id": project_id}});
+    let brief = app.post("session/brief", brief_body.clone(), &device).await;
+    let text = brief["brief"].as_str().unwrap();
+    assert!(
+        text.contains(&shared) && text.contains(r#""why":"project rule""#),
+        "{brief}"
+    );
+    for label in ["Candidate rule", "Doubted rule"] {
+        assert!(!text.contains(label), "{brief}");
+    }
+    assert_eq!(
+        app.post("session/brief", brief_body, &device).await["brief"],
+        ""
+    );
+    let empty = app
+        .post(
+            "session/topic",
+            json!({"session_id": "shared", "path": "src/shared.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(empty, json!({"notes": []}));
+
+    for i in 0..9 {
+        let path = format!("src/probe{i}.rs");
+        let title = format!("Working timer probe {i}");
+        save(
+            &app,
+            &device,
+            json!({
+                "kind": "fact", "scope": "personal", "title": title,
+                "summary": format!("Probe {i} measures how long the worker stays active."),
+                "reason": "Dedicated measurements cover a different path per file.",
+                "context": {"files": [path]}
+            }),
+        )
+        .await;
+    }
+    // The fixtures differ by path and index. Promote them so duplicate coaching does not
+    // influence the cap assertion.
+    sqlx::query("UPDATE memories SET rank = 'normal' WHERE kind = 'fact'")
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    let app = std::sync::Arc::new(app);
+    let mut requests = tokio::task::JoinSet::new();
+    for i in 0..9 {
+        let (app, device) = (app.clone(), device.clone());
+        requests.spawn(async move {
+            app.post(
+                "session/topic",
+                json!({
+                    "session_id": "shared", "path": format!("src/probe{i}.rs")
+                }),
+                &device,
+            )
+            .await
+        });
+    }
+    let replies = requests.join_all().await;
+    let shown: Vec<_> = replies
+        .iter()
+        .flat_map(|reply| reply["notes"].as_array().unwrap())
+        .collect();
+    assert_eq!(shown.len(), 7, "{replies:?}");
+    assert!(
+        shown
+            .iter()
+            .all(|note| note["why"].as_str().unwrap().starts_with("file src/probe"))
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM session_shown WHERE session_id = 'shared'")
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(remaining, 8);
+    let exhausted = app
+        .post(
+            "session/topic",
+            json!({"session_id":"shared", "path":"src/probe8.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(exhausted, json!({"notes": []}));
+    let prompt = app
+        .post(
+            "session/prompt-recall",
+            json!({
+                "session_id":"shared", "prompt":"Please check the working timer probe"
+            }),
+            &device,
+        )
+        .await;
+    assert_eq!(prompt, json!({"text":"", "budget_spent":true}));
+    let search = app
+        .post("search", json!({"query":"Working timer probe 8"}), &device)
+        .await;
+    assert!(!ids(&search).is_empty());
+    let fresh = app
+        .post(
+            "session/topic",
+            json!({"session_id":"fresh", "path":"src/shared.rs"}),
+            &device,
+        )
+        .await;
+    assert_eq!(fresh["notes"].as_array().unwrap().len(), 1, "{fresh}");
+    assert_eq!(fresh["notes"][0]["id"], shared);
+    std::sync::Arc::into_inner(app).unwrap().finish().await;
+}
+
+#[tokio::test]
+async fn brief_ranks_proven_ahead_of_recency_and_recent_file_matches() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "laptop").await;
     let project = app
         .post(
             "projects/init",
-            json!({"repository": "r", "name": "R"}),
+            json!({"repository": "r", "name": "E2E Brief ordering"}),
             &device,
         )
         .await;
@@ -851,13 +1045,17 @@ async fn brief_uses_recent_files() {
         save(&app, &device, json!({"kind": "gotcha", "scope": "project", "title": title, "summary": "Mind it. is a summary of the test", "reason": "r and the test says why",
             "fields": {"symptom": "s", "cause": "c", "fix": "f"}, "context": context(file)})).await;
     }
-    let brief = |recent: serde_json::Value| {
+    sqlx::query("UPDATE memories SET proof_count = 3 WHERE title = 'Queue lock order'")
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    let brief = |session_id: &'static str, recent: serde_json::Value| {
         let (app, device) = (&app, &device);
         async move {
             let reply = app
                 .post(
                     "session/brief",
-                    json!({"session_id": "s1", "context": {"project_id": pid}, "recent_files": recent}),
+                    json!({"session_id": session_id, "context": {"project_id": pid}, "recent_files": recent}),
                     device,
                 )
                 .await;
@@ -868,15 +1066,10 @@ async fn brief_uses_recent_files() {
         text.find(title)
             .unwrap_or_else(|| panic!("{title} in {text}"))
     };
-    let touching_queue = brief(json!(["src/jobs/worker.rs"])).await;
-    assert!(
-        position(&touching_queue, "Queue lock order")
-            < position(&touching_queue, "Docs build flag")
-    );
-    let touching_docs = brief(json!(["docs/build.md"])).await;
-    assert!(
-        position(&touching_docs, "Docs build flag") < position(&touching_docs, "Queue lock order")
-    );
+    for (session, file) in [("queues", "src/jobs/worker.rs"), ("docs", "docs/build.md")] {
+        let text = brief(session, json!([file])).await;
+        assert!(position(&text, "Queue lock order") < position(&text, "Docs build flag"));
+    }
     app.finish().await;
 }
 
@@ -902,7 +1095,7 @@ async fn brief_offers_a_check_and_repo_state_is_device_only_and_default_branch_o
         app.post(
             "remember",
             json!({"kind": "rule", "title": title, "summary": format!("{title}, as the team agreed."),
-                   "reason": "the review said so", "context": context("main")}),
+                   "reason": "The review identified this as a concurrency invariant.", "context": context("main")}),
             &device,
         )
         .await;
@@ -978,4 +1171,792 @@ async fn brief_offers_a_check_and_repo_state_is_device_only_and_default_branch_o
         .await;
     assert!(topic.get("card").is_none() && topic["notes"].as_array().unwrap().is_empty());
     app.finish().await;
+}
+
+#[tokio::test]
+async fn prompt_recall_learns_per_person_across_push_sources() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("push-owner").await;
+    let device = app.device(&admin, "push-device").await;
+    let member = app.member(&admin, "push-member").await;
+    let other = app.device(&member, "member-device").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-push", "name": "E2E push usage"
+            }),
+            &device,
+        )
+        .await["project_id"]
+        .clone();
+    let context = json!({"project_id": project, "files": ["src/push.rs"]});
+    let id = save(
+        &app,
+        &device,
+        json!({
+            "kind": "preference", "scope": "personal", "title": "Sol means Codex on high effort",
+            "summary": "Launch the worker on high effort when asked to work with Sol.",
+            "reason": "The coordinator specifies this worker by its short name.",
+            "context": context
+        }),
+    )
+    .await;
+    let project_rule = save(
+        &app,
+        &device,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Preserve Quartz scheduler isolation",
+            "summary": "Preserve quartz isolation during all scheduler tests.",
+            "reason": "Quartz shares the scheduler lock with other fixtures.",
+            "context": context
+        }),
+    )
+    .await;
+    app.post(
+        "projects/init",
+        json!({"repository": "local:e2e-push", "project_id": project}),
+        &other,
+    )
+    .await;
+    let prompt = |session: &str, text: &str| {
+        json!({
+            "session_id": session, "prompt": text, "context": {"project_id": project}
+        })
+    };
+    let query = "Can we proceed with sol?";
+    let run = |session, text| app.post("session/prompt-recall", prompt(session, text), &device);
+    for skip in [
+        "with sol",
+        "/go ahead with sol",
+        "yes please go ahead",
+        "Should I paint a sunset?",
+    ] {
+        assert_eq!(run("skip", skip).await["text"], "");
+    }
+    let (first, concurrent) = tokio::join!(run("push-a", query), run("push-a", query));
+    let nonempty = |reply: &serde_json::Value| !reply["text"].as_str().unwrap().is_empty();
+    assert_ne!(nonempty(&first), nonempty(&concurrent));
+    for session in ["push-b", "push-c"] {
+        let reply = run(session, query).await;
+        let text = reply["text"].as_str().unwrap();
+        assert!(
+            text.contains(r#"why: matches "sol" in your prompt"#),
+            "{reply}"
+        );
+        assert!(text.len() <= 300);
+        assert_eq!(run(session, query).await["text"], "");
+    }
+    assert_eq!(run("muted", query).await["text"], "");
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id":"muted", "context": context}),
+            &device,
+        )
+        .await;
+    assert!(
+        !brief["brief"].as_str().unwrap().contains("Sol means"),
+        "{brief}"
+    );
+    let topic = app
+        .post(
+            "session/topic",
+            json!({
+                "session_id":"muted", "path":"src/push.rs", "context": context
+            }),
+            &device,
+        )
+        .await;
+    assert!(!topic.to_string().contains("Sol means"), "{topic}");
+    let before = app.get(&format!("memories/{id}"), &admin).await;
+    assert_eq!(before["usage"]["pushed"], 3);
+    assert_eq!(before["usage"]["push_used"], 0);
+    let records: i64 = sqlx::query_scalar("SELECT count(*) FROM lookup_log")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let observations: i64 = sqlx::query_scalar("SELECT count(*) FROM observations")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!((records, observations), (0, 0));
+
+    let search = app
+        .post(
+            "search",
+            json!({"query":"Sol means Codex on high effort"}),
+            &device,
+        )
+        .await;
+    assert_eq!(ids(&search), std::slice::from_ref(&id));
+    assert!(
+        run("revived", query).await["text"]
+            .as_str()
+            .unwrap()
+            .contains("Sol means")
+    );
+    let get = json!({"ids":[id], "session_id":"revived"});
+    for _ in 0..2 {
+        app.post("get", get.clone(), &device).await;
+    }
+    let view = app.get(&format!("memories/{id}"), &admin).await;
+    assert_eq!(view["usage"]["pushed"], 4);
+    // One credit for the search hit and one for the session's gets (repeats count once).
+    assert_eq!(view["usage"]["push_used"], 2);
+    assert_eq!(view["trust_level"], before["trust_level"]);
+
+    let rule_query = "Please preserve quartz isolation";
+    assert!(
+        !run("vote", rule_query).await["text"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    app.post(
+        "session/lookup",
+        json!({"session_id":"vote", "kind":"feedback", "used_ids":[project_rule]}),
+        &device,
+    )
+    .await;
+    app.post(
+        "feedback",
+        json!({"id":project_rule, "vote":"helpful", "session_id":"vote"}),
+        &device,
+    )
+    .await;
+    let shared = format!("memories/{project_rule}");
+    assert_eq!(app.get(&shared, &admin).await["usage"]["push_used"], 1);
+    assert_eq!(app.get(&shared, &member).await["usage"]["push_used"], 0);
+    assert_eq!(
+        app.post(
+            "session/prompt-recall",
+            prompt("other-person", query),
+            &other
+        )
+        .await["text"],
+        ""
+    );
+    assert!(
+        !app.post(
+            "session/prompt-recall",
+            prompt("other-person", rule_query),
+            &other
+        )
+        .await["text"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn prompt_recall_narrows_candidates_before_the_hybrid_limit() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("prompt-scope").await;
+    let device = app.device(&admin, "prompt-scope").await;
+    let project = |name| {
+        app.post(
+            "projects/init",
+            json!({"repository": format!("local:e2e-{name}"), "name": format!("E2E {name}")}),
+            &device,
+        )
+    };
+    let here = project("current").await["project_id"].clone();
+    let elsewhere = project("other").await["project_id"].clone();
+    let save_one = |scope, kind, title, project| {
+        save(
+            &app,
+            &device,
+            json!({
+                "scope": scope, "kind": kind, "title": title, "context":{"project_id":project},
+                "summary": "Keep opal scheduler isolation for this build path.",
+                "reason": "The scheduler shares its queue with a second service."
+            }),
+        )
+    };
+    save_one(
+        "personal",
+        "rule",
+        "Retain opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    save_one(
+        "project",
+        "procedure",
+        "Keep opal scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    let candidate = save_one(
+        "project",
+        "rule",
+        "Candidate scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    let doubted = save_one(
+        "project",
+        "rule",
+        "Doubted opal scheduler isolation",
+        here.clone(),
+    )
+    .await;
+    save_one(
+        "project",
+        "rule",
+        "Other opal scheduler isolation",
+        elsewhere,
+    )
+    .await;
+    save_one(
+        "global",
+        "rule",
+        "Global opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    save_one(
+        "personal",
+        "fact",
+        "Fact about opal scheduler isolation",
+        serde_json::Value::Null,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE memories SET rank = CASE WHEN memory_id = $1 THEN 'candidate' ELSE 'normal' END",
+    )
+    .bind(&candidate)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+    app.post("feedback", json!({"id":doubted, "vote":"wrong"}), &device)
+        .await;
+    let payload = json!({"session_id":"scope", "context":{"project_id":here}, "prompt":"Please keep opal scheduler isolation"});
+    let reply = app
+        .post("session/prompt-recall", payload.clone(), &device)
+        .await;
+    let text = reply["text"].as_str().unwrap();
+    assert!(
+        text.contains("Retain opal") && text.contains("Keep opal"),
+        "{reply}"
+    );
+    assert_eq!(text.matches("(why:").count(), 2);
+    assert!(text.len() <= 300);
+    assert_eq!(
+        app.post("session/prompt-recall", payload, &device).await["text"],
+        ""
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn pins_are_web_only_and_both_brief_layers_deduplicate_automatic_recall() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("layer-owner").await;
+    let device = app.device(&admin, "laptop").await;
+    let outsider = app.member(&admin, "layer-outsider").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-brief-layers", "name": "E2E Brief layers"
+            }),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let context = json!({"project_id": pid, "branch": "main", "files": ["src/layers.rs"]});
+    let save_rule = |title| {
+        save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "project", "title": title,
+                "summary": format!("{title} is part of the startup test fixture."),
+                "reason": "Startup context should include existing policies.",
+                "context": context
+            }),
+        )
+    };
+    let pin = save_rule("Startup identity").await;
+    let essential = save_rule("Startup policy").await;
+    let superseded = save_rule("Previous policy").await;
+    let forgotten = save_rule("Retired policy").await;
+    save(
+        &app,
+        &device,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Feature policy",
+            "summary": "Set the retry behavior on the feature branch.",
+            "reason": "This policy only applies on another branch.",
+            "context": {"project_id": pid, "branch": "feature", "files": ["src/feature.rs"]}
+        }),
+    )
+    .await;
+    let target = format!("memories/{pin}/pin");
+    for (token, expected) in [(&device, 401), (&outsider, 404)] {
+        assert_eq!(
+            app.send("POST", &target, json!({"pinned": true}), Some(token))
+                .await
+                .0,
+            expected
+        );
+    }
+    for id in [&pin, &superseded, &forgotten] {
+        let pinned = app
+            .post(
+                &format!("memories/{id}/pin"),
+                json!({"pinned": true}),
+                &admin,
+            )
+            .await;
+        assert!(pinned["pinned_at"].is_i64(), "{pinned}");
+    }
+    let fetched = app
+        .send("GET", &format!("memories/{pin}"), json!(null), Some(&admin))
+        .await;
+    assert_eq!(fetched.0, 200, "{fetched:?}");
+    assert!(fetched.1["pinned_at"].is_i64(), "{fetched:?}");
+    app.post("forget", json!({"id": forgotten}), &admin).await;
+    sqlx::query("UPDATE memories SET status = 'superseded' WHERE memory_id = $1")
+        .bind(&superseded)
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET rank = 'normal', created_at = now() - interval '3 days 12 hours' WHERE project_id = $1")
+        .bind(pid).execute(app.db.store.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO push_usage (person_id, memory_id, pushed, muted)
+                 SELECT owner_id, memory_id, 3, true FROM memories WHERE memory_id = $1",
+    )
+    .bind(&pin)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "layers", "context": context}),
+            &device,
+        )
+        .await;
+    let text = brief["brief"].as_str().unwrap();
+    let data: serde_json::Value = serde_json::from_str(
+        text.split("```")
+            .nth(1)
+            .unwrap()
+            .strip_prefix("json\n")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["L0 Identity"][0]["id"], pin);
+    assert_eq!(data["L0 Identity"][0]["age"], "3d");
+    assert_eq!(data["L1 Essential"][0]["id"], essential);
+    assert_eq!(data["L0 Identity"].as_array().unwrap().len(), 1, "{text}");
+    assert_eq!(data["L1 Essential"].as_array().unwrap().len(), 1, "{text}");
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT memory_id FROM session_shown WHERE session_id = 'layers' AND source = 'brief'",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&pin) && ids.contains(&essential));
+    let topic = |session| {
+        app.post(
+            "session/topic",
+            json!({
+                "session_id": session, "context": context, "path": "src/layers.rs"
+            }),
+            &device,
+        )
+    };
+    let same_session = topic("layers").await;
+    let another_session = topic("fresh-layers").await;
+    assert!(
+        !same_session.to_string().contains(&pin) && !same_session.to_string().contains(&essential)
+    );
+    assert!(
+        another_session.to_string().contains("Startup identity"),
+        "{another_session}"
+    );
+
+    let person: String = sqlx::query_scalar("SELECT owner_id FROM projects WHERE project_id = $1")
+        .bind(pid)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    app.db
+        .store
+        .set_project_archived(&person, true, pid, true)
+        .await
+        .unwrap();
+    let archived = app
+        .post(
+            "session/brief",
+            json!({"session_id": "archived-layers", "context": context}),
+            &device,
+        )
+        .await;
+    assert_eq!(archived["brief"], "");
+    app.db
+        .store
+        .set_project_archived(&person, true, pid, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.post(&target, json!({"pinned": false}), &admin).await["pinned_at"],
+        json!(null)
+    );
+    let unpinned = app
+        .post(
+            "session/brief",
+            json!({"session_id": "unpinned-layers", "context": context}),
+            &device,
+        )
+        .await;
+    assert!(
+        !unpinned["brief"].as_str().unwrap().contains(&pin),
+        "{unpinned}"
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn legacy_brief_keeps_identity_and_packs_essentials_within_1200_bytes() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("brief-compat").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:e2e-brief-compat", "name": "E2E Brief compatibility"}),
+            &device,
+        )
+        .await;
+    let project_id = project["project_id"].as_str().unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'brief_' || n, p.owner_id, p.project_id, 'project', 'rule', 'Brief card ' || n,
+                repeat('é', 120), 'e', 'brief_' || n, CASE WHEN n <= 2 THEN now() END
+           FROM projects p CROSS JOIN generate_series(1, 8) n WHERE p.project_id = $1",
+    )
+    .bind(project_id)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+
+    let body = json!({"session_id": "legacy-brief", "context": {"project_id": project_id}});
+    let legacy = app.post("session/brief", body.clone(), &device).await;
+    let mut extended_body = body;
+    extended_body["session_id"] = json!("extended-brief");
+    extended_body["extended_brief"] = json!(true);
+    let extended = app.post("session/brief", extended_body, &device).await;
+    assert!(extended["brief"].as_str().unwrap().len() > 1200);
+
+    let decode = |reply: &serde_json::Value, max_bytes| -> serde_json::Value {
+        assert_eq!(reply["max_bytes"], max_bytes);
+        let text = reply["brief"].as_str().unwrap();
+        assert!(text.len() <= max_bytes, "{text}");
+        serde_json::from_str(
+            text.split_once("```json\n")
+                .unwrap()
+                .1
+                .strip_suffix("\n```")
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let legacy = decode(&legacy, 1200);
+    let extended = decode(&extended, 1800);
+    assert_eq!(legacy["L0 Identity"], extended["L0 Identity"]);
+    assert_eq!(legacy["L0 Identity"][0]["id"], "brief_1");
+    assert_eq!(legacy["L0 Identity"][1]["id"], "brief_2");
+    let legacy_essentials = legacy["L1 Essential"].as_array().unwrap();
+    let extended_essentials = extended["L1 Essential"].as_array().unwrap();
+    assert!(!legacy_essentials.is_empty() && legacy_essentials.len() < extended_essentials.len());
+
+    let shown: Vec<String> = sqlx::query_scalar(
+        "SELECT memory_id FROM session_shown WHERE session_id = 'legacy-brief' ORDER BY memory_id",
+    )
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    let mut rendered: Vec<&str> = legacy["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(legacy_essentials)
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    rendered.sort_unstable();
+    assert_eq!(shown, rendered);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
+    let Some(app) = App::new().await else { return };
+    let owner = app.admin("chat-owner").await;
+    let token = app.device(&owner, "hermes-gateway").await;
+    let other = app.member(&owner, "other-account").await;
+    let foreign_token = app.device(&other, "other-device").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-hermes-chat", "name": "E2E Hermes chat"
+            }),
+            &token,
+        )
+        .await["project_id"]
+        .clone();
+    let chat = |kind, hash: &str| {
+        json!({
+            "platform": "matrix", "kind": kind, "chat_id_hash": hash.repeat(64),
+            "thread_id_hash": "d".repeat(64),
+        })
+    };
+    let group = chat("group", "a");
+    let other_group = chat("group", "b");
+    let dm = chat("dm", "c");
+    let private = save(
+        &app,
+        &token,
+        json!({
+            "kind": "preference", "title": "Kestrel private fallback",
+            "summary": "Use the private Kestrel fallback when generating my reports.",
+            "reason": "The fallback preserves the account's report format."
+        }),
+    )
+    .await;
+    let pinned = save(
+        &app,
+        &token,
+        json!({
+            "kind": "note", "title": "Private identity pin",
+            "summary": "This pin is available only to the account owner."
+        }),
+    )
+    .await;
+    app.post(
+        &format!("memories/{pinned}/pin"),
+        json!({"pinned": true}),
+        &owner,
+    )
+    .await;
+    let project_rule = save(
+        &app,
+        &token,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Kestrel project schedule",
+            "summary": "Refresh the Kestrel schedule on the first day of the month.",
+            "reason": "Shared reports read the monthly schedule.",
+            "context": {"project_id": project}
+        }),
+    )
+    .await;
+    let saved_body = json!({
+        "kind": "note", "scope": "global", "title": "Kestrel observatory schedule",
+        "summary": "The Kestrel observatory runs a public tour every Thursday.",
+        "context": {"chat": group}
+    });
+    let group_id = save(&app, &token, saved_body.clone()).await;
+    assert_eq!(save(&app, &token, saved_body.clone()).await, group_id);
+    let record = app.get(&format!("memories/{group_id}"), &owner).await;
+    assert_eq!(record["scope"], "personal");
+    assert_eq!(record["trust"], "new · awaiting confirmation");
+    assert_eq!(record["project_id"], serde_json::Value::Null);
+    let stored: (String, i32) =
+        sqlx::query_as("SELECT chat_id_hash, proof_count FROM memories WHERE memory_id = $1")
+            .bind(&group_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, ("a".repeat(64), 1));
+
+    let search = async |chat: &serde_json::Value, token: &str| {
+        let args = json!({"query": "Kestrel", "context": {"chat": chat}});
+        ids(&app.post("search", args, token).await)
+    };
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
+    assert!(search(&other_group, &token).await.is_empty());
+    assert!(search(&dm, &token).await.is_empty());
+    let dm_saved = save(&app, &token, json!({
+        "kind": "note", "title": "Kestrel ticket", "summary": "The next Kestrel tour runs on Thursday.",
+        "context": {"chat": dm}
+    })).await;
+    assert_eq!(search(&dm, &token).await, [dm_saved.as_str()]);
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
+    assert!(search(&group, &foreign_token).await.is_empty());
+
+    let project_save = json!({
+        "kind": "note", "title": "Kestrel tour capacity",
+        "summary": "The Kestrel tour can take twelve passengers.",
+        "context": {"chat": group, "project_id": "E2E Hermes chat"}
+    });
+    let project_note = save(&app, &token, project_save.clone()).await;
+    let record = app.get(&format!("memories/{project_note}"), &owner).await;
+    assert_eq!(record["scope"], "project");
+    assert_eq!(record["project_id"], project);
+    assert_eq!(record["trust"], "new · awaiting confirmation");
+    let tag: Option<String> =
+        sqlx::query_scalar("SELECT chat_id_hash FROM memories WHERE memory_id = $1")
+            .bind(&project_note)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(tag, None);
+    let denied_search = json!({
+        "query": "Kestrel", "context": {"chat": group, "project_id": project}
+    });
+    for (route, body) in [
+        ("search", denied_search),
+        ("remember", project_save.clone()),
+    ] {
+        assert_eq!(
+            app.send("POST", route, body, Some(&foreign_token)).await.0,
+            404
+        );
+    }
+    let mut preference = project_save.clone();
+    preference["kind"] = "preference".into();
+    let (status, reply) = app.send("POST", "remember", preference, Some(&token)).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        reply["error"],
+        cairn_core::process::prepare::CHAT_PREFERENCE_ERROR
+    );
+
+    let selected = app
+        .post(
+            "search",
+            json!({"query": "Kestrel", "context": {
+                "chat": group, "project_id": "E2E Hermes chat"
+            }}),
+            &token,
+        )
+        .await;
+    let selected = ids(&selected);
+    assert!(selected.contains(&project_rule) && selected.contains(&project_note));
+    assert!(selected.contains(&group_id));
+    assert!(!selected.contains(&private) && !selected.contains(&dm_saved));
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
+    assert!(
+        !ids(&app
+            .post("search", json!({"query": "Kestrel"}), &token)
+            .await)
+        .contains(&group_id)
+    );
+    assert_eq!(
+        app.send(
+            "GET",
+            &format!("memories/{group_id}"),
+            serde_json::Value::Null,
+            Some(&token)
+        )
+        .await
+        .0,
+        404
+    );
+
+    for (key, invalid) in [
+        ("chat_id_hash", json!("unhashed-transport-id")),
+        ("sender_id_hash", json!("e".repeat(64))),
+        ("owner", json!(true)),
+        ("platform", json!("Uppercase")),
+    ] {
+        let mut invalid_chat = saved_body.clone();
+        invalid_chat["context"]["chat"][key] = invalid;
+        assert_eq!(
+            app.send("POST", "remember", invalid_chat, Some(&token))
+                .await
+                .0,
+            400
+        );
+    }
+
+    let session = |digit: char| format!("hchat_{}", digit.to_string().repeat(32));
+    let brief = app
+        .post(
+            "session/brief",
+            json!({
+                "session_id": session('a'), "context": {"chat": group, "project_id": project}
+            }),
+            &token,
+        )
+        .await;
+    let briefing = brief["brief"].as_str().unwrap();
+    assert!(briefing.contains("Kestrel project schedule"), "{brief}");
+    assert!(!briefing.contains("private fallback") && !briefing.contains("Private identity pin"));
+    assert_eq!(
+        brief["instructions"]["chat_instruction"],
+        cairn_core::instructions::DEFAULT_CHAT_INSTRUCTION
+    );
+    let dm_brief = app
+        .post(
+            "session/brief",
+            json!({
+                "session_id": session('b'), "context": {"chat": dm}
+            }),
+            &token,
+        )
+        .await;
+    assert!(
+        !dm_brief["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Private identity pin")
+    );
+    for (chat, digit) in [(&group, 'c'), (&dm, 'd')] {
+        let prompt = app
+            .post(
+                "session/prompt-recall",
+                json!({
+                    "session_id": session(digit), "prompt": "Can I use Kestrel private fallback?",
+                    "context": {"chat": chat}
+                }),
+                &token,
+            )
+            .await;
+        assert!(
+            !prompt["text"]
+                .as_str()
+                .unwrap()
+                .contains("Kestrel private fallback"),
+            "{prompt}"
+        );
+    }
+    save(&app, &token, json!({
+        "kind": "gotcha", "title": "Kestrel command warning",
+        "summary": "Check the report directory before running kestrel audit.",
+        "reason": "The audit replaces the existing report.",
+        "fields": {"symptom": "The previous report disappeared",
+                   "cause": "kestrel audit overwrites it", "fix": "Copy the previous report first"},
+        "context": {"commands": ["kestrel audit"]}
+    })).await;
+    for (chat, digit) in [(&group, 'e'), (&dm, 'f')] {
+        let warning = app
+            .post(
+                "session/command-recall",
+                json!({
+                    "session_id": session(digit), "command": "kestrel audit", "chat": chat
+                }),
+                &token,
+            )
+            .await;
+        assert!(
+            !warning["text"]
+                .as_str()
+                .unwrap()
+                .contains("Kestrel command warning"),
+            "{warning}"
+        );
+    }
+    app.db.finish().await;
 }

@@ -20,7 +20,8 @@ fn cli_usage_lists_only_kept_commands() {
         assert!(!super::USAGE.contains(gone), "{gone}");
     }
     for kept in [
-        "setup", "init", "update", "doctor", "mcp", "search", "get", "save", "feedback", "forget",
+        "setup", "init", "import", "update", "doctor", "mcp", "search", "get", "save", "feedback",
+        "forget",
     ] {
         assert!(super::USAGE.contains(&format!("cairn {kept}")), "{kept}");
     }

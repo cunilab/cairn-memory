@@ -1,13 +1,12 @@
 use super::entities;
-use crate::capture::{WorkContext, redact_sensitive_content};
+use crate::capture::{ChatKind, WorkContext, redact_sensitive_content};
 use crate::error::Error;
 use crate::memory::identity::{evidence_hash, identity_hash, normalize_evidence};
 use crate::memory::kind::{expires_at, resolve_scope};
 use crate::memory::validate::{validate_quality, validate_save};
 use crate::memory::{Context, Entity, Fields, Kind, SaveInput, Scope};
 
-/// Who is saving. The system path (distill, promotion) may write a handoff and skips the quality
-/// rules (its outputs are built to pass them); an agent may not and does not.
+/// Who is saving. Only the system path may write a handoff.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +14,8 @@ pub enum Origin {
     Agent,
     System,
 }
+
+pub const CHAT_PREFERENCE_ERROR: &str = "A preference is always personal. Save it without a project to keep it in this chat, or save shared project knowledge as a note, rule, decision, gotcha, procedure, or fact with the project.";
 
 impl Origin {
     pub fn as_str(self) -> &'static str {
@@ -39,12 +40,15 @@ impl std::str::FromStr for Origin {
 /// A validated, redacted and derived memory, ready for the store to insert.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewMemory {
+    pub chat_id_hash: Option<crate::capture::ChatHash>,
+    pub chat_candidate: bool,
     pub kind: Kind,
     pub scope: Scope,
     pub origin: Origin,
     pub title: String,
     pub summary: String,
     pub reason: String,
+    pub detail: Option<String>,
     pub fields: Fields,
     pub evidence: Vec<String>,
     pub evidence_hash: String,
@@ -56,8 +60,16 @@ pub struct NewMemory {
     pub contradicts: Option<String>,
 }
 
-/// Everything in §2.2 that needs no IO: redact, validate, apply the kind policy, hash, derive.
-/// `has_project` is true when the person is a member of the request's project.
+impl NewMemory {
+    /// Keep exact duplicates within one chat, including across export and rewrite.
+    pub fn tag_chat(&mut self, hash: crate::capture::ChatHash, candidate: bool) {
+        self.identity_hash = crate::id::sha256_hex(&["chat", hash.as_str(), &self.identity_hash]);
+        self.chat_id_hash = Some(hash);
+        self.chat_candidate = candidate;
+    }
+}
+
+/// Preparation for system saves and callers that still enforce the legacy quality gate.
 pub fn prepare_save(
     input: SaveInput,
     work: &WorkContext,
@@ -65,6 +77,38 @@ pub fn prepare_save(
     origin: Origin,
     now: i64,
 ) -> Result<NewMemory, Error> {
+    prepare(
+        input,
+        work,
+        has_project,
+        origin,
+        now,
+        origin == Origin::Agent,
+    )
+}
+
+/// Prepare an explicit agent save for advisory coaching after normal validation.
+pub fn prepare_coached_save(
+    input: SaveInput,
+    work: &WorkContext,
+    has_project: bool,
+    now: i64,
+) -> Result<NewMemory, Error> {
+    prepare(input, work, has_project, Origin::Agent, now, false)
+}
+
+fn prepare(
+    input: SaveInput,
+    work: &WorkContext,
+    has_project: bool,
+    origin: Origin,
+    now: i64,
+    strict_quality: bool,
+) -> Result<NewMemory, Error> {
+    let chat_project = work.chat.is_some() && origin == Origin::Agent && has_project;
+    if chat_project && input.kind == Kind::Preference {
+        return Err(Error::validation(CHAT_PREFERENCE_ERROR));
+    }
     let redact = |text: &str| redact_sensitive_content(text.trim());
     let fields =
         Fields::parse(input.kind, input.fields.clone())?.map_text(redact_sensitive_content);
@@ -72,11 +116,12 @@ pub fn prepare_save(
         title: redact(&input.title),
         summary: redact(&input.summary),
         reason: redact(&input.reason),
+        detail: input.detail.as_deref().map(redact_sensitive_content),
         evidence: input.evidence.iter().map(|e| redact(e)).collect(),
         ..input
     };
     validate_save(&input, &fields, origin == Origin::System)?;
-    if origin == Origin::Agent {
+    if strict_quality {
         validate_quality(&input, &fields)?;
     }
     if input.supersedes.is_some() && input.supersedes == input.contradicts {
@@ -84,7 +129,13 @@ pub fn prepare_save(
             "supersedes and contradicts must name different memories",
         ));
     }
-    let scope = resolve_scope(input.kind, input.scope, has_project)?;
+    let scope = if chat_project {
+        Scope::Project
+    } else if work.chat.is_some() {
+        Scope::Personal
+    } else {
+        resolve_scope(input.kind, input.scope, has_project)?
+    };
     let evidence = normalize_evidence(&input.evidence);
     let entities = entities::derive(
         &[
@@ -95,7 +146,9 @@ pub fn prepare_save(
         ],
         work,
     );
-    Ok(NewMemory {
+    let mut new = NewMemory {
+        chat_id_hash: None,
+        chat_candidate: false,
         kind: input.kind,
         scope,
         origin,
@@ -104,6 +157,7 @@ pub fn prepare_save(
         title: input.title,
         summary: input.summary,
         reason: input.reason,
+        detail: input.detail,
         fields,
         evidence,
         context: Context {
@@ -116,7 +170,16 @@ pub fn prepare_save(
         expires_at: expires_at(input.kind, origin == Origin::System, scope, now),
         supersedes: input.supersedes,
         contradicts: input.contradicts,
-    })
+    };
+    if let Some(chat) = &work.chat {
+        let candidate = chat.kind == ChatKind::Group;
+        if scope == Scope::Personal {
+            new.tag_chat(chat.chat_id_hash.clone(), candidate);
+        } else {
+            new.chat_candidate = candidate;
+        }
+    }
+    Ok(new)
 }
 
 #[cfg(test)]
@@ -246,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_saves_are_quality_checked_and_system_saves_are_not() {
+    fn legacy_agent_quality_gate_does_not_apply_to_coached_or_system_saves() {
         let thin = json!({"kind":"gotcha","title":"t","summary":"s","reason":"r"});
         let agent = prepare_save(
             input(thin.clone()),
@@ -256,6 +319,9 @@ mod tests {
             0,
         );
         assert!(matches!(agent, Err(Error::Quality(m)) if m.starts_with("title:")));
+        assert!(
+            prepare_coached_save(input(thin.clone()), &WorkContext::default(), false, 0).is_ok()
+        );
         let system = prepare_save(
             input(thin),
             &WorkContext::default(),

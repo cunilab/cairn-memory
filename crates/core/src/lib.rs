@@ -13,5 +13,6 @@ pub mod memory;
 pub mod process;
 pub mod project;
 pub mod retrieve;
+pub mod skill;
 #[cfg(test)]
 mod testing;

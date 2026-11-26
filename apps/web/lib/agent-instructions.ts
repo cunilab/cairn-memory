@@ -1,6 +1,6 @@
 import type { InstructionSource } from "@/lib/generated/InstructionSource";
 
-/** The longest text the server stores for either field, in bytes (the server checks it too). */
+/** The longest text the server stores per field, in bytes (the server checks it too). */
 export const MAX_INSTRUCTION_BYTES = 600;
 
 export const SOURCE_LABEL: Record<InstructionSource, string> = {
@@ -35,12 +35,12 @@ export function sampleStop(text: string, files: number = 3): string {
 }
 
 /** A change to send: only the fields whose text differs from what is saved. Empty clears. */
-export function changedFields(
-  draft: { session_instruction: string; stop_nudge: string },
-  saved: { session_instruction: string | null; stop_nudge: string | null },
-): Partial<{ session_instruction: string; stop_nudge: string }> {
-  const out: Partial<{ session_instruction: string; stop_nudge: string }> = {};
-  for (const key of ["session_instruction", "stop_nudge"] as const) {
+export function changedFields<Key extends string>(
+  draft: Record<Key, string>,
+  saved: Record<Key, string | null>,
+): Partial<Record<Key, string>> {
+  const out: Partial<Record<Key, string>> = {};
+  for (const key of Object.keys(draft) as Key[]) {
     if (draft[key].trim() !== (saved[key] ?? "")) out[key] = draft[key].trim();
   }
   return out;

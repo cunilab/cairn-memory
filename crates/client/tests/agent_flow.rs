@@ -1,5 +1,5 @@
 //! Runs the real `cairn` binary (CLI and `cairn mcp`) against an in-process Cairn server on a
-//! `TestDb` schema: the five tools through both transports, plus config and argument handling.
+//! `TestDb` schema: the five memory tools through both transports, plus config and argument handling.
 
 mod common;
 
@@ -489,7 +489,7 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
     assert_eq!(voted, json!({"id": id, "status": "active"}));
     assert!(!member.run_in(&dir_b, &["forget", &id]).status.success());
 
-    // The same five tools over MCP, with the instruction text sent once at initialize.
+    // MCP lists the memory and skill tools, with instructions sent once at initialize.
     let mut mcp = owner.mcp_in(&dir_a);
     let listed = mcp.request("tools/list", json!({}));
     let names: Vec<_> = listed["result"]["tools"]
@@ -505,7 +505,11 @@ fn the_five_tools_work_through_the_cli_and_mcp() {
             "memory_get",
             "memory_save",
             "memory_feedback",
-            "memory_forget"
+            "memory_forget",
+            "skill_search",
+            "skill_get",
+            "skill_save",
+            "skill_feedback"
         ]
     );
     let via_mcp = mcp.ok("memory_search", json!({"query": "skip locked"}));
@@ -545,6 +549,41 @@ fn non_git_project_saves_attach_from_root_and_child_for_cli_and_mcp() {
             ))
             .unwrap();
         assert_eq!(view["project_id"], identity["project_id"]);
+    }
+}
+
+#[test]
+fn init_keeps_same_named_no_remote_folders_separate() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "local-collision");
+    let first = checkout("local-collision-first");
+    let second = checkout("local-collision-second");
+    let identity = |dir: &std::path::Path| -> Value {
+        serde_json::from_slice(&std::fs::read(dir.join(".cairn/project.json")).unwrap()).unwrap()
+    };
+    for dir in [&first, &second] {
+        let output = team.owner.run_in(dir, &["init"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let first_file = identity(&first);
+    let second_file = identity(&second);
+    assert_eq!(first_file["repository"], "local:repo");
+    assert_eq!(second_file["repository"], "local:repo");
+    assert_ne!(first_file["project_id"], second_file["project_id"]);
+    for (dir, original) in [(&first, &first_file), (&second, &second_file)] {
+        let output = team.owner.run_in(dir, &["init"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(&identity(dir), original);
     }
 }
 

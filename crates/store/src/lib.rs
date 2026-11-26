@@ -14,6 +14,7 @@ pub mod memory;
 pub mod project;
 pub mod repo;
 pub mod retrieve;
+pub mod skill;
 pub mod stats;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -82,6 +83,50 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0014_memory_owner_project_created",
         include_str!("../../../migrations/0014_memory_owner_project_created.sql"),
+    ),
+    (
+        "0015_memory_detail",
+        include_str!("../../../migrations/0015_memory_detail.sql"),
+    ),
+    (
+        "0016_project_archive",
+        include_str!("../../../migrations/0016_project_archive.sql"),
+    ),
+    (
+        "0017_device_agents",
+        include_str!("../../../migrations/0017_device_agents.sql"),
+    ),
+    (
+        "0018_memory_usage",
+        include_str!("../../../migrations/0018_memory_usage.sql"),
+    ),
+    (
+        "0019_session_shown",
+        include_str!("../../../migrations/0019_session_shown.sql"),
+    ),
+    (
+        "0020_device_agent_hermes",
+        include_str!("../../../migrations/0020_device_agent_hermes.sql"),
+    ),
+    (
+        "0021_push_usage",
+        include_str!("../../../migrations/0021_push_usage.sql"),
+    ),
+    (
+        "0022_memory_pins",
+        include_str!("../../../migrations/0022_memory_pins.sql"),
+    ),
+    (
+        "0023_hermes_chat",
+        include_str!("../../../migrations/0023_hermes_chat.sql"),
+    ),
+    (
+        "0024_hermes_route_privacy",
+        include_str!("../../../migrations/0024_hermes_route_privacy.sql"),
+    ),
+    (
+        "0025_skills",
+        include_str!("../../../migrations/0025_skills.sql"),
     ),
 ];
 

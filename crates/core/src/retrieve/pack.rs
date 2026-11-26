@@ -34,6 +34,7 @@ pub struct Card {
     /// How many times this knowledge was saved. Omitted the first time.
     #[serde(default, skip_serializing_if = "seen_once")]
     pub seen: u32,
+    pub trust: String,
 }
 
 /// `more` counts hits cut by the limit or the budget; a caller raises either to see them.
@@ -124,6 +125,7 @@ impl Packer {
             label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
             seen: hit.memory.proof_count,
+            trust: hit.memory.trust().1,
         };
         let cost = serde_json::to_string(&card).map_or(0, |json| json.len()) + 1;
         if self.out.len() == self.limit || (self.used + cost > self.budget && !self.out.is_empty())
@@ -218,7 +220,7 @@ mod tests {
         let json = serde_json::to_value(pack(&[hit("a", 0.3)], 5, 1200)).expect("json");
         assert!(json.get("more").is_none());
         let keys: Vec<_> = json["results"][0].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["id", "kind", "score", "summary", "title"]);
+        assert_eq!(keys, ["id", "kind", "score", "summary", "title", "trust"]);
         let mut stale = hit("s", 0.3);
         stale.memory.status = Status::Stale;
         let json = serde_json::to_value(pack(&[stale], 5, 1200)).expect("json");
@@ -247,7 +249,7 @@ mod tests {
     #[test]
     fn pack_tries_a_smaller_card_after_one_that_does_not_fit() {
         let mut big = hit("big", 0.9);
-        big.memory.summary = "s".repeat(240);
+        big.memory.summary = "é".repeat(240);
         let mut hits = vec![hit("a", 1.0)];
         hits.extend((0..4).map(|i| {
             let mut h = big.clone();
@@ -256,8 +258,7 @@ mod tests {
         }));
         hits.push(hit("small", 0.1));
         let c = pack(&hits, 10, 200);
-        assert_eq!(ids(&c).first(), Some(&"a"));
-        assert_eq!(ids(&c).last(), Some(&"small"), "{:?}", ids(&c));
+        assert_eq!(ids(&c), ["a", "big0", "small"]);
     }
 
     #[test]
@@ -310,13 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn card_unchanged_for_single_proof() {
+    fn card_omits_seen_for_single_proof() {
         let mut one = hit("a", 0.3);
         one.memory.proof_count = 1;
         let json = serde_json::to_string(&pack(&[one], 5, 1200)).expect("json");
         assert_eq!(
             json,
-            r#"{"results":[{"id":"a","kind":"fact","title":"title a","summary":"summary a","score":0.3}]}"#
+            r#"{"results":[{"id":"a","kind":"fact","title":"title a","summary":"summary a","score":0.3,"trust":"normal"}]}"#
         );
         let mut repeated = hit("b", 0.3);
         repeated.memory.proof_count = 3;

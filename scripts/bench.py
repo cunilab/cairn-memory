@@ -181,6 +181,86 @@ def result_ids(structured):
     return [row["id"] for row in rows if isinstance(row, dict) and "id" in row]
 
 
+def check_recall_latency(http, device, context, repo, env, exe, config, out, semantic, size, settle):
+    command = "cargo test phase_c_recall"
+    error = "Error: amber scheduler queue overflow"
+    prompt = "Can we proceed with sol?"
+    preference = http.call("/remember", {
+        "scope": "personal", "kind": "preference", "title": "Sol means Codex on high effort",
+        "summary": "Launch the worker on high effort when asked to work with Sol.",
+        "reason": "The coordinator names the worker using this shorthand.",
+    }, device)["id"]
+    gotcha = http.call("/remember", {
+        "scope": "project", "kind": "gotcha", "title": "Amber scheduler queue overflow",
+        "summary": error, "fields": {
+            "symptom": "The retry fails with a scheduler queue overflow.",
+            "cause": "A previous fixture left pending scheduler jobs.",
+            "fix": "Drain the amber scheduler queue before retrying.",
+        },
+        "reason": "A pending scheduler fixture can fill the amber queue during a retry.",
+        "context": dict(context, commands=[command], files=["src/jobs/queue.rs"]),
+    }, device)["id"]
+    settle()
+
+    path = "src/jobs/queue.rs"
+    tool = {"tool_name": "Bash", "tool_input": {"command": command}}
+    routes = {
+        "brief": ("session/brief", {"context": context, "extended_brief": True}, "brief"),
+        "topic": ("session/topic", {"context": context, "path": path}, "notes"),
+        "warning": ("session/command-recall", {"project_id": context["project_id"], "command": command}, "text"),
+        "failure": ("session/command-recall", {"project_id": context["project_id"], "command": command, "error_tail": error}, "text"),
+        "prompt": ("session/prompt-recall", {"context": context, "prompt": prompt}, "text"),
+    }
+    hooks = {
+        "brief": ("SessionStart", {"source": "startup"}),
+        "topic": ("PostToolUse", {"tool_name": "Read", "tool_input": {"file_path": path}}),
+        "warning": ("PreToolUse", tool),
+        "failure": ("PostToolUseFailure", dict(tool, error=f"Exit code 1\n{error}")),
+        "prompt": ("UserPromptSubmit", {"prompt": prompt}),
+    }
+
+    report = {"semantic": semantic, "seeded_memories": size + 2}
+    failed = []
+    for group, cases, limit in [("http", routes, 100), ("hook", hooks, 500)]:
+        report[group] = {}
+        for name, case in cases.items():
+            timings = []
+            for sample in range(23):
+                session_id = f"latency-{group}-{name}-{sample}"
+                body = dict(case[1], session_id=session_id)
+                start = time.perf_counter()
+                if group == "http":
+                    response = http.call("/" + case[0], body, device)
+                    hit = response.get(case[2]) or response.get("card")
+                else:
+                    done = run([exe, "hook", case[0], "--agent", "claude", "--config", str(config)],
+                               input=json.dumps(dict(body, cwd=str(repo))), cwd=repo, env=env, timeout=5)
+                    hit = json.loads(done.stdout or "{}").get("hookSpecificOutput", {}).get("additionalContext")
+                elapsed = (time.perf_counter() - start) * 1000
+                assert hit, f"{group} {name} did not deliver recall for {session_id}"
+                if name == "brief":
+                    assert "Cairn memory data" in hit, f"brief was not delivered for {session_id}"
+                if name == "prompt":
+                    assert 'why: matches "sol"' in hit, f"Sol preference was not delivered for {session_id}"
+                # A get credits the push outside the measurement and keeps the fixture eligible.
+                used_ids = [preference, gotcha] if name == "brief" else [preference if name == "prompt" else gotcha]
+                http.call("/get", {"ids": used_ids, "session_id": session_id}, device)
+                if sample >= 3:
+                    timings.append(elapsed)
+            timings.sort()
+            p95 = timings[math.ceil(0.95 * len(timings)) - 1]
+            report[group][name] = {"p50_ms": round(timings[9], 1), "p95_ms": round(p95, 1),
+                                   "max_ms": round(timings[-1], 1), "limit_ms": limit}
+            if p95 >= limit:
+                failed.append(f"{group} {name}: {p95:.1f} ms >= {limit} ms")
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    if failed:
+        raise SystemExit("Recall latency budget exceeded: " + ", ".join(failed))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True, help="JSON result path")
@@ -189,6 +269,8 @@ def main():
                         "CAIRN_TEST_EMBEDDING_MODEL_DIR, then ~/.cache/cairn-bench/minilm)")
     parser.add_argument("--lexical-only", action="store_true", help="do not load the embedding model")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--check-recall-latency", action="store_true",
+                        help="measure seeded recall only and fail if p95 exceeds its latency budget")
     parser.add_argument("--questions", default="questions.json", help="main question set in bench/fixtures (default: v1)")
     parser.add_argument("--distractors", type=int, default=0, help="add this many generated unrelated memories")
     parser.add_argument("--min-hit5", type=float, help="exit 1 when memory_search hit@5 is below this (a CI gate)")
@@ -313,7 +395,7 @@ def main():
         (repo / "README.md").write_text("harbor\n")
         run(["git", "add", "README.md"], cwd=repo, env=git_env)
         run(["git", "commit", "-q", "-m", "init"], cwd=repo, env=git_env)
-        run([cairn_exe, "init", "Harbor"], cwd=repo, env=env)
+        run([cairn_exe, "init", "E2E Recall Latency" if args.check_recall_latency else "Harbor"], cwd=repo, env=env)
         project_id = json.loads((repo / ".cairn" / "project.json").read_text())["project_id"]
         context = {"project_id": project_id, "repository": "example.test/bench/harbor"}
 
@@ -359,6 +441,10 @@ def main():
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
+        if args.check_recall_latency:
+            check_recall_latency(http, device, context, repo, env, cairn_exe, config_file,
+                                 args.out, semantic, len(ids), settle)
+            return
         # Count stored aliases and their vectors separately because alias inference follows the search gate.
         alias_rows = int(sql("select count(*) from cairn.memory_aliases") or 0)
         alias_unembedded = int(sql("select count(*) from cairn.memory_aliases where embedding is null") or 0)
@@ -682,7 +768,7 @@ def main():
             except subprocess.TimeoutExpired:
                 server.kill()
         if container:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            subprocess.run(["docker", "rm", "-fv", container], capture_output=True)
         shutil.rmtree(work, ignore_errors=True)
 
 

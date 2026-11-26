@@ -23,6 +23,7 @@ const AUTO_LINK_CAP: i64 = 8;
 const COHORT: &str = "((o.project_id IS NOT NULL AND o.project_id = $3) OR o.owner_id = $2)
     AND (o.scope <> 'personal' OR o.owner_id = $2)
     AND NOT (o.origin = 'system' AND o.scope = 'global')
+    AND o.chat_id_hash IS NOT DISTINCT FROM (SELECT chat_id_hash FROM memories WHERE memory_id = $1)
     AND o.status = 'active' AND o.kind <> 'handoff' AND o.memory_id <> $1";
 
 /// File, symbol, command and test names of a gotcha's fix and cause text.
@@ -49,6 +50,8 @@ impl Store {
     /// The `link` job body. Returns how many links were added.
     pub async fn link_memory(&self, memory_id: &str) -> Result<usize> {
         let mut tx = self.pool.begin().await?;
+        crate::project::lock_memory_projects(&mut tx, &[memory_id]).await?;
+        let active = crate::memory::active_project_memory("o");
         let Some(subject) = sqlx::query(
             "SELECT owner_id, project_id, kind, status, origin, scope, fields FROM memories WHERE memory_id = $1",
         )
@@ -85,7 +88,7 @@ impl Store {
             let fixers: Vec<String> = sqlx::query_scalar(&format!(
                 "SELECT e.memory_id FROM entities e JOIN memories o ON o.memory_id = e.memory_id
                   JOIN unnest($4::text[], $5::text[]) AS n(kind, name) ON n.kind = e.kind AND n.name = e.name
-                  WHERE o.kind IN ('decision','rule','procedure') AND {COHORT}
+                  WHERE o.kind IN ('decision','rule','procedure') AND {COHORT} AND {active}
                   GROUP BY e.memory_id ORDER BY count(*) DESC, e.memory_id LIMIT {FIX_LIMIT}"
             ))
             .bind(memory_id)
@@ -112,7 +115,7 @@ impl Store {
             .map(|r| Ok((r.try_get("kind")?, r.try_get("name")?)))
             .collect::<Result<_>>()?;
             let gotchas = sqlx::query(&format!(
-                "SELECT o.memory_id, o.fields FROM memories o WHERE o.kind = 'gotcha' AND {COHORT}
+                "SELECT o.memory_id, o.fields FROM memories o WHERE o.kind = 'gotcha' AND {COHORT} AND {active}
                   ORDER BY o.created_at DESC, o.memory_id DESC LIMIT {GOTCHA_SCAN}"
             ))
             .bind(memory_id)
@@ -148,7 +151,7 @@ impl Store {
                FROM entities e1
                JOIN entities e2 ON e2.name = e1.name AND e2.kind = e1.kind AND e2.memory_id <> e1.memory_id
                JOIN memories o ON o.memory_id = e2.memory_id
-              WHERE e1.memory_id = $1 AND e1.kind IN ('file','module','symbol','test') AND {COHORT}
+              WHERE e1.memory_id = $1 AND e1.kind IN ('file','module','symbol','test') AND {COHORT} AND {active}
               GROUP BY e2.memory_id ORDER BY score DESC, e2.memory_id LIMIT {SHARED_LIMIT}"
         ))
         .bind(memory_id)
@@ -202,6 +205,7 @@ pub(crate) async fn insert_link(
     if source == target {
         return Ok(false);
     }
+    crate::project::lock_memory_projects(tx, &[source, target]).await?;
     let linked: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM links WHERE (source_id = $1 AND target_id = $2) OR (source_id = $2 AND target_id = $1))",
     )

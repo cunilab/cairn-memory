@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 
-const CARD_KEYS: [&str; 5] = ["id", "kind", "score", "summary", "title"];
+const CARD_KEYS: [&str; 6] = ["id", "kind", "score", "summary", "title", "trust"];
 
 fn decision() -> Value {
     json!({"kind": "decision", "title": "Use Postgres SKIP LOCKED for the job queue",
@@ -93,6 +93,15 @@ fn save_with_a_reason() {
     let text = refused["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("reason") && !text.contains('\n'), "{text}");
 
+    let mut body = decision();
+    body["summary"] = json!("x".repeat(263));
+    let refused = mcp.tool("memory_save", body);
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["content"][0]["text"],
+        "HTTP 400: summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail"
+    );
+
     let first = mcp.ok("memory_save", decision());
     assert_eq!(first["status"], "active");
     assert_eq!(first["deduplicated"], false);
@@ -152,6 +161,97 @@ fn correct_via_supersedes() {
         .find(|card| card["id"] == old)
         .unwrap();
     assert_eq!(old_card["label"], format!("replaced by {new}"));
+}
+
+#[test]
+fn memory_save_coaches_retry_and_explicit_correction() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "behave-coaching");
+    let dir = checkout("behave-coaching");
+    assert!(
+        team.owner
+            .run_in(&dir, &["init", "E2E Save coaching"])
+            .status
+            .success()
+    );
+    let mut mcp = team.owner.mcp_in(&dir);
+
+    let mut weak = decision();
+    weak["reason"] = json!("Checked.");
+    let saved = mcp.ok("memory_save", weak.clone());
+    let id = saved["id"].as_str().unwrap();
+    assert_eq!(saved["status"], "active");
+    assert_eq!(saved["hints"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        saved["improve"],
+        format!("Improve it: save again with supersedes={id}.")
+    );
+    let repeat = mcp.ok("memory_save", weak);
+    assert_eq!(repeat["id"], id);
+    assert_eq!(repeat["deduplicated"], true);
+    assert_eq!(repeat["hints"], saved["hints"]);
+    for _ in 0..2 {
+        let read = mcp.ok("memory_get", json!({"ids": [id]}));
+        assert!(
+            read["memories"][0]["trust"]
+                .as_str()
+                .unwrap()
+                .starts_with("new")
+        );
+    }
+
+    // Reason is outside identity, so this explicit correction updates the same row.
+    let mut better = decision();
+    better["supersedes"] = json!(id);
+    let corrected = mcp.ok("memory_save", better.clone());
+    assert_eq!(
+        corrected,
+        json!({"id": id, "status": "active", "deduplicated": true})
+    );
+    let read = mcp.ok("memory_get", json!({"ids": [id]}));
+    assert!(
+        read["memories"][0]["trust"]
+            .as_str()
+            .unwrap()
+            .starts_with("normal")
+    );
+    assert_eq!(read["memories"][0]["reason"], better["reason"]);
+
+    better.as_object_mut().unwrap().remove("supersedes");
+    better["summary"] =
+        json!("The background jobs run from a Postgres table claimed with SKIP LOCKED.");
+    let close = mcp.ok("memory_save", better);
+    let close_id = close["id"].as_str().unwrap();
+    assert_ne!(close_id, id);
+    let [hint] = close["hints"].as_array().unwrap().as_slice() else {
+        panic!("{close}");
+    };
+    let hint = hint.as_str().unwrap();
+    assert!(hint.starts_with(&format!("Looks like {id} 'Use Postgres SKIP LOCKED")));
+    assert!(hint.ends_with(&format!("Use supersedes={id}.")));
+    let read = mcp.ok("memory_get", json!({"ids": [close_id]}));
+    assert_eq!(read["memories"][0]["trust"], "new · awaiting confirmation");
+    mcp.ok(
+        "memory_feedback",
+        json!({"id": close_id, "vote": "helpful"}),
+    );
+    let read = mcp.ok("memory_get", json!({"ids": [close_id, id]}));
+    assert!(
+        read["memories"][0]["trust"]
+            .as_str()
+            .unwrap()
+            .starts_with("normal")
+    );
+    assert_eq!(read["memories"][1]["status"], "active");
+    for path in [
+        dir.parent().unwrap(),
+        team.owner.home.as_path(),
+        team.member.home.as_path(),
+    ] {
+        std::fs::remove_dir_all(path).unwrap();
+    }
 }
 
 /// Scenario 4: two wrong votes from a member make a memory stale; its owner can forget it.

@@ -1,6 +1,6 @@
 use crate::jobs::enqueue_tx;
-use crate::memory::insert_memory;
-use crate::usage::RETRIEVAL_RETENTION_DAYS;
+use crate::memory::{SaveSource, insert_memory, save_in_tx};
+use crate::usage::{RETRIEVAL_RETENTION_DAYS, SHOWN_RETENTION_DAYS};
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::session::IDLE_SESSION_SECONDS;
 use cairn_core::capture::{
@@ -293,6 +293,9 @@ impl Store {
             }
             None => false,
         };
+        if end {
+            crate::usage::settle_errors(&mut tx, Some((person_id, session_id))).await?;
+        }
         tx.commit().await?;
         Ok(queued)
     }
@@ -354,6 +357,7 @@ impl Store {
                 "session has no retained observations: {session_id}"
             )));
         };
+        let mut tx = self.pool.begin().await?;
         let (session_project, session_device, session_context, session_ended): (
             Option<String>,
             Option<String>,
@@ -364,9 +368,12 @@ impl Store {
         )
         .bind(person_id)
         .bind(session_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .unwrap_or_default();
+        if let Some(project_id) = &session_project {
+            crate::project::lock_active_project(&mut tx, project_id).await?;
+        }
         let automated = session_context
             .get("origin")
             .and_then(|value| value.as_str())
@@ -375,6 +382,7 @@ impl Store {
         // The checkout only; each note adds the files it is about.
         let work = WorkContext {
             project_id: session_project.clone(),
+            chat: last.context.chat.clone(),
             repository: last.context.repository.clone(),
             branch: last.context.branch.clone(),
             worktree: last.context.worktree.clone(),
@@ -399,16 +407,16 @@ impl Store {
                 files: note.files,
                 ..work.clone()
             };
-            match self
-                .save_with_project(
-                    person_id,
-                    note.input,
-                    &note_work,
-                    Origin::System,
-                    device,
-                    session_project.as_deref(),
-                )
-                .await
+            match save_in_tx(
+                &mut tx,
+                person_id,
+                note.input,
+                &note_work,
+                SaveSource::System,
+                device,
+                session_project.as_deref(),
+            )
+            .await
             {
                 Ok(saved) => {
                     report.notes += 1;
@@ -442,16 +450,16 @@ impl Store {
                 files,
                 ..work.clone()
             };
-            match self
-                .save_with_project(
-                    person_id,
-                    digest,
-                    &digest_work,
-                    Origin::System,
-                    device,
-                    session_project.as_deref(),
-                )
-                .await
+            match save_in_tx(
+                &mut tx,
+                person_id,
+                digest,
+                &digest_work,
+                SaveSource::System,
+                device,
+                session_project.as_deref(),
+            )
+            .await
             {
                 Ok(saved) => {
                     written.push(saved.id);
@@ -477,13 +485,13 @@ impl Store {
             )?;
             // Each handoff is its own row. The previous one of this checkout (same person, repo,
             // branch, worktree and project) is superseded and linked newer → older.
-            let mut tx = self.pool.begin().await?;
             let previous = sqlx::query(
                 "SELECT memory_id, status, fields FROM memories
                   WHERE owner_id = $1 AND kind = 'handoff'
                     AND repo IS NOT DISTINCT FROM $2 AND repo_branch IS NOT DISTINCT FROM $3
                     AND repo_worktree IS NOT DISTINCT FROM $4
-                    AND project_id IS NOT DISTINCT FROM $5
+                    AND ($6::text IS NOT NULL OR project_id IS NOT DISTINCT FROM $5)
+                    AND chat_id_hash IS NOT DISTINCT FROM $6
                   ORDER BY created_at DESC, memory_id DESC LIMIT 1 FOR UPDATE",
             )
             .bind(person_id)
@@ -491,6 +499,7 @@ impl Store {
             .bind(&new.context.branch)
             .bind(&new.context.worktree)
             .bind(session_project.as_deref())
+            .bind(new.chat_id_hash.as_ref().map(|hash| hash.as_str()))
             .fetch_optional(&mut *tx)
             .await?;
             let kept = match &previous {
@@ -512,6 +521,7 @@ impl Store {
                 &new,
                 None,
                 device,
+                false,
             )
             .await
             {
@@ -558,7 +568,6 @@ impl Store {
                 }
                 Err(error) => Err(error),
             }?;
-            tx.commit().await?;
         }
         let handoff_outcome: Option<&str> = if session_ended {
             if automated {
@@ -620,7 +629,7 @@ impl Store {
         .bind(digest_written)
         .bind(handoff_outcome)
         .bind(why_none.as_deref())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE sessions SET pending_since = NULL WHERE person_id = $1 AND session_id = $2
@@ -630,12 +639,13 @@ impl Store {
         .bind(person_id)
         .bind(session_id)
         .bind(started)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if report.handoff || report.notes > 0 || report.handoff_kept {
             let recorded = handoff_written.clone().or(kept_id);
             let ids: Vec<&String> = recorded.iter().chain(&written).collect();
-            self.record_audit(
+            crate::account::audit_tx(
+                &mut tx,
                 person_id,
                 None,
                 "session_distilled",
@@ -652,6 +662,7 @@ impl Store {
             )
             .await?;
         }
+        tx.commit().await?;
         Ok(report)
     }
 
@@ -675,10 +686,10 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         for row in &idle {
-            let key = distill_key(
-                &row.try_get::<String, _>("person_id")?,
-                &row.try_get::<String, _>("session_id")?,
-            );
+            let person: String = row.try_get("person_id")?;
+            let session: String = row.try_get("session_id")?;
+            crate::usage::settle_errors(&mut tx, Some((&person, &session))).await?;
+            let key = distill_key(&person, &session);
             enqueue_tx(&mut tx, JobKind::Distill, &key).await?;
         }
         report.sessions_closed = idle.len() as u64;
@@ -707,6 +718,14 @@ impl Store {
         ))
         .execute(&mut *tx)
         .await?;
+        crate::usage::settle_errors(&mut tx, None).await?;
+        for ledger in ["session_shown", "session_skill_shown"] {
+            sqlx::query(&format!(
+                "DELETE FROM {ledger} WHERE shown_at < now() - interval '{SHOWN_RETENTION_DAYS} days'"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query("DELETE FROM lookup_log WHERE at < now() - interval '14 days'")
             .execute(&mut *tx)
             .await?;
@@ -784,10 +803,13 @@ async fn upsert_session<'e>(
     if let Some(origin) = work.origin.as_deref().filter(|origin| !origin.is_empty()) {
         context.insert("origin".into(), origin.into());
     }
+    if let Some(chat) = &work.chat {
+        context.insert("chat".into(), serde_json::json!(chat));
+    }
     let context = (!context.is_empty()).then_some(serde_json::Value::Object(context));
     // A project is safe for distillation only if every accepted capture resolved to it. An
     // existing observation without this metadata predates tracking and is indeterminate.
-    sqlx::query(
+    let done = sqlx::query(
         "INSERT INTO sessions (person_id, session_id, project_id, context, pending_since, device_id)
          VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb) || CASE WHEN $5 THEN jsonb_build_object('capture_project_id', $3::text) ELSE '{}'::jsonb END,
                  CASE WHEN $5 THEN now() END, $6)
@@ -803,7 +825,9 @@ async fn upsert_session<'e>(
                     ) THEN jsonb_build_object('capture_project_id', $3::text)
                     ELSE '{\"capture_project_id\":null}'::jsonb END,
                 ended_at = CASE WHEN $5 THEN NULL ELSE sessions.ended_at END,
-                pending_since = CASE WHEN $5 THEN COALESCE(sessions.pending_since, now()) ELSE sessions.pending_since END",
+                pending_since = CASE WHEN $5 THEN COALESCE(sessions.pending_since, now()) ELSE sessions.pending_since END
+            WHERE sessions.context->'chat'->>'chat_id_hash' IS NOT DISTINCT FROM $4::jsonb->'chat'->>'chat_id_hash'
+              AND sessions.context->'chat'->>'thread_id_hash' IS NOT DISTINCT FROM $4::jsonb->'chat'->>'thread_id_hash'",
     )
     .bind(person_id)
     .bind(session_id)
@@ -813,6 +837,11 @@ async fn upsert_session<'e>(
     .bind(device_id)
     .execute(executor)
     .await?;
+    if done.rows_affected() == 0 {
+        return Err(StoreError::Conflict(
+            "session already belongs to another chat or thread".into(),
+        ));
+    }
     Ok(())
 }
 

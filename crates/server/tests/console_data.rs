@@ -92,6 +92,30 @@ async fn memory_list_filters_q_branch_and_expired() {
     let default = ids(&app.get("memories", &admin).await);
     assert!(default.contains(&c), "an old expires_at stays in the list");
     assert_eq!(default.len(), 4);
+
+    sql(
+        &app,
+        &format!("UPDATE memories SET proof_count = 3 WHERE memory_id IN ('{a}', '{b}', '{d}')"),
+    )
+    .await;
+    sql(
+        &app,
+        &format!("UPDATE memories SET rank = 'candidate' WHERE memory_id IN ('{b}', '{d}')"),
+    )
+    .await;
+    for (level, id, line) in [
+        ("proven", &a, "proven · saved 3×"),
+        ("new", &b, "new · awaiting confirmation"),
+        ("normal", &c, "normal"),
+        ("doubted", &d, "doubted · stale"),
+    ] {
+        let list = app
+            .get(&format!("memories?trust={level}&limit=1"), &admin)
+            .await;
+        assert_eq!(ids(&list), [id.as_str()]);
+        assert_eq!(list[0]["trust_level"], level);
+        assert_eq!(list[0]["trust"], line);
+    }
     let (status, body) = app
         .send(
             "GET",
@@ -375,7 +399,17 @@ async fn devices_report_client_health() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let mut tokens = Vec::new();
-    for name in ["never", "working", "old", "legacy", "quiet", "mcp"] {
+    for name in [
+        "never",
+        "working",
+        "old",
+        "legacy",
+        "quiet",
+        "mcp",
+        "grok",
+        "antigravity",
+        "hermes",
+    ] {
         tokens.push((name, app.device(&admin, name).await));
     }
     let token = |name: &str| tokens.iter().find(|(n, _)| *n == name).unwrap().1.clone();
@@ -399,6 +433,9 @@ async fn devices_report_client_health() {
     hook("legacy", "Python-urllib/3.12").await;
     hook("quiet", &current("opencode; hook")).await;
     hook("mcp", &current("mcp")).await;
+    for agent in ["grok", "antigravity", "hermes"] {
+        hook(agent, &current(&format!("{agent}; hook"))).await;
+    }
     sql(
         &app,
         "UPDATE devices SET last_hook_at = now() - interval '8 days' WHERE name = 'quiet'",
@@ -428,6 +465,11 @@ async fn devices_report_client_health() {
         (Some("working"), Some("codex"))
     );
     assert_eq!(working["client_version"], SERVER_VERSION);
+    for agent in ["grok", "antigravity", "hermes"] {
+        let device = by(agent);
+        assert_eq!(device["agent"], agent);
+        assert_eq!(device["health"], "working");
+    }
     assert!(working["last_hook_at"].is_i64());
     assert!(working["fix_command"].is_null() && working["health_reason"].is_null());
     let old = by("old");
@@ -587,6 +629,7 @@ async fn export_owned_memories_and_import_with_dry_run() {
     let personal = {
         let mut body = rule("Alice personal rule");
         body["scope"] = json!("personal");
+        body["detail"] = json!("Expanded context from Alice's personal archive.");
         app.save(&alice_d, body).await
     };
     let global = {
@@ -639,6 +682,16 @@ async fn export_owned_memories_and_import_with_dry_run() {
         "owned only, nothing forgotten"
     );
     let first = &export["memories"][0];
+    let exported = export["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == personal)
+        .unwrap();
+    assert_eq!(
+        exported["detail"],
+        "Expanded context from Alice's personal archive."
+    );
     for key in [
         "id",
         "kind",
@@ -670,6 +723,10 @@ async fn export_owned_memories_and_import_with_dry_run() {
         .as_array_mut()
         .unwrap()
         .push(json!({"kind": "rule", "scope": "personal", "title": "No summary here"}));
+    file["memories"].as_array_mut().unwrap().push(json!({
+        "kind": "fact", "scope": "personal", "title": "Very short summary",
+        "summary": "Too brief.", "reason": "The JSON import still applies the original rules."
+    }));
     let (status, dry) = app
         .send(
             "POST",
@@ -682,7 +739,11 @@ async fn export_owned_memories_and_import_with_dry_run() {
     assert_eq!(dry["new"], 2, "{dry}");
     assert_eq!(dry["duplicate"], 0);
     let invalid = dry["invalid"].as_array().unwrap();
-    assert_eq!(invalid.len(), 3, "{dry}");
+    assert_eq!(invalid.len(), 4, "{dry}");
+    assert_eq!(
+        invalid[3]["error"],
+        "summary: use 20-240 characters saying what is true"
+    );
     assert!(
         invalid
             .iter()
@@ -706,6 +767,7 @@ async fn export_owned_memories_and_import_with_dry_run() {
         (done["new"].as_i64(), done["duplicate"].as_i64()),
         (Some(2), Some(0))
     );
+    assert_eq!(done["invalid"], dry["invalid"]);
     assert_eq!(count(&app).await, 2);
     let again = app.post("memories/import", file.clone(), &carol).await;
     assert_eq!(
@@ -721,6 +783,20 @@ async fn export_owned_memories_and_import_with_dry_run() {
         .filter(|m| m["owner_is_me"] == true)
         .count();
     assert_eq!(mine, 2, "imported rows are carol's own new memories");
+    let imported = carols
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["title"] == "Alice personal rule")
+        .unwrap();
+    assert!(imported.get("detail").is_none());
+    let detail = app
+        .get(
+            &format!("memories/{}", imported["id"].as_str().unwrap()),
+            &carol,
+        )
+        .await;
+    assert_eq!(detail["detail"], exported["detail"]);
     assert!(
         ids(&carols).contains(&global),
         "alice's global rule is visible to everyone"

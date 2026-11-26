@@ -15,7 +15,7 @@ Coding agents forget decisions and gotchas between sessions, machines and teamma
 - Capture prompts, edits and commands; distill decisions, gotchas and session handoffs.
 - Search across personal, project and global scopes with full-text, entities, links and local embeddings.
 - Inspect memories, relationships, sessions and actionable Fixes in the web console.
-- Keep existing agent memory enabled; Cairn adds its own tools and context.
+- Bring existing Claude Code memories into Cairn and keep the original files on disk.
 
 ```text
 Agent hooks / CLI / MCP  ──device token──▶  Cairn server  ──▶  PostgreSQL + pgvector
@@ -28,6 +28,9 @@ Web console              ──web session───▶       │
 | Claude Code | `--agent claude` | Hooks and MCP |
 | Codex | `--agent codex` | Hooks and MCP; trust hooks in Codex |
 | OpenCode | `--agent opencode` | Plugin hooks and MCP; no continuing Stop reminder |
+| Grok Build | `--agent grok` | Hooks and MCP with a brief on the first tool result |
+| Antigravity CLI | `--agent antigravity` | Hooks and MCP with checkpoints on Stop |
+| Hermes Agent | `--agent hermes` | Plugin hooks and MCP with a brief on the first prompt |
 
 ## Set up Cairn
 
@@ -77,40 +80,54 @@ Set `POSTGRES_PASSWORD` in your environment before starting Compose; use a URL-s
 
 ### 2. Install and configure the first device
 
-Download the binary for your platform and `SHA256SUMS` from the same [GitHub release](https://github.com/cunilab/cairn-memory/releases). For example, on macOS arm64:
+Copy and paste the block for your platform. It downloads the latest release, verifies it against `SHA256SUMS`, installs it as `cairn` and prints the version.
+
+macOS (Apple silicon):
 
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
-curl -fLO "$base/cairn-aarch64-apple-darwin"
+asset=cairn-aarch64-apple-darwin
+curl -fLO "$base/$asset"
 curl -fLO "$base/SHA256SUMS"
-grep '  cairn-aarch64-apple-darwin$' SHA256SUMS | shasum -a 256 -c -
-chmod +x cairn-aarch64-apple-darwin
-# Move it to a directory on PATH as cairn.
+grep "  $asset$" SHA256SUMS | shasum -a 256 -c -
+chmod +x "$asset"
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+cairn --version
 ```
 
-On Linux x86-64 (use `aarch64-unknown-linux-musl` on arm64):
+Linux (x86-64 or arm64; `uname -m` picks the right binary):
 
 ```sh
 base=https://github.com/cunilab/cairn-memory/releases/latest/download
-asset=cairn-x86_64-unknown-linux-musl
+asset=cairn-$(uname -m)-unknown-linux-musl
 curl -fLO "$base/$asset"
 curl -fLO "$base/SHA256SUMS"
 grep "  $asset$" SHA256SUMS | sha256sum -c -
 chmod +x "$asset"
-# Move it to a directory on PATH as cairn.
+mkdir -p ~/.local/bin && mv "$asset" ~/.local/bin/cairn
+cairn --version
 ```
 
-On Windows x86-64 in PowerShell:
+If `cairn` is not found, add `~/.local/bin` to `PATH`, for example `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc` (or `~/.zshrc`), and open a new terminal.
+
+Windows (x86-64, PowerShell):
 
 ```powershell
 $base = "https://github.com/cunilab/cairn-memory/releases/latest/download"
 $asset = "cairn-x86_64-pc-windows-msvc.exe"
 Invoke-WebRequest "$base/$asset" -OutFile $asset
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
-Get-FileHash $asset -Algorithm SHA256
-Select-String -Path SHA256SUMS -Pattern $asset -SimpleMatch
-# Compare the hashes, then place the binary on PATH as cairn.exe.
+$expected = ((Select-String -Path SHA256SUMS -Pattern $asset -SimpleMatch).Line -split '\s+')[0]
+if ((Get-FileHash $asset -Algorithm SHA256).Hash -ne $expected) { throw "SHA256 mismatch for $asset" }
+$dir = "$env:LOCALAPPDATA\cairn\bin"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Move-Item -Force $asset "$dir\cairn.exe"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notlike "*$dir*") { [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User") }
+& "$dir\cairn.exe" --version
 ```
+
+Open a new PowerShell window afterwards so `cairn` is on `PATH`.
 
 Alternatively build from source with `cargo build --release -p cairn-client`; the binary is `target/release/cairn` (or `cairn.exe` on Windows).
 
@@ -121,7 +138,9 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex` or `opencode` instead of `claude` for those agents. Their native CLIs must be on `PATH`; Codex also requires trusting the installed hooks. Setup writes managed integration entries and leaves unrelated configuration in place. See [hook setup](docs/reference/hook.md#setup).
+Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
+
+In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
 
 ### 3. Add a device, agent or teammate
 
@@ -131,7 +150,7 @@ In the project folder on the first device run `cairn init "Project name"` and co
 
 ### 4. Update
 
-Back up PostgreSQL and upgrade the server and clients together; migrations run at server startup. Run `cairn update --check` or `cairn update` on each device, then rerun `cairn setup <server-url> --agent <agent>` with the device token on stdin to refresh the integration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.9.md) before upgrading. There is no database downgrade path.
+Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.10.md) before upgrading. There is no database downgrade path.
 
 ## Use Cairn
 
@@ -144,6 +163,10 @@ At session start the hook requests a brief and an instruction. During work it ca
 | `memory_save` | Save a decision, gotcha, procedure or other reusable knowledge. |
 | `memory_feedback` | Mark a memory helpful or wrong. |
 | `memory_forget` | Hide an owned memory from normal recall. |
+| `skill_search` | Find shared skills. |
+| `skill_get` | Read one version of a skill. |
+| `skill_save` | Create a skill or publish a new version. |
+| `skill_feedback` | Vote on a skill version. |
 
 The CLI also offers `cairn search`, `cairn get`, `cairn save`, `cairn feedback` and `cairn forget`. Use `cairn fixes` to list device fixes, `cairn fixes apply [id]` to apply them, and `cairn doctor` to diagnose setup. See [CLI and MCP](docs/reference/cli-and-mcp.md) for arguments.
 
@@ -151,6 +174,7 @@ In the web console:
 
 - **Dashboard** shows activity and health.
 - **Memories** lists and inspects records.
+- **Skills** lists shared instructions and their version history, and suggests procedures to publish as skills.
 - **Projects** shows members, branches and session reports.
 - **Graph** shows memory relationships.
 - **Activity** shows sessions, jobs and audit events.
@@ -197,7 +221,7 @@ Cairn is pre-1.0. Use disposable databases for tests and read the migration rule
 | [Deployment](docs/deploy.md) | Server, console and reverse proxy |
 | [Development](docs/development.md) | Build, checks, migrations and docs |
 | [Release process](docs/release.md) | Releases and updates |
-| [Release notes](docs/release-notes-0.1.9.md) | Version-specific changes and upgrade steps |
+| [Release notes](docs/release-notes-0.1.10.md) | Version-specific changes and upgrade steps |
 
 ## Acknowledgements and licence
 

@@ -42,6 +42,63 @@ impl Payload {
         }
     }
 
+    /// Hermes tool callbacks carry the arguments and JSON-encoded result from the tool handler.
+    pub(super) fn normalize_hermes(&mut self) {
+        for (native, common) in [
+            ("user_message", "prompt"),
+            ("assistant_response", "last_assistant_message"),
+            ("tool_call_id", "tool_use_id"),
+            ("args", "tool_input"),
+        ] {
+            if let Some(value) = self.0.remove(native) {
+                self.0.insert(common.into(), value);
+            }
+        }
+        let name = self.text("tool_name");
+        let mcp = name
+            .is_some_and(|name| name.starts_with("mcp__cairn__") || name.starts_with("mcp_cairn_"));
+        let canonical = match name {
+            Some("terminal") => Some("Bash"),
+            Some("write_file") => Some("Write"),
+            Some("patch") => Some("apply_patch"),
+            _ => None,
+        };
+        if let Some(name) = canonical {
+            self.0.insert("tool_name".into(), Value::from(name));
+        }
+        if let Some(result) = self.0.remove("result") {
+            let decoded = decode_json_text(result);
+            let mut response = if mcp {
+                decoded
+                    .get("result")
+                    .cloned()
+                    .map(decode_json_text)
+                    .unwrap_or(decoded)
+            } else {
+                decoded
+            };
+            if let Some(fields) = response.as_object_mut() {
+                match self.text("status") {
+                    Some("ok") => {
+                        fields.entry("is_error").or_insert(Value::Bool(false));
+                    }
+                    Some(_) => {
+                        fields.insert("is_error".into(), Value::Bool(true));
+                    }
+                    _ => {}
+                }
+                if let Some(error) = self.text("error_message") {
+                    fields.insert("stderr".into(), Value::from(error));
+                }
+            }
+            self.0.insert("tool_response".into(), response);
+        }
+    }
+
+    pub(super) fn value(&self, key: &str) -> Option<&Value> {
+        self.0.get(key)
+    }
+
     pub(super) fn text(&self, key: &str) -> Option<&str> {
         self.0
             .get(key)
@@ -51,10 +108,25 @@ impl Payload {
 
     pub fn session_id(&self) -> Option<&str> {
         self.text("session_id")
+            .or_else(|| self.text("sessionId"))
+            .or_else(|| self.text("conversationId"))
+    }
+
+    pub fn tool_use_id(&self) -> Option<&str> {
+        self.text("tool_use_id").or_else(|| self.text("toolUseId"))
     }
 
     pub fn cwd(&self) -> Option<&str> {
         self.text("cwd")
+            .or_else(|| self.text("workspaceRoot"))
+            .or_else(|| {
+                self.0
+                    .get("workspacePaths")?
+                    .as_array()?
+                    .first()?
+                    .as_str()
+                    .filter(|path| !path.trim().is_empty())
+            })
     }
 
     /// A boolean field the host sent, such as the Stop hook's `stop_hook_active`.
@@ -63,17 +135,44 @@ impl Payload {
     }
 
     pub fn tool(&self) -> Option<Tool<'_>> {
-        let name = self.text("tool_name")?;
+        let call = self.0.get("toolCall");
+        let name = self
+            .text("tool_name")
+            .or_else(|| self.text("toolName"))
+            .or_else(|| call?.get("name")?.as_str())?;
+        let name = name
+            .strip_prefix("cairn__")
+            .or_else(|| name.strip_prefix("mcp_cairn_"))
+            .or_else(|| name.strip_prefix("cairn_"))
+            .map_or_else(
+                || canonical_tool(name),
+                |tool| format!("mcp__cairn__{tool}"),
+            );
         Some(Tool {
-            name: canonical_tool(name),
-            input: self.0.get("tool_input").and_then(Value::as_object),
-            response: self.0.get("tool_response"),
+            name,
+            input: self
+                .0
+                .get("tool_input")
+                .or_else(|| self.0.get("toolInput"))
+                .or_else(|| call?.get("args"))
+                .and_then(Value::as_object),
+            response: self
+                .0
+                .get("tool_response")
+                .or_else(|| self.0.get("toolResult")),
+            antigravity_ok: call.map(|_| self.text("error").is_none()),
+            error: self.text("error"),
+            interrupted: self.flag("is_interrupt"),
         })
+    }
+
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.text("prompt").or_else(|| self.text("lastUserInput"))
     }
 
     /// `kind=prompt`: the redacted prompt, clipped to 8 KiB.
     pub fn prompt(&self) -> Option<Capture> {
-        let prompt = self.text("prompt")?;
+        let prompt = self.prompt_text()?;
         Some(Capture::new(
             CaptureKind::Prompt,
             text_of(prompt, PROMPT_MAX_BYTES),
@@ -82,7 +181,9 @@ impl Payload {
 
     /// `kind=assistant`; the caller decides whether `CAIRN_CAPTURE_ASSISTANT` allows it.
     pub fn assistant(&self) -> Option<Capture> {
-        let message = self.text("last_assistant_message")?;
+        let message = self
+            .text("last_assistant_message")
+            .or_else(|| self.text("lastAssistantMessage"))?;
         Some(Capture::new(
             CaptureKind::Assistant,
             text_of(message, PROMPT_MAX_BYTES),
@@ -148,15 +249,25 @@ fn patch_sections(patch: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn decode_json_text(value: Value) -> Value {
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(value)
+}
+
 /// A tool call, with the tool name canonical.
 pub struct Tool<'a> {
     pub name: String,
     input: Option<&'a Map<String, Value>>,
     response: Option<&'a Value>,
+    antigravity_ok: Option<bool>,
+    error: Option<&'a str>,
+    interrupted: bool,
 }
 
 impl Tool<'_> {
-    fn input_text(&self, key: &str) -> Option<&str> {
+    pub(super) fn input_text(&self, key: &str) -> Option<&str> {
         self.input?
             .get(key)?
             .as_str()
@@ -208,6 +319,14 @@ impl Tool<'_> {
             "search"
         } else if self.name == "mcp__cairn__memory_get" {
             "get"
+        } else if self.name == "mcp__cairn__memory_feedback" {
+            let reply = self.mcp_response();
+            let id = reply.as_ref().and_then(|v| v["id"].as_str()).or_else(|| {
+                (self.antigravity_ok == Some(true))
+                    .then(|| self.input_text("id"))
+                    .flatten()
+            })?;
+            return Some(serde_json::json!({"kind": "feedback", "used_ids": [id]}));
         } else {
             return None;
         };
@@ -239,30 +358,32 @@ impl Tool<'_> {
                 })
             })
             .and_then(Value::as_array);
-        let ids: Vec<String> = if kind == "get" {
-            input_ids
+        let returned_ids: Vec<_> = records
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.get("id").and_then(Value::as_str))
+            .take(20)
+            .collect();
+        let hit = records.map(|r| !r.is_empty());
+        let ids: Vec<_> = if kind == "get" {
+            input_ids.iter().map(String::as_str).collect()
         } else {
-            records
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.get("id").and_then(Value::as_str))
-                .take(20)
-                .map(str::to_owned)
-                .collect()
+            returned_ids.clone()
         };
-        let hit = records.map(|r| {
-            if kind == "search" {
-                !ids.is_empty()
-            } else {
-                !r.is_empty()
-            }
-        });
-        Some(serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit}))
+        let used_ids = if kind == "get" && records.is_none() && self.antigravity_ok == Some(true) {
+            &ids
+        } else {
+            &returned_ids
+        };
+        Some(
+            serde_json::json!({"kind":kind,"query":query,"result_ids":ids,"hit":hit,"used_ids":used_ids}),
+        )
     }
 
     fn command_text(&self) -> Option<&str> {
         self.input_text("command")
             .or_else(|| self.input_text("cmd"))
+            .or_else(|| self.input_text("CommandLine"))
     }
 
     /// The shell command of a `Bash` call, as sent.
@@ -291,9 +412,15 @@ impl Tool<'_> {
 
     /// The structured path argument; the file itself is never read.
     fn file_path(&self) -> Option<&str> {
-        ["file_path", "filePath", "path"]
-            .iter()
-            .find_map(|key| self.input_text(key))
+        [
+            "file_path",
+            "filePath",
+            "path",
+            "TargetFile",
+            "AbsolutePath",
+        ]
+        .iter()
+        .find_map(|key| self.input_text(key))
     }
 
     /// Every edited file with its new text: the structured path, else the `*** Add|Update|Delete
@@ -310,10 +437,18 @@ impl Tool<'_> {
     }
 
     fn new_text(&self) -> String {
-        match self.input.and_then(|input| input.get("edits")) {
+        match self.input.and_then(|input| {
+            input
+                .get("edits")
+                .or_else(|| input.get("ReplacementChunks"))
+        }) {
             Some(Value::Array(edits)) => edits
                 .iter()
-                .filter_map(|edit| edit.get("new_string")?.as_str())
+                .filter_map(|edit| {
+                    edit.get("new_string")
+                        .or_else(|| edit.get("ReplacementContent"))?
+                        .as_str()
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => [
@@ -321,6 +456,8 @@ impl Tool<'_> {
                 "newString",
                 "new_str",
                 "content",
+                "CodeContent",
+                "ReplacementContent",
                 "patch",
                 "patchText",
                 "input",
@@ -386,9 +523,43 @@ impl Tool<'_> {
         }
         let flags = ["is_error", "interrupted"].map(|key| self.response_field(key));
         if flags.iter().all(Option::is_none) {
-            return None;
+            return self.antigravity_ok;
         }
         Some(flags.iter().all(|flag| *flag != Some(&Value::Bool(true))))
+    }
+
+    /// Explicit failure signals only; arbitrary output is not evidence of a non-zero exit.
+    pub(super) fn failure_text(&self, failure_event: bool) -> Option<&str> {
+        if self.interrupted || self.response_field("interrupted") == Some(&Value::Bool(true)) {
+            return None;
+        }
+        if !failure_event
+            && self.ok() != Some(false)
+            && self.response_field("isError") != Some(&Value::Bool(true))
+            && self.response_field("is_error") != Some(&Value::Bool(true))
+        {
+            return None;
+        }
+        Some(
+            ["stderr", "stdout", "output_for_prompt", "output", "error"]
+                .iter()
+                .filter_map(|key| self.response_field(key)?.as_str())
+                .chain(self.response.and_then(Value::as_str))
+                .chain(self.error)
+                .map(|text| {
+                    let first = text.lines().next().unwrap_or_default();
+                    if ["Exit code ", "exit status "].iter().any(|prefix| {
+                        first
+                            .strip_prefix(prefix)
+                            .is_some_and(|code| code.parse::<i64>().is_ok())
+                    }) {
+                        return text.get(first.len()..).unwrap_or_default().trim_start();
+                    }
+                    text
+                })
+                .find(|text| !text.trim().is_empty())
+                .unwrap_or_default(),
+        )
     }
 
     fn first_error_line(&self) -> Option<String> {
@@ -396,6 +567,7 @@ impl Tool<'_> {
             .iter()
             .filter_map(|key| self.response_field(key)?.as_str())
             .chain(self.response.and_then(Value::as_str))
+            .chain(self.error.filter(|_| self.antigravity_ok.is_some()))
             .find_map(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
             .map(|line| truncate(&redact_sensitive_content(line), ERROR_LINE_MAX_BYTES).to_owned())
     }

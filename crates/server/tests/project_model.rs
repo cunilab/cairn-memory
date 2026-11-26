@@ -224,6 +224,53 @@ async fn shared_project_model() {
 }
 
 #[tokio::test]
+async fn local_repository_names_do_not_identify_projects() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "laptop").await;
+    let first = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo"}),
+            &device,
+        )
+        .await;
+    let second = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo"}),
+            &device,
+        )
+        .await;
+    assert_eq!(first["created"], true);
+    assert_eq!(second["created"], true);
+    assert_ne!(first["project_id"], second["project_id"]);
+
+    let named = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo", "name": "Other"}),
+            &device,
+        )
+        .await;
+    assert_eq!(named["created"], true);
+    assert_eq!(named["name"], "Other");
+    assert_ne!(named["project_id"], first["project_id"]);
+    assert_ne!(named["project_id"], second["project_id"]);
+
+    let again = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:repo", "project_id": first["project_id"]}),
+            &device,
+        )
+        .await;
+    assert_eq!(again["created"], false);
+    assert_eq!(again["project_id"], first["project_id"]);
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn init_registers_a_committed_project_the_server_lost() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
@@ -311,8 +358,8 @@ async fn bad_save_input_is_a_400_with_a_message() {
             "project",
         ),
         (
-            json!({"kind": "rule", "title": "t", "summary": "s", "reason": "r"}),
-            "title: use 8-80",
+            json!({"kind": "rule", "title": " ", "summary": "A summary that says what is true.", "reason": "a stated reason"}),
+            "title must not be empty",
         ),
     ] {
         let (status, reply) = app.send("POST", "remember", body, Some(&device)).await;
@@ -420,22 +467,18 @@ async fn account_errors_use_the_texts_the_console_expects() {
 }
 
 #[tokio::test]
-async fn quality_error_is_400_quality_one_line() {
+async fn missing_gotcha_fields_return_one_line_of_coaching() {
     let Some(app) = App::new().await else { return };
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "d").await;
-    let thin = json!({"kind": "gotcha", "title": "Pool timeouts", "summary": "Requests hang when the pool is exhausted.", "reason": "Seen in production."});
-    let (status, reply) = app
-        .send("POST", "remember", thin.clone(), Some(&device))
-        .await;
-    assert_eq!(status, 400, "{reply}");
-    assert_eq!(reply["code"], "quality");
-    assert_eq!(reply["error"], "fields.fix: say how the gotcha was fixed");
-    assert!(!reply["error"].as_str().unwrap().contains('\n'));
-    let mut fixed = thin;
-    fixed["fields"] = json!({"fix": "Raise the pool size and add a timeout."});
-    let (status, reply) = app.send("POST", "remember", fixed, Some(&device)).await;
+    let thin = json!({"kind": "gotcha", "title": "Requests stall on pool exhaustion", "summary": "Requests hang when the pool is exhausted.", "reason": "Observed in production when all connections were busy."});
+    let (status, reply) = app.send("POST", "remember", thin, Some(&device)).await;
     assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["status"], "active");
+    assert_eq!(
+        reply["hints"],
+        json!(["Fill in the gotcha's symptom, cause and fix."])
+    );
     app.finish().await;
 }
 
@@ -735,5 +778,151 @@ async fn personal_observation_in_a_project_session_is_distilled_personally() {
             .await
             .unwrap();
     assert_eq!(scopes, vec![("personal".to_owned(), None); 2]);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn project_archive_keeps_console_reads_and_hides_agent_memory_until_restore() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("archive-admin").await;
+    let owner = app.member(&admin, "archive-owner").await;
+    let member = app.member(&admin, "archive-member").await;
+    let device = app.device(&owner, "archive-laptop").await;
+    let repository = "github.com/acme/e2e-archive";
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": repository, "name": "E2E Archive"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+    let init = json!({"project_id": pid, "repository": repository});
+    app.post("projects/init", init.clone(), &member).await;
+    let archive = format!("projects/{pid}/archive");
+    let restore = format!("projects/{pid}/restore");
+    let context = json!({"project_id": pid, "repository": repository, "branch": "main", "files": ["src/archive.rs"]});
+    let note = json!({"kind": "rule", "scope": "project", "title": "Preserve blueprints for restoration",
+        "summary": "Keep the blueprints for the archive.", "reason": "They allow exact restoration.",
+        "context": context, "detail": "Detailed blueprint."});
+    let memory = app.save(&device, note.clone()).await;
+    let get_body = json!({"ids": [memory], "detail": true});
+    let search_body = json!({"query": "preserve blueprints", "context": context});
+    let brief_body = json!({"session_id": "e2e-archive", "context": context});
+    let topic_body = json!({"path": "src/archive.rs", "context": context});
+    assert!(ids(&app.post("search", search_body.clone(), &device).await).contains(&memory));
+    let before = app.post("get", get_body.clone(), &device).await;
+    assert_eq!(before["memories"][0]["detail"], "Detailed blueprint.");
+    assert_eq!(before["memories"][0]["trust"], "normal · used 1×");
+    assert!(
+        app.post("session/brief", brief_body.clone(), &device).await["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    assert_eq!(
+        app.post("session/topic", topic_body.clone(), &device).await["notes"][0]["id"],
+        memory
+    );
+
+    assert_eq!(
+        app.send("POST", &archive, json!(null), Some(&member))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        app.send("POST", &archive, json!(null), Some(&device))
+            .await
+            .0,
+        401
+    );
+    let archived = app.post(&archive, json!(null), &owner).await;
+    assert!(archived["archived_at"].is_number());
+    assert_eq!(app.post(&archive, json!(null), &owner).await, archived);
+    assert_eq!(
+        app.send("POST", &restore, json!(null), Some(&member))
+            .await
+            .0,
+        403
+    );
+
+    assert!(ids(&app.post("search", search_body.clone(), &device).await).is_empty());
+    assert_eq!(
+        app.post("get", get_body.clone(), &device).await,
+        json!({"memories": [], "missing": [memory]})
+    );
+    let brief = app.post("session/brief", brief_body.clone(), &device).await;
+    assert!(
+        !brief["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    assert!(brief.get("check").is_none());
+    assert_eq!(
+        app.post("session/topic", topic_body, &device).await["notes"],
+        json!([])
+    );
+    let graph = app.get(&format!("graph?projectId={pid}"), &device).await;
+    assert_eq!(graph["nodes"], json!([]));
+    assert_eq!(graph["edges"], json!([]));
+
+    let detail = format!("memories/{memory}");
+    let scoped = format!("memories?projectId={pid}");
+    assert_eq!(
+        app.send("GET", &detail, json!(null), Some(&device)).await.0,
+        404
+    );
+    assert_eq!(app.get(&scoped, &device).await, json!([]));
+    assert_eq!(app.get("memories", &member).await, json!([]));
+    assert_eq!(app.get(&scoped, &member).await[0]["id"], memory);
+    let view = app.get(&detail, &member).await;
+    assert_eq!(view["project_archived"], true);
+    assert_eq!(view["detail"], "Detailed blueprint.");
+    assert_eq!(view["usage"]["shown"], 2);
+    assert_eq!(view["usage"]["detail_opened"], 1);
+    let (status, _) = app
+        .send("POST", "forget", json!({"id": memory}), Some(&owner))
+        .await;
+    assert_eq!(status, 409);
+
+    let message = "project E2E Archive is archived; restore it in the web console";
+    for (path, body) in [
+        ("remember", note.clone()),
+        ("projects/init", init),
+        ("projects/init", json!({"repository": repository})),
+    ] {
+        let (status, body) = app.send("POST", path, body, Some(&device)).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(body["error"], message);
+    }
+    for scope in ["personal", "global"] {
+        let mut allowed = note.clone();
+        allowed["scope"] = json!(scope);
+        app.save(&device, allowed).await;
+    }
+
+    // Admin can restore even without project membership.
+    assert!(app.post(&restore, json!(null), &admin).await["archived_at"].is_null());
+    let mut expected = before;
+    expected["memories"][0]["trust"] = json!("normal · used 2×");
+    assert_eq!(app.post("get", get_body, &device).await, expected);
+    assert!(ids(&app.post("search", search_body, &device).await).contains(&memory));
+    assert!(
+        app.post(
+            "session/brief",
+            json!({"session_id": "e2e-archive-restored", "context": context}),
+            &device
+        )
+        .await["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Preserve blueprints")
+    );
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_events WHERE subject_id = $1 AND action IN ('project_archived', 'project_restored') ORDER BY created_at"
+    ).bind(pid).fetch_all(app.db.store.pool()).await.unwrap();
+    assert_eq!(events, ["project_archived", "project_restored"]);
     app.finish().await;
 }

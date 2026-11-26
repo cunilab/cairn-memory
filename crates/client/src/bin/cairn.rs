@@ -1,10 +1,10 @@
-//! `cairn`: the agent CLI. Every command is one REST call authenticated with the device token
-//! in the selected config file. Humans use the web console.
+//! `cairn`: the agent CLI. REST calls authenticate with the device token in the selected
+//! config file. Humans manage the server through the web console.
 
 use cairn_client::tools::{self, Tool};
 use cairn_client::{
-    Client, Config, Error, doctor, fixes, hook, mcp, project, selected_config_path, setup, update,
-    warn_ignored_legacy_config,
+    Client, Config, Error, claude_memory, doctor, fixes, hook, mcp, project, selected_config_path,
+    setup, update, warn_ignored_legacy_config,
 };
 use serde_json::{Map, Value, json};
 use std::env;
@@ -13,15 +13,17 @@ use std::path::PathBuf;
 use std::process;
 
 const USAGE: &str = "Usage:
-  cairn setup <server-url> [--agent claude|codex|opencode] [--remove]
+  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory|--gateway]
+  cairn setup <agent> [--remove|--gateway]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
+  cairn import claude-memory [--yes]
   cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
   cairn doctor                  (check config, server, device, project, agents)
   cairn mcp
   cairn update [--check]        (install the latest release; --check only reports)
   cairn --version
   cairn search <query> [--kind <kind>] [--limit <n>]
-  cairn get <id>...
+  cairn get <id>... [--detail]
   cairn save [JSON-record|-]    (SaveInput JSON; stdin when absent or -)
   cairn feedback <id> helpful|wrong
   cairn forget <id>
@@ -44,6 +46,7 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             name,
             "init"
                 | "setup"
+                | "import"
                 | "mcp"
                 | "update"
                 | "version"
@@ -66,10 +69,22 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     }
     for (index, value) in args.iter().enumerate() {
         let allowed = (index == 0 && value == "--version")
-            || (index == 1 && args[0] == "update" && value == "--check")
+            || (index == 1
+                && args[0] == "update"
+                && matches!(value.as_str(), "--check" | "--refresh"))
             || (args[0] == "init" && value == "--yes")
+            || (args[0] == "get" && index + 1 == args.len() && value == "--detail")
+            || (index == 2 && args[0] == "import" && value == "--yes")
             || (args[0] == "setup"
-                && ((index == 2 && value == "--agent") || (index == 4 && value == "--remove")));
+                && ((index == 2 && value == "--agent")
+                    || (index == 2
+                        && matches!(value.as_str(), "--remove" | "--gateway")
+                        && setup::AGENTS.contains(&args[1].as_str()))
+                    || (index == 4
+                        && matches!(
+                            value.as_str(),
+                            "--remove" | "--keep-native-memory" | "--gateway"
+                        ))));
         if value.starts_with('-') && value != "-" && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -92,7 +107,11 @@ fn main() {
             process::exit(1);
         }
     }
-    update::remove_old_exe();
+    let pre_tool_use = args.first().is_some_and(|arg| arg == "hook")
+        && args.get(1).is_some_and(|arg| arg == "PreToolUse");
+    if !pre_tool_use && args.first().is_none_or(|arg| arg != "import") {
+        update::remove_old_exe();
+    }
     if matches!(args.first().map(String::as_str), Some("init" | "doctor")) {
         let _ = fixes::apply_automatically();
     }
@@ -105,6 +124,13 @@ fn main() {
         },
         Some("setup") => setup(&args[1..]),
         Some("init") => init(&args[1..]),
+        Some("import") => match &args[1..] {
+            [source] if source == "claude-memory" => claude_memory::import(false),
+            [source, flag] if source == "claude-memory" && flag == "--yes" => {
+                claude_memory::import(true)
+            }
+            _ => usage(),
+        },
         Some("mcp") if args.len() == 1 => Config::load().and_then(mcp::run_stdio),
         Some("doctor") if args.len() == 1 => doctor_command(),
         Some("hook") => match hook::run(&args[1..]) {
@@ -118,6 +144,7 @@ fn main() {
         Some("update") => match &args[1..] {
             [] => update::update(false).map(|_| ()),
             [flag] if flag == "--check" => update::update(true).map(|_| ()),
+            [flag] if flag == "--refresh" => update::refresh(),
             _ => usage(),
         },
         Some(name) => match tools::find(name).filter(|tool| tool.cli == name) {
@@ -130,10 +157,10 @@ fn main() {
     if let Err(error) = result {
         eprintln!("cairn: {error}");
     }
-    // Never on `mcp` (a protocol stream), `update` (it reports itself) or the version flag.
+    // Keep protocol, diagnostic and import commands free of background update requests.
     if !matches!(
         args.first().map(String::as_str),
-        Some("mcp" | "update" | "version" | "--version" | "doctor" | "hook")
+        Some("mcp" | "update" | "version" | "--version" | "doctor" | "hook" | "import")
     ) {
         update::notify();
     }
@@ -143,20 +170,46 @@ fn main() {
 }
 
 fn setup(args: &[String]) -> Result<(), Error> {
-    let (url, agent, remove) = match args {
-        [url] => (url, None, false),
-        [url, flag, agent] if flag == "--agent" => (url, Some(agent.as_str()), false),
-        [url, flag, agent, remove] if flag == "--agent" && remove == "--remove" => {
-            (url, Some(agent.as_str()), true)
+    let (url, agent, option) = match args {
+        [agent] if setup::AGENTS.contains(&agent.as_str()) => (None, Some(agent.as_str()), None),
+        [agent, flag]
+            if matches!(flag.as_str(), "--remove" | "--gateway")
+                && setup::AGENTS.contains(&agent.as_str()) =>
+        {
+            (None, Some(agent.as_str()), Some(flag.as_str()))
+        }
+        [url] => (Some(url), None, None),
+        [url, flag, agent] if flag == "--agent" => (Some(url), Some(agent.as_str()), None),
+        [url, flag, agent, option]
+            if flag == "--agent"
+                && matches!(
+                    option.as_str(),
+                    "--remove" | "--keep-native-memory" | "--gateway"
+                ) =>
+        {
+            (Some(url), Some(agent.as_str()), Some(option.as_str()))
         }
         _ => usage(),
     };
     if agent.is_some_and(|a| !setup::AGENTS.contains(&a)) {
+        return Err(Error::Input(format!(
+            "agent must be one of {}",
+            setup::AGENTS.join(", ")
+        )));
+    }
+    let keep_native_memory = option == Some("--keep-native-memory");
+    if keep_native_memory && agent != Some("claude") {
         return Err(Error::Input(
-            "agent must be claude, codex or opencode".into(),
+            "--keep-native-memory applies only to Claude Code".into(),
         ));
     }
-    if remove {
+    let gateway = option == Some("--gateway");
+    if gateway && agent != Some("hermes") {
+        return Err(Error::Input(
+            "--gateway applies only to Hermes Agent".into(),
+        ));
+    }
+    if option == Some("--remove") {
         println!(
             "{}",
             setup::configure(agent.expect("remove has an agent"), true)?
@@ -164,13 +217,22 @@ fn setup(args: &[String]) -> Result<(), Error> {
         return Ok(());
     }
     warn_ignored_legacy_config();
-    let path = selected_config_path()?;
-    let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
-    config.save(&path)?;
-    println!("Cairn configured for {} ({})", config.url(), path.display());
-    setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
+    if let Some(url) = url {
+        let path = selected_config_path()?;
+        let config = Config::new(url, &read_token()?)?.keeping_nudge_of(&path);
+        config.save(&path)?;
+        println!("Cairn configured for {} ({})", config.url(), path.display());
+        setup::retire_python(path.parent().unwrap_or(std::path::Path::new(".")));
+    } else {
+        Config::load()?;
+    }
     if let Some(agent) = agent {
-        println!("{}", setup::configure(agent, false)?);
+        let done = if url.is_some() || gateway {
+            setup::install(agent, keep_native_memory, gateway)?
+        } else {
+            setup::configure(agent, false)?
+        };
+        println!("{done}");
         if agent == "codex" {
             println!("Review and trust the installed hooks with /hooks in Codex before they run.");
         }
@@ -180,7 +242,8 @@ fn setup(args: &[String]) -> Result<(), Error> {
 
 /// Creates (or finds) the caller's project for this folder and writes
 /// `.cairn/project.json`. Inside git the root is the checkout; otherwise it is the working
-/// folder and the repository is `local:<folder name>`. This never stages or commits.
+/// folder and the repository is `local:<folder name>`. Without a remote or project file,
+/// creates a new project. This never stages or commits.
 fn init(args: &[String]) -> Result<(), Error> {
     let yes = args.iter().any(|arg| arg == "--yes");
     let args: Vec<String> = args.iter().filter(|arg| *arg != "--yes").cloned().collect();
@@ -360,6 +423,14 @@ fn tool_arguments(tool: &Tool, args: &[String]) -> Result<Map<String, Value>, Er
             }
         }
         "get" => {
+            let args = if let Some((flag, ids)) = args.split_last()
+                && flag == "--detail"
+            {
+                arguments.insert("detail".to_owned(), json!(true));
+                ids
+            } else {
+                args
+            };
             arguments.insert("ids".to_owned(), json!(args));
         }
         "save" => {

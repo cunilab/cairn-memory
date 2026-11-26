@@ -5,15 +5,19 @@
 //! `notifications/initialized`, `tools/list`, `tools/call`, and `ping`. The tool table and
 //! its REST mapping live in [`crate::tools`]; this module only speaks the protocol.
 
+use crate::hook::git;
 use crate::{Client, Config, Error};
 use crate::{present, tools};
 use cairn_core::account::ClientKind;
+use cairn_core::retrieve::brief::SESSION_BRIEF_MAX_BYTES;
 use serde_json::{Map, Value, json};
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// A line longer than this is skipped with an error, so one message cannot fill memory.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+const BRIEF_TIMEOUT: Duration = Duration::from_secs(1);
 
 enum Line {
     Eof,
@@ -58,6 +62,7 @@ pub struct McpServer {
     /// What `client` was built from; a 401 reloads the file and retries when it changed.
     config: Config,
     initialized: bool,
+    session_id: Option<String>,
 }
 
 impl McpServer {
@@ -66,6 +71,7 @@ impl McpServer {
             client: Client::identified(config.clone(), crate::REQUEST_TIMEOUT, "", ClientKind::Mcp),
             config,
             initialized: false,
+            session_id: None,
         }
     }
 
@@ -185,6 +191,24 @@ impl McpServer {
         }
     }
 
+    fn checkout_brief(&self, session_id: Option<&str>) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        let top = git::top_level(&cwd);
+        if git::ignored(&cwd, top.as_deref()) {
+            return None;
+        }
+        let body = json!({
+            "session_id": session_id,
+            "context": git::work_context(&cwd, top.as_deref()),
+            "recent_files": git::recent_files(&cwd),
+            "extended_brief": true,
+        });
+        let client = Client::identified(self.config.clone(), BRIEF_TIMEOUT, "", ClientKind::Mcp);
+        let reply = client.post("/cairn-memory/session/brief", &body).ok()?;
+        let text = reply["brief"].as_str()?;
+        (!text.is_empty() && text.len() <= SESSION_BRIEF_MAX_BYTES).then(|| text.to_owned())
+    }
+
     fn initialize(&mut self, id: Value, params: Option<Value>) -> String {
         self.initialized = true;
         let requested_version = params
@@ -192,6 +216,18 @@ impl McpServer {
             .and_then(|params| params.get("protocolVersion"))
             .and_then(Value::as_str)
             .unwrap_or(PROTOCOL_VERSION);
+
+        self.session_id = params
+            .as_ref()
+            .and_then(|params| params.pointer("/_meta/sessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty() && id.len() <= 512 && !id.contains('\0'))
+            .map(str::to_owned);
+        let mut instructions = tools::instructions().to_owned();
+        if let Some(brief) = self.checkout_brief(self.session_id.as_deref()) {
+            instructions.push_str("\n\n");
+            instructions.push_str(&brief);
+        }
 
         let result = json!({
             "protocolVersion": if requested_version == PROTOCOL_VERSION {
@@ -207,7 +243,7 @@ impl McpServer {
                 "title": "Cairn",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": tools::instructions()
+            "instructions": instructions
         });
         rpc_result(id, result)
     }
@@ -223,11 +259,16 @@ impl McpServer {
         let Some(tool) = tools::find_by_name(name) else {
             return rpc_error(id, -32602, format!("unknown tool: {name}"));
         };
-        let arguments = match params.get("arguments") {
+        let mut arguments = match params.get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
+        if let Some(session) = &self.session_id
+            && matches!(name, "memory_get" | "memory_feedback")
+        {
+            arguments.insert("session_id".to_owned(), json!(session));
+        }
         match self.call_with_fresh_config(tool, arguments) {
             Ok(value) => rpc_result(id, present::success(&value)),
             Err(error) => rpc_result(id, present::failure(&error.to_string())),
@@ -257,7 +298,7 @@ mod tests {
     use super::*;
 
     fn server() -> McpServer {
-        // Nothing listens here; these tests never reach the network.
+        // Nothing listens here, so initialize keeps the static instructions.
         McpServer::new(Config::new("http://127.0.0.1:1", "test-token").unwrap())
     }
 
@@ -284,8 +325,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["title"], "Cairn");
         let instructions = init["result"]["instructions"].as_str().unwrap();
         assert_eq!(instructions, tools::instructions());
-        assert!(!instructions.contains("source of truth"));
-        assert!(!instructions.contains("do not keep memory in local files"));
+        assert!(instructions.starts_with(cairn_core::instructions::DEFAULT_SESSION_INSTRUCTION));
         assert!(instructions.len() <= 700);
         assert!(
             server
@@ -307,7 +347,11 @@ mod tests {
                 "memory_get",
                 "memory_save",
                 "memory_feedback",
-                "memory_forget"
+                "memory_forget",
+                "skill_search",
+                "skill_get",
+                "skill_save",
+                "skill_feedback"
             ]
         );
     }
@@ -351,7 +395,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let mut server = McpServer::new(Config::new(&url, "test-token").unwrap());
-        call(&mut server, 1, "initialize", json!({}));
+        server.initialized = true;
 
         let side_effect = json!({"jsonrpc": "2.0", "method": "tools/call",
             "params": {"name": "memory_search", "arguments": {"query": "x"}}});
@@ -485,10 +529,10 @@ mod tests {
 
     /// Compact JSON bytes of `memory_save`'s inputSchema before `items` was added.
     #[test]
-    fn five_tools_and_schema_budget() {
+    fn tool_count_and_memory_save_schema_budget() {
         let list = tools::tools_list();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 9);
         let save = tools
             .iter()
             .find(|tool| tool["name"] == "memory_save")
