@@ -112,7 +112,7 @@ Account and device management stay in the web console.
 For a Cairn-managed integration, `doctor` warns if its global instruction block is missing or
 differs from this version. The warning names the file and the `cairn setup <agent>` command that
 refreshes the block. Repair malformed block markers before refreshing. Hermes gateway profiles
-receive their instructions per chat and skip this check. For Hermes, `doctor` checks that the profile
+receive their instructions per chat and skip this check. For Hermes, `doctor` also warns when the installed Hermes is older than v2026.4.23 or its version is unknown ([why](hook.md#setup)), and checks that the profile
 selects Cairn as its memory provider instead of checking for an MCP entry.
 
 For Claude Code, `doctor` also checks the current project's `MEMORY.md` when the memory folder

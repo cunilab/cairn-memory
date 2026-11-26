@@ -21,7 +21,7 @@ cairn setup https://your-server.example --agent claude
 cairn doctor
 ```
 
-Setup reads the token from stdin. Choose `claude`, `codex`, `opencode`, `grok`, `antigravity` or `hermes`. Codex and OpenCode setup need their native CLI installed. For an already configured device, run `cairn setup <agent>`. Hermes setup makes Cairn the profile's memory provider and replaces any other external provider until `cairn setup hermes --remove` restores it. Hermes's built-in `MEMORY.md` and `USER.md` stay unchanged. See [hook setup](reference/hook.md#setup).
+Setup reads the token from stdin. Choose `claude`, `codex`, `opencode`, `grok`, `antigravity` or `hermes`. Codex and OpenCode setup need their native CLI installed. For an already configured device, run `cairn setup <agent>`. Hermes needs v2026.4.23 or newer; with an older Hermes, command warnings, failed-command recall and gateway chat memory do not work, and setup and `cairn doctor` warn. Hermes setup makes Cairn the profile's memory provider and replaces any other external provider until `cairn setup hermes --remove` restores it. Hermes's built-in `MEMORY.md` and `USER.md` stay unchanged. See [hook setup](reference/hook.md#setup).
 
 ## Projects
 

@@ -32,6 +32,51 @@ pub(crate) fn config_dir(home: &Path) -> PathBuf {
     home.join(format!(".hermes{suffix}"))
 }
 
+/// The oldest Hermes with the plugin and provider surface Cairn uses (`transform_tool_result`,
+/// bound gateway session context).
+const MIN_RELEASE: (u32, u32, u32) = (2026, 4, 23);
+
+/// A warning when the installed Hermes is older than Cairn needs or its version cannot be read. Reads
+/// the release date the installer's checkout carries; never runs Hermes.
+pub(crate) fn version_warning(home: &Path) -> Option<String> {
+    let profile = config_dir(home);
+    // Profiles live in `<root>/profiles/<name>`; the installer's checkout is `<root>/hermes-agent`.
+    let root = (profile.parent().and_then(Path::file_name) == Some("profiles".as_ref()))
+        .then(|| {
+            profile
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        })
+        .flatten();
+    let found = [Some(profile), root, Some(home.join(".hermes"))]
+        .into_iter()
+        .flatten()
+        .find_map(|dir| release_date(&dir.join("hermes-agent/hermes_cli/__init__.py")));
+    let needed = "Cairn needs Hermes v2026.4.23 or newer; older Hermes never delivers command warnings or failed-command recall, and gateway chat memory is off";
+    match found {
+        Some(release) if release >= MIN_RELEASE => None,
+        Some((year, month, day)) => Some(format!(
+            "Hermes v{year}.{month}.{day} found. {needed}. Run hermes update."
+        )),
+        None => Some(format!(
+            "Hermes version unknown (no hermes-agent/hermes_cli/__init__.py found). {needed}."
+        )),
+    }
+}
+
+/// `__release_date__ = "2026.4.23"` from Hermes's `hermes_cli/__init__.py`.
+fn release_date(path: &Path) -> Option<(u32, u32, u32)> {
+    let text = fs::read_to_string(path).ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("__release_date__"))?
+        .split('"')
+        .nth(1)?;
+    let mut parts = value.split('.').map(|part| part.parse().ok());
+    Some((parts.next()??, parts.next()??, parts.next()??))
+}
+
 pub(crate) fn hook_file(home: &Path) -> PathBuf {
     config_dir(home)
         .join("plugins")

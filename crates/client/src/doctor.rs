@@ -245,6 +245,11 @@ fn agent_checks(home: &Path) -> Vec<Check> {
         if !managed_mcp && !managed_hook {
             continue;
         }
+        if *agent == "hermes"
+            && let Some(warning) = setup::hermes::version_warning(home)
+        {
+            checks.push(check("warn", "hermes", warning));
+        }
         let instruction = folder.join(instruction_name);
         if !(*agent == "hermes" && setup::hermes::gateway_profile(&folder.join("config.yaml")))
             && let Some(issue) = setup::instruction_issue(&instruction)

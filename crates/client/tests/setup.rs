@@ -426,6 +426,57 @@ fn hermes_provider_replaces_the_previous_provider_and_remove_restores_it() {
 }
 
 #[test]
+fn hermes_setup_and_doctor_warn_about_old_or_unknown_hermes() {
+    let home = Home::new("hermes-version", false);
+    let root = home.dir.join("hermes root");
+    let profile = root.join("profiles/work");
+    let setup = || {
+        let mut cmd = home.command("hermes", false);
+        cmd.env("HERMES_HOME", &profile);
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let doctor = || {
+        let output = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let lost = "Cairn needs Hermes v2026.4.23 or newer; older Hermes never delivers command warnings or failed-command recall, and gateway chat memory is off";
+
+    let unknown = setup();
+    assert!(
+        unknown.contains(&format!("cairn: warning: Hermes version unknown (no hermes-agent/hermes_cli/__init__.py found). {lost}.")),
+        "{unknown}"
+    );
+    assert!(doctor().contains("warn  hermes  Hermes version unknown"));
+
+    // The installer's checkout sits next to the profiles folder.
+    let stamp = root.join("hermes-agent/hermes_cli/__init__.py");
+    fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    fs::write(
+        &stamp,
+        "import sys\n\n__version__ = \"0.10.0\"\n__release_date__ = \"2026.4.16\"\n",
+    )
+    .unwrap();
+    let old = setup();
+    assert!(
+        old.contains(&format!(
+            "cairn: warning: Hermes v2026.4.16 found. {lost}. Run hermes update."
+        )),
+        "{old}"
+    );
+    assert!(doctor().contains(&format!("warn  hermes  Hermes v2026.4.16 found. {lost}.")));
+
+    for current in ["2026.4.23", "2026.9.24", "2027.1.2"] {
+        fs::write(&stamp, format!("__release_date__ = \"{current}\"\n")).unwrap();
+        assert!(!setup().contains("warning"), "{current}");
+        assert!(!doctor().contains("warn  hermes"), "{current}");
+    }
+    fs::write(&stamp, "__release_date__ = \"unreleased\"\n").unwrap();
+    assert!(setup().contains("Hermes version unknown"));
+}
+
+#[test]
 fn hermes_custom_home_preserves_unowned_entries_and_plugin_preferences() {
     let home = Home::new("hermes-custom", false);
     let profile = home.dir.join("custom profile");
@@ -1276,7 +1327,12 @@ fn refresh_adds_command_hooks_to_every_existing_install() {
         assert!(
             lines
                 .iter()
-                .all(|line| line.ends_with("integration installed")),
+                // A Hermes line can carry the version warning on its second line.
+                .all(|line| line
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .ends_with("integration installed")),
             "{lines:?}"
         );
         return;

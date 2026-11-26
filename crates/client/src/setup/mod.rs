@@ -440,11 +440,19 @@ fn apply(ctx: &Ctx) -> R<String> {
         write_private(&path, body.as_bytes())
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
-    Ok(format!(
+    let mut done = format!(
         "Cairn {} integration {}",
         ctx.agent,
         if ctx.remove { "removed" } else { "installed" }
-    ))
+    );
+    if ctx.agent == "hermes"
+        && !ctx.remove
+        && let Some(warning) = hermes::version_warning(&ctx.home)
+    {
+        done.push_str("\ncairn: warning: ");
+        done.push_str(&warning);
+    }
+    Ok(done)
 }
 
 fn configure_with(
