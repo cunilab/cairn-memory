@@ -138,7 +138,7 @@ cairn setup http://localhost:3111 --agent claude
 cairn doctor
 ```
 
-Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Hermes must be v2026.4.23 or newer; setup warns about an older or unknown version. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
+Use `codex`, `opencode`, `grok`, `antigravity` or `hermes` for those agents. Codex and OpenCode setup need their native CLIs on `PATH`. Hermes must be v2026.4.23 or newer; setup warns about an older or unknown version. Codex also requires trusting the installed hooks. Once the device is configured, `cairn setup <agent>` uses the saved device configuration. Setup manages the hooks, MCP entries (a memory provider for Hermes) and a block in the agent's global instructions. See [hook setup](docs/reference/hook.md#setup).
 
 In an existing Claude Code project, run `cairn import claude-memory` to preview and confirm an import. Cairn backs up `MEMORY.md` before replacing it with a pointer. Claude setup also blocks writes to its native memory directory. Add `--keep-native-memory` to the Claude setup command to omit the write guard. See [Claude memory import](docs/reference/cli-and-mcp.md#import-claude-code-memory).
 
@@ -150,7 +150,7 @@ In the project folder on the first device run `cairn init "Project name"` and co
 
 ### 4. Update
 
-Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.10.md) before upgrading. There is no database downgrade path.
+Back up PostgreSQL and upgrade the server and clients together. Migrations run at server startup. Run `cairn update --check` to check for an update or `cairn update` to install it and refresh configured integrations. Run `cairn setup <agent>` to refresh one integration using the saved device configuration. Run `cairn doctor` and consult the [release notes](docs/release-notes-0.1.11.md) before upgrading. There is no database downgrade path.
 
 ## Use Cairn
 
@@ -221,7 +221,7 @@ Cairn is pre-1.0. Use disposable databases for tests and read the migration rule
 | [Deployment](docs/deploy.md) | Server, console and reverse proxy |
 | [Development](docs/development.md) | Build, checks, migrations and docs |
 | [Release process](docs/release.md) | Releases and updates |
-| [Release notes](docs/release-notes-0.1.10.md) | Version-specific changes and upgrade steps |
+| [Release notes](docs/release-notes-0.1.11.md) | Version-specific changes and upgrade steps |
 
 ## Acknowledgements and licence
 

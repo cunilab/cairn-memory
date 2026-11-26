@@ -16,6 +16,6 @@ status: draft
 - [Deployment](deploy.md): services and routing.
 - [Development](development.md): checks, migrations and documentation rules.
 - [Release process](release.md): release flow and client updates.
-- [Release notes 0.1.6](release-notes-0.1.6.md), [0.1.7](release-notes-0.1.7.md), [0.1.8](release-notes-0.1.8.md), [0.1.9](release-notes-0.1.9.md), [0.1.10](release-notes-0.1.10.md): version-specific changes.
+- [Release notes 0.1.6](release-notes-0.1.6.md), [0.1.7](release-notes-0.1.7.md), [0.1.8](release-notes-0.1.8.md), [0.1.9](release-notes-0.1.9.md), [0.1.10](release-notes-0.1.10.md), [0.1.11](release-notes-0.1.11.md): version-specific changes.
 - [Rust idioms](RUST_IDIOMS.md): Rust quality rules.
 - [Hook examples](examples/README.md): manual Claude Code wiring.
