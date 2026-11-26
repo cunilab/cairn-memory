@@ -146,6 +146,8 @@ class Chat:
         self.salt = salt
         self.bound = bound_session_env
         self.sessions = {}
+        # Hermes session id -> chat state: teardown (/new, /reset, shutdown) runs without a bound route.
+        self.hosts = {}
         self.lock = threading.Lock()
 
     def route(self, session_id=None, **details):
@@ -180,41 +182,63 @@ class Chat:
         self.send("Stop", state, state["chat"])
         self.send("SessionEnd", state, state["chat"])
 
+    def drop(self, state):
+        """Forgets a chat state (caller holds the lock); False when it was already gone."""
+        if self.sessions.get(state["key"]) is not state:
+            return False
+        del self.sessions[state["key"]]
+        if state["timer"] is not None:
+            state["timer"].cancel()
+        for host in state["hosts"]:
+            if self.hosts.get(host) is state:
+                del self.hosts[host]
+        return True
+
     def idle(self, key, state, timer):
         with self.lock:
             if self.sessions.get(key) is not state or state["timer"] is not timer:
                 return
-            del self.sessions[key]
+            self.drop(state)
         self.close(state)
 
-    def end(self, key):
-        """Ends a chat's Cairn session now (Hermes /new or /reset), unless a turn is still running."""
+    def end(self, session_id):
+        """Hermes finalized this host session (/new, /reset or shutdown): its chat's Cairn session ends now,
+        or when the running turn ends."""
         with self.lock:
-            state = self.sessions.get(key)
-            if state is None or state["turns"]:
+            state = self.hosts.get(session_id)
+            if state is None:
                 return
-            del self.sessions[key]
-            if state["timer"] is not None:
-                state["timer"].cancel()
+            state["ended"] = True
+            if state["turns"] or not self.drop(state):
+                return
         self.close(state)
+
+    def finalize(self, session_id=None, **_):
+        if isinstance(session_id, str) and session_id:
+            self.end(session_id)
 
     def prompt(self, session_id, user_message, **details):
-        """Returns (route key, chat instruction for a new chat session, prompt recall)."""
+        """Returns (chat instruction for a new chat session, prompt recall)."""
         current = self.route(session_id, **details)
         if current is None:
-            return None, None, None
+            return None, None
         key, chat = current
         expired = None
         with self.lock:
             old = self.sessions.get(key)
-            if old is not None and old["timer"] is not None and time.monotonic() >= old["deadline"]:
-                old["timer"].cancel()
-                expired = self.sessions.pop(key)
+            # An ended session whose turn never reported its end closes here at the latest.
+            if old is not None and (old["ended"] or (
+                    old["timer"] is not None and time.monotonic() >= old["deadline"])):
+                self.drop(old)
+                expired = old
             first = key not in self.sessions
             if first:
-                self.sessions[key] = {"id": "hchat_" + uuid.uuid4().hex,
-                                      "turns": set(), "timer": None, "recall": {}}
+                self.sessions[key] = {"id": "hchat_" + uuid.uuid4().hex, "key": key, "hosts": set(),
+                                      "ended": False, "turns": set(), "timer": None, "recall": {}}
             state = self.sessions[key]
+            if session_id:
+                state["hosts"].add(session_id)
+                self.hosts[session_id] = state
             if state["timer"] is not None:
                 state["timer"].cancel()
                 state["timer"] = None
@@ -226,7 +250,7 @@ class Chat:
         recall = None
         if isinstance(user_message, str):
             recall = context(self.send("UserPromptSubmit", state, chat, user_message=user_message))
-        return key, start, recall
+        return start, recall
 
     def turn_end(self, session_id, **details):
         current = self.route(session_id, **details)
@@ -241,11 +265,15 @@ class Chat:
             if state["turns"]:
                 return
             state["recall"].clear()
-            timer = threading.Timer(IDLE_SECONDS, lambda: self.idle(key, state, timer))
-            state["timer"] = timer
-            state["deadline"] = time.monotonic() + IDLE_SECONDS
-            timer.daemon = True
-            timer.start()
+            ended = state["ended"] and self.drop(state)
+            if not ended:
+                timer = threading.Timer(IDLE_SECONDS, lambda: self.idle(key, state, timer))
+                state["timer"] = timer
+                state["deadline"] = time.monotonic() + IDLE_SECONDS
+                timer.daemon = True
+                timer.start()
+        if ended:
+            self.close(state)
 
     def active(self, **details):
         current = self.route(**details)
@@ -304,7 +332,6 @@ class CairnProvider(MemoryProvider):
         self.cwd = None
         self.primary = True
         self.chat = None
-        self.key = None
         self.started = set()
         self.brief = None
         self.recall = None
@@ -347,8 +374,7 @@ class CairnProvider(MemoryProvider):
             return
         if GATEWAY:
             if self.chat is not None:
-                key, start, self.recall = self.chat.prompt(self.session_id, message)
-                self.key = key or self.key
+                start, self.recall = self.chat.prompt(self.session_id, message)
                 self.brief = start or self.brief
             return
         if self.session_id not in self.started:
@@ -378,8 +404,8 @@ class CairnProvider(MemoryProvider):
         if rewound or not new_session_id:
             return
         if GATEWAY:
-            if reset and self.chat is not None and self.key is not None:
-                self.chat.end(self.key)
+            if reset and self.chat is not None:
+                self.chat.end(self.session_id)
         elif kwargs.get("reason") == "compression":
             self.started.add(new_session_id)  # The same conversation continues: no second brief.
         self.session_id = new_session_id
@@ -448,3 +474,8 @@ def register_gateway(ctx):
     except ValueError:
         pass
     ctx.register_hook("on_session_end", chat.turn_end)
+    try:
+        # /new, /reset and shutdown tear the agent down and finalize its session; agent eviction does not.
+        ctx.register_hook("on_session_finalize", chat.finalize)
+    except ValueError:
+        pass

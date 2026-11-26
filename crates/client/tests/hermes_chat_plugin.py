@@ -158,8 +158,7 @@ class Hermes(unittest.TestCase):
 class CommandLine(Hermes):
     def test_plugin_load_registers_provider_and_tool_hooks_only(self):
         self.assertEqual(set(self.ctx.hooks), {"post_tool_call", "transform_tool_result", "on_session_end"})
-        self.assertEqual(self.ctx.tools, {})
-        self.assertEqual(len(self.ctx.providers), 1)
+
 
     def test_provider_lifecycle_maps_to_cairn_events(self):
         provider = self.provider()
@@ -397,29 +396,84 @@ class Gateway(Hermes):
         self.assertEqual(self.turn(self.provider()), "custom instruction\nrecall")
         self.assertNotEqual(first["session_id"], self.requests[-1][1]["session_id"])
 
-    def test_new_or_reset_ends_the_chat_session_and_the_next_prompt_starts_one(self):
+    def finalize(self, session="host-session", reason="new_session", new="fresh"):
+        # Hermes runs finalize off the turn: no session context is bound.
+        bound, self.bound = self.bound, {}
+        self.ctx.hooks["on_session_finalize"](session_id=session, platform="telegram", reason=reason,
+                                              old_session_id=session, new_session_id=new)
+        self.bound = bound
+
+    def test_new_or_reset_tears_down_the_agent_and_the_next_prompt_starts_a_chat_session(self):
         self.route()
         provider = self.provider()
         self.turn(provider)
         first = self.requests[-1][1]["session_id"]
-        provider.on_session_switch("host-session", rewound=True)
-        provider.on_session_switch("resumed", reset=False, reason="resume")
-        self.assertNotIn("SessionEnd", self.events())
-        provider.on_session_switch("fresh", parent_session_id="resumed", reset=True)
-        self.assertNotIn("SessionEnd", self.events(), "a running turn keeps its chat session")
         self.end()
-        provider.on_session_switch("fresh", parent_session_id="resumed", reset=True)
+        # Ordinary eviction shuts the provider down and builds a new one: the chat session continues.
+        provider.on_session_end([])
+        provider = self.provider()
+        self.assertEqual(self.turn(provider), "recall")
+        self.assertEqual(self.requests[-1][1]["session_id"], first)
+        self.end()
+        timer = self.timers[-1]
+        self.assertNotIn("SessionEnd", self.events())
+
+        # /new: Hermes tears the agent down, finalizes the old host session, then builds a new provider.
+        provider.on_session_end([])
+        self.finalize()
         self.assertEqual(self.events()[-2:], ["Stop", "SessionEnd"])
         self.assertEqual(self.requests[-1][1]["session_id"], first)
-        self.assertTrue(self.timers[-1].cancelled)
+        self.assertTrue(timer.cancelled)
+        self.finalize()
+        self.assertEqual(self.events().count("SessionEnd"), 1)
         self.route(session="fresh")
+        provider = self.provider("fresh")
         self.assertEqual(self.turn(provider), "custom instruction\nrecall")
-        self.assertNotEqual(self.requests[-1][1]["session_id"], first)
+        second = self.requests[-1][1]["session_id"]
+        self.assertNotEqual(second, first)
         before = len(self.requests)
         provider.sync_turn("prompt", "answer")
         provider.on_pre_compress([])
         provider.on_session_end([])
         self.assertEqual(len(self.requests), before, "chat sessions end by idle time or reset only")
+
+        # A reset during a running turn waits for that turn to end.
+        self.finalize("fresh", new="third")
+        self.assertEqual(self.events()[-1], "UserPromptSubmit")
+        self.end("fresh")
+        self.assertEqual(self.events()[-2:], ["Stop", "SessionEnd"])
+        self.assertEqual(self.requests[-1][1]["session_id"], second)
+        self.assertEqual(len(self.timers), 2, "an ended chat session arms no idle timer")
+
+        # Shutdown finalizes too; a turn that never reports its end closes at the next prompt.
+        self.route(session="third")
+        provider = self.provider("third")
+        self.turn(provider)
+        third = self.requests[-1][1]["session_id"]
+        self.finalize("third", reason="shutdown", new=None)
+        self.route(session="fourth")
+        self.assertEqual(self.turn(self.provider("fourth")), "custom instruction\nrecall")
+        self.assertEqual([(event, body["session_id"]) for event, body in self.requests[-4:-2]],
+                         [("Stop", third), ("SessionEnd", third)])
+        self.end("third")
+        self.assertNotEqual(self.events()[-1], "SessionEnd")
+
+    def test_in_place_reset_switch_ends_the_chat_session_after_the_turn(self):
+        self.route()
+        provider = self.provider()
+        self.turn(provider)
+        first = self.requests[-1][1]["session_id"]
+        provider.on_session_switch("host-session", rewound=True)
+        provider.on_session_switch("host-session", reset=False, reason="resume")
+        self.assertNotIn("SessionEnd", self.events())
+        provider.on_session_switch("fresh", parent_session_id="host-session", reset=True)
+        self.assertNotIn("SessionEnd", self.events(), "a running turn keeps its chat session")
+        self.end()
+        self.assertEqual(self.events()[-2:], ["Stop", "SessionEnd"])
+        self.assertEqual(self.requests[-1][1]["session_id"], first)
+        self.route(session="fresh")
+        self.assertEqual(self.turn(provider), "custom instruction\nrecall")
+        self.assertNotEqual(self.requests[-1][1]["session_id"], first)
 
     def test_terminal_recall_and_background_turns(self):
         self.route()

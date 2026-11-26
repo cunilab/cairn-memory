@@ -120,7 +120,7 @@ Cairn in that turn. DMs and groups share the same visibility rules. Each chat ho
 checks that the server reports version 0.1.10 or later; otherwise, or when the server does not
 answer, chat memory is off for that call and nothing is sent.
 
-The chat route still comes from the turn's bound gateway context, not from the provider's chat arguments, so Discord threads keep their parent channel's tag. Chat sessions live per gateway profile, across Hermes sessions. Hermes `/new` or `/reset` ends the chat's Cairn session at once; otherwise it ends after 30 minutes without a turn. The gateway's own session teardown does not end it.
+The chat route still comes from the turn's bound gateway context, not from the provider's chat arguments, so Discord threads keep their parent channel's tag. Chat sessions live per gateway profile, across Hermes sessions. Hermes `/new`, `/reset` and gateway shutdown end the chat's Cairn session through the `on_session_finalize` hook, after the running turn if one is in progress; otherwise it ends after 30 minutes without a turn. Hermes evicting a cached agent does not end it.
 
 On the first prompt of a Cairn chat session, Hermes receives the **Hermes chat instruction**
 from **Settings → Agent instructions**. A server admin can edit it or reset it to the built-in

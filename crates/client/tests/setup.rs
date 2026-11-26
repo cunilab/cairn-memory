@@ -323,16 +323,16 @@ mcp_servers:
     let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
     // Without an explicit kind, Hermes would load a provider file only as the memory provider.
     assert!(manifest.contains("\nkind: standalone\n"));
-    for event in ["post_tool_call", "transform_tool_result", "on_session_end"] {
+    for event in [
+        "post_tool_call",
+        "transform_tool_result",
+        "on_session_end",
+        "on_session_finalize",
+    ] {
         assert!(manifest.contains(event), "{event}");
         assert!(script.contains(event), "{event}");
     }
-    for event in [
-        "pre_tool_call",
-        "pre_llm_call",
-        "post_llm_call",
-        "on_session_finalize",
-    ] {
+    for event in ["pre_tool_call", "pre_llm_call", "post_llm_call"] {
         assert!(!manifest.contains(event), "{event}");
     }
     assert!(!home.snapshot(".hermes").iter().any(|(_, text)| {
