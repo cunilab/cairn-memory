@@ -3,7 +3,7 @@ use crate::auth::{Agent, Device, DeviceCaller};
 use crate::error::ApiError;
 use axum::Json;
 use axum::extract::State;
-use cairn_core::capture::ObservationInput;
+use cairn_core::capture::{ChatContext, ObservationInput};
 use cairn_store::repo::RepoState;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ pub struct SessionRef {
     session_id: String,
     nudge_asked: Option<bool>,
     nudge_saved: Option<bool>,
+    chat: Option<ChatContext>,
 }
 
 /// A typed capture. Unknown keys are a 400, so a client learns about a misnamed field.
@@ -66,6 +67,7 @@ async fn capture(
     input: ObservationInput,
 ) -> Result<Json<Value>, ApiError> {
     let context = input.context.clone();
+    super::retrieve::validate_chat_session(&input.session_id, context.chat.as_ref())?;
     let result = state
         .store
         .capture_from(&account.person_id, input, Some(&device_id))
@@ -96,6 +98,7 @@ pub async fn end(
     Agent(account): Agent,
     Json(body): Json<SessionRef>,
 ) -> Result<Json<Value>, ApiError> {
+    super::retrieve::validate_chat_session(&body.session_id, body.chat.as_ref())?;
     let queued = state
         .store
         .end_session_with_nudge(
@@ -117,6 +120,7 @@ pub async fn checkpoint(
     Agent(account): Agent,
     Json(body): Json<SessionRef>,
 ) -> Result<Json<Value>, ApiError> {
+    super::retrieve::validate_chat_session(&body.session_id, body.chat.as_ref())?;
     let queued = state
         .store
         .checkpoint_session(&account.person_id, &body.session_id)

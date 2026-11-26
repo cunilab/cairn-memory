@@ -39,6 +39,23 @@ Cairn credits a pushed card once per session when the agent gets the memory or v
 
 After three pushes in separate sessions with zero uses, that person's automatic recall mutes the memory unless it is pinned. The person can still find or get it, and its trust stays the same. A returned explicit search result, a successful get, or a helpful vote restores automatic eligibility. Session attribution comes from either the host's MCP session metadata or its post-tool hook.
 
+## Hermes chat recall
+
+Cairn saves chat memories as personal records owned by the gateway's Cairn account.
+The same chat, that owner's verified DM with the bot, and the owner's web console can
+read those records. Other chats and standalone agent sessions leave chat-tagged
+memories out of their results. A group or an unmapped DM can read personal memories
+tagged to its own chat. L0 pins, L1 essentials, L2 prompts and commands, and explicit
+search use the same privacy rule. Project recall in chat requires an explicit existing
+project link and the owner's project membership. Group and unmapped DM saves start
+as new candidates, including repeat saves and memories derived from captured turns.
+
+Each chat thread has its own Cairn session and eight-card automatic recall ledger.
+A chat without threads uses one session. At 30 minutes of idle time Cairn closes
+the session and queues distillation. The next message starts a new ledger. A
+gateway restart starts a new session on the next message. Cairn's idle sweep closes
+any earlier session with retained captures. See [Hermes gateway setup](hook.md#hermes-telegram-and-discord-gateway).
+
 ## Session handoffs and distillation
 
 Checkpoint and session-end processing turns typed captures into notes, a digest and, when appropriate, a handoff. A session that mixes projects, or project and personal work, distills each attachment on its own; a mixed or indeterminate cohort stays personal. The digest's test line is the last execution of that command. Explicit `next:` or `todo:` lines supply next steps. Short chats and automated or subagent sessions do not overwrite a useful handoff. Raw observations are not returned by memory search.

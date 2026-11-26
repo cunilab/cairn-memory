@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::process;
 
 const USAGE: &str = "Usage:
-  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory]
-  cairn setup <agent> [--remove]
+  cairn setup <server-url> [--agent claude|codex|opencode|grok|antigravity|hermes] [--remove|--keep-native-memory|--gateway]
+  cairn setup <agent> [--remove|--gateway]
   cairn init [name] [--yes]     (create or join; write .cairn/project.json; --yes re-registers an id the server lost)
   cairn import claude-memory [--yes]
   cairn fixes [apply [fx_id]]  (list or apply this device's fixes)
@@ -76,10 +76,13 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
             || (args[0] == "setup"
                 && ((index == 2 && value == "--agent")
                     || (index == 2
-                        && value == "--remove"
+                        && matches!(value.as_str(), "--remove" | "--gateway")
                         && setup::AGENTS.contains(&args[1].as_str()))
                     || (index == 4
-                        && matches!(value.as_str(), "--remove" | "--keep-native-memory"))));
+                        && matches!(
+                            value.as_str(),
+                            "--remove" | "--keep-native-memory" | "--gateway"
+                        ))));
         if value.starts_with('-') && value != "-" && !allowed {
             return Err(Error::Input(format!(
                 "unexpected option {value:?}; run `cairn --help`"
@@ -166,14 +169,20 @@ fn main() {
 fn setup(args: &[String]) -> Result<(), Error> {
     let (url, agent, option) = match args {
         [agent] if setup::AGENTS.contains(&agent.as_str()) => (None, Some(agent.as_str()), None),
-        [agent, flag] if flag == "--remove" && setup::AGENTS.contains(&agent.as_str()) => {
+        [agent, flag]
+            if matches!(flag.as_str(), "--remove" | "--gateway")
+                && setup::AGENTS.contains(&agent.as_str()) =>
+        {
             (None, Some(agent.as_str()), Some(flag.as_str()))
         }
         [url] => (Some(url), None, None),
         [url, flag, agent] if flag == "--agent" => (Some(url), Some(agent.as_str()), None),
         [url, flag, agent, option]
             if flag == "--agent"
-                && matches!(option.as_str(), "--remove" | "--keep-native-memory") =>
+                && matches!(
+                    option.as_str(),
+                    "--remove" | "--keep-native-memory" | "--gateway"
+                ) =>
         {
             (Some(url), Some(agent.as_str()), Some(option.as_str()))
         }
@@ -189,6 +198,12 @@ fn setup(args: &[String]) -> Result<(), Error> {
     if keep_native_memory && agent != Some("claude") {
         return Err(Error::Input(
             "--keep-native-memory applies only to Claude Code".into(),
+        ));
+    }
+    let gateway = option == Some("--gateway");
+    if gateway && agent != Some("hermes") {
+        return Err(Error::Input(
+            "--gateway applies only to Hermes Agent".into(),
         ));
     }
     if option == Some("--remove") {
@@ -209,8 +224,8 @@ fn setup(args: &[String]) -> Result<(), Error> {
         Config::load()?;
     }
     if let Some(agent) = agent {
-        let done = if url.is_some() {
-            setup::install(agent, keep_native_memory)?
+        let done = if url.is_some() || gateway {
+            setup::install(agent, keep_native_memory, gateway)?
         } else {
             setup::configure(agent, false)?
         };

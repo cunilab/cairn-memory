@@ -47,6 +47,7 @@ pub(crate) struct Ctx<'a> {
     config: &'a Path,
     home: PathBuf,
     keep_native_memory: bool,
+    gateway: bool,
 }
 
 impl Ctx<'_> {
@@ -430,6 +431,7 @@ fn configure_with(
     agent: &str,
     remove: bool,
     keep_native_memory: Option<bool>,
+    gateway: bool,
     exe: &Path,
     config: &Path,
 ) -> Result<String, Error> {
@@ -445,6 +447,7 @@ fn configure_with(
         remove,
         exe: &exe,
         config: &config,
+        gateway,
         keep_native_memory: keep_native_memory.unwrap_or_else(|| {
             agent == "claude"
                 && fs::read_to_string(crate::claude_memory::config_dir(&home).join("settings.json"))
@@ -458,16 +461,17 @@ fn configure_with(
 /// Installs or removes one agent's integration for this executable and the selected config.
 pub fn configure(agent: &str, remove: bool) -> Result<String, Error> {
     let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
-    configure_with(agent, remove, None, &exe, &selected_config_path()?)
+    configure_with(agent, remove, None, false, &exe, &selected_config_path()?)
 }
 
 /// Installs one agent with the caller's choice about Claude's built-in memory writes.
-pub fn install(agent: &str, keep_native_memory: bool) -> Result<String, Error> {
+pub fn install(agent: &str, keep_native_memory: bool, gateway: bool) -> Result<String, Error> {
     let exe = env::current_exe().map_err(|e| Error::Config(e.to_string()))?;
     configure_with(
         agent,
         false,
         Some(keep_native_memory),
+        gateway,
         &exe,
         &selected_config_path()?,
     )
@@ -516,12 +520,14 @@ pub fn refresh(exe: &Path) -> Vec<String> {
         if !fs::read_to_string(file).is_ok_and(|text| text.contains(MANAGED_FLAG)) {
             continue;
         }
-        lines.push(match configure_with(agent, false, None, exe, &config) {
-            Ok(done) => done,
-            Err(error) => format!(
-                "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"
-            ),
-        });
+        lines.push(
+            match configure_with(agent, false, None, false, exe, &config) {
+                Ok(done) => done,
+                Err(error) => format!(
+                    "cairn: warning: {agent} hooks were not refreshed ({error}); run `cairn setup`"
+                ),
+            },
+        );
     }
     retire_python(config.parent().unwrap_or(Path::new(".")));
     lines

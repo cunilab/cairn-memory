@@ -95,6 +95,10 @@ impl Payload {
         }
     }
 
+    pub(super) fn value(&self, key: &str) -> Option<&Value> {
+        self.0.get(key)
+    }
+
     pub(super) fn text(&self, key: &str) -> Option<&str> {
         self.0
             .get(key)

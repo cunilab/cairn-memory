@@ -1,9 +1,9 @@
 //! Moving a person's own memories out and back in: the console's Export and Import. Import goes
 //! through the normal agent save (quality checks, redaction, dedupe by identity hash).
 
-use crate::memory::{MEMORY_SELECT_WITH_DETAIL, visible_with_archive};
+use crate::memory::{MEMORY_SELECT_WITH_DETAIL, SaveSource, visible_with_archive};
 use crate::{Result, Store, StoreError};
-use cairn_core::capture::WorkContext;
+use cairn_core::capture::{ChatHash, WorkContext};
 use cairn_core::id::now_seconds;
 use cairn_core::memory::{Fields, Kind, Link, SaveInput, Scope, Status};
 use cairn_core::process::{Origin, prepare_save};
@@ -19,6 +19,8 @@ pub struct ExportedMemory {
     pub id: String,
     pub kind: Kind,
     pub scope: Scope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_id_hash: Option<ChatHash>,
     pub status: Status,
     pub title: String,
     pub summary: String,
@@ -91,6 +93,7 @@ impl Store {
                     id: m.id,
                     kind: m.kind,
                     scope: m.scope,
+                    chat_id_hash: m.chat_id_hash,
                     status: m.status,
                     title: m.title,
                     summary: m.summary,
@@ -165,6 +168,17 @@ impl Store {
         }
         let input: SaveInput = serde_json::from_value(Value::Object(keep))
             .map_err(|e| StoreError::Validation(e.to_string()))?;
+        let chat: Option<ChatHash> = object
+            .get("chat_id_hash")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|error| StoreError::Validation(error.to_string()))?;
+        if chat.is_some() && input.scope != Some(Scope::Personal) {
+            return Err(StoreError::Validation(
+                "chat-tagged memories must be personal".into(),
+            ));
+        }
         let wants_project = input.scope == Some(Scope::Project);
         let mut work = WorkContext::default();
         if wants_project {
@@ -191,10 +205,14 @@ impl Store {
             .and_then(Value::as_str)
             .map(str::to_owned);
         if !dry_run {
-            let saved = self.save(person_id, input, &work).await?;
+            let source = chat.map_or(SaveSource::StrictAgent, SaveSource::ImportedChat);
+            let saved = self.save_as(person_id, input, &work, source, None).await?;
             return Ok(!saved.deduplicated);
         }
-        let new = prepare_save(input, &work, wants_project, Origin::Agent, now_seconds())?;
+        let mut new = prepare_save(input, &work, wants_project, Origin::Agent, now_seconds())?;
+        if let Some(hash) = chat {
+            new.tag_chat(hash, true);
+        }
         let key = (
             new.scope.as_str().to_owned(),
             work.project_id.clone().unwrap_or_default(),

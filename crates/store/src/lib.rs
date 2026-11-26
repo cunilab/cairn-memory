@@ -115,6 +115,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0022_memory_pins",
         include_str!("../../../migrations/0022_memory_pins.sql"),
     ),
+    (
+        "0023_hermes_chat",
+        include_str!("../../../migrations/0023_hermes_chat.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

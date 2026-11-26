@@ -51,6 +51,7 @@ pub(crate) async fn save_duplicate(
                ) n
               WHERE m.owner_id = $1 AND m.scope = $2 AND m.project_id IS NOT DISTINCT FROM $3
                 AND m.status = 'active' AND {visible} AND m.kind <> 'handoff'
+                AND m.chat_id_hash IS NOT DISTINCT FROM $9
                 AND m.identity_hash <> $5 AND m.memory_id <> ALL($6)
                 AND cardinality(input.words) >= 5 AND m.search_tsv @@ input.terms
          )
@@ -65,6 +66,7 @@ pub(crate) async fn save_duplicate(
     .bind(new.supersedes.iter().chain(&new.contradicts).map(String::as_str).collect::<Vec<_>>())
     .bind(SUPERSEDE_AT)
     .bind(CANDIDATES as i64)
+    .bind(new.chat_id_hash.as_ref().map(|hash| hash.as_str()))
     .fetch_all(tx)
     .await?;
     for row in matches {
@@ -136,7 +138,7 @@ impl Store {
         lock_cohort(&mut tx, memory_id).await?;
         crate::project::lock_memory_projects(&mut tx, &[memory_id]).await?;
         let subject = sqlx::query(
-            "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary,
+            "SELECT owner_id, scope, project_id, kind, status, repo_branch, origin, title, summary, chat_id_hash,
                     embedding::text AS embedding
                FROM memories WHERE memory_id = $1 AND embedding IS NOT NULL
                 AND (origin <> 'agent' OR rank <> 'candidate') FOR UPDATE",
@@ -170,6 +172,7 @@ impl Store {
                  SELECT m.memory_id, m.created_at, m.embedding, m.repo_branch, m.origin, m.title, m.summary
                    FROM memories m
                   WHERE m.embedding IS NOT NULL AND m.owner_id = $2 AND m.scope = $3 AND m.project_id IS NOT DISTINCT FROM $4 AND m.kind = $5
+                    AND m.chat_id_hash IS NOT DISTINCT FROM $8
                     AND m.memory_id <> $6 AND m.status IN ('active','stale')
                     AND (m.origin <> 'agent' OR m.rank <> 'candidate'))
              SELECT c.memory_id, c.repo_branch, c.origin, c.title, c.summary,
@@ -185,6 +188,7 @@ impl Store {
         .bind(&kind)
         .bind(memory_id)
         .bind(CANDIDATES as i64)
+        .bind(subject.try_get::<Option<String>, _>("chat_id_hash")?)
         .fetch_all(&mut *tx)
         .await?;
         let mut subject_superseded = false;

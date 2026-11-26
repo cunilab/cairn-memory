@@ -5,7 +5,7 @@ use crate::memory::{
 };
 use crate::usage::{Lookup, SESSION_PUSH_LIMIT, already_shown, finish_push, repeat_error, unmuted};
 use crate::{Result, Store, StoreError};
-use cairn_core::capture::{WorkContext, redact_sensitive_content};
+use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
 use cairn_core::memory::{Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Status, TrustLevel};
 use cairn_core::process::embed::validate_vector;
@@ -70,6 +70,25 @@ pub struct Trace {
 /// Most rows one lexical leg reads before ranking (see `lexical_sql`).
 pub const LEXICAL_MATCH_CAP: i64 = 2000;
 
+/// Web reads use their own owner visibility. Agent reads also apply this chat boundary.
+fn chat_visibility(alias: &str, parameter: usize) -> String {
+    format!(
+        " AND (${parameter}::text = '*' OR
+            CASE WHEN ${parameter} IS NULL THEN {alias}.chat_id_hash IS NULL
+                 ELSE {alias}.scope <> 'personal' OR {alias}.chat_id_hash = ${parameter} END)"
+    )
+}
+
+fn chat_key(chat: Option<&ChatContext>) -> Option<&str> {
+    chat.map(|chat| {
+        if chat.owner_dm() {
+            "*"
+        } else {
+            chat.chat_id_hash.as_str()
+        }
+    })
+}
+
 /// The request's project and kind, applied inside every channel's `WHERE` so the candidate pool
 /// holds only memories the filter would keep. `cairn_core::retrieve::filter::matches` still runs
 /// afterwards and is exact (it also reads a handoff's session, branch and worktree).
@@ -80,6 +99,7 @@ pub struct Narrow {
     pub project: Option<String>,
     pub kind: Option<String>,
     prompt_session: Option<String>,
+    chat: Option<ChatContext>,
 }
 
 impl Narrow {
@@ -88,9 +108,18 @@ impl Narrow {
         project: None,
         kind: None,
         prompt_session: None,
+        chat: None,
     };
 
     /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
+    fn chat_sql(&self, alias: &str, parameter: usize) -> String {
+        if self.chat.is_none() {
+            format!(" AND {alias}.chat_id_hash IS NULL")
+        } else {
+            chat_visibility(alias, parameter)
+        }
+    }
+
     fn sql(&self, alias: &str, person: &str, first: usize) -> String {
         if self.prompt_session.is_some() {
             let session = first + 1;
@@ -103,8 +132,8 @@ impl Narrow {
                   AND {}
                   AND NOT EXISTS (SELECT 1 FROM session_shown s
                        WHERE s.person_id = {person} AND s.session_id = ${session}
-                         AND s.memory_id = {alias}.memory_id)",
-                unmuted(alias, person)
+                         AND s.memory_id = {alias}.memory_id){}",
+                unmuted(alias, person), self.chat_sql(alias, session + 1)
             );
         }
         let mut next = first;
@@ -116,8 +145,9 @@ impl Narrow {
         }
         if self.kind.is_some() {
             out += &format!(" AND {alias}.kind = ${next}::text");
+            next += 1;
         }
-        out
+        out + &self.chat_sql(alias, next)
     }
 
     fn bind<'q>(
@@ -125,13 +155,17 @@ impl Narrow {
         mut q: Query<'q, Postgres, PgArguments>,
     ) -> Query<'q, Postgres, PgArguments> {
         if let Some(session) = &self.prompt_session {
-            return q.bind(self.project.as_deref()).bind(session);
-        }
-        if self.scoped {
+            q = q.bind(self.project.as_deref()).bind(session);
+        } else if self.scoped {
             q = q.bind(self.project.as_deref());
         }
-        if let Some(kind) = &self.kind {
+        if self.prompt_session.is_none()
+            && let Some(kind) = &self.kind
+        {
             q = q.bind(kind.as_str());
+        }
+        if let Some(key) = chat_key(self.chat.as_ref()) {
+            q = q.bind(key);
         }
         q
     }
@@ -144,6 +178,7 @@ impl From<&Filter> for Narrow {
             project: f.context.as_ref().and_then(|c| c.project_id.clone()),
             kind: f.kind.map(|k| k.as_str().to_owned()),
             prompt_session: None,
+            chat: f.context.as_ref().and_then(|work| work.chat.clone()),
         }
     }
 }
@@ -380,7 +415,7 @@ impl Store {
     /// Visible memories by id, with entities and links. Unknown and hidden ids are absent.
     pub async fn memories_by_ids(&self, person_id: &str, ids: &[String]) -> Result<Vec<Memory>> {
         let rows = sqlx::query(&format!(
-            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id = ANY($2) AND {}",
+            "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id = ANY($2) AND {} AND m.chat_id_hash IS NULL",
             visible("m", "$1")
         ))
         .bind(person_id)
@@ -757,15 +792,17 @@ impl Store {
             visible("m", "$1"),
             narrow.sql("m", "$1", 3)
         );
-        let eligible: HashSet<String> = sqlx::query_scalar(&statement)
+        let query = sqlx::query_scalar(&statement)
             .bind(person_id)
             .bind(ids)
             .bind(&narrow.project)
-            .bind(session_id)
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .collect();
+            .bind(session_id);
+        let query = if let Some(key) = chat_key(narrow.chat.as_ref()) {
+            query.bind(key)
+        } else {
+            query
+        };
+        let eligible: HashSet<String> = query.fetch_all(&mut *tx).await?.into_iter().collect();
         let chosen: Vec<_> = ranked
             .into_iter()
             .filter(|(_, memory, _)| eligible.contains(&memory.id))
@@ -821,13 +858,15 @@ impl Store {
             "{MEMORY_SELECT}
               WHERE {visible} AND ({personal} OR {project})
                 AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
-                AND m.memory_id <> ALL($3)
-              ORDER BY m.pinned_at, m.memory_id LIMIT $4"
+                AND m.memory_id <> ALL($3){}
+              ORDER BY m.pinned_at, m.memory_id LIMIT $4",
+            chat_visibility("m", 5)
         ))
         .bind(person_id)
         .bind(&context.project_id)
         .bind(&shown)
         .bind(limit as i64)
+        .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
         .await?;
         let pins = pins
@@ -837,12 +876,13 @@ impl Store {
         shown.extend(pins.iter().map(|pin| pin.id.clone()));
 
         let unmuted = unmuted("m", "$1");
-        let handoff = if context.repository.is_some() {
+        let handoff = if context.repository.is_some() || context.chat.is_some() {
             let rows = sqlx::query(&format!(
                 "{MEMORY_SELECT}
                   WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.kind = 'handoff' AND m.owner_id = $1
-                    AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5
-                    AND m.project_id IS NOT DISTINCT FROM $2
+                    AND (m.chat_id_hash = $6 OR ($6::text IS NULL AND m.chat_id_hash IS NULL
+                         AND m.repo = $3 AND m.repo_branch IS NOT DISTINCT FROM $4 AND m.repo_worktree IS NOT DISTINCT FROM $5))
+                    AND ($6::text IS NOT NULL OR m.project_id IS NOT DISTINCT FROM $2)
                   ORDER BY m.created_at DESC, m.memory_id LIMIT 50"
             ))
             .bind(person_id)
@@ -850,6 +890,7 @@ impl Store {
             .bind(&context.repository)
             .bind(&context.branch)
             .bind(&context.worktree)
+            .bind(context.chat.as_ref().map(|chat| chat.chat_id_hash.as_str()))
             .fetch_all(&mut *tx)
             .await?;
             let rows = rows
@@ -865,14 +906,14 @@ impl Store {
         let essentials = sqlx::query(&format!(
             "{MEMORY_SELECT}
               WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.pinned_at IS NULL AND m.memory_id <> ALL($4)
-                AND (m.memory_id = $5 OR (m.status = 'active' AND (
+                {} AND (m.memory_id = $5 OR (m.status = 'active' AND (
                     ({personal} AND m.kind = 'preference')
                     OR ({project} AND m.kind IN ('rule','decision','gotcha')
                         AND (m.repo_branch IS NULL OR m.repo_branch = $3
                              OR coalesce(m.repo_branch = (SELECT default_branch FROM projects WHERE project_id = $2),
                                          m.repo_branch IN ('main','master')))))))
               {} LIMIT $6",
-            essential_order()
+            chat_visibility("m", 7), essential_order()
         ))
         .bind(person_id)
         .bind(&context.project_id)
@@ -880,6 +921,7 @@ impl Store {
         .bind(&shown)
         .bind(handoff)
         .bind(limit as i64)
+        .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
         .await?;
         let essentials = essentials
@@ -913,6 +955,19 @@ impl Store {
         project_id: Option<&str>,
         command: &str,
         failure: Option<&str>,
+    ) -> Result<String> {
+        self.command_recall_in(person_id, session_id, project_id, command, failure, None)
+            .await
+    }
+
+    pub async fn command_recall_in(
+        &self,
+        person_id: &str,
+        session_id: &str,
+        project_id: Option<&str>,
+        command: &str,
+        failure: Option<&str>,
+        chat: Option<&ChatContext>,
     ) -> Result<String> {
         let command = entities::normalize_command(&redact_sensitive_content(command));
         if command.is_empty() || command.contains('\0') || command.chars().count() > 200 {
@@ -969,7 +1024,7 @@ impl Store {
             source
         };
 
-        let terms = "phraseto_tsquery('english', $6)";
+        let terms = "phraseto_tsquery('english', $7)";
         let exact_command = "m.memory_id IN
             (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)";
         // Three adjacent lexemes keep generic failure lines out of automatic recall.
@@ -982,18 +1037,19 @@ impl Store {
               WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted}
                 AND (m.scope <> 'project' OR m.project_id = $2)
                 AND m.kind IN ('gotcha', 'procedure') AND m.memory_id <> ALL($4)
-                AND {exact_command} {error_match}
+                AND {exact_command} {} {error_match}
               ORDER BY (m.kind = 'gotcha') DESC, coalesce(u.helpful, 0) DESC,
                        m.updated_at DESC, m.memory_id
               LIMIT $5",
-            visible("m", "$1"),
+            visible("m", "$1"), chat_visibility("m", 6),
         );
         let query = sqlx::query_as(&sql)
             .bind(person_id)
             .bind(project_id)
             .bind(&command)
             .bind(&shown)
-            .bind(limit as i64);
+            .bind(limit as i64)
+            .bind(chat_key(chat));
         let query = if let Some(phrase) = phrase {
             query.bind(phrase)
         } else {
@@ -1067,7 +1123,8 @@ impl Store {
                JOIN entities e ON e.memory_id = m.memory_id
                LEFT JOIN usage u ON u.memory_id = m.memory_id
               WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted} AND m.kind <> 'handoff'
-                AND m.memory_id <> ALL($6)
+                AND m.memory_id <> ALL($6){}
+                AND ($8::text IS NULL OR m.scope <> 'project' OR m.project_id = $3)
                 AND ((e.kind = 'file' AND e.name = $2) OR (e.kind = 'module' AND e.name = $4)
                      OR (e.kind = 'symbol' AND e.name = ANY($5)
                          AND (m.scope <> 'project' OR m.project_id = $3)))
@@ -1080,7 +1137,7 @@ impl Store {
                        (m.project_id IS NOT NULL AND m.project_id = $3) DESC,
                        m.memory_id
               LIMIT $7",
-            visible("m", "$1")
+            visible("m", "$1"), chat_visibility("m", 8)
         ))
         .bind(person_id)
         .bind(path)
@@ -1089,6 +1146,7 @@ impl Store {
         .bind(&symbols)
         .bind(&shown)
         .bind(limit as i64)
+        .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
         .await?;
 
@@ -1169,9 +1227,13 @@ impl Store {
         person_id: &str,
         filter: &GraphFilter,
         cap: Option<usize>,
+        exclude_chat: bool,
     ) -> Result<Graph> {
         let cap = node_cap(cap)?;
-        let memories = self.visible_memories(person_id).await?;
+        let mut memories = self.visible_memories(person_id).await?;
+        if exclude_chat {
+            memories.retain(|memory| memory.chat_id_hash.is_none());
+        }
         let links: Vec<_> = memories.iter().flat_map(|m| m.links.clone()).collect();
         Ok(build(&memories, &links, filter, cap))
     }

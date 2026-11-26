@@ -57,8 +57,9 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         return Err("an unmarked Hermes cairn-memory plugin exists; move it first".into());
     }
     let config = folder.join("config.yaml");
-    let config = (config.clone(), config_text(&config, ctx)?);
-    let instructions = instruction_file(folder.join("SOUL.md"), ctx.remove)?;
+    let (text, gateway) = config_text(&config, ctx)?;
+    let config = (config, text);
+    let instructions = instruction_file(folder.join("SOUL.md"), ctx.remove || gateway)?;
     if ctx.remove {
         let after: super::After = Box::new(move |_| {
             for path in [&manifest, &hook] {
@@ -80,12 +81,21 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
         });
     }
     let paths = json!([ctx.exe, ctx.config.to_string_lossy()]).to_string();
-    let script = PLUGIN.replacen("__CAIRN_PATHS__", &paths, 1);
+    let script = PLUGIN.replacen("__CAIRN_PATHS__", &paths, 1).replacen(
+        "__CAIRN_GATEWAY__",
+        if gateway { "True" } else { "False" },
+        1,
+    );
+    let manifest_text = if gateway {
+        format!("{MANIFEST}provides_tools:\n  - memory_search\n  - memory_save\n")
+    } else {
+        MANIFEST.to_owned()
+    };
     Ok(Plan {
         files: vec![
-            (hook, script),
-            (manifest, MANIFEST.into()),
             config,
+            (hook, script),
+            (manifest, manifest_text),
             instructions,
         ],
         native: None,
@@ -93,13 +103,16 @@ pub(super) fn plan(ctx: &Ctx) -> R<Plan> {
     })
 }
 
-fn config_text(path: &Path, ctx: &Ctx) -> R<String> {
+fn config_text(path: &Path, ctx: &Ctx) -> R<(String, bool)> {
     let raw = read(path)?;
     let mut root: Value =
         yaml_serde::from_str(&raw).map_err(|_| "cannot parse Hermes config.yaml")?;
     root.apply_merge()
         .map_err(|_| "cannot resolve Hermes config.yaml merges")?;
     let before = root.clone();
+    let settings = &root["plugins"]["entries"][PLUGIN_NAME]["settings"];
+    let gateway = ctx.gateway || settings["cairn_gateway"].as_bool() == Some(true);
+    let mut owns_enable = settings[ENABLED_MARKER].as_bool() == Some(true);
     let config = as_mapping(&mut root, "Hermes config.yaml")?;
     let servers = as_mapping(
         config.entry("mcp_servers".into()).or_insert(Value::Null),
@@ -110,11 +123,12 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<String> {
     if existing.is_some() && !marked(MARKER) {
         return Err(UNMARKED.into());
     }
-    let mut owns_enable = marked(ENABLED_MARKER);
-    if ctx.remove {
-        if servers.remove("cairn").is_none() {
-            return Ok(raw);
-        }
+    owns_enable |= marked(ENABLED_MARKER);
+    if ctx.remove && !gateway && existing.is_none() {
+        return Ok((raw, false));
+    }
+    if ctx.remove || gateway {
+        servers.remove("cairn");
         if servers.is_empty() {
             config.remove("mcp_servers");
         }
@@ -149,7 +163,36 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<String> {
         }
     }
 
-    if !ctx.remove {
+    if gateway {
+        let plugins = as_mapping(
+            config.entry("plugins".into()).or_insert(Value::Null),
+            "plugins",
+        )?;
+        let entries = as_mapping(
+            plugins.entry("entries".into()).or_insert(Value::Null),
+            "plugins.entries",
+        )?;
+        let entry = as_mapping(
+            entries.entry(PLUGIN_NAME.into()).or_insert(Value::Null),
+            PLUGIN_NAME,
+        )?;
+        let settings = as_mapping(
+            entry.entry("settings".into()).or_insert(Value::Null),
+            "Cairn plugins settings",
+        )?;
+        if ctx.remove {
+            settings.remove("cairn_gateway");
+            settings.remove(ENABLED_MARKER);
+        } else {
+            settings.insert("cairn_gateway".into(), true.into());
+            if owns_enable {
+                settings.insert(ENABLED_MARKER.into(), true.into());
+            }
+            settings
+                .entry("chat_salt".into())
+                .or_insert_with(|| cairn_core::id::new_id("salt").into());
+        }
+    } else if !ctx.remove {
         let mut env = ctx.mcp_env();
         // Hermes filters the inherited stdio environment, including CAIRN_CONFIG.
         env.insert("CAIRN_CONFIG".into(), json!(ctx.config.to_string_lossy()));
@@ -167,9 +210,10 @@ fn config_text(path: &Path, ctx: &Ctx) -> R<String> {
         );
     }
     if root == before {
-        return Ok(raw);
+        return Ok((raw, gateway));
     }
-    yaml_serde::to_string(&root).map_err(|_| "cannot serialize Hermes config.yaml".into())
+    let text = yaml_serde::to_string(&root).map_err(|_| "cannot serialize Hermes config.yaml")?;
+    Ok((text, gateway))
 }
 
 fn as_mapping<'a>(value: &'a mut Value, name: &str) -> R<&'a mut Mapping> {

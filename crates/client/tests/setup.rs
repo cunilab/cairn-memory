@@ -1158,3 +1158,66 @@ fn refresh_adds_command_hooks_to_every_existing_install() {
         assert!(read(&home, path).contains(event), "{path}");
     }
 }
+
+#[test]
+fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
+    let home = Home::new("hermes-gateway", false);
+    let profile = home.dir.join("gateway-profile");
+    let invoke = |gateway: bool, remove: bool| {
+        let mut cmd = home.command("hermes", remove);
+        cmd.env("HERMES_HOME", &profile);
+        if gateway {
+            cmd.arg("--gateway");
+        }
+        let output = with_stdin(&mut cmd, SECRET);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let yaml = || {
+        yaml_serde::from_str::<Value>(&fs::read_to_string(profile.join("config.yaml")).unwrap())
+            .unwrap()
+    };
+    invoke(false, false);
+    assert_eq!(yaml()["mcp_servers"]["cairn"]["trust"], "full");
+
+    invoke(true, false);
+    let converted = yaml();
+    assert!(converted["mcp_servers"]["cairn"].is_null());
+    let settings = &converted["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert_eq!(settings["cairn_gateway"], true);
+    let salt = settings["chat_salt"].as_str().unwrap();
+    let plugin = profile.join("plugins/cairn-memory");
+    assert!(
+        fs::read_to_string(plugin.join("__init__.py"))
+            .unwrap()
+            .contains("GATEWAY = True")
+    );
+    assert!(
+        fs::read_to_string(plugin.join("plugin.yaml"))
+            .unwrap()
+            .contains("  - memory_search\n  - memory_save")
+    );
+    let before = home.snapshot("gateway-profile");
+    invoke(true, false);
+    assert_eq!(before, home.snapshot("gateway-profile"));
+    invoke(false, false);
+    assert_eq!(
+        before,
+        home.snapshot("gateway-profile"),
+        "routine setup preserves gateway mode"
+    );
+
+    invoke(false, true);
+    let removed = yaml();
+    assert!(removed["mcp_servers"]["cairn"].is_null());
+    assert!(removed["plugins"]["enabled"].as_array().unwrap().is_empty());
+    let settings = &removed["plugins"]["entries"]["cairn-memory"]["settings"];
+    assert!(settings["cairn_gateway"].is_null());
+    assert_eq!(settings["chat_salt"], salt);
+    assert!(!plugin.join("__init__.py").exists());
+    assert!(!plugin.join("plugin.yaml").exists());
+    assert!(!home.dir.join(".hermes").exists());
+}

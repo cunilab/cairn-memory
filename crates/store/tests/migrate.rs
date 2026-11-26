@@ -38,6 +38,7 @@ async fn migrate_twice_is_a_no_op() {
             "0020_device_agent_hermes",
             "0021_push_usage",
             "0022_memory_pins",
+            "0023_hermes_chat",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1028,6 +1029,7 @@ async fn fixes_migration_additive() {
     versions.push("0020_device_agent_hermes".into());
     versions.push("0021_push_usage".into());
     versions.push("0022_memory_pins".into());
+    versions.push("0023_hermes_chat".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")

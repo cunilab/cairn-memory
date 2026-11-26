@@ -78,7 +78,7 @@ macro_rules! memory_columns {
         concat!(
             "SELECT m.memory_id, m.owner_id, m.project_id, m.scope, m.kind,
     m.title, m.summary, m.reason, ", $detail, " AS detail, m.fields, m.evidence, m.evidence_count, m.evidence_hash,
-    m.identity_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
+    m.identity_hash, m.chat_id_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
     EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at,
@@ -184,6 +184,11 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         updated_at: row.try_get("updated_at")?,
         evidence_hash: row.try_get("evidence_hash")?,
         identity_hash: row.try_get("identity_hash")?,
+        chat_id_hash: row
+            .try_get::<Option<String>, _>("chat_id_hash")?
+            .map(cairn_core::capture::ChatHash::try_from)
+            .transpose()
+            .map_err(|error| StoreError::Validation(error.into()))?,
         usage: Usage {
             fetched: row.try_get::<i32, _>("fetched")?.max(0) as u32,
             shown: row.try_get::<i32, _>("shown")?.max(0) as u32,
@@ -234,10 +239,11 @@ pub struct Saved {
     pub hints: Vec<String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum SaveSource {
     Agent,
     StrictAgent,
+    ImportedChat(cairn_core::capture::ChatHash),
     System,
 }
 
@@ -266,6 +272,8 @@ pub struct ListFilter {
     pub see_forgotten: bool,
     /// A console list filtered to an explicitly selected project.
     pub include_archived: bool,
+    /// A device listing cannot browse chat-tagged personal memories.
+    pub exclude_chat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +338,9 @@ impl Store {
         work: &WorkContext,
         device_id: Option<&str>,
     ) -> Result<Option<String>> {
+        if work.chat.is_some() {
+            return Ok(self.resolve_project(person_id, work).await?.project_id);
+        }
         if let Some(project_id) = work
             .project_id
             .as_deref()
@@ -499,6 +510,7 @@ impl Store {
                AND ($9::text IS NULL OR m.repo_branch = $9)
                AND ($10::text IS NULL OR {matches})
                AND ($11::text IS NULL OR ({trust}) = $11)
+               AND (NOT $12 OR m.chat_id_hash IS NULL)
              ORDER BY m.updated_at DESC, m.memory_id DESC LIMIT $8"
         ))
         .bind(person_id)
@@ -512,6 +524,7 @@ impl Store {
         .bind(&filter.branch)
         .bind(q)
         .bind(filter.trust.map(TrustLevel::as_str))
+        .bind(filter.exclude_chat)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| match &error {
@@ -844,11 +857,13 @@ pub(crate) async fn link_tx(
         ));
     }
     let row = sqlx::query(&format!(
-        "SELECT m.owner_id, m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND {}",
+        "SELECT m.owner_id, m.scope, m.project_id FROM memories m WHERE m.memory_id = $2 AND {}
+           AND m.chat_id_hash IS NOT DISTINCT FROM (SELECT chat_id_hash FROM memories WHERE memory_id = $3)",
         visible("m", "$1")
     ))
     .bind(person_id)
     .bind(target)
+    .bind(source)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| StoreError::NotFound(format!("memory {target}")))?;
@@ -917,11 +932,11 @@ pub(crate) async fn save_in_tx(
         .map(|alias| cairn_core::capture::redact_sensitive_content(alias.trim()))
         .collect();
     input.aliases = aliases.clone();
-    let new = match source {
+    let mut new = match &source {
         SaveSource::Agent => {
             prepare_coached_save(input, work, project_id.is_some(), now_seconds())?
         }
-        SaveSource::StrictAgent => prepare_save(
+        SaveSource::StrictAgent | SaveSource::ImportedChat(_) => prepare_save(
             input,
             work,
             project_id.is_some(),
@@ -936,6 +951,9 @@ pub(crate) async fn save_in_tx(
             now_seconds(),
         )?,
     };
+    if let SaveSource::ImportedChat(hash) = &source {
+        new.tag_chat(hash.clone(), true);
+    }
     let saved = insert_memory(
         tx,
         person_id,
@@ -978,7 +996,7 @@ pub(crate) async fn insert_memory(
     coach: bool,
 ) -> Result<Saved> {
     lock_project_memory(tx, new.scope, project_id).await?;
-    let project_id = if new.scope == Scope::Global {
+    let project_id = if new.scope == Scope::Global || new.chat_id_hash.is_some() {
         None
     } else {
         project_id
@@ -998,7 +1016,8 @@ pub(crate) async fn insert_memory(
     } else {
         Vec::new()
     };
-    let rank = if !hints.is_empty()
+    let rank = if new.chat_candidate
+        || !hints.is_empty()
         || (new.origin == Origin::System && new.kind != Kind::Handoff && new.scope != Scope::Global)
     {
         Rank::Candidate
@@ -1008,8 +1027,8 @@ pub(crate) async fn insert_memory(
     let inserted: Option<String> = sqlx::query_scalar(
         "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary, reason, fields,
                                evidence, evidence_count, evidence_hash, identity_hash,
-                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank, detail)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21, $22)
+                               repo, repo_branch, repo_worktree, repo_commit, expires_at, origin, device_id, rank, detail, chat_id_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, to_timestamp($18), $19, $20, $21, $22, $23)
          ON CONFLICT (owner_id, scope, (coalesce(project_id, '')), identity_hash) DO NOTHING
          RETURNING memory_id",
     )
@@ -1035,6 +1054,7 @@ pub(crate) async fn insert_memory(
     .bind(device_id)
     .bind(rank.as_str())
     .bind(new.detail.as_deref().unwrap_or_default())
+    .bind(new.chat_id_hash.as_ref().map(|hash| hash.as_str()))
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = inserted else {
@@ -1056,7 +1076,8 @@ pub(crate) async fn insert_memory(
         let coached = parse::<Origin>(&existing, "origin")? == Origin::Agent
             && parse::<Rank>(&existing, "rank")? == Rank::Candidate;
         let self_correction = new.supersedes.as_deref() == Some(id.as_str());
-        if new.origin != Origin::System
+        if !new.chat_candidate
+            && new.origin != Origin::System
             && (!coached || (self_correction && coach && hints.is_empty()))
         {
             promote_candidates(&mut *tx, std::slice::from_ref(&id), true).await?;
@@ -1207,13 +1228,16 @@ impl Store {
             scope: Some(old.scope),
             aliases: Vec::new(),
         };
-        let prepared = prepare_save(
+        let mut prepared = prepare_save(
             input,
             &context,
             old.project_id.is_some(),
             old.origin,
             now_seconds(),
         )?;
+        if let Some(hash) = old.chat_id_hash {
+            prepared.tag_chat(hash, old.rank == Rank::Candidate);
+        }
         if prepared.identity_hash == old.identity_hash {
             return Err(StoreError::Conflict(
                 "nothing to rewrite: title, summary and fields are unchanged".into(),

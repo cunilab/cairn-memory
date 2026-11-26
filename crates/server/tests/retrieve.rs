@@ -1697,3 +1697,220 @@ async fn legacy_brief_keeps_identity_and_packs_essentials_within_1200_bytes() {
     assert_eq!(shown, rendered);
     app.finish().await;
 }
+
+#[tokio::test]
+async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
+    let Some(app) = App::new().await else { return };
+    let owner = app.admin("chat-owner").await;
+    let token = app.device(&owner, "hermes-gateway").await;
+    let other = app.member(&owner, "other-account").await;
+    let foreign_token = app.device(&other, "other-device").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({
+                "repository": "local:e2e-hermes-chat", "name": "E2E Hermes chat"
+            }),
+            &token,
+        )
+        .await["project_id"]
+        .clone();
+    let chat = |kind, hash: &str, sender, owner| {
+        json!({
+            "platform": "telegram", "kind": kind, "chat_id_hash": hash.repeat(64),
+            "sender_id_hash": sender, "thread_id_hash": "d".repeat(64), "owner": owner,
+        })
+    };
+    let group = chat("group", "a", "e".repeat(64), true);
+    let other_group = chat("group", "b", "e".repeat(64), false);
+    let owner_dm = chat("dm", "c", "e".repeat(64), true);
+    let mut guest_dm = chat("dm", "c", "f".repeat(64), false);
+    let private = save(
+        &app,
+        &token,
+        json!({
+            "kind": "preference", "title": "Kestrel private fallback",
+            "summary": "Use the private Kestrel fallback when generating my reports.",
+            "reason": "The fallback preserves the account's report format."
+        }),
+    )
+    .await;
+    let pinned = save(
+        &app,
+        &token,
+        json!({
+            "kind": "note", "title": "Private identity pin",
+            "summary": "This pin is available only to the account owner."
+        }),
+    )
+    .await;
+    app.post(
+        &format!("memories/{pinned}/pin"),
+        json!({"pinned": true}),
+        &owner,
+    )
+    .await;
+    let project_rule = save(
+        &app,
+        &token,
+        json!({
+            "kind": "rule", "scope": "project", "title": "Kestrel project schedule",
+            "summary": "Refresh the Kestrel schedule on the first day of the month.",
+            "reason": "Shared reports read the monthly schedule.",
+            "context": {"project_id": project}
+        }),
+    )
+    .await;
+    let saved_body = json!({
+        "kind": "note", "scope": "global", "title": "Kestrel observatory schedule",
+        "summary": "The Kestrel observatory runs a public tour every Thursday.",
+        "context": {"chat": group, "project_id": project}
+    });
+    let group_id = save(&app, &token, saved_body.clone()).await;
+    assert_eq!(save(&app, &token, saved_body.clone()).await, group_id);
+    let record = app.get(&format!("memories/{group_id}"), &owner).await;
+    assert_eq!(record["scope"], "personal");
+    assert_eq!(record["trust"], "new · awaiting confirmation");
+    assert_eq!(record["project_id"], serde_json::Value::Null);
+    let stored: (String, i32) =
+        sqlx::query_as("SELECT chat_id_hash, proof_count FROM memories WHERE memory_id = $1")
+            .bind(&group_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, ("a".repeat(64), 1));
+
+    let search = async |chat: &serde_json::Value, token: &str| {
+        let args = json!({"query": "Kestrel", "context": {"chat": chat}});
+        ids(&app.post("search", args, token).await)
+    };
+    assert_eq!(search(&group, &token).await, [group_id.as_str()]);
+    assert!(search(&other_group, &token).await.is_empty());
+    assert!(search(&guest_dm, &token).await.is_empty());
+    let guest_saved = save(&app, &token, json!({
+        "kind": "note", "title": "Guest ticket", "summary": "The guest has a ticket for Thursday.",
+        "context": {"chat": guest_dm}
+    })).await;
+    let guest_memory = app.get(&format!("memories/{guest_saved}"), &owner).await;
+    assert_eq!(guest_memory["trust"], "new · awaiting confirmation");
+    guest_dm["owner"] = true.into();
+    guest_dm["sender_id_hash"] = serde_json::Value::Null;
+    assert!(search(&guest_dm, &token).await.is_empty());
+    assert!(search(&group, &foreign_token).await.is_empty());
+    let owner_ids = search(&owner_dm, &token).await;
+    assert!(owner_ids.contains(&group_id) && owner_ids.contains(&private));
+    assert!(!owner_ids.contains(&project_rule));
+    let linked = app
+        .post(
+            "search",
+            json!({"query": "Kestrel", "context": {
+                "chat": group, "project_id": project
+            }}),
+            &token,
+        )
+        .await;
+    assert!(ids(&linked).contains(&project_rule));
+    assert!(!ids(&linked).contains(&private));
+    assert!(
+        !ids(&app
+            .post("search", json!({"query": "Kestrel"}), &token)
+            .await)
+        .contains(&group_id)
+    );
+    assert_eq!(
+        app.send(
+            "GET",
+            &format!("memories/{group_id}"),
+            serde_json::Value::Null,
+            Some(&token)
+        )
+        .await
+        .0,
+        404
+    );
+
+    let mut raw_id = saved_body;
+    raw_id["context"]["chat"]["chat_id_hash"] = "unhashed-transport-id".into();
+    assert_eq!(
+        app.send("POST", "remember", raw_id, Some(&token)).await.0,
+        400
+    );
+
+    let session = |digit: char| format!("hchat_{}", digit.to_string().repeat(32));
+    let brief = app
+        .post(
+            "session/brief",
+            json!({
+                "session_id": session('a'), "context": {"chat": group, "project_id": project}
+            }),
+            &token,
+        )
+        .await;
+    let briefing = brief["brief"].as_str().unwrap();
+    assert!(briefing.contains("Kestrel project schedule"), "{brief}");
+    assert!(!briefing.contains("private fallback") && !briefing.contains("Private identity pin"));
+    assert!(brief["instructions"].is_null());
+    let owner_brief = app
+        .post(
+            "session/brief",
+            json!({
+                "session_id": session('b'), "context": {"chat": owner_dm}
+            }),
+            &token,
+        )
+        .await;
+    assert!(
+        owner_brief["brief"]
+            .as_str()
+            .unwrap()
+            .contains("Private identity pin")
+    );
+    for (chat, digit, visible) in [(&group, 'c', false), (&owner_dm, 'd', true)] {
+        let prompt = app
+            .post(
+                "session/prompt-recall",
+                json!({
+                    "session_id": session(digit), "prompt": "Can I use Kestrel private fallback?",
+                    "context": {"chat": chat}
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            prompt["text"]
+                .as_str()
+                .unwrap()
+                .contains("Kestrel private fallback"),
+            visible,
+            "{prompt}"
+        );
+    }
+    save(&app, &token, json!({
+        "kind": "gotcha", "title": "Kestrel command warning",
+        "summary": "Check the report directory before running kestrel audit.",
+        "reason": "The audit replaces the existing report.",
+        "fields": {"symptom": "The previous report disappeared",
+                   "cause": "kestrel audit overwrites it", "fix": "Copy the previous report first"},
+        "context": {"commands": ["kestrel audit"]}
+    })).await;
+    for (chat, digit, visible) in [(&group, 'e', false), (&owner_dm, 'f', true)] {
+        let warning = app
+            .post(
+                "session/command-recall",
+                json!({
+                    "session_id": session(digit), "command": "kestrel audit", "chat": chat
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            warning["text"]
+                .as_str()
+                .unwrap()
+                .contains("Kestrel command warning"),
+            visible,
+            "{warning}"
+        );
+    }
+    app.db.finish().await;
+}

@@ -38,6 +38,8 @@ impl std::str::FromStr for Origin {
 /// A validated, redacted and derived memory, ready for the store to insert.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewMemory {
+    pub chat_id_hash: Option<crate::capture::ChatHash>,
+    pub chat_candidate: bool,
     pub kind: Kind,
     pub scope: Scope,
     pub origin: Origin,
@@ -54,6 +56,15 @@ pub struct NewMemory {
     pub expires_at: Option<i64>,
     pub supersedes: Option<String>,
     pub contradicts: Option<String>,
+}
+
+impl NewMemory {
+    /// Keep exact duplicates within one chat, including across export and rewrite.
+    pub fn tag_chat(&mut self, hash: crate::capture::ChatHash, candidate: bool) {
+        self.identity_hash = crate::id::sha256_hex(&["chat", hash.as_str(), &self.identity_hash]);
+        self.chat_id_hash = Some(hash);
+        self.chat_candidate = candidate;
+    }
 }
 
 /// Preparation for system saves and callers that still enforce the legacy quality gate.
@@ -112,7 +123,11 @@ fn prepare(
             "supersedes and contradicts must name different memories",
         ));
     }
-    let scope = resolve_scope(input.kind, input.scope, has_project)?;
+    let scope = if work.chat.is_some() {
+        Scope::Personal
+    } else {
+        resolve_scope(input.kind, input.scope, has_project)?
+    };
     let evidence = normalize_evidence(&input.evidence);
     let entities = entities::derive(
         &[
@@ -123,7 +138,9 @@ fn prepare(
         ],
         work,
     );
-    Ok(NewMemory {
+    let mut new = NewMemory {
+        chat_id_hash: None,
+        chat_candidate: false,
         kind: input.kind,
         scope,
         origin,
@@ -145,7 +162,11 @@ fn prepare(
         expires_at: expires_at(input.kind, origin == Origin::System, scope, now),
         supersedes: input.supersedes,
         contradicts: input.contradicts,
-    })
+    };
+    if let Some(chat) = &work.chat {
+        new.tag_chat(chat.chat_id_hash.clone(), !chat.owner_dm());
+    }
+    Ok(new)
 }
 
 #[cfg(test)]

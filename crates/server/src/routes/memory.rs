@@ -268,6 +268,7 @@ pub async fn list(
                 q: query.q,
                 see_forgotten: account.is_admin && status == Some("forgotten"),
                 include_archived: caller.device_id.is_none(),
+                exclude_chat: caller.device_id.is_some(),
             },
         )
         .await?;
@@ -295,6 +296,9 @@ pub async fn get(
         .store
         .get_visible(&account.person_id, &id, caller.device_id.is_none())
         .await?;
+    if caller.device_id.is_some() && memory.chat_id_hash.is_some() {
+        return Err(cairn_store::StoreError::NotFound(format!("memory {id}")).into());
+    }
     let detail = (!memory.detail.is_empty()).then(|| std::mem::take(&mut memory.detail));
     let mut views = state
         .store

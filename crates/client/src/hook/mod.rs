@@ -13,7 +13,7 @@ mod state;
 use crate::{Client, Config, Error, claude_memory, selected_config_path, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{
-    CaptureKind, WorkContext, redact_sensitive_content, redact_work_context,
+    CaptureKind, ChatContext, WorkContext, redact_sensitive_content, redact_work_context,
 };
 use cairn_core::id::{new_id, now_seconds, sha256_hex};
 use cairn_core::instructions::{
@@ -171,6 +171,15 @@ fn session(options: &Options) -> Result<(), String> {
     if options.agent == "hermes" {
         payload.normalize_hermes();
     }
+    let chat = if options.agent == "hermes" {
+        payload
+            .value("chat_context")
+            .map(|value| serde_json::from_value::<ChatContext>(value.clone()))
+            .transpose()
+            .map_err(|_| "invalid Hermes chat context")?
+    } else {
+        None
+    };
     if options.event == "PreToolUse" {
         // A running Hermes plugin from before the update may still call this and discard stdout.
         if options.agent == "hermes" {
@@ -206,8 +215,8 @@ fn session(options: &Options) -> Result<(), String> {
         Some(cwd) => PathBuf::from(cwd),
         None => std::env::current_dir().map_err(|e| format!("no working folder: {e}"))?,
     };
-    let top = git::top_level(&cwd);
-    if git::ignored(&cwd, top.as_deref()) {
+    let top = chat.is_none().then(|| git::top_level(&cwd)).flatten();
+    if chat.is_none() && git::ignored(&cwd, top.as_deref()) {
         return Ok(());
     }
     let session_id = payload
@@ -224,6 +233,7 @@ fn session(options: &Options) -> Result<(), String> {
         agent: &options.agent,
         config,
         config_dir,
+        chat,
         key,
         session_id,
         cwd,
@@ -232,6 +242,16 @@ fn session(options: &Options) -> Result<(), String> {
         check: OnceCell::new(),
         payload,
     };
+    if matches!(hook.event, "ChatSearch" | "ChatSave") {
+        if hook.chat.is_none() {
+            return Err("Hermes chat tools require chat context".into());
+        }
+        let reply = hook
+            .chat_tool()
+            .unwrap_or_else(|_| json!({"error": "Cairn could not complete this chat request."}));
+        println!("{reply}");
+        return Ok(());
+    }
     let text = hook.handle()?;
     if let Some(reply) = inject::output(hook.agent, hook.event, text.as_deref()) {
         println!("{reply}");
@@ -246,6 +266,7 @@ struct Hook<'a> {
     agent: &'a str,
     config: Config,
     config_dir: PathBuf,
+    chat: Option<ChatContext>,
     key: String,
     session_id: String,
     cwd: PathBuf,
@@ -365,7 +386,38 @@ impl Hook<'_> {
         }
     }
 
+    fn chat_tool(&self) -> Result<Value, Error> {
+        let (route, keys): (&str, &[&str]) = if self.event == "ChatSearch" {
+            ("/cairn-memory/search", &["query"])
+        } else {
+            (
+                "/cairn-memory/remember",
+                &["kind", "title", "summary", "reason", "fields"],
+            )
+        };
+        let arguments = self
+            .payload
+            .value("arguments")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Error::Input("chat tool arguments must be an object".into()))?;
+        let mut body = serde_json::Map::new();
+        for key in keys {
+            if let Some(value) = arguments.get(*key) {
+                body.insert((*key).to_owned(), value.clone());
+            }
+        }
+        body.insert("context".into(), json!(self.work_context()));
+        self.post(route, &Value::Object(body))
+    }
+
     fn work_context(&self) -> WorkContext {
+        if let Some(chat) = &self.chat {
+            return WorkContext {
+                chat: Some(chat.clone()),
+                project_id: self.payload.text("project_id").map(str::to_owned),
+                ..WorkContext::default()
+            };
+        }
         self.context
             .get_or_init(|| git::work_context(&self.cwd, self.top.as_deref()))
             .clone()
@@ -443,7 +495,11 @@ impl Hook<'_> {
 
     fn start(&self) -> Option<String> {
         state::sweep(&self.state_dir());
-        let dirty = git::dirty_files(&self.cwd, BASELINE_MAX);
+        let dirty = if self.chat.is_some() {
+            Vec::new()
+        } else {
+            git::dirty_files(&self.cwd, BASELINE_MAX)
+        };
         self.with_state(|state| {
             state.baseline_dirty = dirty;
             state.grok_brief_shown = false;
@@ -455,7 +511,7 @@ impl Hook<'_> {
         let body = json!({
             "session_id": self.session_id,
             "context": self.work_context(),
-            "recent_files": git::recent_files(&self.cwd),
+            "recent_files": if self.chat.is_some() { Vec::new() } else { git::recent_files(&self.cwd) },
             "extended_brief": true,
         });
         let reply = match self.post("/cairn-memory/session/brief", &body) {
@@ -468,7 +524,9 @@ impl Hook<'_> {
                 return self
                     .config
                     .nudge()
-                    .then(|| DEFAULT_SESSION_INSTRUCTION.to_owned());
+                    .then_some(DEFAULT_SESSION_INSTRUCTION)
+                    .filter(|_| self.chat.is_none())
+                    .map(str::to_owned);
             }
         };
         if let Some(check) = reply.get("check").filter(|check| check.is_object()) {
@@ -497,7 +555,7 @@ impl Hook<'_> {
         if let Some(id) = resolved.clone() {
             self.with_state(|s| s.project_id = Some(id));
         }
-        let line = if !self.config.nudge() {
+        let line = if !self.config.nudge() || self.chat.is_some() {
             None
         } else {
             let stop = inject::server_text(&reply, "stop_nudge", DEFAULT_STOP_NUDGE);
@@ -798,6 +856,7 @@ impl Hook<'_> {
         context = WorkContext {
             project_id: context.project_id.take(),
             branch: context.branch.take(),
+            chat: context.chat.take(),
             ..WorkContext::default()
         };
         let body = json!({"prompt": prompt, "session_id": self.session_id, "context": context});
@@ -831,13 +890,20 @@ impl Hook<'_> {
         if command.is_empty() || command.chars().count() > 200 || self.server_is_down() {
             return None;
         }
-        let project_id = self.top.as_deref().and_then(git::project_id);
-        let body = json!({
+        let project_id = if self.chat.is_some() {
+            self.payload.text("project_id").map(str::to_owned)
+        } else {
+            self.top.as_deref().and_then(git::project_id)
+        };
+        let mut body = json!({
             "command": command,
             "session_id": self.session_id,
             "project_id": project_id,
-            "error_tail": error_tail
+            "error_tail": error_tail,
         });
+        if let Some(chat) = &self.chat {
+            body["chat"] = json!(chat);
+        }
         let reply = Client::identified(
             self.config.clone(),
             RECALL_TIMEOUT,
@@ -933,6 +999,9 @@ impl Hook<'_> {
     /// Paths dirty since SessionStart, plus tool edits, capped. Skipped when that set is empty
     /// or the same set was already sent. `outside_edits` rides along as a count.
     fn capture_changed_files(&self) {
+        if self.chat.is_some() {
+            return;
+        }
         let cwd = self.cwd.clone();
         let Some(Some((files, outside, hash))) = self.with_state(|state| {
             let files = changed_paths(state, &cwd);
@@ -1042,7 +1111,10 @@ impl Hook<'_> {
     /// Keeps the session's work: on a stored result `dirty` clears unless more work arrived
     /// while the request ran.
     fn checkpoint(&self, generation: u64) {
-        let body = json!({"session_id": self.session_id});
+        let mut body = json!({"session_id": self.session_id});
+        if let Some(chat) = &self.chat {
+            body["chat"] = json!(chat);
+        }
         match self.post("/cairn-memory/session/checkpoint", &body) {
             Ok(reply)
                 if matches!(
@@ -1086,9 +1158,11 @@ impl Hook<'_> {
         if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
             locked.delete();
         }
-        if worked || used_recall {
+        if worked || used_recall || self.chat.is_some() {
             let mut body = json!({"session_id": self.session_id});
-            if !automated {
+            if let Some(chat) = &self.chat {
+                body["chat"] = json!(chat);
+            } else if !automated {
                 body["nudge_asked"] = json!(nudged);
                 body["nudge_saved"] = json!(saved);
             }

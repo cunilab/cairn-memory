@@ -35,6 +35,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         updated_at: 0,
         evidence_hash: String::new(),
         identity_hash: String::new(),
+        chat_id_hash: None,
         usage: Usage::default(),
     }
 }

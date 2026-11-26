@@ -1,9 +1,9 @@
 use crate::AppState;
-use crate::auth::Agent;
+use crate::auth::{Agent, Caller};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Query, State};
-use cairn_core::capture::{WorkContext, redact_sensitive_content};
+use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::memory::{Kind, Relation, Scope};
 use cairn_core::retrieve::brief::BriefBudget;
 use cairn_core::retrieve::command::ERROR_TAIL_MAX_BYTES;
@@ -84,9 +84,13 @@ pub async fn search(
     Json(body): Json<Search>,
 ) -> Result<Json<Value>, ApiError> {
     let vector = vector(&state, &body.query).await;
+    let context = match body.context {
+        Some(context) => Some(chat_project(&state, &account.person_id, context).await?),
+        None => None,
+    };
     let filter = Filter {
         kind: body.kind,
-        context: body.context,
+        context,
         ..Filter::default()
     };
     if body.debug && state.debug_scores {
@@ -141,18 +145,50 @@ pub(super) fn push_session_id(id: Option<&str>) -> Result<Option<&str>, ApiError
     Ok(id)
 }
 
+pub(super) fn validate_chat_session(id: &str, chat: Option<&ChatContext>) -> Result<(), ApiError> {
+    let chat_id = id.strip_prefix("hchat_").is_some_and(|value| {
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    });
+    if chat.is_some() != chat_id {
+        return Err(ApiError::invalid("invalid Hermes chat session id"));
+    }
+    Ok(())
+}
+
+async fn chat_project(
+    state: &AppState,
+    person_id: &str,
+    mut work: WorkContext,
+) -> Result<WorkContext, ApiError> {
+    if work.chat.is_some() {
+        work.project_id = state
+            .store
+            .resolve_project(person_id, &work)
+            .await?
+            .project_id;
+    }
+    Ok(work)
+}
+
 pub async fn brief(
     State(state): State<AppState>,
     Agent(account): Agent,
     Json(body): Json<Brief>,
 ) -> Result<Json<Value>, ApiError> {
-    let context = body.context.unwrap_or_default();
+    let mut context = body.context.unwrap_or_default();
     let resolved = state
         .store
         .resolve_project(&account.person_id, &context)
         .await?;
+    if context.chat.is_some() {
+        context.project_id.clone_from(&resolved.project_id);
+    }
     let session_id = push_session_id(body.session_id.as_deref())?;
     if let Some(session_id) = session_id {
+        validate_chat_session(session_id, context.chat.as_ref())?;
         state
             .store
             .record_session_files(&account.person_id, session_id, &context, &body.recent_files)
@@ -167,23 +203,23 @@ pub async fn brief(
         }
         _ => None,
     };
-    // The texts the hook appends at start and sends at Stop, so it needs no other request.
-    let instructions = state
-        .store
-        .effective_instructions(&account.person_id, context.project_id.as_deref())
-        .await?;
     let budget = if body.extended_brief {
         BriefBudget::Extended
     } else {
         BriefBudget::Legacy
     };
-    let mut reply = json!({
-        "max_bytes": budget.max_bytes(),
-        "instructions": {
+    let mut reply = json!({"max_bytes": budget.max_bytes()});
+    if context.chat.as_ref().is_none_or(ChatContext::owner_dm) {
+        // The texts the hook appends at start and sends at Stop, so it needs no other request.
+        let instructions = state
+            .store
+            .effective_instructions(&account.person_id, context.project_id.as_deref())
+            .await?;
+        reply["instructions"] = json!({
             "session_instruction": instructions.session_instruction.text,
             "stop_nudge": instructions.stop_nudge.text,
-        },
-    });
+        });
+    }
     if let Some(check) = check {
         reply["check"] = json!(check);
     }
@@ -220,12 +256,14 @@ pub async fn topic(
     if body.path.trim().is_empty() {
         return Err(ApiError::invalid("path must not be empty"));
     }
+    let context =
+        chat_project(&state, &account.person_id, body.context.unwrap_or_default()).await?;
     let topic = state
         .store
         .topic(
             &account.person_id,
             &body.path,
-            &body.context.unwrap_or_default(),
+            &context,
             push_session_id(body.session_id.as_deref())?,
         )
         .await?;
@@ -248,6 +286,7 @@ pub struct CommandRecall {
     project_id: Option<String>,
     command: String,
     error_tail: Option<String>,
+    chat: Option<ChatContext>,
 }
 
 pub async fn command_recall(
@@ -256,6 +295,7 @@ pub async fn command_recall(
     Json(body): Json<CommandRecall>,
 ) -> ApiResult<Value> {
     push_session_id(Some(&body.session_id))?;
+    validate_chat_session(&body.session_id, body.chat.as_ref())?;
     if body.command.len() > 800
         || body
             .error_tail
@@ -266,12 +306,23 @@ pub async fn command_recall(
             "command recall input exceeds its byte limit",
         ));
     }
-    let recall = state.store.command_recall(
+    let work = chat_project(
+        &state,
+        &account.person_id,
+        WorkContext {
+            project_id: body.project_id,
+            chat: body.chat,
+            ..WorkContext::default()
+        },
+    )
+    .await?;
+    let recall = state.store.command_recall_in(
         &account.person_id,
         &body.session_id,
-        body.project_id.as_deref(),
+        work.project_id.as_deref(),
         &body.command,
         body.error_tail.as_deref(),
+        work.chat.as_ref(),
     );
     let text = match tokio::time::timeout(RECALL_TIMEOUT, recall).await {
         Ok(result) => result?,
@@ -295,6 +346,7 @@ pub async fn prompt_recall(
     Json(body): Json<PromptRecall>,
 ) -> ApiResult<Value> {
     push_session_id(Some(&body.session_id))?;
+    validate_chat_session(&body.session_id, body.context.chat.as_ref())?;
     if body.prompt.len() > PROMPT_QUERY_MAX_BYTES || body.prompt.contains('\0') {
         return Ok(Json(json!({"text": ""})));
     }
@@ -302,6 +354,7 @@ pub async fn prompt_recall(
     if !should_recall(&prompt) {
         return Ok(Json(json!({"text": ""})));
     }
+    let context = chat_project(&state, &account.person_id, body.context).await?;
     let recall = async {
         if state
             .store
@@ -316,7 +369,7 @@ pub async fn prompt_recall(
             .prompt_recall(
                 &account.person_id,
                 &body.session_id,
-                body.context,
+                context,
                 &prompt,
                 embedding.as_deref(),
             )
@@ -331,7 +384,7 @@ pub async fn prompt_recall(
 
 pub async fn graph(
     State(state): State<AppState>,
-    Agent(account): Agent,
+    caller: Caller,
     Query(query): Query<GraphQuery>,
 ) -> ApiResult<Graph> {
     let filter = GraphFilter {
@@ -342,7 +395,12 @@ pub async fn graph(
     Ok(Json(
         state
             .store
-            .graph(&account.person_id, &filter, query.cap)
+            .graph(
+                &caller.account.person_id,
+                &filter,
+                query.cap,
+                caller.device_id.is_some(),
+            )
             .await?,
     ))
 }

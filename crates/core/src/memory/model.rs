@@ -150,6 +150,8 @@ pub struct Memory {
     pub evidence_hash: String,
     #[serde(skip)]
     pub identity_hash: String,
+    #[serde(skip)]
+    pub chat_id_hash: Option<crate::capture::ChatHash>,
     /// Internal only; never shown to agents.
     #[serde(skip)]
     pub usage: Usage,
