@@ -137,9 +137,10 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
     )
     .unwrap();
 
-    // The same release feed offers 99.0.0; a copy of the binary updates itself.
+    // The same release feed offers 99.0.0; a copy of the binary updates itself. The new binary's
+    // setup output is distinguishable from the old one's.
     let name = "cairn-x86_64-unknown-linux-musl".to_owned();
-    let binary = b"#!/bin/sh\necho 'cairn 99.0.0'\n".to_vec();
+    let binary = b"#!/bin/sh\ncase \"$*\" in\n--version) echo 'cairn 99.0.0' ;;\n'update --refresh') echo 'new setup ran' ;;\nesac\n".to_vec();
     let sums = format!("{:x}  {name}\n", Sha256::digest(&binary));
     let base = serve(vec![
         (format!("/dl/{name}"), binary),
@@ -166,8 +167,23 @@ fn update_points_the_installed_hook_commands_at_the_new_executable() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // The refresh ran in the installed executable, not in the updating (old) process.
     assert!(
-        stdout.contains("Updated cairn") && stdout.contains("Cairn claude integration installed"),
+        stdout.contains("Updated cairn") && stdout.contains("new setup ran"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("integration installed"), "{stdout}");
+
+    // What the new executable's refresh entry point does: a real binary rewrites the integrations.
+    std::fs::copy(env!("CARGO_BIN_EXE_cairn"), &copy).unwrap();
+    let mut refresh = Command::new(&copy);
+    common::isolate(&mut refresh, &home);
+    setup_env(&mut refresh);
+    let output = refresh.args(["update", "--refresh"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout.contains("Cairn claude integration installed"),
         "{stdout}"
     );
     for (agent, hooks, mcp) in [

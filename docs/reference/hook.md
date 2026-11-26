@@ -101,7 +101,9 @@ Keep the profile's chat salt so Cairn can find its existing chat memories.
 
 Cairn accepts a bound route from any platform with a lowercase token of up to 32 ASCII
 characters. It sends salted hashes of the chat and thread route. A missing route disables
-Cairn in that turn. DMs and groups share the same visibility rules.
+Cairn in that turn. DMs and groups share the same visibility rules. Each chat hook call first
+checks that the server reports version 0.1.10 or later; otherwise, or when the server does not
+answer, chat memory is off for that call and nothing is sent.
 
 On the first prompt of a Cairn chat session, Hermes receives the **Hermes chat instruction**
 from **Settings → Agent instructions**. A server admin can edit it or reset it to the built-in

@@ -134,6 +134,7 @@ fn default_reply(request: &Req) -> (u16, String) {
                             "project_attachment": {"status": "personal"}})
         }
         "brief" => json!({"brief": "BRIEF"}),
+        "health" => json!({"ok": true, "version": env!("CARGO_PKG_VERSION")}),
         "topic" => json!({"notes": []}),
         "checkpoint" => json!({"status": "stored"}),
         _ => json!({"status": "queued"}),
@@ -639,6 +640,114 @@ fn hermes_chat_hook_forwards_project_and_chat_instruction() {
     );
     invoke("ChatSearch", &Value::Null, json!({"query":"tour"}));
     assert_eq!(server.to("search").len(), 1);
+}
+
+/// A 0.1.9 server ignores `context.chat`: chat memory must stay off, not fall back to personal
+/// memory. A rollback mid-session turns it off at once, and queued chat captures wait.
+#[test]
+fn hermes_chat_memory_stays_off_against_a_server_without_chat_scope() {
+    let version = Arc::new(Mutex::new("0.1.9".to_owned()));
+    let observe_down = Arc::new(AtomicBool::new(false));
+    let server = fake_with({
+        let (version, observe_down) = (version.clone(), observe_down.clone());
+        move |_, request| match request.path.rsplit('/').next() {
+            Some("observe") if observe_down.load(Ordering::Relaxed) => (503, "{}".into()),
+            Some("health") => (
+                200,
+                json!({"ok": true, "version": *version.lock().unwrap()}).to_string(),
+            ),
+            // What a legacy server answers: the untagged personal preference.
+            Some("brief") => (200, json!({"brief": "Prefers window seats"}).to_string()),
+            Some("search") => (
+                200,
+                json!({"results": [{"title": "Prefers window seats"}]}).to_string(),
+            ),
+            _ => default_reply(request),
+        }
+    });
+    let env = Env::new("hermes-chat-legacy", &server.url);
+    let invoke = |event: &str, chat: char, extra: Value| {
+        let mut body = json!({
+            "session_id": format!("hchat_{}", chat.to_string().repeat(32)),
+            "chat_context": {"platform": "matrix", "kind": "group",
+                             "chat_id_hash": chat.to_string().repeat(64)},
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for chat in ['a', 'b'] {
+        assert_eq!(invoke("SessionStart", chat, json!({})), "");
+        assert_eq!(
+            invoke(
+                "UserPromptSubmit",
+                chat,
+                json!({"user_message": "where should I sit on the flight"})
+            ),
+            ""
+        );
+        let search = invoke("ChatSearch", chat, json!({"arguments": {"query": "seats"}}));
+        assert!(search.contains("chat memory is off"), "{search}");
+        let save = invoke(
+            "ChatSave",
+            chat,
+            json!({"arguments": {"kind": "fact", "title": format!("chat {chat} secret"), "summary": "s"}}),
+        );
+        assert!(save.contains("chat memory is off"), "{save}");
+        invoke("Stop", chat, json!({"assistant_response": "ok"}));
+        invoke("SessionEnd", chat, json!({}));
+    }
+    let paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
+    assert!(
+        paths.iter().all(|path| path.ends_with("/health")),
+        "only the version check reaches a legacy server: {paths:?}"
+    );
+
+    // Supported, then rolled back: the next chat call sends nothing.
+    *version.lock().unwrap() = env!("CARGO_PKG_VERSION").to_owned();
+    invoke("ChatSearch", 'a', json!({"arguments": {"query": "seats"}}));
+    assert_eq!(server.to("search").len(), 1);
+    *version.lock().unwrap() = "0.1.9".to_owned();
+    invoke(
+        "ChatSave",
+        'a',
+        json!({"arguments": {"kind": "fact", "title": "t", "summary": "s"}}),
+    );
+    assert!(server.to("remember").is_empty());
+
+    // A chat capture queued while the server was supported is not replayed after a rollback
+    // by an ordinary session on the same device.
+    *version.lock().unwrap() = env!("CARGO_PKG_VERSION").to_owned();
+    observe_down.store(true, Ordering::Relaxed);
+    invoke(
+        "UserPromptSubmit",
+        'a',
+        json!({"user_message": "queued chat text"}),
+    );
+    assert_eq!(queued_ids(&env.outbox()).len(), 1);
+    *version.lock().unwrap() = "0.1.9".to_owned();
+    observe_down.store(false, Ordering::Relaxed);
+    env.prompt("ordinary", "an ordinary prompt with enough words in it");
+    assert_eq!(
+        server
+            .observed()
+            .iter()
+            .filter(|b| b["context"]["chat"].is_object())
+            .count(),
+        1,
+        "only the first, failed chat capture attempt reached the server"
+    );
+    assert_eq!(
+        queued_ids(&env.outbox()).len(),
+        1,
+        "the chat capture stays queued"
+    );
 }
 
 #[test]

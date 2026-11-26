@@ -42,7 +42,7 @@ const NOTICE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const MAX_API_BYTES: u64 = 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 
-type Version = (u64, u64, u64);
+pub(crate) type Version = (u64, u64, u64);
 
 struct Release {
     version: Version,
@@ -65,7 +65,7 @@ impl Release {
 }
 
 /// `1.2.3` or `v1.2.3`; a pre-release or build suffix is not a version we install.
-fn parse_version(text: &str) -> Option<Version> {
+pub(crate) fn parse_version(text: &str) -> Option<Version> {
     let number = |part: &str| {
         part.bytes()
             .all(|byte| byte.is_ascii_digit())
@@ -456,11 +456,15 @@ fn run(api: &str, target: &str, exe: &Path, check_only: bool) -> Result<(String,
     Ok((message, release.version))
 }
 
+fn this_exe() -> Result<PathBuf, Error> {
+    std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|error| Error::Config(format!("cannot locate the cairn executable: {error}")))
+}
+
 /// `cairn update [--check]`.
 pub fn update(check_only: bool) -> Result<String, Error> {
-    let exe = std::env::current_exe()
-        .and_then(|exe| exe.canonicalize())
-        .map_err(|error| Error::Config(format!("cannot locate the cairn executable: {error}")))?;
+    let exe = this_exe()?;
     let target = std::env::var(TARGET_ENV)
         .ok()
         .filter(|_| cfg!(debug_assertions))
@@ -468,12 +472,29 @@ pub fn update(check_only: bool) -> Result<String, Error> {
     let (message, installed) = run(&api_url()?, &target, &exe, check_only)?;
     println!("{message}");
     if !check_only {
-        // The hook commands name the executable; keep them pointing at it.
-        for line in crate::setup::refresh(&exe) {
-            println!("{line}");
+        // This process still runs the old code; the installed file refreshes with its own setup.
+        let refreshed = Command::new(&exe)
+            .args(["update", "--refresh"])
+            .stdin(Stdio::null())
+            .status();
+        if !refreshed.as_ref().is_ok_and(|status| status.success()) {
+            let why = refreshed.map_or_else(|error| error.to_string(), |status| status.to_string());
+            println!(
+                "cairn: warning: integrations were not refreshed ({why}); run `cairn setup <agent>`"
+            );
         }
     }
     Ok(show(installed))
+}
+
+/// `cairn update --refresh`: rewrites the managed integrations with this executable's setup,
+/// so hook commands name it. `cairn update` runs it from the newly installed file.
+pub fn refresh() -> Result<(), Error> {
+    let exe = this_exe()?;
+    for line in crate::setup::refresh(&exe) {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn now() -> u64 {

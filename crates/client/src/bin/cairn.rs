@@ -69,7 +69,9 @@ fn check_arguments(args: &[String]) -> Result<bool, Error> {
     }
     for (index, value) in args.iter().enumerate() {
         let allowed = (index == 0 && value == "--version")
-            || (index == 1 && args[0] == "update" && value == "--check")
+            || (index == 1
+                && args[0] == "update"
+                && matches!(value.as_str(), "--check" | "--refresh"))
             || (args[0] == "init" && value == "--yes")
             || (args[0] == "get" && index + 1 == args.len() && value == "--detail")
             || (index == 2 && args[0] == "import" && value == "--yes")
@@ -142,6 +144,7 @@ fn main() {
         Some("update") => match &args[1..] {
             [] => update::update(false).map(|_| ()),
             [flag] if flag == "--check" => update::update(true).map(|_| ()),
+            [flag] if flag == "--refresh" => update::refresh(),
             _ => usage(),
         },
         Some(name) => match tools::find(name).filter(|tool| tool.cli == name) {

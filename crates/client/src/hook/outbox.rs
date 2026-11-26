@@ -230,8 +230,8 @@ impl Outbox {
     /// Best effort after a delivered capture: oldest first, at most 20 events, at most 2 s,
     /// skipping the event just sent. Never an error. The lock covers the read and the final
     /// write only; an event queued meanwhile stays, and one delivered twice is dropped by the
-    /// server (same event id).
-    pub fn replay(&self, config: &Config, agent: &str, skip_event_id: &str) {
+    /// server (same event id). Chat captures wait for a caller that confirmed chat support.
+    pub fn replay(&self, config: &Config, agent: &str, skip_event_id: &str, chat_ok: bool) {
         if !self.path.exists() {
             return;
         }
@@ -244,6 +244,7 @@ impl Outbox {
                 .events
                 .into_iter()
                 .filter(|pending| pending.event_id != skip_event_id)
+                .filter(|pending| chat_ok || pending.body["context"].get("chat").is_none())
                 .take(REPLAY_LIMIT)
                 .collect()
         };

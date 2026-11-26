@@ -60,11 +60,11 @@ The migrations are additive with two exceptions. `0017` and `0020` replace the d
 ## Upgrade
 
 1. Back up the database. Deploy the server before the web console, because the console calls the new skill, pin and archive routes. The server applies the migrations at startup.
-2. On each machine run `cairn update`, which refreshes configured integrations, or rerun `cairn setup <agent>`. This installs the new hooks, MCP permissions and instruction blocks.
+2. On each machine run `cairn update`, then run `cairn setup <agent>` once for each configured agent. The 0.1.9 updater refreshes integrations with its own old setup code, so `cairn update` alone does not install the new hooks, MCP permissions and instruction blocks. From 0.1.10 on, `cairn update` refreshes them with the newly installed executable.
 3. In a Claude Code project with native memory, run `cairn import claude-memory` to preview and import it.
 4. Run `cairn doctor` and address any failures and warnings.
 
-Older clients keep working and receive a session brief of up to 1,200 bytes with L0 pins first. Hermes built-in memory (`memories/MEMORY.md` and `USER.md`) is not imported or disabled yet; that is planned for 0.1.11.
+Older clients keep working and receive a session brief of up to 1,200 bytes with L0 pins first. A 0.1.10 Hermes gateway checks the server version on each chat event and keeps chat memory off against an older server, which would otherwise store chat content as ordinary personal memory. Hermes built-in memory (`memories/MEMORY.md` and `USER.md`) is not imported or disabled yet; that is planned for 0.1.11.
 
 ## Known limits
 

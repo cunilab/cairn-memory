@@ -10,7 +10,7 @@ mod outbox;
 mod readonly;
 mod state;
 
-use crate::{Client, Config, Error, claude_memory, selected_config_path, write_private};
+use crate::{Client, Config, Error, claude_memory, selected_config_path, update, write_private};
 use cairn_core::account::ClientKind;
 use cairn_core::capture::{
     CaptureKind, ChatContext, WorkContext, redact_sensitive_content, redact_work_context,
@@ -39,6 +39,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// After a request got no answer, further requests are skipped (captures go straight to the
 /// outbox) for this long, so a dead network costs one timeout instead of one per hook call.
 const DOWN_SECONDS: i64 = 30;
+/// The first server version that keeps chat memory separate (`context.chat`).
+const CHAT_SCOPE_SERVER: update::Version = (0, 1, 10);
 const NO_PROJECT_HINT: &str =
     "Cairn: no project here (personal memory). Run cairn init to share with a project.";
 /// Already-dirty paths recorded at SessionStart.
@@ -243,7 +245,19 @@ fn session(options: &Options) -> Result<(), String> {
         check: OnceCell::new(),
         payload,
     };
-    if matches!(hook.event, "ChatSearch" | "ChatSave" | "ChatSkill") {
+    let chat_tool = matches!(hook.event, "ChatSearch" | "ChatSave" | "ChatSkill");
+    // Fail closed: a server older than 0.1.10 ignores `context.chat` and would treat chat
+    // content as ordinary personal memory, so chat memory stays off until support is confirmed.
+    if hook.chat.is_some() && !hook.chat_scope_supported() {
+        if chat_tool {
+            println!(
+                "{}",
+                json!({"error": "Cairn chat memory is off: this server does not keep chats separate."})
+            );
+        }
+        return Ok(());
+    }
+    if chat_tool {
         if hook.chat.is_none() {
             return Err("Hermes chat tools require chat context".into());
         }
@@ -450,6 +464,21 @@ impl Hook<'_> {
         }
         body.insert("context".into(), json!(work));
         self.post(route, &Value::Object(body))
+    }
+
+    /// Asked on every chat hook call, so a server rollback turns chat memory off at once.
+    fn chat_scope_supported(&self) -> bool {
+        !self.server_is_down()
+            && Client::identified(
+                self.config.clone(),
+                RECALL_TIMEOUT,
+                self.agent,
+                ClientKind::Hook,
+            )
+            .get("/cairn-memory/health")
+            .ok()
+            .and_then(|health| health["version"].as_str().and_then(update::parse_version))
+            .is_some_and(|version| version >= CHAT_SCOPE_SERVER)
     }
 
     fn work_context(&self) -> WorkContext {
@@ -1134,7 +1163,7 @@ impl Hook<'_> {
                 }
                 remember();
                 if let Some(outbox) = outbox::Outbox::open(&self.config, &self.config_dir) {
-                    outbox.replay(&self.config, self.agent, &event_id);
+                    outbox.replay(&self.config, self.agent, &event_id, self.chat.is_some());
                 }
                 return Ok(());
             }
