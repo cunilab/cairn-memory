@@ -9,6 +9,8 @@ description: "Find memories, skills, sessions, jobs, device settings and adminis
 
 Browser interface for inspecting memories, managing projects and devices, reviewing audit logs, and applying fixes.
 
+The [glossary](../glossary.md#web-console) defines the records and tools you see in the console.
+
 ## Navigate the console
 
 | Section | Purpose |

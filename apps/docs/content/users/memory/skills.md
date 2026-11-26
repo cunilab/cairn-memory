@@ -7,18 +7,14 @@ description: "Find reusable instructions, publish a numbered revision, or roll b
 
 # Skills
 
-Author, version, and share global procedure libraries and workflows across all agents.
+A [skill](../../glossary.md#skill) is a reusable Markdown procedure stored in a shared, versioned library.
 
 ```mermaid
 flowchart LR
-  Author["skill_save"] --> V1["Version 1\n(Immutable)"]
-  V1 -->|revision| V2["Version 2\n(Active version)"]
-  V2 --> Vote["skill_feedback\n(+1 / -1 vote per user)"]
-  V2 --> Rollback["Rollback in Console\n(Republishes copy)"]
-  V2 --> Archive["Admin Archive\n(Hides from search)"]
+  accTitle: Publishing and revising a skill
+  accDescr: Publishing creates an immutable first version. Saving the same name makes a new revision active. Users vote on the specific version they read.
+  V1[Publish v1] --> V2[Revise as v2] --> Vote[Vote on v2]
 ```
-
-*Skill lifecycle: Saving an existing name appends an immutable revision; users vote on specific versions; administrators can roll back or archive skills.*
 
 ## Discover and publish skills
 

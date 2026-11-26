@@ -7,29 +7,14 @@ description: "How Cairn combines evidence, filters visibility, ranks records and
 
 # Retrieval and ranking
 
-Multi-channel evidence fusion, relevance thresholds, trust ranking, and token packing algorithms.
-
 ```mermaid
-flowchart TD
-  Query["Search Query\n(Text + Context)"] --> ScopeCheck["Visibility Gate\n(Personal, Project, Global)"]
-  ScopeCheck --> Channels
-
-  subgraph Channels["Evidence Channels"]
-    BM25["Lexical (BM25)\nPostgreSQL tsvector"]
-    Vec["Vector Search\nCosine similarity (MiniLM)"]
-    Entity["Entity Matching\nSymbol, command, file"]
-    Graph["Link Graph\nSupersedes & relates"]
-  end
-
-  Channels --> RRF["Reciprocal-Rank Fusion (RRF)\nWeighted candidate merge"]
-  RRF --> Gate{"Relevance Gate\n• Entity match OR\n• Cosine >= 0.43 OR\n• Cosine >= 0.35 + 50% words"}
-  Gate -- Pass --> RankBoost["Ranking & Boosts\n(+Proven votes, -Stale/Superseded)"]
-  Gate -- Fail --> Drop["Discard Candidate"]
-  RankBoost --> Pack["Context Packer\nFit into token budget (1,200 default)"]
-  Pack --> Results["Return Compact Cards + 'more' count"]
+flowchart LR
+  accTitle: Explicit retrieval pipeline
+  accDescr: Search filters records by visibility, combines evidence from the available channels, gates and ranks results, and packs compact cards into the token budget.
+  Scope[Visibility] --> Evidence[Fusion] --> Rank[Ranking] --> Pack[Packing]
 ```
 
-*Retrieval pipeline: Queries filter by visibility, gather evidence across four channels, fuse via RRF, filter through a relevance gate, adjust by trust rating, and pack within token limits.*
+Cairn merges candidate lists with weighted reciprocal-rank fusion. The [relevance gate](../glossary.md#relevance-gate) drops weak candidates before trust and status affect ranking. Matching records become compact cards within the token budget, which defaults to 1,200 tokens. The reply includes a `more` count for additional matches.
 
 ## Hybrid recall
 

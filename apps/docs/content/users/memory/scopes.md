@@ -7,28 +7,13 @@ description: "Understand visibility, membership, and what happens when you archi
 
 # Projects and memory scopes
 
-Visibility boundaries between personal, project, and global memories, and project lifecycle management.
-
-```mermaid
-flowchart TD
-  subgraph Global["Global Scope"]
-    G1["Skills & Shared Instructions\nVisible to all authenticated accounts"]
-  end
-  subgraph Project["Project Scope (.cairn/project.json)"]
-    P1["Decisions, Rules, Gotchas, Procedures\nVisible strictly to project members"]
-  end
-  subgraph Personal["Personal Scope"]
-    U1["Preferences, Handoffs, Draft Notes\nVisible exclusively to owner account"]
-  end
-```
-
-*Scope hierarchy: Global memories are visible across all users; Project memories are restricted to accounts holding the project ID; Personal memories belong strictly to the owner.*
+A memory’s [scope](../../glossary.md#scope) determines who can see it.
 
 ## Memory scopes and record
 
-- **Personal**: Visible only to the creating account. Preferences, session handoffs, and draft notes default to personal scope.
-- **Project**: Visible to all registered members of the project. Decisions, rules, gotchas, facts, and procedures default to project scope when the caller belongs to the project.
-- **Global**: Visible to all authenticated accounts on the Cairn server. Used for shared skills and server-wide instructions.
+- **[Personal](../../glossary.md#personal-scope)**: Visible only to the creating account. Preferences, session handoffs, and draft notes default to personal scope.
+- **[Project](../../glossary.md#project-scope)**: Visible to all registered members of the project. Decisions, rules, gotchas, facts, and procedures default to project scope when the caller belongs to the project.
+- **[Global](../../glossary.md#global-scope)**: Visible to all authenticated accounts on the Cairn server. Used for shared skills and server-wide instructions.
 - **Retention**: Memories never expire by age. Forgotten memories are excluded from search; stale and superseded records remain retrievable with lower ranking and a label.
 
 See [CLI and MCP](../reference/mcp.md) for tool interfaces.

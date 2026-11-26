@@ -2,6 +2,7 @@
   "title": "Cairn Memory",
   "pages": [
     "users",
-    "technical"
+    "technical",
+    "!glossary"
   ]
 }

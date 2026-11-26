@@ -1,6 +1,6 @@
 {
   "title": "Help",
-  "defaultOpen": true,
+  "defaultOpen": false,
   "pages": [
     "doctor",
     "troubleshooting",

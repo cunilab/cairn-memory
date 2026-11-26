@@ -1,0 +1,50 @@
+---
+id: CM-DOC-TECHNICAL-BENCHMARKS
+title: "Benchmarks"
+status: accepted
+description: "Read Cairn’s fixture-based retrieval, capture and latency checks."
+---
+
+import { LatencyChart, RetrievalChart } from '../../lib/benchmark-charts';
+
+# Benchmarks
+
+The benchmark runner drives a real Cairn server with [fixture records](../../../../bench/fixtures/corpus.json). The results describe those workloads and hardware.
+
+## CI gates
+
+CI runs both question sets. Each must return zero hits on off-topic weak queries.
+
+| Run | Questions | Distractors | Minimum hit@5 | Allowed weak-query hits |
+| --- | ---: | ---: | ---: | ---: |
+| v1 | 25 | 0 | 88% | 0 of 5 |
+| v2 | 43 | 2,000 | 65% | 0 of 14 |
+
+The v1 gate also requires at least 60% of durable fixture memories to have a link.
+
+### Measured release performance (0.1.9 Shipped)
+
+<RetrievalChart />
+
+Hit@5 is the share of questions with a correct memory among the first five results. MRR@10 scores how early the first correct result appears. Precision@5 measures the share of returned cards that match expected memories.
+
+The shipped runs returned no records on any weak query. Search replies averaged an estimated 108 tokens on v1 and 133 on v2. A test with a cross-encoder raised v2 hit@5 from 67.4% to 74.4%, admitted eight off-topic queries, and increased p95 latency. The release kept the existing ranking.
+
+See the [v1 release results](../../../../bench/after-0.1.9-aliases-v1-shipped.json) and [v2 release results](../../../../bench/after-0.1.9-aliases-v2-shipped.json).
+
+## Latency
+
+The opt-in [automatic recall latency check](../../../../bench/README.md#automatic-recall-latency) seeds a disposable database and measures the real hook binary alongside the loopback HTTP path.
+
+### Measured latency budgets (ARM64 macOS, MiniLM, 2,072 memories)
+
+<LatencyChart />
+
+Across the five recall paths, HTTP p95 ranged from 12.1 to 63.9 ms against a 100 ms budget. Hook p95 ranged from 128.0 to 462.2 ms against a 500 ms budget.
+
+```sh
+python3 scripts/bench.py --questions questions-v2.json --distractors 2000 \
+  --check-recall-latency --out /tmp/cairn-recall-latency.json
+```
+
+See [retrieval and ranking](retrieval.md) for the [relevance gate](../glossary.md#relevance-gate) and ranking rules.

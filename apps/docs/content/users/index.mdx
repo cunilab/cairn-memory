@@ -7,24 +7,14 @@ description: "Connect a coding agent, save a project decision, and verify that C
 
 # Quickstart
 
-Get Cairn running, connect your coding agent, and verify memory recall in under five minutes.
-
-```mermaid
-flowchart LR
-  S1["1. Start Stack\n(Server + DB)"] --> S2["2. Create Token\n(Web Settings)"]
-  S2 --> S3["3. Connect Agent\n(cairn setup)"]
-  S3 --> S4["4. Init Repo\n(cairn init)"]
-  S4 --> S5["5. Save & Recall\n(cairn search)"]
-```
-
-*Quickstart workflow: Start the server and database, generate a device token in the web console, connect your agent with CLI setup, initialize your repository, then save and recall a decision.*
+Start a local stack or use an existing Cairn server. You’ll need a console account and a supported agent.
 
 <Steps>
 
 <Step>
 ## Start Cairn and create a device
 
-[Run the local server and console](install-server.md) or connect to an existing server. Open the console at `http://localhost:3000`, sign in, and generate a token under **Settings → Devices**. Copy the token (displayed once).
+[Run the local server and console](install-server.md) or connect to an existing server. Open the console at `http://localhost:3000`, sign in, and generate a [device token](../glossary.md#device-token) under **Settings → Devices**. Copy the token (displayed once).
 </Step>
 
 <Step>
@@ -55,14 +45,14 @@ Commit the generated `.cairn/project.json` to share project memories with teamma
 <Step>
 ## Save and find a decision
 
-Save a verified decision and search for it:
+Save a verified [decision](../glossary.md#decision) and search for it:
 
 ```sh
 cairn save '{"kind":"decision","title":"Run database tests in a disposable schema","summary":"Give each test suite its own disposable PostgreSQL schema.","reason":"Test cleanup must leave the shared development database intact.","fields":{"context":"Integration test isolation"}}'
 cairn search "disposable PostgreSQL schema"
 ```
 
-The search returns the decision with its assigned memory ID. Inspect the full record with `cairn get <id>` or open **Memories** in the web console. Next: explore [daily use](daily-use.md).
+The search returns the decision with its assigned memory ID. Inspect the full record with `cairn get <id>` or open **Memories** in the web console. Next, explore [daily use](daily-use.md) or look up terms in the [glossary](../glossary.md).
 </Step>
 
 </Steps>

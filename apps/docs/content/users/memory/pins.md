@@ -7,7 +7,7 @@ description: "Pin an owned memory so it leads the session brief."
 
 # Pins
 
-Pin essential personal or project memories to lead the opening session brief.
+A [pin](../../glossary.md#pin) puts an owned personal or project memory at the front of the opening [session brief](../../glossary.md#session-brief).
 
 ## Pin management
 

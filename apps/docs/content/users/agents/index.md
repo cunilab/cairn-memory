@@ -7,7 +7,7 @@ description: "Set up and maintain a Cairn integration on a configured device."
 
 # Choose an agent
 
-Setup commands, integration architectures, and instruction file locations for supported coding agents.
+Most integrations expose Cairn through [MCP](../../glossary.md#mcp). Hermes uses a native [memory provider](../../glossary.md#provider).
 
 ## Supported integrations
 

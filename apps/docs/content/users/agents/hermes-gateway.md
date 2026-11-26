@@ -7,7 +7,7 @@ description: "Connect a dedicated Hermes gateway profile and control which chats
 
 # Hermes chat gateway
 
-Deploy a dedicated Hermes gateway profile with isolated chat-scoped personal memory.
+A [gateway](../../glossary.md#gateway) gives Hermes a dedicated messaging profile with [chat-scoped memory](../../glossary.md#chat-tag).
 
 ## Hermes gateway
 

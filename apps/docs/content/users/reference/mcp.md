@@ -11,6 +11,8 @@ Model Context Protocol JSON-RPC specification, tool argument schemas, and compac
 
 The `cairn mcp` stdio server exposes five memory tools and four global skill tools. In Hermes, Cairn's memory provider supplies these same nine tools natively.
 
+See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology.
+
 ## Transport
 
 - **Command**: `cairn mcp` running newline-delimited JSON-RPC 2.0 over stdin/stdout. Diagnostics output to stderr only.

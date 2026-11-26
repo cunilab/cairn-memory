@@ -14,6 +14,7 @@ export const navigation = {
   links: [
     { text: 'Users', url: '/docs/users/', active: 'nested-url' },
     { text: 'Technical', url: '/docs/technical/', active: 'nested-url' },
+    { text: 'Glossary', url: '/docs/glossary/' },
     { text: 'GitHub', url: repository, external: true },
   ],
 } satisfies BaseLayoutProps;

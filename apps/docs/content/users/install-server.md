@@ -31,7 +31,7 @@ A named database volume retains accounts, projects, memories, and jobs across co
 
 1. Open `http://localhost:3000` in your browser.
 2. Register the initial account. This first account is the sole administrator and can invite teammates.
-3. Navigate to **Settings → Devices** to create a device token.
+3. Navigate to **Settings → Devices** to create a [device token](../glossary.md#device-token).
 4. Proceed to [Install the CLI](install-cli.mdx).
 
 ## Other deployment options

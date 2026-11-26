@@ -9,6 +9,8 @@ description: "Reference for CLI commands, configuration, exit behavior and devic
 
 Command-line interface reference for setup, diagnostics, memory operations, and agent hooks.
 
+Look up memory and integration terms in the [glossary](../../glossary.md).
+
 ## Configuration
 
 Cairn stores client configuration and device tokens locally with restricted permissions:

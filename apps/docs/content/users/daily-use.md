@@ -7,8 +7,6 @@ description: "Save, find and correct useful decisions and resume work across dev
 
 # Daily use
 
-Core workflow for recording verified decisions, retrieving context, managing corrections, and resuming sessions.
-
 ## Save a decision
 
 Instruct your agent to save verified findings immediately:
@@ -31,7 +29,7 @@ Retrieve context explicitly whenever automatic recall is insufficient:
 
 Keep memory accurate when requirements or architectural choices evolve:
 
-- **Supersede**: Save the revised decision with `supersedes: "<old_id>"` and a clear reason for the change.
+- **[Supersede](../glossary.md#superseded)**: Save the revised decision with `supersedes: "<old_id>"` and a clear reason for the change.
 - **History preserved**: The superseded record remains searchable with a `superseded` status.
 - **Feedback**: Call `memory_feedback` with `helpful` or `wrong` to adjust confidence rankings ([Trust and corrections](memory/trust.md)).
 
@@ -41,13 +39,13 @@ Seamlessly continue development across machines or teammates:
 
 - **Configure device**: Add a new token under **Settings → Devices** or join from a teammate account.
 - **Attach repo**: Open the repository checkout and run `cairn init`.
-- **Handoffs**: Project members automatically receive project-scoped decisions. Personal handoffs track your account and checkout context. Ask your agent for the last handoff if the brief is incomplete.
+- **[Handoffs](../glossary.md#handoff)**: Project members automatically receive project-scoped decisions. Personal handoffs track your account and checkout context. Ask your agent for the last handoff if the brief is incomplete.
 
 ## Capture controls
 
 Control how Cairn records development activity:
 
-- **Automatic capture**: Hooks capture prompts, code edits, and non-read-only terminal commands.
+- **[Automatic capture](../glossary.md#capture)**: Hooks capture prompts, code edits, and non-read-only terminal commands.
 - **Opt out**: Add a `.cairnignore` file in a checkout root to disable capture entirely for that directory.
 - **Assistant text**: Disabled by default; enable with `CAIRN_CAPTURE_ASSISTANT=1`.
 - **Automated sessions**: Set `CAIRN_SESSION_ORIGIN=automation` in CI or batch scripts to capture and distill without overriding personal handoffs or triggering Stop reminders ([Hook protocol](../technical/hooks/index.md)).

@@ -1,6 +1,6 @@
 {
   "title": "Tool reference",
-  "defaultOpen": true,
+  "defaultOpen": false,
   "pages": [
     "cli",
     "mcp"

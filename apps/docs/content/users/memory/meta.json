@@ -1,6 +1,6 @@
 {
   "title": "Memory concepts",
-  "defaultOpen": true,
+  "defaultOpen": false,
   "pages": [
     "kinds",
     "scopes",

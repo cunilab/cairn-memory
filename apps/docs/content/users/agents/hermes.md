@@ -7,26 +7,17 @@ description: "Set up a Hermes profile to use Cairn as its memory provider."
 
 # Hermes Agent
 
-Configure Hermes Agent to use Cairn as its native memory provider and plugin hook engine.
+Hermes connects to Cairn through a native [memory provider](../../glossary.md#provider) and separate [plugin hooks](../../glossary.md#hook).
 
 ```mermaid
 flowchart TD
-  subgraph Hermes["Hermes Agent Profile"]
-    Provider["Memory Provider (cairn-memory)\n• Prompt prefetch (on_turn_start)\n• Native tools: memory_search, memory_save"]
-    Plugin["Plugin Hooks (plugins/cairn-memory/)\n• post_tool_call (Tool capture)\n• transform_tool_result (Error warnings)"]
-  end
-  subgraph Scope["Memory Scope & Chat"]
-    DevEnv["Coding Checkouts\nProject & personal scoped memories"]
-    Gateway["Chat Gateway\nPersonal chat-tagged memories"]
-  end
-
-  Provider <-->|Sync turn & tools| Cairn[Cairn Server]
-  Plugin -->|Tool events & capture| Cairn
-  Hermes --> DevEnv
-  Hermes --> Gateway
+  accTitle: How Hermes connects to Cairn
+  accDescr: The memory provider connects to the Cairn server for prompt recall and native tools. The plugin sends tool events and requests failed-command recall.
+  Provider[Provider] -->|Recall & tools| Server[Cairn server]
+  Plugin[Hooks] -->|Tool events| Server
 ```
 
-*Hermes integration architecture: Cairn operates as both an external memory provider (for prompt prefetch and native tools) and a standalone plugin (for tool event capture and command warnings).*
+The provider prefetches at turn start and supplies native tools. The plugin captures tool activity and returns failed-command warnings. A coding checkout uses project and personal memory. A [gateway profile](hermes-gateway.md) can also keep chat-tagged personal memories.
 
 ## Check the Hermes version
 

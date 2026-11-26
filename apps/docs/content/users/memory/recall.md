@@ -9,6 +9,8 @@ description: "Read a brief or handoff, search for a decision, and fetch the full
 
 Strategies for consuming opening briefs, triggering contextual recall, and executing explicit searches.
 
+The [recall glossary](../../glossary.md#recall-and-context) defines the layers, cards, and search terms used here.
+
 ## Start from the brief
 
 At session startup, Cairn injects the opening brief:

@@ -7,17 +7,15 @@ description: "Account and device credentials, project visibility and data handli
 
 # Accounts and authentication
 
-Authentication architecture, device token verification, administrative APIs, and secret redaction.
-
 ## Accounts and sessions
 
 - **Bootstrap**: The first registered account becomes the sole administrator. Open signups are disabled.
-- **Humans**: Web console users authenticate via cookie-backed sessions. Passwords are encrypted with Argon2. Resetting a password revokes active web sessions without invalidating device tokens.
+- **Humans**: Web console users authenticate via cookie-backed sessions. Passwords are hashed with Argon2. Resetting a password revokes active web sessions without invalidating device tokens.
 - **Role separation**: Account administration, audit viewing, and Fixes management require an administrator session.
 
 ## Device tokens
 
-- **Agents**: Coding agents authenticate via bearer tokens generated under **Settings → Devices**.
+- **Agents**: Coding agents authenticate via [device tokens](../glossary.md#device-token) generated under **Settings → Devices**.
 - **Scope**: Device tokens have read/write access to memories and skills according to the owning user's project memberships.
 - **Restricted surface**: Device tokens cannot manage accounts, create devices, or view account-wide audit logs.
 - **Revocation**: Revoking a device immediately invalidates its bearer credential.

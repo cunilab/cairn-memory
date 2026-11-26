@@ -2,33 +2,104 @@
 id: CM-INDEX-001
 title: "Shared memory for coding agents"
 status: accepted
-description: "Cairn captures useful work, recalls it in later sessions, and lets people inspect, correct and share it from a self-hosted web console."
+description: "Self-host Cairn to carry decisions, rules, and gotchas across agent sessions, machines, and teammates."
 ---
 
 # Shared memory for coding agents
 
-Persistent, self-hosted memory service for coding agents: capture verified work, distill knowledge across sessions, and inspect records via web console.
+<section className="home-section" aria-labelledby="how-it-works">
 
-```mermaid
-flowchart TD
-  subgraph Agents["Coding Agents"]
-    Hook["Agent Hooks\n(Capture events)"]
-    MCP["MCP / Provider Tools\n(Recall & Save)"]
-  end
-  subgraph Cairn["Cairn Server"]
-    Distill["Capture & Distill"]
-    Recall["Recall Engine"]
-  end
-  DB[("PostgreSQL\n+ pgvector")]
-  Console["Web Console\n(Inspect & Correct)"]
+## How it works
 
-  Hook -->|events| Distill
-  Distill --> DB
-  DB --> Recall
-  Recall -->|memories| MCP
-  Console <-->|manage| Cairn
-```
+<ol className="home-steps">
+  <li>
+    <h3>Capture the work</h3>
+    <p>Agent hooks record prompts, edits, and commands. Your agent can also save a verified decision directly.</p>
+  </li>
+  <li>
+    <h3>Keep what matters</h3>
+    <p>Cairn distills observations into candidate memories and handoffs. It stores durable records in PostgreSQL.</p>
+  </li>
+  <li>
+    <h3>Recall it when needed</h3>
+    <p>Later sessions start with a brief and get relevant context as they work. Agents can search for a specific record.</p>
+  </li>
+</ol>
 
-*Flow: Agent hooks capture developer activity, background jobs distill durable records into PostgreSQL, recall serves relevant memories to agents, and humans inspect or correct knowledge in the web console.*
+[Explore recall layers](users/memory/layers.md)
 
-Agent hooks capture prompts, edits, and tool results. Cairn stores durable memories and automatically delivers relevant context to later sessions. Teams review, vote on, and correct records in the web console.
+</section>
+
+<section className="home-section" aria-labelledby="working-with-memory">
+
+## Working with memory
+
+<div className="grid gap-x-10 gap-y-4 md:grid-cols-3">
+  <div>
+
+### Share by project
+
+Keep personal memories private and share project decisions, rules, and gotchas with teammates.
+
+[Projects and scopes](users/memory/scopes.md)
+
+  </div>
+  <div>
+
+### Review and correct
+
+Inspect records, vote on their accuracy, and link corrections from the web console.
+
+[Web console](users/web-console.md)
+
+  </div>
+  <div>
+
+### Run on your infrastructure
+
+Cairn stores memory in PostgreSQL with pgvector and can embed search records locally.
+
+[Architecture](technical/index.mdx)
+
+  </div>
+</div>
+
+</section>
+
+<section className="home-section" aria-labelledby="supported-agents">
+
+## Supported agents
+
+<div className="home-agent-links">
+
+- [Claude Code](users/agents/claude-code.md)
+- [Codex](users/agents/codex.md)
+- [OpenCode](users/agents/opencode.md)
+- [Grok Build](users/agents/grok.md)
+- [Antigravity CLI](users/agents/antigravity.md)
+- [Hermes Agent](users/agents/hermes.md)
+
+</div>
+
+</section>
+
+<section className="home-section grid gap-6 sm:grid-cols-2">
+  <div>
+
+## Use Cairn
+
+Set up your agent, learn the daily workflow, and look up Cairn terminology.
+
+[Daily use](users/daily-use.md) · [Glossary](glossary.md)
+
+  </div>
+  <div>
+
+## Operate Cairn
+
+Run the server and console, manage access, and practice restoring your database.
+
+[Deployment](technical/deployment.md) · [Backup and restore](technical/backups.md)
+
+  </div>
+</section>

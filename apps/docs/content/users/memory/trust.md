@@ -7,30 +7,25 @@ description: "Read Cairn’s trust labels, correct outdated knowledge and forget
 
 # Trust and corrections
 
-Understand memory confidence ratings, vote on accuracy, record superseding corrections, and forget data.
+The [trust label](../../glossary.md#trust-level) reflects a record’s status, rank, and feedback.
 
 ```mermaid
-flowchart TD
-  Distill["Distilled Capture"] --> New["New / Candidate\n(Lower rank, awaiting confirmation)"]
-  Save["Verified Save"] --> Normal["Normal\n(Standard rank)"]
-  New -->|User confirm / save| Normal
-  Normal -->|2+ helpful votes\nor 3 saves| Proven["Proven\n(Confidence boost, leads L1)"]
-  Normal -->|2 wrong votes\nor 1 owner wrong| Doubted["Doubted / Stale\n(Lower rank, labeled)"]
-  Proven -->|Reported wrong| Doubted
-  Normal -->|Save with supersedes| Replaced["Superseded\n(Replaced, linked history)"]
-  Normal -->|memory_forget| Forgotten["Forgotten\n(Excluded from recall)"]
+flowchart LR
+  accTitle: Memory trust from candidate to proven
+  accDescr: Distillation can produce a new candidate. A verified save records normal trust. Helpful feedback or repeated saves can raise it to proven.
+  New[New] --> Normal[Normal] --> Proven[Proven]
 ```
 
-*Memory lifecycle: Records progress from New to Normal upon verification, reach Proven status with helpful feedback or repeated saves, become Doubted/Stale if reported wrong, link via supersedes on revision, or become Forgotten when removed.*
+Wrong votes flag a record as doubted. Superseding and forgetting change its status separately.
 
 ## Trust labels
 
 Cairn evaluates confidence in order:
 
-1. **Doubted / Stale**: Two distinct users marked the record wrong, or the owner marked it wrong once. Ranks lower with a warning label.
-2. **New**: Distilled candidate awaiting verification. Ranks lower and stays out of L1.
-3. **Proven**: Validated with at least two helpful votes or three separate saves of the same knowledge. Prioritized in L1 briefs.
-4. **Normal**: Standard verified memory.
+1. **[Doubted](../../glossary.md#doubted)**: Displayed after a wrong vote or when the record is stale. Two wrong votes from different users, or one from the owner, mark a record [stale](../../glossary.md#stale) and lower its rank.
+2. **[New](../../glossary.md#new)**: Distilled candidate awaiting verification. Ranks lower and stays out of L1.
+3. **[Proven](../../glossary.md#proven)**: Validated with at least two helpful votes or three separate saves of the same knowledge. Prioritized in L1 briefs.
+4. **[Normal](../../glossary.md#normal)**: Standard verified memory.
 
 ## Corrections, links and forgetting
 

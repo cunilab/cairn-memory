@@ -1,6 +1,6 @@
 {
   "title": "Hooks",
-  "defaultOpen": true,
+  "defaultOpen": false,
   "pages": [
     "index",
     "claude-code",

@@ -11,18 +11,10 @@ Create consistent PostgreSQL database dumps and verify disaster recovery drills 
 
 ```mermaid
 flowchart LR
-  subgraph Source["Production PostgreSQL"]
-    PG[("Database\n(cairn schema + pgvector)")] -->|pg_dump --format=custom| Dump["cairn.dump\n(umask 077)"]
-  end
-
-  subgraph Target["Disposable Verification DB"]
-    Dump -->|pg_restore --single-transaction| RestoreDB[("Isolated DB\n(Disposable schema)")]
-    RestoreDB --> Query["SQL verification\n(Table counts & extensions)"]
-    Query --> Drill["Server smoke test\n(Validate read & search)"]
-  end
+  accTitle: Backup and restore drill
+  accDescr: Dump the source database, restore it into a disposable database, then check record counts and run server smoke tests.
+  Dump[Dump source] --> Restore[Restore] --> Check[Verify restore]
 ```
-
-*Backup and restore cycle: Production database is dumped with custom format, restored to an isolated disposable database inside a single transaction, verified with count queries, and smoke tested.*
 
 ## Create a backup
 

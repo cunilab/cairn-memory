@@ -31,11 +31,16 @@ export default async function Article({ params }: Props) {
 
   const { body: Content, toc, title, description } = page.data;
   const titleId = toc.find(({ depth }) => depth === 1)?.url.slice(1);
+  const headings = toc.filter(({ depth }) => depth > 1 && (page.path !== 'glossary.md' || depth === 2));
   return (
-    <DocsPage toc={toc.filter(({ depth }) => depth > 1)}>
-      <DocsTitle id={titleId}>{title}</DocsTitle>
-      <DocsDescription>{description}</DocsDescription>
-      <DocsBody><Content components={components(page)} /></DocsBody>
+    <DocsPage
+      toc={headings}
+      tableOfContent={{ container: { role: 'navigation', 'aria-labelledby': 'toc-title' } }}
+      tableOfContentPopover={{ container: { role: 'navigation', 'aria-label': 'On this page' } }}
+    >
+      <DocsTitle id={titleId} className="docs-title">{title}</DocsTitle>
+      <DocsDescription className="docs-description">{description}</DocsDescription>
+      <DocsBody className="docs-copy"><Content components={components(page)} /></DocsBody>
     </DocsPage>
   );
 }

@@ -7,7 +7,7 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 
 # Agent hooks
 
-Lifecycle hook protocol, injection budgets, secret redaction, and offline outbox queuing.
+[Hooks](../../glossary.md#hook) send selected session events to Cairn and can deliver relevant memories back to the agent.
 
 `cairn hook <Event>` consumes JSON payloads from agent host events via stdin, redacts sensitive tokens, and delivers contextual memories or queues observations for distillation.
 
@@ -64,7 +64,7 @@ The hook and server execute 18 ordered regex patterns replacing secrets with `[R
 
 ## Outbox
 
-A local disk outbox (`outbox.json` in config dir, or `CAIRN_OUTBOX`) queues transient capture failures:
+A local disk [outbox](../../glossary.md#outbox) (`outbox.json` in config dir, or `CAIRN_OUTBOX`) queues transient capture failures:
 
 - **Binding**: Bound strictly to the server URL and device token hash.
 - **Capacity**: Buffers up to 256 events (oldest dropped when full). Retries up to 10 times with backoff.

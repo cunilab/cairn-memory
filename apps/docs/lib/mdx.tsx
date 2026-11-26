@@ -8,17 +8,19 @@ import type { MDXComponents } from 'mdx/types';
 import { render } from 'pele';
 import { source } from './source';
 import { basePath, repository } from './site';
+import { DiagramViewer } from './diagram-viewer';
 
 function Mermaid({ chart }: { chart: string }) {
   const id = useId();
-  const wide = render(chart, { idPrefix: id });
-  const narrow = render(chart, { idPrefix: `${id}-small`, maxWidth: 320 });
-  return (
-    <div className="@container my-6" aria-hidden="true">
-      <div className="hidden @min-[560px]:block" dangerouslySetInnerHTML={{ __html: wide.svg }} />
-      <div className="@min-[560px]:hidden" dangerouslySetInnerHTML={{ __html: narrow.svg }} />
-    </div>
-  );
+  const label = /^\s*accTitle: (.+)$/m.exec(chart)?.[1] ?? 'Diagram';
+  const settings = { fontSize: 18, padding: 12 };
+  const wide = render(chart, { ...settings, idPrefix: id });
+  const narrow = wide.width > 280
+    ? render(chart, { ...settings, idPrefix: `${id}-small`, maxWidth: 280 })
+    : undefined;
+  return <DiagramViewer label={label} wide={{ svg: wide.svg, width: wide.width }} narrow={
+    narrow && narrow.width < wide.width ? { svg: narrow.svg, width: narrow.width } : undefined
+  } />;
 }
 
 export function components(page: NonNullable<ReturnType<typeof source.getPage>>): MDXComponents {

@@ -7,11 +7,9 @@ description: "Follow typed captures through checkpoints, distillation, retrieval
 
 # Processing and jobs
 
-Background worker lifecycle, distillation heuristics, embedding jobs, and link consolidation.
-
 ## Session handoffs and distillation
 
-Background processing transforms raw capture events into structured notes, digests, and continuity records:
+[Distillation](../glossary.md#distill) turns captured [observations](../glossary.md#observation) into candidate notes, digests, and [handoffs](../glossary.md#handoff).
 
 - **Session boundaries**: Triggered at checkpoints (`Stop`, `PreCompact`) and session termination (`SessionEnd`).
 - **Scope resolution**: Sessions touching multiple projects distill each attachment independently; indeterminate cohorts stay personal.

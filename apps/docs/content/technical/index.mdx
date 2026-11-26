@@ -7,29 +7,16 @@ description: "How the Rust crates, web console, PostgreSQL and device outbox fit
 
 # Architecture — Cairn Memory
 
-System topology, Rust crate responsibilities, data flow, and key architectural decisions.
-
-Cairn is a self-hosted memory service for coding agents. A Rust server manages authoritative state in PostgreSQL with pgvector. Agents interact via CLI, hooks, and MCP over device-authenticated HTTP; humans inspect and manage records through the web console.
+Cairn is a self-hosted memory service for coding agents. A Rust server manages authoritative state in PostgreSQL with pgvector. Agents interact via CLI, hooks, and MCP over [device-authenticated](../glossary.md#device-token) HTTP; humans inspect and manage records through the web console.
 
 ```mermaid
 flowchart TD
-  subgraph Crates["Rust Workspace Crates"]
-    Core["cairn-core\n• Domain models & traits\n• Ingestion redaction & parsing\n• Zero async/DB dependencies"]
-    Store["cairn-store\n• PostgreSQL queries & migrations\n• pgvector queries & advisory locks\n• Transactional job workers"]
-    Server["cairn-server\n• Axum REST HTTP router\n• Background worker tasks\n• Bearer auth & session security"]
-    Client["cairn-client\n• CLI binary & MCP stdio server\n• Compiled agent hooks\n• Bounded disk outbox bridge"]
-  end
-  Web["apps/web (Next.js 16)\nHuman console for audit & review"]
-  DB[("PostgreSQL 17\n+ pgvector extension")]
-
-  Core --> Store
-  Store --> Server
-  Client -->|HTTP + device token| Server
-  Web -->|HTTP + web session| Server
-  Store --> DB
+  accTitle: Cairn runtime topology
+  accDescr: Agent devices use a device token and the web console uses an authenticated session to call the Cairn server. The server reads and writes PostgreSQL with pgvector.
+  Agent[Agent] -->|Device token| Server[Cairn server]
+  Web[Console] -->|Web session| Server
+  Server --> DB[(PostgreSQL)]
 ```
-
-*Crate dependency hierarchy: cairn-core contains pure logic; cairn-store manages PostgreSQL; cairn-server serves REST endpoints; cairn-client and apps/web communicate strictly over HTTP.*
 
 ## Components
 
@@ -38,28 +25,21 @@ flowchart TD
 | `cairn-core` | Pure domain library | Data models, quality validation, secret redaction, token budgets. Zero external I/O. |
 | `cairn-store` | Database abstraction | PostgreSQL 17 + pgvector queries, advisory-locked migrations, job transactions. |
 | `cairn-server` | HTTP API service | REST router (`/cairn-memory/*`), authentication, background processing workers. |
-| `cairn-client` | Client binary | `cairn` CLI, `cairn mcp` stdio server, agent hooks, and resilient local outbox. |
+| `cairn-client` | Client binary | `cairn` CLI, `cairn mcp` stdio server, agent hooks, and bounded local [outbox](../glossary.md#outbox). |
 | `apps/web` | Browser console | Next.js web application for accounts, devices, memories, skills, and admin fixes. |
 
 ## Main flows
 
 ```mermaid
-flowchart TD
-  Event[Agent Tool / Prompt Event] --> Redact[Redact secrets & clip size]
-  Redact --> Observe[Store observation in session]
-  Observe --> Distill[Session end / Checkpoint: distill notes]
-  Distill --> Candidate[Save candidate memory]
-  AgentSave[Explicit Agent Save] --> Validate[Validate quality & kind fields]
-  Validate --> Memory[Store durable memory in DB]
-  Candidate --> Memory
-  Memory --> Jobs[Queue background embed & link jobs]
-  Query[Agent Search Query] --> Visibility[Filter by personal / project scope]
-  Visibility --> Channels[Query BM25, vector, entity, link channels]
-  Channels --> Gate[Evaluate relevance gate]
-  Gate --> Results[Pack compact cards under token budget]
+flowchart LR
+  accTitle: From capture to retrieval
+  accDescr: Redacted hook events become observations. Distillation produces candidate notes or handoffs. Retrieval can return relevant stored memories later.
+  Hooks[Capture] --> Distill[Distill] --> Store[Store] --> Recall[Recall]
 ```
 
-*Data flow: Hooks capture developer actions, workers distill observations into durable memories, and the hybrid retrieval engine serves relevant context back to agents.*
+- Hooks redact secrets and clip events before storing observations. Checkpoints and session end enqueue [distillation](processing.md#session-handoffs-and-distillation).
+- Explicit saves validate quality and kind-specific fields before storage. New and revised memories can enqueue embedding and link jobs.
+- [Retrieval](retrieval.md) filters by visibility, combines evidence across channels, and returns relevant records within a token budget.
 
 ## Decisions and why
 
