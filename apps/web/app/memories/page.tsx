@@ -10,7 +10,7 @@ export default function MemoriesPage() {
     <ConsoleShell crumbs={[{ label: "Memories" }]}>
       <PageHeader
         title="Memories"
-        description="Exact search, pins, and numbered pages."
+        description="Search what Cairn has saved."
       />
       <Suspense fallback={<LoadingBlock label="Loading memories…" rows={8} />}>
         <MemoryTable />

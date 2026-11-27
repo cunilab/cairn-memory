@@ -8,7 +8,7 @@ import { Skills } from "./_components/skills";
 export default function SkillsPage() {
   return (
     <ConsoleShell crumbs={[{ label: "Skills" }]}>
-      <PageHeader title="Skills" description="Library, suggestions, and archived skills." />
+      <PageHeader title="Skills" description="Procedures agents can reuse." />
       <Suspense fallback={<LoadingBlock label="Loading skills…" rows={4} />}>
         <Skills />
       </Suspense>

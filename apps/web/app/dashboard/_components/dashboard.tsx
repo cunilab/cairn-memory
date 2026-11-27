@@ -247,7 +247,7 @@ export function Dashboard() {
             </p>
           </div>
         </Section>
-        <Section title="Usage" description="Your usage in the last 30 days, whatever range is selected. Counts memories, not requests.">
+        <Section title="Usage" description="Memories used and helpful votes are from the last 30 days. Counts memories, not requests.">
           <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-sm tabular-nums">
             <dt>Different memories used</dt><dd>{stats.usage.fetched_30d.toLocaleString()}</dd>
             <dt>Marked helpful</dt><dd>{stats.usage.helpful_30d.toLocaleString()}</dd>
@@ -267,15 +267,6 @@ export function Dashboard() {
             </ul>
           ) : null}
         </Section>
-        <details className="rounded-lg border px-4 py-3">
-          <summary className="cursor-pointer text-sm font-medium">Diagnostics</summary>
-          <dl className="mt-3 grid grid-cols-2 gap-3 text-sm tabular-nums">
-            <div><dt className="text-muted-foreground">Right memory in top 5</dt><dd className="text-lg font-semibold">{Math.round(stats.bench.hit_at_5 * 100)}%</dd></div>
-            <div><dt className="text-muted-foreground">Search reply</dt><dd className="text-lg font-semibold">~{stats.bench.search_tokens.toLocaleString()} tokens</dd></div>
-            <div><dt className="text-muted-foreground">Session overhead</dt><dd className="text-lg font-semibold">~{stats.bench.session_tokens.toLocaleString()} tokens</dd></div>
-            <div><dt className="text-muted-foreground">Fetch one</dt><dd className="text-lg font-semibold">~{stats.bench.get_tokens.toLocaleString()} tokens</dd></div>
-          </dl>
-        </details>
         <Section title="By kind" description="Memories by kind. Select one to list them.">
           {kinds.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing saved yet.</p>
@@ -284,6 +275,15 @@ export function Dashboard() {
           )}
         </Section>
       </div>
+      <details className="w-fit max-w-full rounded-lg border px-4 py-2">
+        <summary className="cursor-pointer text-sm font-medium">Diagnostics</summary>
+        <dl className="mt-3 grid grid-cols-2 gap-3 text-sm tabular-nums">
+          <div><dt className="text-muted-foreground">Right memory in top 5</dt><dd className="text-lg font-semibold">{Math.round(stats.bench.hit_at_5 * 100)}%</dd></div>
+          <div><dt className="text-muted-foreground">Search reply</dt><dd className="text-lg font-semibold">~{stats.bench.search_tokens.toLocaleString()} tokens</dd></div>
+          <div><dt className="text-muted-foreground">Session overhead</dt><dd className="text-lg font-semibold">~{stats.bench.session_tokens.toLocaleString()} tokens</dd></div>
+          <div><dt className="text-muted-foreground">Fetch one</dt><dd className="text-lg font-semibold">~{stats.bench.get_tokens.toLocaleString()} tokens</dd></div>
+        </dl>
+      </details>
     </div>
   );
 }
