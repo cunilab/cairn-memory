@@ -100,6 +100,20 @@ pub struct PinSummary {
     pub omitted_ids: Vec<String>,
 }
 
+/// One pin bucket. Limits are the current personal (3) and project (4) quotas.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinQuota {
+    /// `personal` or `project`.
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub name: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub used: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub limit: i64,
+}
+
 struct Extra {
     project_name: Option<String>,
     project_archived: bool,

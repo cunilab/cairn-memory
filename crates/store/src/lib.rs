@@ -3,6 +3,7 @@
 
 pub mod account;
 pub mod capture;
+pub mod console;
 pub mod consolidate;
 pub mod device;
 pub mod embed;

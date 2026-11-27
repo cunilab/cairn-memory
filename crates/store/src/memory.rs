@@ -47,7 +47,7 @@ async fn resolve_chat_project<'e>(
     }
 }
 
-fn owned(alias: &str, me: &str) -> String {
+pub(crate) fn owned(alias: &str, me: &str) -> String {
     format!(
         "({a}.owner_id = {me} OR {a}.scope = 'global'
           OR ({a}.scope = 'project' AND {a}.project_id IN
@@ -769,6 +769,19 @@ impl Store {
         let limit = pin_limit(scope).ok_or_else(|| {
             StoreError::Validation("only personal and project memories can be pinned".into())
         })?;
+        if scope == Scope::Project {
+            let archived: Option<bool> = sqlx::query_scalar(
+                "SELECT archived_at IS NOT NULL FROM projects WHERE project_id = $1",
+            )
+            .bind(project_id.as_deref())
+            .fetch_optional(&mut *tx)
+            .await?;
+            if archived == Some(true) {
+                return Err(StoreError::Validation(
+                    "archived project memories are read-only".into(),
+                ));
+            }
+        }
         let bucket = match scope {
             Scope::Project => project_id
                 .as_deref()
