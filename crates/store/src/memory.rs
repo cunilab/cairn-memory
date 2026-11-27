@@ -1216,17 +1216,27 @@ async fn save_links(
     Ok(())
 }
 
+/// Text submitted with an administrator rewrite.
+/// `detail: None` keeps the stored detail. An empty string clears it.
+pub struct RewriteText {
+    pub title: String,
+    pub summary: String,
+    pub reason: String,
+    pub fields: Option<serde_json::Value>,
+    pub detail: Option<String>,
+}
+
 impl Store {
     /// Admin edit retains the owner and provenance, and atomically audits the successor.
-    pub async fn rewrite_memory(
-        &self,
-        admin: &str,
-        id: &str,
-        title: String,
-        summary: String,
-        reason: String,
-        fields: Option<serde_json::Value>,
-    ) -> Result<String> {
+    /// Detail is not part of identity, so a detail-only edit updates this row.
+    pub async fn rewrite_memory(&self, admin: &str, id: &str, text: RewriteText) -> Result<String> {
+        let RewriteText {
+            title,
+            summary,
+            reason,
+            fields,
+            detail,
+        } = text;
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
             "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
@@ -1257,7 +1267,7 @@ impl Store {
             title,
             summary,
             reason,
-            detail: Some(old.detail),
+            detail: Some(detail.unwrap_or_else(|| old.detail.clone())),
             fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
             evidence: old.evidence.clone(),
             supersedes: Some(id.to_owned()),
@@ -1275,10 +1285,37 @@ impl Store {
         if let Some(hash) = old.chat_id_hash {
             prepared.tag_chat(hash, old.rank == Rank::Candidate);
         }
+        let next_detail = prepared.detail.clone().unwrap_or_default();
         if prepared.identity_hash == old.identity_hash {
-            return Err(StoreError::Conflict(
-                "nothing to rewrite: title, summary and fields are unchanged".into(),
-            ));
+            if next_detail == old.detail {
+                return Err(StoreError::Conflict(
+                    "nothing to rewrite: title, summary and fields are unchanged".into(),
+                ));
+            }
+            // The identity unique index blocks a second row, so this edit stays on the current one.
+            sqlx::query(
+                "UPDATE memories SET detail=$2, reason=$3, edited_by=$4, updated_at=now() WHERE memory_id=$1",
+            )
+            .bind(id)
+            .bind(next_detail)
+            .bind(&prepared.reason)
+            .bind(admin)
+            .execute(&mut *tx)
+            .await?;
+            if prepared.reason != old.reason {
+                enqueue_tx(&mut tx, JobKind::Embed, id).await?;
+            }
+            crate::account::audit_tx(
+                &mut tx,
+                admin,
+                None,
+                "memory_rewritten_by_admin",
+                Some(id),
+                serde_json::json!({"old_id":id,"new_id":id}),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(id.to_owned());
         }
         let saved = insert_memory(
             &mut tx,

@@ -120,7 +120,45 @@ function Lineage({
   );
 }
 
-function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void }) {
+const DETAIL_MAX = 8_000;
+
+function detailChars(text: string): number {
+  return Array.from(text).length;
+}
+
+function DetailField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const count = detailChars(value);
+  const over = count > DETAIL_MAX;
+  return (
+    <label className="block text-sm">
+      <span className="flex items-baseline justify-between gap-2">
+        <span>Detail</span>
+        <span className={over ? "text-xs tabular-nums text-destructive" : "text-xs tabular-nums text-muted-foreground"}>
+          {count}/{DETAIL_MAX}
+        </span>
+      </span>
+      <Textarea
+        value={value}
+        rows={5}
+        className="max-h-48"
+        aria-invalid={over || undefined}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function Body({
+  memory,
+  open,
+  canEdit,
+  onEdit,
+}: {
+  memory: MemoryView;
+  open: (id: string) => void;
+  canEdit: boolean;
+  onEdit: () => void;
+}) {
   const fields = Object.entries(memory.fields ?? {});
   const evidence = memory.evidence ?? [];
   return (
@@ -138,7 +176,23 @@ function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void
           <summary className="cursor-pointer font-medium">Full detail</summary>
           <p className="mt-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.detail}</p>
         </details>
-      ) : null}
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          No detail
+          {canEdit ? (
+            <>
+              {" · "}
+              <button
+                type="button"
+                className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                onClick={onEdit}
+              >
+                Edit
+              </button>
+            </>
+          ) : null}
+        </p>
+      )}
       {fields.length > 0 ? (
         <dl className="flex flex-col gap-2 text-sm">
           {fields.map(([key, value]) => (
@@ -254,7 +308,17 @@ export function MemorySheet() {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [reason, setReason] = useState("");
+  const [detail, setDetail] = useState("");
   const [fields, setFields] = useState("");
+  const detailOver = detailChars(detail) > DETAIL_MAX;
+  function beginEdit(source: MemoryView | null) {
+    setTitle(source?.title ?? "");
+    setSummary(source?.summary ?? "");
+    setReason(source?.reason ?? "");
+    setDetail(source?.detail ?? "");
+    setFields(source ? JSON.stringify(source.fields, null, 2) : "");
+    setEditingId(id);
+  }
   const close = useCallback(() => { setEditingId(null); set({ memory: null }); }, [set]);
   useResetOnHide(() => {
     setLoaded(null);
@@ -344,8 +408,9 @@ export function MemorySheet() {
     if (!id || memory?.project_archived) return;
     setPending(true);
     try {
-      const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
+      const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, detail, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
       setEditingId(null);
+      setAttempt((n) => n + 1);
       announceMemoriesChanged();
       set({ memory: result.memory_id }, "push");
       toast.success("Memory rewritten");
@@ -401,7 +466,7 @@ export function MemorySheet() {
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
               <p className="text-sm text-muted-foreground">This memory was forgotten.</p>
-              {account?.is_admin && !editing ? <Button variant="outline" onClick={() => { setTitle(""); setSummary(""); setReason(""); setFields(""); setEditingId(id); }}>Rewrite by ID…</Button> : null}
+              {account?.is_admin && !editing ? <Button variant="outline" onClick={() => beginEdit(null)}>Rewrite by ID…</Button> : null}
               <Button type="button" variant="outline" onClick={close}>
                 Close
               </Button>
@@ -412,7 +477,8 @@ export function MemorySheet() {
             <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
             <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
             <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-            <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+            <DetailField value={detail} onChange={setDetail} />
+            <div className="flex gap-2"><Button disabled={pending || detailOver} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
           </div> : null}
           {current?.error ? (
             <div className="px-4">
@@ -421,14 +487,20 @@ export function MemorySheet() {
           ) : null}
           {memory ? (
             <>
-              <Body memory={memory} open={(next) => set({ memory: next }, "push")} />
+              <Body
+                memory={memory}
+                open={(next) => set({ memory: next }, "push")}
+                canEdit={account?.is_admin === true && !memory.project_archived && !editing}
+                onEdit={() => beginEdit(memory)}
+              />
               {account?.is_admin && !memory.project_archived && editing ? <div className="space-y-3 px-4 pb-4">
                 <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
                 <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
                 <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+                <DetailField value={detail} onChange={setDetail} />
                 <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>
-                <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
-              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
+                <div className="flex gap-2"><Button disabled={pending || detailOver} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => beginEdit(memory)}>Rewrite memory…</Button></div> : null}
               {canForget ? (
                 <div className="mt-auto flex flex-col gap-3 px-4 pb-4">
                   {memory.scope !== "global" ? (

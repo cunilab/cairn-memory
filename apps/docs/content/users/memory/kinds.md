@@ -9,6 +9,8 @@ description: "Select the right record type and supply the fields that help agent
 
 Every authored memory requires a `kind`, `title`, and `summary`. A `reason` is required for every kind except `note`. Add [`evidence`](../../glossary.md#evidence) (source files/URLs) and kind-specific fields to maximize reuse value.
 
+Optional `detail` is longer text, at most 8,000 characters. Agents leave it out of ordinary reads and fetch it with `memory_get` (`detail: true`). The web console shows it on the memory sheet. An administrator can add or edit it there; an empty detail removes it.
+
 ## Memory kinds
 
 | Kind | Purpose | Example | Kind-specific fields |

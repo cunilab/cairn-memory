@@ -7,6 +7,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use cairn_store::memory::RewriteText;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -27,6 +28,8 @@ pub struct Rewrite {
     summary: String,
     reason: String,
     fields: Option<Value>,
+    /// Absent keeps the stored detail. An empty string clears it.
+    detail: Option<String>,
 }
 
 pub async fn list(
@@ -158,11 +161,18 @@ pub async fn rewrite(
         .rewrite_memory(
             &admin.person_id,
             &id,
-            body.title,
-            body.summary,
-            body.reason,
-            body.fields,
+            RewriteText {
+                title: body.title,
+                summary: body.summary,
+                reason: body.reason,
+                fields: body.fields,
+                detail: body.detail,
+            },
         )
         .await?;
-    Ok(Json(json!({"memory_id":new,"superseded":id})))
+    let mut body = json!({"memory_id": new});
+    if new != id {
+        body["superseded"] = json!(id);
+    }
+    Ok(Json(body))
 }

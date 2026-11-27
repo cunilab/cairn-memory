@@ -16,7 +16,7 @@ The [glossary](../glossary.md#web-console) defines the records and tools you see
 | Section | Purpose |
 | --- | --- |
 | **Dashboard** | Overview of system health, active sessions, and recent activity. |
-| **Memories** | Search and filter memories by trust, scope, and status. Inspect evidence, counters, and pins. |
+| **Memories** | Search and filter memories by trust, scope, and status. Inspect evidence, counters, pins, and detail. |
 | **Skills** | Browse the shared global skill library, view version histories, and roll back revisions. |
 | **Projects** | Manage project settings, view members, browse branches, and inspect session handoffs. |
 | **Graph** | Visualize relationship links (`supersedes`, `contradicts`, `related`) between memories. |
@@ -25,6 +25,8 @@ The [glossary](../glossary.md#web-console) defines the records and tools you see
 | **Settings** | Manage personal device tokens and exports. Administrators manage accounts and global agent prompts. |
 
 *Session save counts track new records created during a session window. Project owners and administrators can edit project-specific instructions directly on the project page.*
+
+A memory sheet with no detail says "No detail". Administrators add or edit that text from **Rewrite memory** (up to 8,000 characters). An empty detail clears it. Changing the title, summary, or fields still saves a new version.
 
 ## Fixes
 

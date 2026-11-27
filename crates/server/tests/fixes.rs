@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_core::memory::validate::DETAIL_MAX;
 use cairn_core::memory::{Fields, Kind, validate::validate_fields};
 use common::App;
 use serde_json::json;
@@ -147,6 +148,205 @@ async fn admin_rewrite() {
     let (status, earlier) = app.send("POST", &format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), Some(&admin)).await;
     assert_eq!(status, 409);
     assert_eq!(earlier["error"], "rewrite the current version");
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn admin_rewrite_detail() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let summary = "A useful fact for this test";
+    let reason = "Verified test evidence";
+    let old = app
+        .save(
+            &device,
+            json!({
+                "kind": "fact",
+                "scope": "personal",
+                "title": "Original detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Seed detail for the rewrite."
+            }),
+        )
+        .await;
+
+    let boundary = "d".repeat(DETAIL_MAX);
+    let kept = app
+        .post(
+            &format!("admin/memories/{old}/rewrite"),
+            json!({
+                "title": "Boundary detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": boundary
+            }),
+            &admin,
+        )
+        .await;
+    let kept_id = kept["memory_id"].as_str().unwrap();
+    assert_ne!(kept_id, old);
+    assert_eq!(kept["superseded"], old);
+    let stored: i32 =
+        sqlx::query_scalar("SELECT char_length(detail) FROM memories WHERE memory_id=$1")
+            .bind(kept_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, DETAIL_MAX as i32);
+    let view = app.get(&format!("memories/{kept_id}"), &admin).await;
+    assert_eq!(view["detail"], boundary);
+
+    let preserved = app
+        .post(
+            &format!("admin/memories/{kept_id}/rewrite"),
+            json!({
+                "title": "Preserved detail fact",
+                "summary": summary,
+                "reason": reason
+            }),
+            &admin,
+        )
+        .await;
+    let preserved_id = preserved["memory_id"].as_str().unwrap();
+    let preserved_view = app.get(&format!("memories/{preserved_id}"), &admin).await;
+    assert_eq!(preserved_view["detail"], boundary);
+
+    let memories_before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let (status, too_long) = app
+        .send(
+            "POST",
+            &format!("admin/memories/{preserved_id}/rewrite"),
+            json!({
+                "title": "Too long detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "d".repeat(DETAIL_MAX + 1)
+            }),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        too_long["error"],
+        format!(
+            "detail is {} characters, limit {DETAIL_MAX}: cut 1",
+            DETAIL_MAX + 1
+        )
+    );
+    let memories_after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(memories_before, memories_after);
+
+    let redacted = app
+        .post(
+            &format!("admin/memories/{preserved_id}/rewrite"),
+            json!({
+                "title": "Redacted detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Operator note password=fake_secret_value stays in detail."
+            }),
+            &admin,
+        )
+        .await;
+    let redacted_id = redacted["memory_id"].as_str().unwrap();
+    let redacted_view = app.get(&format!("memories/{redacted_id}"), &admin).await;
+    assert_eq!(
+        redacted_view["detail"],
+        "Operator note password=[REDACTED] stays in detail."
+    );
+    let agent = app
+        .post("get", json!({"ids": [redacted_id]}), &device)
+        .await;
+    assert!(agent["memories"][0].get("detail").is_none());
+    assert!(!agent.to_string().contains("fake_secret_value"));
+    assert!(!agent.to_string().contains("Operator note"));
+
+    let cleared = app
+        .post(
+            &format!("admin/memories/{redacted_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": ""
+            }),
+            &admin,
+        )
+        .await;
+    let cleared_id = cleared["memory_id"].as_str().unwrap();
+    assert_ne!(cleared_id, redacted_id);
+    let cleared_view = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    assert!(cleared_view.get("detail").is_none());
+    let cleared_detail: String =
+        sqlx::query_scalar("SELECT detail FROM memories WHERE memory_id=$1")
+            .bind(cleared_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(cleared_detail, "");
+
+    let count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let only = app
+        .post(
+            &format!("admin/memories/{cleared_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Added from the web console."
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(only["memory_id"], cleared_id);
+    assert!(only.get("superseded").is_none());
+    let count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count_before, count_after);
+    let status_now: String = sqlx::query_scalar("SELECT status FROM memories WHERE memory_id=$1")
+        .bind(cleared_id)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(status_now, "active");
+    let added = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    assert_eq!(added["detail"], "Added from the web console.");
+    assert!(added.get("edited_by").is_some());
+
+    let (status, emptied_body) = app
+        .send(
+            "POST",
+            &format!("admin/memories/{cleared_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": ""
+            }),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(emptied_body["memory_id"], cleared_id);
+    let emptied: String = sqlx::query_scalar("SELECT detail FROM memories WHERE memory_id=$1")
+        .bind(cleared_id)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(emptied, "");
     app.finish().await;
 }
 
