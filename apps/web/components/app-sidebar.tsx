@@ -60,13 +60,11 @@ import { cairn } from "@/lib/cairn";
 const THEME_ICONS = { light: SunIcon, dark: MoonIcon, system: MonitorIcon };
 
 const WORKSPACE = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboardIcon },
+  { href: "/dashboard", label: "Overview", icon: LayoutDashboardIcon },
   { href: "/memories", label: "Memories", icon: BrainIcon },
+  { href: "/projects", label: "Projects", icon: FolderIcon },
   { href: "/skills", label: "Skills", icon: BookOpenIcon },
   { href: "/activity", label: "Activity", icon: ActivityIcon },
-  { href: "/projects", label: "Projects", icon: FolderIcon },
-  { href: "/graph", label: "Graph", icon: WaypointsIcon },
-  { href: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 function NavItem({
@@ -139,6 +137,10 @@ function AccountMenu() {
             <DropdownMenuLabel className="truncate">{email}</DropdownMenuLabel>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
+          <DropdownMenuItem render={<Link href="/settings" />}>
+            <SettingsIcon />
+            Settings
+          </DropdownMenuItem>
           <DropdownMenuItem render={<Link href="/settings?tab=account" />}>
             <LockKeyholeIcon />
             Change password
@@ -205,6 +207,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               {WORKSPACE.map((item) => (
                 <NavItem key={item.href} {...item} pathname={pathname} attention={attention[item.href]} />
               ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <NavItem href="/graph" label="Relationships" icon={WaypointsIcon} pathname={pathname} />
               {account?.is_admin ? <NavItem href="/fixes" label="Fixes" icon={WrenchIcon} pathname={pathname} count={fixCount} /> : null}
             </SidebarMenu>
           </SidebarGroupContent>

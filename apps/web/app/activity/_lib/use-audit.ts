@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { AuditEvent } from "@/lib/generated/AuditEvent";
 
 const PAGE = 50;
@@ -27,7 +27,7 @@ export function useAudit(actor: "system" | "person", types: readonly string[] = 
   const fail = useCallback(
     (cause: unknown, prefix: string) => {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return null;
       }
       return `${prefix} ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`;

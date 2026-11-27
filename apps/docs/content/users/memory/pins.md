@@ -11,7 +11,7 @@ A [pin](../../glossary.md#pin) puts an owned personal or project memory at the f
 
 ## Pin management
 
-- **Web console**: Open any owned personal or project memory and toggle the **Pin** action.
+- **Web console**: Use the pin control on a memory row or in the memory sheet. **Pinned** lists personal and project pins with their quotas. Archived project memories are read-only. A full quota stays as it is until you unpin one.
 - **API endpoint**: `POST /cairn-memory/memories/{id}/pin` with `{"pinned": true|false}`.
 
 ## Quotas and rules

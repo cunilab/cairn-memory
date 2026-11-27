@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { SOURCE_LABEL, byteCounter, changedFields, overLimit, sampleStart, sampleStop } from "@/lib/agent-instructions";
 import { cairn } from "@/lib/cairn";
 import type { AgentInstructions } from "@/lib/generated/AgentInstructions";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 
 type Key = keyof Omit<AgentInstructions, "max_bytes">;
 
@@ -76,7 +76,7 @@ export function AgentInstructionsEditor({
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+        if (cause instanceof SessionRequiredError) router.replace(loginHref());
         else setError(cause instanceof Error ? cause.message : "Could not load the agent instructions.");
       });
     return () => {
@@ -91,7 +91,7 @@ export function AgentInstructionsEditor({
       adopt(await cairn<AgentInstructions>(path, { method: "POST", body: JSON.stringify(body) }));
       toast.success(done);
     } catch (cause) {
-      if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+      if (cause instanceof SessionRequiredError) router.replace(loginHref());
       else setError(cause instanceof Error ? cause.message : "Could not save.");
     } finally {
       setBusy(false);

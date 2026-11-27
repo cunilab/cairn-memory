@@ -20,7 +20,7 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { FilterSelect } from "@/components/filter-select";
 import { cairn } from "@/lib/cairn";
 import type { Stats } from "@/lib/generated/Stats";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import { healthLabel, healthSegments, valueSentence } from "../_lib/summary";
 import { BarList } from "./bar-list";
 import { FirstRun } from "./first-run";
@@ -119,7 +119,7 @@ export function Dashboard() {
         },
         (cause: unknown) => {
           if (cause instanceof SessionRequiredError) {
-            router.replace(LOGIN_PATH);
+            router.replace(loginHref());
             return;
           }
           setError(`Stats could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);
@@ -178,6 +178,10 @@ export function Dashboard() {
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
+      <div className="flex flex-wrap gap-2">
+        <Button nativeButton={false} variant="outline" size="sm" render={<Link href="/memories?focus=search" />}>Search memories</Button>
+        <Button nativeButton={false} variant="outline" size="sm" render={<Link href="/memories?view=pinned" />}>Pinned</Button>
+      </div>
       {firstRun ? (
         <FirstRun
           checkedIn={stats.devices_checked_in > 0}
@@ -185,17 +189,7 @@ export function Dashboard() {
           total={stats.memories.total}
           gaveUp={gaveUp}
         />
-      ) : (
-        <>
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <p className="max-w-prose text-base">{valueSentence(stats.usage_days, days)}</p>
-            <div className="w-40">
-              <FilterSelect label="Range" value={String(days)} onChange={(v) => setDays(Number(v) || 30)} options={RANGE_OPTIONS} allLabel="Last 30 days" />
-            </div>
-          </div>
-          <UsageChart stats={stats} days={days} />
-        </>
-      )}
+      ) : null}
       {error ? <ErrorAlert message={error} onRetry={() => void load()} /> : null}
       {attention.length > 0 ? (
         <section aria-label="Needs attention" className="flex flex-col gap-2">
@@ -210,6 +204,17 @@ export function Dashboard() {
               </AlertDescription>
             </Alert>
           ))}
+        </section>
+      ) : null}
+      {!firstRun ? (
+        <section aria-label="Recent usage" className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-medium">Recent usage</h2>
+            <div className="w-40">
+              <FilterSelect label="Range" value={String(days)} onChange={(value) => setDays(Number(value) || 30)} options={RANGE_OPTIONS} allLabel="Last 30 days" />
+            </div>
+          </div>
+          <UsageChart stats={stats} days={days} />
         </section>
       ) : null}
       <div className="grid min-w-0 gap-4 lg:grid-cols-2">
@@ -262,14 +267,15 @@ export function Dashboard() {
             </ul>
           ) : null}
         </Section>
-        <Section title="Benchmark" description="Current version, 2,000 distractor memories, 43 questions. These are benchmark figures, not your usage.">
-          <dl className="grid grid-cols-2 gap-3 text-sm tabular-nums">
+        <details className="rounded-lg border px-4 py-3">
+          <summary className="cursor-pointer text-sm font-medium">Diagnostics</summary>
+          <dl className="mt-3 grid grid-cols-2 gap-3 text-sm tabular-nums">
             <div><dt className="text-muted-foreground">Right memory in top 5</dt><dd className="text-lg font-semibold">{Math.round(stats.bench.hit_at_5 * 100)}%</dd></div>
             <div><dt className="text-muted-foreground">Search reply</dt><dd className="text-lg font-semibold">~{stats.bench.search_tokens.toLocaleString()} tokens</dd></div>
             <div><dt className="text-muted-foreground">Session overhead</dt><dd className="text-lg font-semibold">~{stats.bench.session_tokens.toLocaleString()} tokens</dd></div>
             <div><dt className="text-muted-foreground">Fetch one</dt><dd className="text-lg font-semibold">~{stats.bench.get_tokens.toLocaleString()} tokens</dd></div>
           </dl>
-        </Section>
+        </details>
         <Section title="By kind" description="Memories by kind. Select one to list them.">
           {kinds.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nothing saved yet.</p>

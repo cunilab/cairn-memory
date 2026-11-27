@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ActivityIcon,
+  BookOpenIcon,
   BrainIcon,
   DownloadIcon,
   FolderIcon,
@@ -13,9 +14,11 @@ import {
   LogOutIcon,
   MonitorIcon,
   MoonIcon,
+  PinIcon,
   SettingsIcon,
   SunIcon,
   WaypointsIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   Command,
@@ -27,6 +30,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
+import { useAccount } from "@/hooks/use-account";
 import { useLogout } from "@/hooks/use-logout";
 import { useTheme } from "@/hooks/use-theme";
 import { toast } from "sonner";
@@ -36,11 +40,13 @@ import { THEMES } from "@/lib/theme";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 
 const PAGES = [
-  { href: "/dashboard", label: "Dashboard", keywords: "overview home", icon: LayoutDashboardIcon },
+  { href: "/dashboard", label: "Overview", keywords: "dashboard home", icon: LayoutDashboardIcon },
   { href: "/memories", label: "Memories", keywords: "search list", icon: BrainIcon },
-  { href: "/activity", label: "Activity", keywords: "timeline audit jobs", icon: ActivityIcon },
+  { href: "/memories?view=pinned", label: "Pinned memories", keywords: "pins", icon: PinIcon },
   { href: "/projects", label: "Projects", keywords: "repositories branches", icon: FolderIcon },
-  { href: "/graph", label: "Graph", keywords: "links", icon: WaypointsIcon },
+  { href: "/skills", label: "Skills", keywords: "library procedures", icon: BookOpenIcon },
+  { href: "/activity", label: "Activity", keywords: "timeline audit jobs events", icon: ActivityIcon },
+  { href: "/graph", label: "Relationships", keywords: "graph links", icon: WaypointsIcon },
   { href: "/settings", label: "Settings", keywords: "devices tokens accounts password", icon: SettingsIcon },
 ];
 
@@ -55,6 +61,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const router = useRouter();
+  const account = useAccount();
   const logout = useLogout();
   const [, setTheme] = useTheme();
   const [projects, setProjects] = useState<ProjectView[]>([]);
@@ -106,6 +113,12 @@ export function CommandPalette({
               {label}
             </CommandItem>
           ))}
+          {account?.is_admin ? (
+            <CommandItem value="fixes admin queue" onSelect={() => go("/fixes")}>
+              <WrenchIcon />
+              Fixes
+            </CommandItem>
+          ) : null}
         </CommandGroup>
         <CommandGroup heading="Actions">
           <CommandItem

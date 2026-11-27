@@ -11,7 +11,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/u
 import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { Job } from "@/lib/generated/Job";
 import type { JobCounts } from "@/lib/generated/JobCounts";
 import type { JobSnapshot } from "@/lib/generated/JobSnapshot";
@@ -45,7 +45,7 @@ export function Jobs() {
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         setError(`Jobs could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);
@@ -87,12 +87,15 @@ export function Jobs() {
       {
         accessorKey: "last_error",
         header: "Last error",
-        cell: ({ row }) => (
-          <span className="block max-w-md truncate text-muted-foreground" title={row.original.last_error ?? undefined}>
-            {row.original.last_error ?? "—"}
-          </span>
+        cell: ({ row }) => row.original.last_error ? (
+          <details>
+            <summary className="cursor-pointer text-muted-foreground">Show error and attempts</summary>
+            <p className="mt-1 max-w-md text-sm break-words">{row.original.last_error}</p>
+            <p className="text-xs tabular-nums text-muted-foreground">{row.original.attempts} attempts</p>
+          </details>
+        ) : (
+          <span className="text-muted-foreground">—</span>
         ),
-        meta: { className: "hidden md:table-cell" },
       },
       {
         accessorKey: "updated_at",

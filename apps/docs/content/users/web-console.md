@@ -15,14 +15,16 @@ The [glossary](../glossary.md#web-console) defines the records and tools you see
 
 | Section | Purpose |
 | --- | --- |
-| **Dashboard** | Overview of system health, active sessions, and recent activity. |
-| **Memories** | Search and filter memories by trust, scope, and status. Inspect evidence, counters, pins, and detail. |
-| **Skills** | Browse the shared global skill library, view version histories, and roll back revisions. |
-| **Projects** | Manage project settings, view members, browse branches, and inspect session handoffs. |
-| **Graph** | Visualize relationship links (`supersedes`, `contradicts`, `related`) between memories. |
-| **Activity** | Inspect raw capture events, background processing jobs, and account audit logs (admin only). |
-| **Fixes** | Automated health detector diagnosing configuration drift, stale pins, and updates. |
-| **Settings** | Manage personal device tokens and exports. Administrators manage accounts and global agent prompts. |
+| **Overview** | What needs attention, memory health, and recent usage. |
+| **Memories** | Exact phrase search by default, with a Related mode. All and Pinned tabs, row pins, and numbered pages. |
+| **Projects** | Project rows, then a project overview, memories, sessions, and settings. |
+| **Skills** | Library, Suggestions, and Archived. |
+| **Activity** | System events, account audit, and background jobs. |
+| **Relationships** | Desktop graph and a relationship list. Phones use the list. |
+| **Fixes** | Admin queue grouped by who can act next. Open from Overview or the admin section. |
+| **Settings** | Your account (devices, profile, data) and administration (accounts, agent instructions). |
+
+Search matches the exact phrase in one field and highlights it. Pinned shows personal and project quotas (3 and 4). Pages are numbered; the list does not append with Load more.
 
 *Session save counts track new records created during a session window. Project owners and administrators can edit project-specific instructions directly on the project page.*
 

@@ -8,7 +8,7 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { onMemoriesChanged } from "@/lib/memory-events";
 import { pinFitText } from "@/lib/pin-summary";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { PinSummary } from "@/lib/generated/PinSummary";
 import { cn } from "@/lib/utils";
 
@@ -39,7 +39,7 @@ export function PinSummaryBar({ projectId, memoryId, pinnedAt, compact = false, 
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         setSummary(null);

@@ -25,7 +25,7 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { announceMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { Project } from "@/lib/generated/Project";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 
@@ -55,7 +55,7 @@ export function ProjectList() {
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         setError(`Projects could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);
@@ -73,7 +73,7 @@ export function ProjectList() {
       announceMemoriesChanged();
       toast.success("Project restored");
     } catch (cause) {
-      if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+      if (cause instanceof SessionRequiredError) router.replace(loginHref());
       else toast.error(cause instanceof Error ? cause.message : "Could not restore the project.");
     } finally {
       setRestoring(null);
@@ -93,7 +93,16 @@ export function ProjectList() {
             >
               {row.original.name}
             </Link>
-            <span className="font-mono text-xs break-all text-muted-foreground md:hidden">{row.original.repository}</span>
+            <span className="text-xs text-muted-foreground md:hidden">
+              {row.original.role} ·{" "}
+              <Link href={`/projects/${encodeURIComponent(row.original.project_id)}?tab=memories`} className="underline-offset-4 hover:underline">
+                {row.original.memories.toLocaleString()} memories
+              </Link>
+              {" · "}
+              <Link href={`/projects/${encodeURIComponent(row.original.project_id)}?tab=memories&status=stale`} className="underline-offset-4 hover:underline">
+                {row.original.stale.toLocaleString()} stale
+              </Link>
+            </span>
           </div>
         ),
       },
@@ -115,7 +124,16 @@ export function ProjectList() {
         id,
         header,
         accessorFn: (p) => p[id],
-        cell: ({ row }) => <span className="tabular-nums">{row.original[id].toLocaleString()}</span>,
+        cell: ({ row }) => id === "members" ? (
+          <span className="tabular-nums">{row.original[id].toLocaleString()}</span>
+        ) : (
+          <Link
+            href={`/projects/${encodeURIComponent(row.original.project_id)}?tab=memories${id === "stale" ? "&status=stale" : ""}`}
+            className="tabular-nums underline-offset-4 hover:underline"
+          >
+            {row.original[id].toLocaleString()}
+          </Link>
+        ),
         meta: { className: "hidden md:table-cell" },
       });
     }
@@ -147,10 +165,18 @@ export function ProjectList() {
   if (projects === null) return <LoadingBlock label="Loading projects…" rows={4} />;
   return (
     <Tabs value={tab} onValueChange={setTab} className="gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
       <TabsList>
         <TabsTrigger value="active">Active</TabsTrigger>
         <TabsTrigger value="archived">Archived</TabsTrigger>
       </TabsList>
+      <details className="text-sm">
+        <summary className="cursor-pointer font-medium">Connect a repository</summary>
+        <p className="mt-2 max-w-md text-muted-foreground">
+          Run <code className="font-mono">cairn init</code> in the repository. The project id in <code className="font-mono">.cairn/project.json</code> is what joins it.
+        </p>
+      </details>
+      </div>
       <TabsContent value={tab}>
         <DataTable
           label="projects"

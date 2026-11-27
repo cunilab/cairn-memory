@@ -29,7 +29,7 @@ import { useOpenMemory, useTabParam } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { ApiError, cairn } from "@/lib/cairn";
 import { announceMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { BranchSummary } from "@/lib/generated/BranchSummary";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectMember } from "@/lib/generated/ProjectMember";
@@ -39,7 +39,14 @@ import { MemoryTable } from "../../memories/_components/memory-table";
 import { ProjectBranches } from "./project-branches";
 import { ProjectSessions } from "./project-sessions";
 
-const TABS = ["branches", "memories", "stale", "members", "instructions"] as const;
+const TABS = ["overview", "memories", "sessions", "settings", "branches", "stale", "members", "instructions"] as const;
+
+function shownTab(tab: (typeof TABS)[number]): "overview" | "memories" | "sessions" | "settings" {
+  if (tab === "memories") return "memories";
+  if (tab === "sessions" || tab === "branches") return "sessions";
+  if (tab === "settings" || tab === "members" || tab === "instructions") return "settings";
+  return "overview";
+}
 
 type Loaded = {
   project: ProjectView;
@@ -52,7 +59,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
   const account = useAccount();
   const openMemory = useOpenMemory();
-  const [tab, setTab] = useTabParam(TABS);
+  const [rawTab, setTab] = useTabParam(TABS);
+  const tab = shownTab(rawTab);
   const generation = useRef(0);
   const [projectData, setData] = useState<Loaded | null>(null);
   const [sessions, setSessions] = useState<SessionReport[] | null>(null);
@@ -103,7 +111,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         if (cause instanceof ApiError && cause.status === 404) setNotFound(true);
@@ -123,7 +131,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       })
       .catch((cause: unknown) => {
         if (cancelled || generation.current !== expected) return;
-        if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+        if (cause instanceof SessionRequiredError) router.replace(loginHref());
         else setSessionsError(true);
       });
     return () => { cancelled = true; };
@@ -142,7 +150,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       } catch (cause) {
         if (generation.current !== expected) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         setData(null);
@@ -162,7 +170,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       announceMemoriesChanged();
       setConfirmArchive(false);
     } catch (cause) {
-      if (cause instanceof SessionRequiredError) router.replace(LOGIN_PATH);
+      if (cause instanceof SessionRequiredError) router.replace(loginHref());
       else toast.error(cause instanceof Error ? cause.message : "Could not change the project archive.");
     } finally {
       setArchivePending(false);
@@ -298,31 +306,46 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
       {data ? <PinSummaryBar projectId={projectId} /> : null}
       {data ? (
         <Tabs value={tab} onValueChange={(value) => setTab(value as (typeof TABS)[number])}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
           <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-7">
-            <TabsTrigger value="branches">Branches</TabsTrigger>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="memories">Memories</TabsTrigger>
-            <TabsTrigger value="stale">Stale ({data.stale.length})</TabsTrigger>
-            <TabsTrigger value="members">Members</TabsTrigger>
-            <TabsTrigger value="instructions">Agent instructions</TabsTrigger>
+            <TabsTrigger value="sessions">Sessions</TabsTrigger>
+            <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
-          <TabsContent value="branches" className="space-y-6">
-            <ProjectBranches branches={data.branches} />
+          <Button nativeButton={false} variant="outline" size="sm" render={<Link href={`/graph?project=${encodeURIComponent(projectId)}`} />}>
+            Relationships
+          </Button>
+          </div>
+          <TabsContent value="overview" className="space-y-4">
+            <div className="flex flex-wrap gap-2 text-sm">
+              <Button nativeButton={false} variant="outline" size="sm" render={<Link href={`/projects/${encodeURIComponent(projectId)}?tab=memories&status=stale`} />}>
+                {data.stale.length} stale
+              </Button>
+              <Button nativeButton={false} variant="outline" size="sm" render={<Link href={`/projects/${encodeURIComponent(projectId)}?tab=memories&view=pinned`} />}>
+                Pins
+              </Button>
+            </div>
+            {data.stale.length > 0 ? (
+              <DataTable
+                label="stale memories"
+                data={data.stale.slice(0, 5)}
+                columns={staleColumns}
+                getRowId={(m) => m.id}
+                filterPlaceholder="Filter stale memories"
+                empty={<p className="p-6 text-sm text-muted-foreground">Nothing is stale in this project.</p>}
+              />
+            ) : null}
             {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
           <TabsContent value="memories">
             <MemoryTable projectId={projectId} />
           </TabsContent>
-          <TabsContent value="stale">
-            <DataTable
-              label="stale memories"
-              data={data.stale}
-              columns={staleColumns}
-              getRowId={(m) => m.id}
-              filterPlaceholder="Filter stale memories"
-              empty={<p className="p-6 text-sm text-muted-foreground">Nothing is stale in this project.</p>}
-            />
+          <TabsContent value="sessions" className="space-y-6">
+            <ProjectBranches branches={data.branches} />
+            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
-          <TabsContent value="members">
+          <TabsContent value="settings" className="space-y-6">
             <DataTable
               label="members"
               data={data.members}
@@ -331,8 +354,6 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               filterPlaceholder="Filter members"
               empty={<p className="p-6 text-sm text-muted-foreground">No members found.</p>}
             />
-          </TabsContent>
-          <TabsContent value="instructions">
             <AgentInstructionsEditor
               path={`${path}/agent-instructions`}
               scope="project"

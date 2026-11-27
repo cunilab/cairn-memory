@@ -31,7 +31,7 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { cairn } from "@/lib/cairn";
 import { formatTime } from "@/lib/report";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { Account } from "@/lib/generated/Account";
 
 function PasswordFields({ label = "Password", prefix }: { label?: string; prefix: string }) {
@@ -86,7 +86,7 @@ export function Accounts() {
       setError(null);
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return;
       }
       setError(`Accounts could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);

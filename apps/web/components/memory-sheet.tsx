@@ -2,6 +2,7 @@
 
 import { Pin } from "lucide-react";
 import { Fragment, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { KindBadge, StatusBadge } from "@/components/badges";
@@ -37,7 +38,7 @@ import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
 import { announceMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import { memoryLabel } from "@/app/memories/_components/memory-label";
@@ -163,11 +164,11 @@ function Body({
   const evidence = memory.evidence ?? [];
   return (
     <div className="flex flex-col gap-4 px-4 pb-6">
-      <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.summary}</p>
+      <p id="memory-field-summary" className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.summary}</p>
       {memory.edited_by ? <p className="text-sm text-muted-foreground">Changed by admin</p> : null}
       {memory.reason ? (
-        <div>
-          <h3 className="text-xs font-medium text-muted-foreground">Why it was saved</h3>
+        <div id="memory-field-reason">
+          <h3 className="text-xs font-medium text-muted-foreground">Why saved</h3>
           <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.reason}</p>
         </div>
       ) : null}
@@ -196,7 +197,7 @@ function Body({
       {fields.length > 0 ? (
         <dl className="flex flex-col gap-2 text-sm">
           {fields.map(([key, value]) => (
-            <div key={key}>
+            <div key={key} id={`memory-field-${key}`}>
               <dt className="text-xs font-medium text-muted-foreground">{words(key)}</dt>
               <dd className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                 {Array.isArray(value) ? (
@@ -319,7 +320,7 @@ export function MemorySheet() {
     setFields(source ? JSON.stringify(source.fields, null, 2) : "");
     setEditingId(id);
   }
-  const close = useCallback(() => { setEditingId(null); set({ memory: null }); }, [set]);
+  const close = useCallback(() => { setEditingId(null); set({ memory: null, field: null }); }, [set]);
   useResetOnHide(() => {
     setLoaded(null);
     setConfirming(false);
@@ -336,7 +337,7 @@ export function MemorySheet() {
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         const missing = cause instanceof ApiError && cause.status === 404;
@@ -359,6 +360,11 @@ export function MemorySheet() {
 
   const canPin = canForget && memory !== null && memory.scope !== "global"
     && (memory.status !== "superseded" || memory.pinned_at != null);
+  const field = params.get("field");
+  useEffect(() => {
+    if (!field || !memory) return;
+    document.getElementById(`memory-field-${field}`)?.scrollIntoView({ block: "nearest" });
+  }, [field, memory]);
 
   async function togglePin() {
     if (!canPin || !memory) return;
@@ -375,7 +381,7 @@ export function MemorySheet() {
       toast.success(result.pinned_at == null ? "Memory unpinned" : "Memory pinned");
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return;
       }
       toast.error(cause instanceof Error ? cause.message : "Could not change the pin.");
@@ -395,7 +401,7 @@ export function MemorySheet() {
       close();
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return;
       }
       toast.error(cause instanceof Error ? cause.message : "Could not forget this memory.");
@@ -421,8 +427,8 @@ export function MemorySheet() {
   return (
     <>
       <Sheet open={id !== null} onOpenChange={(open) => !open && close()}>
-        <SheetContent className="overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-lg">
-          <SheetHeader>
+        <SheetContent className="w-full overflow-hidden data-[side=right]:w-full data-[side=right]:sm:max-w-lg">
+          <SheetHeader className="shrink-0 border-b bg-background pr-12">
             <div className="flex flex-wrap items-center gap-2 pr-8">
               {memory ? (
                 <>
@@ -461,7 +467,27 @@ export function MemorySheet() {
               {memory?.title ?? (current?.missing ? "Memory not found" : "Memory")}
             </SheetTitle>
             <SheetDescription className="sr-only">Memory details</SheetDescription>
+            {memory ? (
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                {canPin ? (
+                  <Button type="button" variant={memory.pinned_at == null ? "outline" : "default"} size="sm" disabled={pending} onClick={() => void togglePin()}>
+                    <Pin aria-hidden="true" className={memory.pinned_at != null ? "fill-current" : ""} />
+                    {memory.pinned_at == null ? "Pin" : "Unpin"}
+                  </Button>
+                ) : null}
+                <CopyButton text={typeof window === "undefined" ? memory.id : window.location.href} label="Copy link" onCopied={() => toast.success("Link copied")} />
+                {memory.project_id ? (
+                  <Button type="button" variant="outline" size="sm" nativeButton={false} render={<Link href={`/projects/${encodeURIComponent(memory.project_id)}`} />}>
+                    {memory.project_name ?? "Project"}
+                  </Button>
+                ) : null}
+                <Button type="button" variant="outline" size="sm" nativeButton={false} render={<Link href={`/graph?focus=${encodeURIComponent(memory.id)}${memory.project_id ? `&project=${encodeURIComponent(memory.project_id)}` : ""}`} />}>
+                  Relationships
+                </Button>
+              </div>
+            ) : null}
           </SheetHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto">
           {current === null ? <div className="px-4"><LoadingBlock label="Loading memory…" rows={5} /></div> : null}
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
@@ -512,12 +538,6 @@ export function MemorySheet() {
                     />
                   ) : null}
                   <div className="flex flex-wrap gap-2">
-                    {canPin ? (
-                      <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
-                        <Pin aria-hidden="true" />
-                        {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
-                      </Button>
-                    ) : null}
                     <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
                       Forget memory…
                     </Button>
@@ -526,6 +546,7 @@ export function MemorySheet() {
               ) : null}
             </>
           ) : null}
+          </div>
         </SheetContent>
       </Sheet>
       <AlertDialog open={confirming} onOpenChange={(open) => !pending && setConfirming(open)}>

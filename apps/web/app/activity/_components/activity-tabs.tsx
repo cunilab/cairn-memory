@@ -13,9 +13,9 @@ export function ActivityTabs() {
   return (
     <Tabs value={tab} onValueChange={(value) => setTab(value as (typeof TABS)[number])}>
       <TabsList>
-        <TabsTrigger value="timeline">Timeline</TabsTrigger>
-        <TabsTrigger value="audit">Audit log</TabsTrigger>
-        <TabsTrigger value="jobs">Jobs</TabsTrigger>
+        <TabsTrigger value="timeline">System events</TabsTrigger>
+        <TabsTrigger value="audit">Account audit</TabsTrigger>
+        <TabsTrigger value="jobs">Background jobs</TabsTrigger>
       </TabsList>
       <TabsContent value="timeline">
         <Timeline />

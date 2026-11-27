@@ -12,7 +12,7 @@ import { cairn } from "@/lib/cairn";
 import { downloadExport } from "@/lib/export";
 import type { ImportReport } from "@/lib/generated/ImportReport";
 import { announceMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 
 type Dry = { body: string; report: ImportReport };
 
@@ -25,7 +25,7 @@ export function DataTab() {
 
   function fail(cause: unknown, fallback: string) {
     if (cause instanceof SessionRequiredError) {
-      router.replace(LOGIN_PATH);
+      router.replace(loginHref());
       return;
     }
     setError(cause instanceof Error ? cause.message : fallback);

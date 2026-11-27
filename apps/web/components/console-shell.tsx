@@ -2,7 +2,7 @@
 
 import { Fragment, Suspense, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { SearchIcon } from "lucide-react";
+import { PinIcon, SearchIcon } from "lucide-react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { CommandPalette } from "@/components/command-palette";
 import { MemorySheet } from "@/components/memory-sheet";
@@ -67,11 +67,21 @@ export function ConsoleShell({
             type="button"
             variant="outline"
             size="sm"
-            className="hidden w-56 justify-start gap-2 text-muted-foreground sm:inline-flex"
-            onClick={() => setPaletteOpen(true)}
+            className="hidden gap-2 sm:inline-flex"
+            nativeButton={false}
+            render={<Link href="/memories?focus=search" />}
           >
             <SearchIcon />
-            <span>Jump to…</span>
+            Search memories
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="hidden w-36 justify-start gap-2 text-muted-foreground lg:inline-flex"
+            onClick={() => setPaletteOpen(true)}
+          >
+            <span>Jump to</span>
             <Kbd className="ml-auto">⌘K</Kbd>
           </Button>
           <Button
@@ -79,6 +89,28 @@ export function ConsoleShell({
             variant="ghost"
             size="icon"
             className="sm:hidden"
+            aria-label="Search memories"
+            nativeButton={false}
+            render={<Link href="/memories?focus=search" />}
+          >
+            <SearchIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="sm:hidden"
+            aria-label="Pinned memories"
+            nativeButton={false}
+            render={<Link href="/memories?view=pinned" />}
+          >
+            <PinIcon />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="lg:hidden"
             aria-label="Jump to a page or project"
             onClick={() => setPaletteOpen(true)}
           >

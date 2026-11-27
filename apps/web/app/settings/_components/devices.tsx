@@ -66,7 +66,7 @@ import { useServerUrl } from "@/hooks/use-server-url";
 import { revokeDeviceImpact, rotateDeviceImpact } from "@/lib/action-copy";
 import { baselineOf, checkedInSince, type Baseline } from "@/lib/device-checkin";
 import { cairn } from "@/lib/cairn";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { Agent } from "@/lib/setup-command";
 import type { DeviceView } from "@/lib/generated/DeviceView";
 import type { DeviceRegistration } from "@/lib/generated/DeviceRegistration";
@@ -203,7 +203,7 @@ export function Devices() {
   const requireSignIn = useCallback(() => {
     setDevices(null);
     setIssued(null);
-    router.replace(LOGIN_PATH);
+    router.replace(loginHref());
   }, [router]);
 
   const load = useCallback(() => cairn<DeviceView[]>("devices"), []);

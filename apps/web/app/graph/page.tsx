@@ -7,8 +7,8 @@ import { GraphView } from "./_components/graph-view";
 
 export default function GraphPage() {
   return (
-    <ConsoleShell crumbs={[{ label: "Graph" }]}>
-      <PageHeader title="Graph" description="How your memories connect. Select a memory to read it." />
+    <ConsoleShell crumbs={[{ label: "Relationships" }]}>
+      <PageHeader title="Relationships" description="How memories connect. Select one to read it." />
       <Suspense fallback={<LoadingBlock label="Loading the graph…" rows={4} />}>
         <GraphView />
       </Suspense>
@@ -16,4 +16,4 @@ export default function GraphPage() {
   );
 }
 
-export const metadata: Metadata = { title: "Graph" };
+export const metadata: Metadata = { title: "Relationships" };
