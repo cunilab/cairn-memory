@@ -6,7 +6,9 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 
-const CARD_KEYS: [&str; 6] = ["id", "kind", "score", "summary", "title", "trust"];
+const CARD_KEYS: [&str; 8] = [
+    "id", "kind", "project", "score", "summary", "title", "trust", "why",
+];
 
 fn decision() -> Value {
     json!({"kind": "decision", "title": "Use Postgres SKIP LOCKED for the job queue",
