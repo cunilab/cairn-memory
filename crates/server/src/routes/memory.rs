@@ -3,11 +3,11 @@ use crate::auth::{Agent, Caller, Web};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
 use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
-use cairn_store::memory::{ListFilter, Saved, Vote};
+use cairn_store::memory::{ListFilter, PinOrder, PinSlot, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
 use cairn_store::view::{MemoryView, PinSummary};
@@ -123,6 +123,17 @@ pub async fn remember(
     Json(mut body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let account = caller.account;
+    let session_id = match body.get("session_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return Err(ApiError::invalid("session_id must be a string")),
+    };
+    if let Some(id) = session_id.as_deref() {
+        super::retrieve::push_session_id(Some(id))?;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("session_id");
+    }
     let context = match body
         .as_object_mut()
         .and_then(|object| object.remove("context"))
@@ -138,6 +149,7 @@ pub async fn remember(
             &account.person_id,
             caller.device_id.as_deref(),
             &context,
+            session_id.as_deref(),
             body,
         )
         .await;
@@ -146,11 +158,12 @@ pub async fn remember(
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let mut saved = state
         .store
-        .save_from(
+        .save_from_session(
             &account.person_id,
             input,
             &context,
             caller.device_id.as_deref(),
+            session_id.as_deref(),
         )
         .await?;
     Ok(Json(Receipt {
@@ -168,6 +181,7 @@ async fn save_items(
     person_id: &str,
     device_id: Option<&str>,
     context: &WorkContext,
+    session_id: Option<&str>,
     body: Value,
 ) -> Result<Response, ApiError> {
     let mut object = match body {
@@ -191,7 +205,7 @@ async fn save_items(
     }
     let mut results = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let mut result = save_item(state, person_id, device_id, context, item).await;
+        let mut result = save_item(state, person_id, device_id, context, session_id, item).await;
         result.error = result.error.map(|error| format!("items[{index}]: {error}"));
         results.push(result);
     }
@@ -203,6 +217,7 @@ async fn save_item(
     person_id: &str,
     device_id: Option<&str>,
     context: &WorkContext,
+    session_id: Option<&str>,
     item: &Value,
 ) -> ItemResult {
     let input = match serde_json::from_value::<SaveInput>(item.clone()) {
@@ -218,7 +233,7 @@ async fn save_item(
     };
     match state
         .store
-        .save_from(person_id, input, context, device_id)
+        .save_from_session(person_id, input, context, device_id, session_id)
         .await
     {
         Ok(mut saved) => ItemResult {
@@ -431,7 +446,7 @@ pub async fn pins(
     ))
 }
 
-/// Pinning is a console action, restricted to the memory's owner.
+/// Pin or unpin. Personal pins are owner-only. Project pins also allow the project owner and the server admin.
 pub async fn pin(
     State(state): State<AppState>,
     Web(account): Web,
@@ -443,6 +458,75 @@ pub async fn pin(
         .set_pinned(&account.person_id, &id, body.pinned)
         .await?;
     Ok(Json(json!({ "pinned_at": pinned_at })))
+}
+
+#[derive(Deserialize)]
+pub struct PinOrderBody {
+    scope: Scope,
+    #[serde(rename = "projectId", alias = "project_id")]
+    project_id: Option<String>,
+    order: Vec<PinSlot>,
+}
+
+/// Replace one pin bucket. A stale screen gets 409 and the current order.
+pub async fn reorder_pins(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Json(body): Json<PinOrderBody>,
+) -> Result<Response, ApiError> {
+    let order: Vec<(String, i32)> = body
+        .order
+        .into_iter()
+        .map(|slot| (slot.id, slot.position))
+        .collect();
+    match state
+        .store
+        .reorder_pins(
+            &account.person_id,
+            body.scope,
+            body.project_id.as_deref(),
+            &order,
+        )
+        .await?
+    {
+        PinOrder::Applied(order) => Ok(Json(json!({ "order": order })).into_response()),
+        PinOrder::Stale(order) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "pin order changed",
+                "code": "conflict",
+                "order": order,
+            })),
+        )
+            .into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SessionQuery {
+    #[serde(rename = "sessionId", alias = "session_id")]
+    session_id: String,
+    #[serde(rename = "personId", alias = "person_id")]
+    person_id: Option<String>,
+}
+
+/// One session the viewer may open, with the memories it created.
+pub async fn session(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Query(query): Query<SessionQuery>,
+) -> ApiResult<cairn_store::provenance::SessionInspection> {
+    super::retrieve::push_session_id(Some(&query.session_id))?;
+    let owner = query
+        .person_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| account.person_id.clone());
+    Ok(Json(
+        state
+            .store
+            .inspect_session(&account.person_id, &owner, &query.session_id)
+            .await?,
+    ))
 }
 
 /// Forget: the owner's memory stays, hidden from search, with its text kept.

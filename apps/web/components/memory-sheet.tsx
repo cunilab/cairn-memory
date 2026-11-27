@@ -37,6 +37,7 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
+import { branchActivityHref, sessionHref, sessionTitle } from "@/lib/provenance";
 import { announceMemoriesChanged } from "@/lib/memory-events";
 import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
@@ -358,8 +359,7 @@ export function MemorySheet() {
   const memory = current?.memory ?? null;
   const canForget = memory?.owner_is_me === true && !memory.project_archived;
 
-  const canPin = canForget && memory !== null && memory.scope !== "global"
-    && (memory.status !== "superseded" || memory.pinned_at != null);
+  const canPin = memory?.can_pin === true;
   const field = params.get("field");
   useEffect(() => {
     if (!field || !memory) return;
@@ -466,6 +466,24 @@ export function MemorySheet() {
             <SheetTitle className="[overflow-wrap:anywhere]">
               {memory?.title ?? (current?.missing ? "Memory not found" : "Memory")}
             </SheetTitle>
+            {memory?.provenance ? (
+              <p className="text-sm">
+                Saved in →{" "}
+                <Link className="underline-offset-4 hover:underline" href={sessionHref(memory.provenance)}>
+                  {sessionTitle(memory.provenance.branch)}, <Time value={memory.provenance.started_at} />
+                </Link>
+              </p>
+            ) : memory ? (
+              <p className="text-sm">
+                {memory.project_id ? (
+                  <Link className="underline-offset-4 hover:underline" href={branchActivityHref(memory.project_id, memory.context.branch)}>
+                    View branch activity
+                  </Link>
+                ) : (
+                  "View branch activity"
+                )}
+              </p>
+            ) : null}
             <SheetDescription className="sr-only">Memory details</SheetDescription>
             {memory ? (
               <div className="flex flex-wrap items-center gap-2 pt-2">

@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod link;
 pub mod memory;
 pub mod project;
+pub mod provenance;
 pub mod repo;
 pub mod retrieve;
 pub mod skill;
@@ -128,6 +129,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0025_skills",
         include_str!("../../../migrations/0025_skills.sql"),
+    ),
+    (
+        "0026_session_provenance_pin_order",
+        include_str!("../../../migrations/0026_session_provenance_pin_order.sql"),
     ),
 ];
 

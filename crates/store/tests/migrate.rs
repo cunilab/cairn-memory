@@ -41,6 +41,7 @@ async fn migrate_twice_is_a_no_op() {
             "0023_hermes_chat",
             "0024_hermes_route_privacy",
             "0025_skills",
+            "0026_session_provenance_pin_order",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -49,7 +50,7 @@ async fn migrate_twice_is_a_no_op() {
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert_eq!(tables, 27);
+    assert_eq!(tables, 28);
     // Everything lives in the test schema, nothing leaks into public.
     let public: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('memories','accounts','jobs','session_shown','push_usage','skills','skill_versions','session_skill_shown')")
         .fetch_one(db.store.pool())
@@ -1034,6 +1035,7 @@ async fn fixes_migration_additive() {
     versions.push("0023_hermes_chat".into());
     versions.push("0024_hermes_route_privacy".into());
     versions.push("0025_skills".into());
+    versions.push("0026_session_provenance_pin_order".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")

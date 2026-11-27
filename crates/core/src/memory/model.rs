@@ -122,6 +122,9 @@ pub struct Memory {
     pub faded_at: Option<i64>,
     #[serde(skip)]
     pub pinned_at: Option<i64>,
+    /// Custom pin order within the personal or project bucket. Lower comes first in L0.
+    #[serde(skip)]
+    pub pin_position: Option<i32>,
     /// Whether an administrator edited this memory; the editor's identity stays private.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]

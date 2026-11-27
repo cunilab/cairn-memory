@@ -9,6 +9,7 @@ import type { Rank } from "./Rank";
 import type { Scope } from "./Scope";
 import type { Status } from "./Status";
 import type { TrustLevel } from "./TrustLevel";
+import type { MemoryProvenance } from "./MemoryProvenance";
 import type { UsageView } from "./UsageView";
 
 export type MemoryView = { origin: Origin, project_name: string | null, owner_is_me: boolean, 
@@ -23,7 +24,7 @@ checked_at: number | null, status_changed_at: number, fetched: number, usage: Us
 /**
  * Files and symbols the last check found gone: the "why stale" detail.
  */
-missing_entities: Array<string>, links: Array<LinkView>, project_archived: boolean, pinned_at: number | null, detail?: string, trust_level: TrustLevel, trust: string, id: string, owner: string, project_id: string | null, scope: Scope, kind: Kind, title: string, summary: string, reason?: string, 
+missing_entities: Array<string>, links: Array<LinkView>, project_archived: boolean, pinned_at: number | null, pin_position: number | null, can_pin: boolean, can_reorder: boolean, provenance?: MemoryProvenance, detail?: string, trust_level: TrustLevel, trust: string, id: string, owner: string, project_id: string | null, scope: Scope, kind: Kind, title: string, summary: string, reason?: string, 
 /**
  * Serialized as the bare per-kind object.
  */

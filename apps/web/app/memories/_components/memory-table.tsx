@@ -194,6 +194,37 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
     set({ ...patch, page: null });
   }
 
+  async function movePin(rows: ConsoleMemory[], index: number, direction: -1 | 1) {
+    const next = rows.slice();
+    const target = index + direction;
+    const moved = next[index];
+    if (!moved || target < 0 || target >= next.length) return;
+    next.splice(index, 1);
+    next.splice(target, 0, moved);
+    setPinning(moved.id);
+    try {
+      await cairn("memories/pins/order", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: moved.scope,
+          project_id: moved.project_id,
+          order: next.map((row) => ({ id: row.id, position: row.pin_position })),
+        }),
+      });
+      announceMemoriesChanged();
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) requireSignIn();
+      else if (cause instanceof ApiError && cause.status === 409) {
+        announceMemoriesChanged();
+        setError("Pin order changed. The list was reloaded.");
+      } else {
+        setError(cause instanceof Error ? cause.message : "Could not reorder pins.");
+      }
+    } finally {
+      setPinning(null);
+    }
+  }
+
   async function togglePin(memory: ConsoleMemory) {
     if (!canTogglePin(memory)) return;
     const quota = quotaFor(memory, quotas);
@@ -342,10 +373,16 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
               </h2>
             ) : null}
             <ul className="divide-y rounded-lg border bg-card">
-              {group.rows.map((memory) => {
+              {group.rows.map((memory, index) => {
                 const quota = quotaFor(memory, quotas);
                 const full = quota !== undefined && memory.pinned_at == null && quota.used >= quota.limit;
                 const toggle = canTogglePin(memory);
+                const reorder = view === "pinned"
+                  && !q
+                  && activeFilters.length === 0
+                  && group.quota !== undefined
+                  && group.rows.length === group.quota.used
+                  && group.rows.every((row) => row.can_reorder && row.pin_position != null);
                 return (
                   <li key={memory.id} className="flex items-start gap-2 px-3 py-2">
                     {toggle ? (
@@ -397,6 +434,30 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
                         </Button>
                       ) : null}
                     </div>
+                    {reorder ? (
+                      <div className="flex shrink-0 flex-col gap-1 py-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={index === 0 || pinning === memory.id}
+                          aria-label={`Move ${memory.title} up`}
+                          onClick={() => void movePin(group.rows, index, -1)}
+                        >
+                          Up
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={index === group.rows.length - 1 || pinning === memory.id}
+                          aria-label={`Move ${memory.title} down`}
+                          onClick={() => void movePin(group.rows, index, 1)}
+                        >
+                          Down
+                        </Button>
+                      </div>
+                    ) : null}
                   </li>
                 );
               })}

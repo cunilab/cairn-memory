@@ -32,8 +32,5 @@ export function quotaFor(memory: Pick<MemoryView, "scope" | "project_id">, quota
 }
 
 export function canTogglePin(memory: MemoryView): boolean {
-  if (!memory.owner_is_me || memory.project_archived || memory.scope === "global" || memory.status === "forgotten") {
-    return false;
-  }
-  return memory.status !== "superseded" || memory.pinned_at != null;
+  return memory.can_pin;
 }

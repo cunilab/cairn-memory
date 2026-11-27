@@ -25,6 +25,7 @@ pub fn memory(id: &str, kind: Kind, scope: Scope) -> Memory {
         rank: Rank::Normal,
         faded_at: None,
         pinned_at: None,
+        pin_position: None,
         edited_by: false,
         proof_count: 1,
         stale_cause: None,

@@ -206,7 +206,9 @@ impl Store {
             .map(str::to_owned);
         if !dry_run {
             let source = chat.map_or(SaveSource::StrictAgent, SaveSource::ImportedChat);
-            let saved = self.save_as(person_id, input, &work, source, None).await?;
+            let saved = self
+                .save_as(person_id, input, &work, source, None, None)
+                .await?;
             return Ok(!saved.deduplicated);
         }
         let mut new = prepare_save(input, &work, wants_project, Origin::Agent, now_seconds())?;

@@ -118,7 +118,9 @@ pub struct Conflict {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SessionReport {
+    pub person_id: String,
     pub session_id: String,
+    pub chat: bool,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub started_at: i64,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
@@ -136,6 +138,53 @@ pub struct SessionReport {
     pub captures: i64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub agent_saves: i64,
+}
+
+const SESSION_COLUMNS: &str = "s.person_id,
+    (s.context ? 'chat') AS chat,
+    s.session_id,
+    EXTRACT(EPOCH FROM s.started_at)::bigint AS started_at,
+    EXTRACT(EPOCH FROM s.ended_at)::bigint AS ended_at,
+    (s.context->>'branch') AS branch,
+    (COALESCE(s.context->>'origin', '') = 'automation') AS automated,
+    EXTRACT(EPOCH FROM s.distilled_at)::bigint AS distilled_at,
+    s.notes_written,
+    s.digest_written,
+    s.handoff_outcome,
+    s.why_none,
+    s.files_changed,
+    (SELECT count(*) FROM observations o
+      WHERE o.person_id = s.person_id AND o.session_id = s.session_id
+        AND o.expires_at > now()) AS captures,
+    (SELECT count(*) FROM memories m
+      WHERE m.owner_id = s.person_id
+        AND m.project_id = s.project_id
+        AND m.origin = 'agent'
+        AND m.created_at >= s.started_at
+        AND m.created_at <= COALESCE(
+            s.ended_at,
+            (SELECT max(o.captured_at) FROM observations o WHERE o.person_id = s.person_id AND o.session_id = s.session_id),
+            s.started_at
+        )) AS agent_saves";
+
+fn session_report(row: &sqlx::postgres::PgRow) -> Result<SessionReport> {
+    Ok(SessionReport {
+        person_id: row.try_get("person_id")?,
+        session_id: row.try_get("session_id")?,
+        chat: row.try_get("chat")?,
+        started_at: row.try_get("started_at")?,
+        ended_at: row.try_get("ended_at")?,
+        branch: row.try_get("branch")?,
+        automated: row.try_get("automated")?,
+        distilled_at: row.try_get("distilled_at")?,
+        notes_written: row.try_get("notes_written")?,
+        digest_written: row.try_get("digest_written")?,
+        handoff_outcome: row.try_get("handoff_outcome")?,
+        why_none: row.try_get("why_none")?,
+        files_changed: row.try_get("files_changed")?,
+        captures: row.try_get("captures")?,
+        agent_saves: row.try_get("agent_saves")?,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -666,61 +715,51 @@ impl Store {
         days: i32,
     ) -> Result<Vec<SessionReport>> {
         self.require_member(person_id, project_id).await?;
-        let rows = sqlx::query(
-            "SELECT s.session_id,
-                    EXTRACT(EPOCH FROM s.started_at)::bigint AS started_at,
-                    EXTRACT(EPOCH FROM s.ended_at)::bigint AS ended_at,
-                    (s.context->>'branch') AS branch,
-                    (COALESCE(s.context->>'origin', '') = 'automation') AS automated,
-                    EXTRACT(EPOCH FROM s.distilled_at)::bigint AS distilled_at,
-                    s.notes_written,
-                    s.digest_written,
-                    s.handoff_outcome,
-                    s.why_none,
-                    s.files_changed,
-                    (SELECT count(*) FROM observations o
-                      WHERE o.person_id = s.person_id AND o.session_id = s.session_id
-                        AND o.expires_at > now()) AS captures,
-                    (SELECT count(*) FROM memories m
-                      WHERE m.owner_id = s.person_id
-                        AND m.project_id = s.project_id
-                        AND m.origin = 'agent'
-                        AND m.created_at >= s.started_at
-                        AND m.created_at <= COALESCE(
-                            s.ended_at,
-                            (SELECT max(o.captured_at) FROM observations o WHERE o.person_id = s.person_id AND o.session_id = s.session_id),
-                            s.started_at
-                        )) AS agent_saves
+        let rows = sqlx::query(&format!(
+            "SELECT {SESSION_COLUMNS}, s.project_id
                FROM sessions s
               WHERE s.project_id = $1
                 AND s.started_at >= now() - make_interval(days => $2)
               ORDER BY s.started_at DESC, s.session_id DESC
-              LIMIT 50",
-        )
+              LIMIT 50"
+        ))
         .bind(project_id)
         .bind(days)
         .fetch_all(&self.pool)
         .await?;
+        rows.iter().map(session_report).collect()
+    }
 
-        rows.iter()
-            .map(|r| {
-                Ok(SessionReport {
-                    session_id: r.try_get("session_id")?,
-                    started_at: r.try_get("started_at")?,
-                    ended_at: r.try_get("ended_at")?,
-                    branch: r.try_get("branch")?,
-                    automated: r.try_get("automated")?,
-                    distilled_at: r.try_get("distilled_at")?,
-                    notes_written: r.try_get("notes_written")?,
-                    digest_written: r.try_get("digest_written")?,
-                    handoff_outcome: r.try_get("handoff_outcome")?,
-                    why_none: r.try_get("why_none")?,
-                    files_changed: r.try_get("files_changed")?,
-                    captures: r.try_get("captures")?,
-                    agent_saves: r.try_get("agent_saves")?,
-                })
-            })
-            .collect()
+    /// The session when the viewer may see it. Chat sessions stay with their owner.
+    pub(crate) async fn visible_session(
+        &self,
+        viewer: &str,
+        owner: &str,
+        session_id: &str,
+    ) -> Result<Option<(SessionReport, Option<String>)>> {
+        let row = sqlx::query(&format!(
+            "SELECT {SESSION_COLUMNS}, s.project_id
+               FROM sessions s
+              WHERE s.person_id = $1 AND s.session_id = $2
+                AND (
+                    s.person_id = $3
+                    OR (
+                        s.project_id IS NOT NULL
+                        AND NOT (s.context ? 'chat')
+                        AND EXISTS (
+                            SELECT 1 FROM project_members pm
+                             WHERE pm.project_id = s.project_id AND pm.person_id = $3
+                        )
+                    )
+                )"
+        ))
+        .bind(owner)
+        .bind(session_id)
+        .bind(viewer)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| Ok((session_report(&row)?, row.try_get("project_id")?)))
+            .transpose()
     }
 
     async fn require_member(&self, person_id: &str, project_id: &str) -> Result<()> {

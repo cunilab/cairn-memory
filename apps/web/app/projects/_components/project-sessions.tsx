@@ -1,11 +1,14 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table";
 import { Time } from "@/components/time";
 import { Badge } from "@/components/ui/badge";
+import { useAccount } from "@/hooks/use-account";
 import type { SessionReport } from "@/lib/generated/SessionReport";
+import { sessionTitle } from "@/lib/provenance";
 import {
   formatWhyNone,
   hasSaves,
@@ -13,7 +16,8 @@ import {
   summaryLine,
 } from "../_lib/session-summary";
 
-export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
+export function ProjectSessions({ sessions, initialFilter = "" }: { sessions: SessionReport[]; initialFilter?: string }) {
+  const account = useAccount();
   const withSaves = useMemo(
     () => sessions.filter(hasSaves).length,
     [sessions],
@@ -101,6 +105,22 @@ export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
         ),
       },
       {
+        id: "open",
+        header: "Inspector",
+        cell: ({ row }) => {
+          const session = row.original;
+          if (session.chat && session.person_id !== account?.person_id) {
+            return <span className="text-muted-foreground">—</span>;
+          }
+          const query = new URLSearchParams({ person: session.person_id, session: session.session_id });
+          return (
+            <Link className="text-sm underline-offset-4 hover:underline" href={`/session?${query}`}>
+              {sessionTitle(session.branch)}
+            </Link>
+          );
+        },
+      },
+      {
         id: "why_nothing",
         header: "Why nothing",
         cell: ({ row }) => {
@@ -117,7 +137,7 @@ export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
         },
       },
     ],
-    [],
+    [account?.person_id],
   );
 
   return (
@@ -131,6 +151,7 @@ export function ProjectSessions({ sessions }: { sessions: SessionReport[] }) {
         data={sessions}
         columns={columns}
         getRowId={(s) => s.session_id}
+        initialFilter={initialFilter}
         filterPlaceholder="Filter sessions"
         empty={
           <p className="p-6 text-sm text-muted-foreground">

@@ -106,7 +106,7 @@ fn where_sql(filter: &ConsoleFilter) -> String {
 
 fn order_sql(filter: &ConsoleFilter) -> &'static str {
     if filter.pinned {
-        "(m.scope = 'personal') DESC, coalesce(proj.name, ''), m.pinned_at DESC, m.memory_id DESC"
+        "(m.scope = 'personal') DESC, coalesce(proj.name, ''), m.pin_position, m.memory_id"
     } else if filter.q.is_some() && filter.mode == ConsoleMatch::Exact {
         "(lower(normalize(m.title, NFC)) = lower(normalize($7, NFC))) DESC, m.updated_at DESC, m.memory_id DESC"
     } else if filter.q.is_some() && filter.mode == ConsoleMatch::Related {

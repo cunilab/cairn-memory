@@ -229,6 +229,11 @@ fn pack_slice<'a>(
     used
 }
 
+/// Lower pin position wins leftover L0 bytes. A missing position sorts last.
+fn pin_rank(memory: &Memory) -> (i32, &str) {
+    (memory.pin_position.unwrap_or(i32::MAX), memory.id.as_str())
+}
+
 fn select_l0<'a>(
     personal: &[&'a Memory],
     project: &[&'a Memory],
@@ -278,7 +283,7 @@ fn select_l0<'a>(
         let next_p = personal.get(p_cards.len()).copied();
         let next_j = project.get(j_cards.len()).copied();
         let take_personal = match (next_p, next_j) {
-            (Some(p), Some(j)) => (p.pinned_at, &p.id) <= (j.pinned_at, &j.id),
+            (Some(p), Some(j)) => pin_rank(p) <= pin_rank(j),
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (None, None) => break,

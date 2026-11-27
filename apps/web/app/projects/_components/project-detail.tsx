@@ -25,7 +25,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAccount } from "@/hooks/use-account";
-import { useOpenMemory, useTabParam } from "@/hooks/use-query-params";
+import { useOpenMemory, useQueryParams, useTabParam } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { ApiError, cairn } from "@/lib/cairn";
 import { announceMemoriesChanged } from "@/lib/memory-events";
@@ -59,6 +59,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const router = useRouter();
   const account = useAccount();
   const openMemory = useOpenMemory();
+  const [params] = useQueryParams();
+  const branchFilter = params.get("branch") ?? "";
   const [rawTab, setTab] = useTabParam(TABS);
   const tab = shownTab(rawTab);
   const generation = useRef(0);
@@ -336,14 +338,14 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
                 empty={<p className="p-6 text-sm text-muted-foreground">Nothing is stale in this project.</p>}
               />
             ) : null}
-            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
+            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} initialFilter={branchFilter} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
           <TabsContent value="memories">
             <MemoryTable projectId={projectId} />
           </TabsContent>
           <TabsContent value="sessions" className="space-y-6">
             <ProjectBranches branches={data.branches} />
-            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} /> : <LoadingBlock label="Loading sessions…" />}
+            {sessionsError ? <ErrorAlert message="Sessions could not be loaded." /> : data.sessions ? <ProjectSessions sessions={data.sessions} initialFilter={branchFilter} /> : <LoadingBlock label="Loading sessions…" />}
           </TabsContent>
           <TabsContent value="settings" className="space-y-6">
             <DataTable

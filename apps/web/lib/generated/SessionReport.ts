@@ -3,4 +3,4 @@
 /**
  * Report of a recent session of a project.
  */
-export type SessionReport = { session_id: string, started_at: number, ended_at: number | null, branch: string | null, automated: boolean, distilled_at: number | null, notes_written: number | null, digest_written: boolean | null, handoff_outcome: string | null, why_none: Array<string> | null, files_changed: number | null, captures: number, agent_saves: number, };
+export type SessionReport = { person_id: string, session_id: string, chat: boolean, started_at: number, ended_at: number | null, branch: string | null, automated: boolean, distilled_at: number | null, notes_written: number | null, digest_written: boolean | null, handoff_outcome: string | null, why_none: Array<string> | null, files_changed: number | null, captures: number, agent_saves: number, };

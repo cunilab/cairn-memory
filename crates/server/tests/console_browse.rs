@@ -401,7 +401,7 @@ async fn pinned_tab_reports_quotas_without_changing_filters() {
         .await;
     assert_eq!(
         ids(&pinned),
-        vec![personal_b.clone(), personal_a.clone(), project_pin.clone()],
+        vec![personal_a.clone(), personal_b.clone(), project_pin.clone()],
         "{pinned}"
     );
     assert!(!ids(&pinned).contains(&fact));

@@ -265,7 +265,7 @@ impl McpServer {
             Some(_) => return rpc_error(id, -32602, "tool arguments must be an object"),
         };
         if let Some(session) = &self.session_id
-            && matches!(name, "memory_get" | "memory_feedback")
+            && matches!(name, "memory_get" | "memory_feedback" | "memory_save")
         {
             arguments.insert("session_id".to_owned(), json!(session));
         }

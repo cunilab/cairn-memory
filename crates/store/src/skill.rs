@@ -84,6 +84,23 @@ pub struct SkillDetail {
     pub archived_by: Option<String>,
     pub my_vote: Option<String>,
     pub my_note: Option<String>,
+    /// The procedure this skill was created from, when the reader can see that memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub source: Option<SkillSource>,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, Serialize)]
+pub struct SkillSource {
+    pub memory_id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub project_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -259,7 +276,8 @@ impl Store {
     ) -> Result<SkillDetail> {
         let row = sqlx::query(&format!(
             "SELECT v.skill_id, s.name, v.title, v.description, v.body, votes.*, 0::float4 AS score,
-                    {VERSION_COLUMNS}, {ARCHIVE_COLUMNS}, mine.vote, mine.note
+                    {VERSION_COLUMNS}, {ARCHIVE_COLUMNS}, mine.vote, mine.note,
+                    s.current_version, s.source_memory_id
                FROM skills s JOIN skill_versions v ON v.skill_id = s.skill_id
                {VOTE_COUNTS}
                LEFT JOIN skill_votes mine ON (mine.skill_id, mine.version, mine.person_id) = (v.skill_id, v.version, $3)
@@ -273,6 +291,14 @@ impl Store {
         .ok_or_else(|| StoreError::NotFound("skill version".into()))?;
         let archived_at: Option<i64> = row.try_get("archived_at")?;
         active(archived_at.is_some() && !allow_archived)?;
+        let current: i32 = row.try_get("current_version")?;
+        let version: i32 = row.try_get("version")?;
+        let source_id: Option<String> = row.try_get("source_memory_id")?;
+        let source = if version == current {
+            self.skill_source(person, source_id.as_deref()).await?
+        } else {
+            None
+        };
         Ok(SkillDetail {
             card: card(&row)?,
             body: row.try_get("body")?,
@@ -283,7 +309,41 @@ impl Store {
             archived_by: row.try_get("archived_by")?,
             my_vote: row.try_get("vote")?,
             my_note: row.try_get("note")?,
+            source,
         })
+    }
+
+    /// Title and project of the source memory, or nothing when the reader cannot see it.
+    async fn skill_source(
+        &self,
+        person: &str,
+        memory_id: Option<&str>,
+    ) -> Result<Option<SkillSource>> {
+        let Some(memory_id) = memory_id else {
+            return Ok(None);
+        };
+        let row = sqlx::query(&format!(
+            "SELECT m.title, m.project_id, p.name AS project_name
+               FROM memories m
+               LEFT JOIN projects p ON p.project_id = m.project_id
+              WHERE m.memory_id = $2 AND {}",
+            crate::memory::visible("m", "$1")
+        ))
+        .bind(person)
+        .bind(memory_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let project_id: Option<String> = row.try_get("project_id")?;
+        let project_name: Option<String> = row.try_get("project_name")?;
+        Ok(Some(SkillSource {
+            memory_id: memory_id.to_owned(),
+            title: row.try_get("title")?,
+            project_id,
+            project_name,
+        }))
     }
 
     pub async fn skill_versions(&self, key: &str) -> Result<Vec<SkillVersion>> {

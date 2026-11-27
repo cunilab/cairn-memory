@@ -102,6 +102,7 @@ fn l0_splits_personal_and_project_equally_with_spillover() {
             .map(|index| {
                 let mut m = memory(&format!("{prefix}{index}"), Kind::Rule, scope);
                 m.pinned_at = Some(index as i64 + 1);
+                m.pin_position = Some(index + 1);
                 m.title = format!("{prefix} rule {index}");
                 m.summary = "Summary text long enough to make each card substantial.".repeat(3);
                 m

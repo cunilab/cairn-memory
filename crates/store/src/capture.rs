@@ -424,6 +424,14 @@ impl Store {
                         notes_deduplicated += 1;
                     } else {
                         notes_created += 1;
+                        crate::provenance::record_output(
+                            &mut tx,
+                            person_id,
+                            session_id,
+                            &saved.id,
+                            "distilled",
+                        )
+                        .await?;
                     }
                     written.push(saved.id);
                 }
@@ -462,8 +470,18 @@ impl Store {
             .await
             {
                 Ok(saved) => {
-                    written.push(saved.id);
                     digest_written_flag = !saved.deduplicated;
+                    if !saved.deduplicated {
+                        crate::provenance::record_output(
+                            &mut tx,
+                            person_id,
+                            session_id,
+                            &saved.id,
+                            "distilled",
+                        )
+                        .await?;
+                    }
+                    written.push(saved.id);
                 }
                 Err(StoreError::Conflict(_)) => {}
                 Err(error) => return Err(error),
@@ -527,6 +545,14 @@ impl Store {
             {
                 Ok(saved) => {
                     if !saved.deduplicated {
+                        crate::provenance::record_output(
+                            &mut tx,
+                            person_id,
+                            session_id,
+                            &saved.id,
+                            "distilled",
+                        )
+                        .await?;
                         if let Some(row) = &previous {
                             let old: String = row.try_get("memory_id")?;
                             if old != saved.id {

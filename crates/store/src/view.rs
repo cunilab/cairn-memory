@@ -1,8 +1,9 @@
 //! What the console shows of a memory: the stored memory plus where it came from, how it is used,
 //! why it is stale and what it is linked to. Agents never see this shape (`Record` is theirs).
 
+use crate::memory::{account_is_admin, may_edit_pin};
 use crate::{Result, Store, epoch};
-use cairn_core::memory::{Link, Memory, Relation, TrustLevel};
+use cairn_core::memory::{Link, Memory, Relation, Scope, Status, TrustLevel};
 use cairn_core::process::Origin;
 use serde::Serialize;
 use sqlx::Row;
@@ -71,6 +72,15 @@ pub struct MemoryView {
     pub project_archived: bool,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub pinned_at: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub pin_position: Option<i32>,
+    /// The viewer may pin or unpin this memory.
+    pub can_pin: bool,
+    /// The viewer may reorder the whole pin bucket this memory belongs to.
+    pub can_reorder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub provenance: Option<crate::provenance::MemoryProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub detail: Option<String>,
@@ -206,6 +216,86 @@ impl Store {
                 status: m.status.as_str().to_owned(),
             });
         }
+        let is_admin = account_is_admin(&self.pool, person_id).await?;
+        let project_ids: Vec<&str> = memories
+            .iter()
+            .filter(|memory| memory.scope == Scope::Project)
+            .filter_map(|memory| memory.project_id.as_deref())
+            .collect();
+        let mut project_owner: HashMap<String, String> = HashMap::new();
+        for row in
+            sqlx::query("SELECT project_id, owner_id FROM projects WHERE project_id = ANY($1)")
+                .bind(&project_ids)
+                .fetch_all(&self.pool)
+                .await?
+        {
+            project_owner.insert(row.try_get("project_id")?, row.try_get("owner_id")?);
+        }
+        let member_of: std::collections::HashSet<String> = sqlx::query_scalar(
+            "SELECT project_id FROM project_members WHERE person_id = $1 AND project_id = ANY($2)",
+        )
+        .bind(person_id)
+        .bind(&project_ids)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
+        let reorder_rows = sqlx::query(
+            "SELECT m.project_id,
+                    bool_and(m.owner_id = $1 OR p.owner_id = $1 OR $2) AS allowed
+               FROM memories m
+               JOIN projects p ON p.project_id = m.project_id
+              WHERE m.scope = 'project' AND m.pinned_at IS NOT NULL
+                AND m.project_id = ANY($3) AND p.archived_at IS NULL
+              GROUP BY m.project_id",
+        )
+        .bind(person_id)
+        .bind(is_admin)
+        .bind(&project_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut can_reorder_project: HashMap<String, bool> = HashMap::new();
+        for row in reorder_rows {
+            can_reorder_project.insert(row.try_get("project_id")?, row.try_get("allowed")?);
+        }
+        let mut provenance: HashMap<String, crate::provenance::MemoryProvenance> = HashMap::new();
+        for row in sqlx::query(
+            "SELECT ms.memory_id, ms.person_id, ms.session_id, ms.role, s.project_id,
+                    s.context->>'branch' AS branch,
+                    EXTRACT(EPOCH FROM s.started_at)::bigint AS started_at
+               FROM memory_sessions ms
+               JOIN sessions s ON s.person_id = ms.person_id AND s.session_id = ms.session_id
+              WHERE ms.memory_id = ANY($1)
+                AND (
+                    s.person_id = $2
+                    OR (
+                        s.project_id IS NOT NULL
+                        AND NOT (s.context ? 'chat')
+                        AND EXISTS (
+                            SELECT 1 FROM project_members pm
+                             WHERE pm.project_id = s.project_id AND pm.person_id = $2
+                        )
+                    )
+                )",
+        )
+        .bind(&ids)
+        .bind(person_id)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            let id: String = row.try_get("memory_id")?;
+            provenance.insert(
+                id,
+                crate::provenance::MemoryProvenance {
+                    person_id: row.try_get("person_id")?,
+                    session_id: row.try_get("session_id")?,
+                    project_id: row.try_get("project_id")?,
+                    branch: row.try_get("branch")?,
+                    started_at: row.try_get("started_at")?,
+                    role: row.try_get("role")?,
+                },
+            );
+        }
         let link_view = |memory: &Memory, link: &Link| {
             let out = link.source == memory.id;
             let other = if out { &link.target } else { &link.source };
@@ -221,7 +311,8 @@ impl Store {
         Ok(memories
             .into_iter()
             .map(|mut memory| {
-                let owner_is_me = memory.owner == person_id;
+                let owner_id = memory.owner.clone();
+                let owner_is_me = owner_id == person_id;
                 // Another person's id is of no use to the console.
                 if !owner_is_me {
                     memory.owner.clear();
@@ -242,12 +333,42 @@ impl Store {
                         None => (None, false, None, None, memory.updated_at, Vec::new()),
                     };
                 let (trust_level, trust) = memory.trust();
+                let project_key = memory.project_id.clone();
+                let can_pin = may_edit_pin(
+                    person_id,
+                    is_admin,
+                    memory.scope,
+                    &owner_id,
+                    project_key
+                        .as_ref()
+                        .and_then(|id| project_owner.get(id))
+                        .map(String::as_str),
+                    project_archived,
+                    project_key
+                        .as_ref()
+                        .is_some_and(|id| member_of.contains(id)),
+                ) && memory.status != Status::Forgotten
+                    && (memory.status != Status::Superseded || memory.pinned_at.is_some());
+                let can_reorder = memory.pinned_at.is_some()
+                    && match memory.scope {
+                        Scope::Personal => owner_is_me,
+                        Scope::Project => project_key
+                            .as_ref()
+                            .and_then(|id| can_reorder_project.get(id).copied())
+                            .unwrap_or(false),
+                        Scope::Global => false,
+                    };
+                let provenance = provenance.remove(&memory.id);
                 MemoryView {
                     origin: memory.origin,
                     owner_is_me,
                     project_name,
                     project_archived,
                     pinned_at: memory.pinned_at,
+                    pin_position: memory.pin_position,
+                    can_pin,
+                    can_reorder,
+                    provenance,
                     device_name,
                     checked_at,
                     status_changed_at: changed,

@@ -302,7 +302,7 @@ fn provider_tool(config: Config, payload: &Payload, agent: &str) -> Value {
         .cloned()
         .unwrap_or_default();
     if let Some(session) = payload.session_id()
-        && matches!(tool.name, "memory_get" | "memory_feedback")
+        && matches!(tool.name, "memory_get" | "memory_feedback" | "memory_save")
     {
         arguments.insert("session_id".to_owned(), json!(session));
     }

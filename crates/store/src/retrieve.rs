@@ -1326,7 +1326,7 @@ async fn fetch_brief_pins<'e>(
           WHERE {visible} AND ({personal} OR {project})
             AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
             AND m.memory_id <> ALL($3){}
-          ORDER BY m.pinned_at, m.memory_id",
+          ORDER BY m.pin_position, m.memory_id",
         chat_visibility("m", 4)
     ))
     .bind(person_id)
