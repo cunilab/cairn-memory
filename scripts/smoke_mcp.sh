@@ -114,7 +114,7 @@ try:
     searched = call(6, "tools/call", {"name": "memory_search", "arguments": {"query": "scoped record typed RPC", "limit": 5}})
     rows = result_json(searched)["results"]
     assert [m["id"] for m in rows] == [saved["id"]]
-    assert set(rows[0]) == {"id", "kind", "title", "summary", "score", "trust"}
+    assert set(rows[0]) == {"id", "kind", "title", "summary", "score", "trust", "why"}
     assert loaded["trust"] == "normal" and rows[0]["trust"] == "normal · used 1×"
     assert "\n" not in searched["result"]["content"][0]["text"]
     by_kind = result_json(call(16, "tools/call", {"name": "memory_search", "arguments": {"query": "scoped record typed RPC", "kind": "rule"}}))
