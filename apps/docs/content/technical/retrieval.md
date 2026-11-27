@@ -22,7 +22,7 @@ A person can turn a search trace on in Settings. For 7 days Cairn then stores th
 
 Search applies visibility filters before querying candidate channels:
 
-- **Selectors**: Explicit search accepts `recorded_from`, `recorded_to`, `branch` and `version`. A bare date is that UTC day. Nothing in the query text is read as a date. Hooks do not send these selectors.
+- **Selectors**: Explicit search accepts `recorded_from`, `recorded_to`, `branch` and `version`. A bare date is that UTC day. Nothing in the query text is read as a date. Hooks do not send these selectors. Optional `projects` (at most five ids) also searches those projects when the caller is a member of each. The checkout's cards stay first. A project card includes `project`. Hooks and a search that omits `projects` stay on the current project.
 - **Lexical channel**: PostgreSQL full-text search using English stemming. Explicit search also ORs the parts of an unprotected snake_case, camelCase or path stem into the partial-match leg. Quoted text, versions and error lines stay whole. Hooks keep the original query. After the relevance gate, equal scores prefer an exact symbol, path or error, then a memory listed by more channels. Each memory is returned once.
 - **Vector channel**: 384-dimensional cosine similarity via pgvector and local `all-MiniLM-L6-v2`.
 - **Entity channel**: Exact matches on symbol names, file paths, and command signatures.

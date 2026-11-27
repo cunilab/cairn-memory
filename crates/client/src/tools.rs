@@ -32,7 +32,8 @@ pub const TOOLS: [Tool; 5] = [
                 "recorded_from":{"type":"string"},
                 "recorded_to":{"type":"string"},
                 "branch":{"type":"string"},
-                "version":{"type":"string"}},
+                "version":{"type":"string"},
+                "projects":{"type":"array","maxItems":5,"items":{"type":"string"}}},
               "required":["query"]})
         },
     },

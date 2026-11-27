@@ -48,6 +48,9 @@ pub struct Search {
     branch: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    /// Extra projects to search. The caller must be a member of each. At most 5.
+    #[serde(default)]
+    projects: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +134,19 @@ pub async fn search(
     if version.is_some_and(|version| version.len() > 40 || version.contains('\0')) {
         return Err(ApiError::invalid("version must be at most 40 characters"));
     }
+    if body.projects.len() > 5 {
+        return Err(ApiError::invalid("projects accepts at most 5"));
+    }
+    let mut projects = Vec::new();
+    for id in &body.projects {
+        let id = id.trim();
+        if id.is_empty() || id.len() > 128 || id.contains('\0') {
+            return Err(ApiError::invalid("a project id is empty or too long"));
+        }
+        if !projects.iter().any(|have| have == id) {
+            projects.push(id.to_owned());
+        }
+    }
     let filter = Filter {
         kind: body.kind,
         context,
@@ -138,6 +154,7 @@ pub async fn search(
         recorded_to,
         branch: branch.map(str::to_owned),
         version: version.map(str::to_owned),
+        projects,
         ..Filter::default()
     };
     if body.debug && state.debug_scores {

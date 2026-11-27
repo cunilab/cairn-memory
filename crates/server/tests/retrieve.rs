@@ -297,7 +297,12 @@ async fn search_ranks_filters_and_never_leaks() {
         .await;
     assert_eq!(ids(&found), vec![queue.clone()]);
     let keys: Vec<_> = found["results"][0].as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["id", "kind", "score", "summary", "title", "trust"]);
+    assert_eq!(
+        keys,
+        [
+            "id", "kind", "project", "score", "summary", "title", "trust", "why"
+        ]
+    );
     let got = app.post("get", json!({"ids": [&queue]}), &bob_device).await;
     assert_eq!(got["memories"][0]["fields"]["alternatives"][0], "Redis");
     assert!(got["memories"][0].get("usage").is_none());
@@ -2362,5 +2367,93 @@ async fn retrieval_trace_is_private_redacted_and_off_by_default() {
     assert!(theirs["traces"].as_array().unwrap().is_empty(), "{theirs}");
     let (status, _) = app.send("GET", "me/trace", json!(null), Some(&owner)).await;
     assert_eq!(status, 401);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn search_projects_require_membership_and_keep_the_current_project_first() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("projects").await;
+    let owner = app.device(&admin, "projects").await;
+    let other = app
+        .device(&app.member(&admin, "projects-other").await, "other")
+        .await;
+    let amber = app.project(&owner, "amber").await;
+    let wharf = app.project(&owner, "wharf").await;
+    let here = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "scope": "project",
+            "title": "Lantern policy",
+            "summary": "Amber keeps the lantern policy.",
+            "reason": "The checkout project.",
+            "fields": {"source": "notes"},
+            "context": {"project_id": amber, "repository": "amber"}
+        }),
+    )
+    .await;
+    let there = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "scope": "project",
+            "title": "Lantern policy for the dock",
+            "summary": "Wharf keeps the dock lantern policy.",
+            "reason": "The other project.",
+            "fields": {"source": "notes"},
+            "context": {"project_id": wharf, "repository": "wharf"}
+        }),
+    )
+    .await;
+    let context = json!({"project_id": amber, "repository": "amber"});
+    let scoped = app
+        .post(
+            "search",
+            json!({"query": "lantern policy dock", "context": context}),
+            &owner,
+        )
+        .await;
+    assert_eq!(ids(&scoped), vec![here.clone()], "{scoped}");
+    assert_eq!(scoped["results"][0]["project"], amber);
+    let widened = app
+        .post(
+            "search",
+            json!({
+                "query": "lantern policy dock",
+                "context": {"project_id": amber, "repository": "amber"},
+                "projects": [wharf]
+            }),
+            &owner,
+        )
+        .await;
+    assert_eq!(
+        ids(&widened),
+        vec![here.clone(), there.clone()],
+        "{widened}"
+    );
+    assert_eq!(widened["results"][0]["project"], amber);
+    assert_eq!(widened["results"][1]["project"], wharf);
+    let (status, body) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "lantern policy", "projects": [wharf]}),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(!body.to_string().contains(&here), "{body}");
+    let (status, _) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "lantern", "projects": ["a", "b", "c", "d", "e", "f"]}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
     app.finish().await;
 }

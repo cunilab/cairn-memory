@@ -12,7 +12,9 @@ use crate::view::PinSummary;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
-use cairn_core::memory::{Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Status, TrustLevel};
+use cairn_core::memory::{
+    Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Scope, Status, TrustLevel,
+};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
@@ -106,6 +108,7 @@ pub struct Narrow {
     recorded_to: Option<i64>,
     branch: Option<String>,
     version: Option<String>,
+    projects: Vec<String>,
 }
 
 impl Narrow {
@@ -119,6 +122,7 @@ impl Narrow {
         recorded_to: None,
         branch: None,
         version: None,
+        projects: Vec::new(),
     };
 
     /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
@@ -149,8 +153,21 @@ impl Narrow {
         let mut next = first;
         let mut out = String::new();
         if self.scoped {
+            if self.projects.is_empty() {
+                out += &format!(
+                    " AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text)"
+                );
+                next += 1;
+            } else {
+                let extras = next + 1;
+                out += &format!(
+                    " AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text OR {alias}.project_id = ANY(${extras}))"
+                );
+                next += 2;
+            }
+        } else if !self.projects.is_empty() {
             out +=
-                &format!(" AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text)");
+                &format!(" AND ({alias}.scope <> 'project' OR {alias}.project_id = ANY(${next}))");
             next += 1;
         }
         if self.kind.is_some() {
@@ -186,6 +203,11 @@ impl Narrow {
             q = q.bind(self.project.as_deref()).bind(session);
         } else if self.scoped {
             q = q.bind(self.project.as_deref());
+            if !self.projects.is_empty() {
+                q = q.bind(&self.projects);
+            }
+        } else if !self.projects.is_empty() {
+            q = q.bind(&self.projects);
         }
         if self.prompt_session.is_none()
             && let Some(kind) = &self.kind
@@ -225,6 +247,7 @@ impl From<&Filter> for Narrow {
             recorded_to: f.recorded_to,
             branch: f.branch.clone(),
             version: f.version.clone(),
+            projects: f.projects.clone(),
         }
     }
 }
@@ -523,6 +546,7 @@ impl Store {
             .candidate_pool(person_id, query, vector, filter, None, true)
             .await?;
         let mut hits = rank(&pool, filter, cairn_core::id::now_seconds(), query);
+        hits = current_project_first(hits, filter);
         if filter.kind == Some(Kind::Handoff) {
             hits = one_handoff_per_checkout(hits);
         }
@@ -578,6 +602,11 @@ impl Store {
             ));
         }
         let projects = self.member_projects(person_id).await?;
+        for id in &filter.projects {
+            if !projects.iter().any(|have| have == id) {
+                return Err(StoreError::Forbidden(format!("not a member of {id}")));
+            }
+        }
         let per_channel = CANDIDATES_PER_CHANNEL as i64;
         let mut narrow = Narrow::from(filter);
         narrow.prompt_session = prompt_session.map(str::to_owned);
@@ -1506,6 +1535,31 @@ fn channel_bits(lists: [&Vec<(String, f32)>; 3]) -> HashMap<String, u8> {
         }
     }
     bits
+}
+
+/// When extra projects were requested, the checkout's memories stay ahead of the others.
+/// Score order is kept inside each group. The default search does not reorder.
+fn current_project_first(hits: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
+    if filter.projects.is_empty() {
+        return hits;
+    }
+    let Some(current) = filter
+        .context
+        .as_ref()
+        .and_then(|c| c.project_id.as_deref())
+    else {
+        return hits;
+    };
+    let (mut here, mut there) = (Vec::new(), Vec::new());
+    for hit in hits {
+        if hit.memory.scope != Scope::Project || hit.memory.project_id.as_deref() == Some(current) {
+            here.push(hit);
+        } else {
+            there.push(hit);
+        }
+    }
+    here.append(&mut there);
+    here
 }
 
 fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {

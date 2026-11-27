@@ -1,6 +1,6 @@
 //! The shapes search returns, and the diversity cap, token budget and limit that keep a response small.
 
-use crate::memory::{EntityKind, Kind, Memory, Relation, Status};
+use crate::memory::{EntityKind, Kind, Memory, Relation, Scope, Status};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -36,6 +36,9 @@ pub struct Card {
     /// Channel and matched token. Omitted when search did not record one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// Project id of a project memory. Omitted for personal and global cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// How many times this knowledge was saved. Omitted the first time.
     #[serde(default, skip_serializing_if = "seen_once")]
     pub seen: u32,
@@ -130,6 +133,9 @@ impl Packer {
             label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
             why: (!hit.why.is_empty()).then(|| hit.why.clone()),
+            project: (hit.memory.scope == Scope::Project)
+                .then(|| hit.memory.project_id.clone())
+                .flatten(),
             seen: hit.memory.proof_count,
             trust: hit.memory.trust().1,
         };

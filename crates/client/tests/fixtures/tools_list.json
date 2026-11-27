@@ -37,6 +37,13 @@
      },
      "version": {
       "type": "string"
+     },
+     "projects": {
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 5,
+      "type": "array"
      }
     },
     "required": [

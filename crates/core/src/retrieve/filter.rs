@@ -24,6 +24,9 @@ pub struct Filter {
     pub branch: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+    /// Extra projects an explicit search may include. Empty for hooks and the default search.
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SSZ`. A date alone is the start of that UTC day,
@@ -105,6 +108,14 @@ fn ymd_to_unix(year: i32, month: u32, day: u32) -> Option<i64> {
     Some((days + i64::from(day) - 1) * 86_400)
 }
 
+/// True when `projects` names this memory. An empty list does not.
+fn named_project(memory: &Memory, filter: &Filter) -> bool {
+    filter
+        .projects
+        .iter()
+        .any(|id| memory.project_id.as_deref() == Some(id.as_str()))
+}
+
 /// Explicit recorded-at, branch and version selectors. Unset selectors do not narrow.
 pub fn within_selectors(memory: &Memory, filter: &Filter) -> bool {
     if filter
@@ -142,15 +153,20 @@ pub fn matches(memory: &Memory, filter: &Filter) -> bool {
         return false;
     }
     if filter.session_id.is_none() && filter.context.is_none() {
-        return true;
+        return filter.projects.is_empty()
+            || memory.scope != Scope::Project
+            || named_project(memory, filter);
     }
     match memory.scope {
         Scope::Global => true,
-        Scope::Project => filter
-            .context
-            .as_ref()
-            .and_then(|c| c.project_id.as_ref())
-            .is_some_and(|id| memory.project_id.as_ref() == Some(id)),
+        Scope::Project => {
+            named_project(memory, filter)
+                || filter
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.project_id.as_ref())
+                    .is_some_and(|id| memory.project_id.as_ref() == Some(id))
+        }
         Scope::Personal => {
             if memory.kind != Kind::Handoff {
                 return true;
@@ -195,6 +211,25 @@ mod tests {
             ..Filter::default()
         };
         assert!(matches(&m, &own));
+        let named = Filter {
+            projects: vec!["p1".into()],
+            ..other
+        };
+        assert!(matches(&m, &named));
+        assert!(!matches(
+            &m,
+            &Filter {
+                projects: vec!["p9".into()],
+                ..Filter::default()
+            }
+        ));
+        assert!(matches(
+            &m,
+            &Filter {
+                projects: vec!["p1".into()],
+                ..Filter::default()
+            }
+        ));
     }
 
     #[test]
