@@ -1228,7 +1228,7 @@ pub struct RewriteText {
 
 impl Store {
     /// Admin edit retains the owner and provenance, and atomically audits the successor.
-    /// Detail is not part of identity, so a detail-only edit updates this row.
+    /// A detail-only edit still supersedes: the previous row keeps its detail.
     pub async fn rewrite_memory(&self, admin: &str, id: &str, text: RewriteText) -> Result<String> {
         let RewriteText {
             title,
@@ -1285,37 +1285,21 @@ impl Store {
         if let Some(hash) = old.chat_id_hash {
             prepared.tag_chat(hash, old.rank == Rank::Candidate);
         }
-        let next_detail = prepared.detail.clone().unwrap_or_default();
+        if prepared.identity_hash == old.identity_hash
+            && prepared.detail.as_deref().unwrap_or_default() == old.detail
+        {
+            return Err(StoreError::Conflict(
+                "nothing to rewrite: title, summary and fields are unchanged".into(),
+            ));
+        }
         if prepared.identity_hash == old.identity_hash {
-            if next_detail == old.detail {
-                return Err(StoreError::Conflict(
-                    "nothing to rewrite: title, summary and fields are unchanged".into(),
-                ));
-            }
-            // The identity unique index blocks a second row, so this edit stays on the current one.
-            sqlx::query(
-                "UPDATE memories SET detail=$2, reason=$3, edited_by=$4, updated_at=now() WHERE memory_id=$1",
-            )
-            .bind(id)
-            .bind(next_detail)
-            .bind(&prepared.reason)
-            .bind(admin)
-            .execute(&mut *tx)
-            .await?;
-            if prepared.reason != old.reason {
-                enqueue_tx(&mut tx, JobKind::Embed, id).await?;
-            }
-            crate::account::audit_tx(
-                &mut tx,
-                admin,
-                None,
-                "memory_rewritten_by_admin",
-                Some(id),
-                serde_json::json!({"old_id":id,"new_id":id}),
-            )
-            .await?;
-            tx.commit().await?;
-            return Ok(id.to_owned());
+            // Detail is not part of identity. Free the slot so the successor can take it.
+            let retired = cairn_core::id::sha256_hex(&["superseded", id, &old.identity_hash]);
+            sqlx::query("UPDATE memories SET identity_hash=$2 WHERE memory_id=$1")
+                .bind(id)
+                .bind(retired)
+                .execute(&mut *tx)
+                .await?;
         }
         let saved = insert_memory(
             &mut tx,

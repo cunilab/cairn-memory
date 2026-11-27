@@ -26,7 +26,7 @@ The [glossary](../glossary.md#web-console) defines the records and tools you see
 
 *Session save counts track new records created during a session window. Project owners and administrators can edit project-specific instructions directly on the project page.*
 
-A memory sheet with no detail says "No detail". Administrators add or edit that text from **Rewrite memory** (up to 8,000 characters). An empty detail clears it. Changing the title, summary, or fields still saves a new version.
+A memory sheet with no detail says "No detail". Administrators add or edit that text from **Rewrite memory** (up to 8,000 characters). Saving a rewrite, including a detail-only edit, stores a new version. An empty detail clears it on that version. The previous version keeps the detail it had.
 
 ## Fixes
 

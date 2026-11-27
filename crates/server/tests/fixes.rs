@@ -293,10 +293,6 @@ async fn admin_rewrite_detail() {
             .unwrap();
     assert_eq!(cleared_detail, "");
 
-    let count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
-        .fetch_one(app.db.store.pool())
-        .await
-        .unwrap();
     let only = app
         .post(
             &format!("admin/memories/{cleared_id}/rewrite"),
@@ -309,44 +305,47 @@ async fn admin_rewrite_detail() {
             &admin,
         )
         .await;
-    assert_eq!(only["memory_id"], cleared_id);
-    assert!(only.get("superseded").is_none());
-    let count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
-        .fetch_one(app.db.store.pool())
-        .await
-        .unwrap();
-    assert_eq!(count_before, count_after);
-    let status_now: String = sqlx::query_scalar("SELECT status FROM memories WHERE memory_id=$1")
-        .bind(cleared_id)
-        .fetch_one(app.db.store.pool())
-        .await
-        .unwrap();
-    assert_eq!(status_now, "active");
-    let added = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    let added_id = only["memory_id"].as_str().unwrap();
+    assert_ne!(added_id, cleared_id);
+    assert_eq!(only["superseded"], cleared_id);
+    let (old_status, old_detail): (String, String) =
+        sqlx::query_as("SELECT status, detail FROM memories WHERE memory_id=$1")
+            .bind(cleared_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(old_status, "superseded");
+    assert_eq!(old_detail, "");
+    let kept = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    assert!(kept.get("detail").is_none());
+    let added = app.get(&format!("memories/{added_id}"), &admin).await;
     assert_eq!(added["detail"], "Added from the web console.");
     assert!(added.get("edited_by").is_some());
 
-    let (status, emptied_body) = app
-        .send(
-            "POST",
-            &format!("admin/memories/{cleared_id}/rewrite"),
+    let emptied_body = app
+        .post(
+            &format!("admin/memories/{added_id}/rewrite"),
             json!({
                 "title": "Cleared detail fact",
                 "summary": summary,
                 "reason": reason,
                 "detail": ""
             }),
-            Some(&admin),
+            &admin,
         )
         .await;
-    assert_eq!(status, 200);
-    assert_eq!(emptied_body["memory_id"], cleared_id);
+    let emptied_id = emptied_body["memory_id"].as_str().unwrap();
+    assert_ne!(emptied_id, added_id);
+    assert_eq!(emptied_body["superseded"], added_id);
     let emptied: String = sqlx::query_scalar("SELECT detail FROM memories WHERE memory_id=$1")
-        .bind(cleared_id)
+        .bind(emptied_id)
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
     assert_eq!(emptied, "");
+    let history = app.get(&format!("memories/{added_id}"), &admin).await;
+    assert_eq!(history["status"], "superseded");
+    assert_eq!(history["detail"], "Added from the web console.");
     app.finish().await;
 }
 
