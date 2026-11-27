@@ -9,10 +9,19 @@ use sqlx::{PgConnection, Postgres, Transaction};
 pub const RETRIEVAL_RETENTION_DAYS: i64 = 120;
 pub(crate) const SHOWN_RETENTION_DAYS: i64 = 7;
 pub(crate) const SESSION_PUSH_LIMIT: usize = 8;
-pub(crate) const SESSION_SHOWN: &str =
-    "SELECT memory_id AS id FROM session_shown WHERE person_id = $1 AND session_id = $2
+/// L2 automatic recall budget items (`source = 'brief'` deduplicates without consuming L2 slots).
+pub(crate) const SESSION_RECALL_BUDGET: &str = "SELECT memory_id AS id FROM session_shown
+      WHERE person_id = $1 AND session_id = $2 AND source <> 'brief'
      UNION ALL
      SELECT skill_id AS id FROM session_skill_shown WHERE person_id = $1 AND session_id = $2";
+
+#[derive(Default)]
+pub(crate) struct SessionShown {
+    /// All memory and skill IDs already sent in this session (including brief), for deduplication.
+    pub ids: Vec<String>,
+    /// Cards charged against `SESSION_PUSH_LIMIT` (excludes `source = 'brief'`).
+    pub recall_count: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lookup {
@@ -223,9 +232,9 @@ pub(crate) async fn already_shown(
     tx: &mut Transaction<'_, Postgres>,
     person_id: &str,
     session_id: Option<&str>,
-) -> Result<Vec<String>> {
+) -> Result<SessionShown> {
     let Some(session_id) = session_id else {
-        return Ok(Vec::new());
+        return Ok(SessionShown::default());
     };
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':session_shown'), hashtext($1))",
@@ -233,11 +242,26 @@ pub(crate) async fn already_shown(
     .bind(person_id)
     .execute(&mut **tx)
     .await?;
-    Ok(sqlx::query_scalar(SESSION_SHOWN)
-        .bind(person_id)
-        .bind(session_id)
-        .fetch_all(&mut **tx)
-        .await?)
+    let rows: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT memory_id AS id, (source <> 'brief') AS counts_toward_budget
+           FROM session_shown WHERE person_id = $1 AND session_id = $2
+         UNION ALL
+         SELECT skill_id AS id, true AS counts_toward_budget
+           FROM session_skill_shown WHERE person_id = $1 AND session_id = $2",
+    )
+    .bind(person_id)
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut ids = Vec::with_capacity(rows.len());
+    let mut recall_count = 0usize;
+    for (id, counts) in rows {
+        ids.push(id);
+        if counts {
+            recall_count += 1;
+        }
+    }
+    Ok(SessionShown { ids, recall_count })
 }
 
 /// Commit both the reservation and its usage counter for exactly the cards that fit.

@@ -978,7 +978,7 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
         .iter()
         .flat_map(|reply| reply["notes"].as_array().unwrap())
         .collect();
-    assert_eq!(shown.len(), 7, "{replies:?}");
+    assert_eq!(shown.len(), 8, "{replies:?}");
     assert!(
         shown
             .iter()
@@ -989,7 +989,14 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
             .fetch_one(app.db.store.pool())
             .await
             .unwrap();
-    assert_eq!(remaining, 8);
+    assert_eq!(remaining, 9);
+    let brief_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_shown WHERE session_id = 'shared' AND source = 'brief'",
+    )
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(brief_rows, 1);
     let exhausted = app
         .post(
             "session/topic",
@@ -1674,9 +1681,20 @@ async fn legacy_brief_keeps_identity_and_packs_essentials_within_1200_bytes() {
     };
     let legacy = decode(&legacy, 1200);
     let extended = decode(&extended, 1800);
-    assert_eq!(legacy["L0 Identity"], extended["L0 Identity"]);
-    assert_eq!(legacy["L0 Identity"][0]["id"], "brief_1");
-    assert_eq!(legacy["L0 Identity"][1]["id"], "brief_2");
+    let legacy_l0_ids: Vec<_> = legacy["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    let extended_l0_ids: Vec<_> = extended["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(legacy_l0_ids, vec!["brief_1", "brief_2"]);
+    assert_eq!(extended_l0_ids, vec!["brief_1", "brief_2"]);
     let legacy_essentials = legacy["L1 Essential"].as_array().unwrap();
     let extended_essentials = extended["L1 Essential"].as_array().unwrap();
     assert!(!legacy_essentials.is_empty() && legacy_essentials.len() < extended_essentials.len());
@@ -1959,4 +1977,150 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
         );
     }
     app.db.finish().await;
+}
+
+#[tokio::test]
+async fn web_pin_summary_reports_quotas_and_overflow_matching_brief() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("pin-web-owner").await;
+    let outsider = app.member(&admin, "pin-web-outsider").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:pin-web", "name": "Pin Web Summary"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+
+    // Web-only and membership checks on GET /memories/pins.
+    assert_eq!(
+        app.send("GET", "memories/pins", json!(null), Some(&device))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        app.send(
+            "GET",
+            &format!("memories/pins?projectId={pid}"),
+            json!(null),
+            Some(&outsider)
+        )
+        .await
+        .0,
+        404
+    );
+
+    let mut per_ids = Vec::new();
+    for i in 0..4 {
+        let id = save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "personal",
+                "title": format!("Personal rule number {i}"),
+                "summary": "Personal pin summary long enough to consume L0 bytes cleanly.".repeat(2),
+                "reason": "Testing personal pin quota and L0 fit",
+            }),
+        )
+        .await;
+        per_ids.push(id);
+    }
+    for id in &per_ids[..3] {
+        app.post(
+            &format!("memories/{id}/pin"),
+            json!({"pinned": true}),
+            &admin,
+        )
+        .await;
+    }
+    let (status, _) = app
+        .send(
+            "POST",
+            &format!("memories/{}/pin", per_ids[3]),
+            json!({"pinned": true}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    let mut prj_ids = Vec::new();
+    for i in 0..5 {
+        let id = save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "project",
+                "title": format!("Project rule number {i}"),
+                "summary": "Project pin summary long enough to consume L0 bytes cleanly.".repeat(2),
+                "reason": "Testing project pin quota and L0 fit",
+                "context": {"project_id": pid},
+            }),
+        )
+        .await;
+        prj_ids.push(id);
+    }
+    for id in &prj_ids[..4] {
+        app.post(
+            &format!("memories/{id}/pin"),
+            json!({"pinned": true}),
+            &admin,
+        )
+        .await;
+    }
+    let (status, _) = app
+        .send(
+            "POST",
+            &format!("memories/{}/pin", prj_ids[4]),
+            json!({"pinned": true}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    let summary = app
+        .send(
+            "GET",
+            &format!("memories/pins?projectId={pid}"),
+            json!(null),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(summary.0, 200, "{summary:?}");
+    let summary = summary.1;
+    assert_eq!(summary["personal_quota_used"], 3);
+    assert_eq!(summary["personal_quota_limit"], 3);
+    assert_eq!(summary["project_quota_used"], 4);
+    assert_eq!(summary["project_quota_limit"], 4);
+    assert_eq!(summary["total"], 7);
+    let not_shown = summary["not_shown"].as_u64().unwrap();
+    assert!(not_shown > 0, "{summary}");
+
+    // Promote the unpinned personal rule so it qualifies for L1 Essential.
+    sqlx::query("UPDATE memories SET rank = 'normal' WHERE memory_id = $1")
+        .bind(&per_ids[3])
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "pin-overflow", "extended_brief": true, "context": {"project_id": pid}}),
+            &device,
+        )
+        .await;
+    assert_eq!(brief["pins_not_shown"], not_shown, "{brief}");
+    let text = brief["brief"].as_str().unwrap();
+    assert!(text.contains(&format!(
+        "\"L0_not_shown\":\"{not_shown} more pinned not shown\""
+    )));
+    // Unpinned personal rule reaches L1 with "personal rule" why-label.
+    assert!(
+        text.contains(&per_ids[3]) && text.contains(r#""why":"personal rule""#),
+        "{text}"
+    );
+    app.finish().await;
 }

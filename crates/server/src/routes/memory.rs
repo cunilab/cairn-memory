@@ -10,7 +10,7 @@ use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLe
 use cairn_store::memory::{ListFilter, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
-use cairn_store::view::MemoryView;
+use cairn_store::view::{MemoryView, PinSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -408,6 +408,27 @@ pub async fn feedback(
 #[serde(deny_unknown_fields)]
 pub struct Pin {
     pinned: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PinQuery {
+    #[serde(rename = "projectId", alias = "project_id")]
+    project_id: Option<String>,
+}
+
+/// Pin quota usage and L0 brief fit summary for the console.
+pub async fn pins(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Query(query): Query<PinQuery>,
+) -> ApiResult<PinSummary> {
+    let project_id = query.project_id.as_deref().filter(|id| !id.is_empty());
+    Ok(Json(
+        state
+            .store
+            .pin_summary(&account.person_id, project_id)
+            .await?,
+    ))
 }
 
 /// Pinning is a console action, restricted to the memory's owner.

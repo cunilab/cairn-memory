@@ -3016,7 +3016,7 @@ async fn pin_quotas_are_atomic_and_scoped() {
     .await
     .unwrap();
 
-    for (scope, limit) in [("personal", 5), ("project", 10)] {
+    for (scope, limit) in [("personal", 3), ("project", 4)] {
         let person = |i| {
             if scope == "project" && i % 2 == 0 {
                 &other
@@ -3075,5 +3075,208 @@ async fn pin_quotas_are_atomic_and_scoped() {
                 .is_some()
         );
     }
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_includes_personal_rules_in_l1_cross_project_and_respects_chat_scope() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("rule-owner").await;
+    let (project_a, _) = store
+        .init_project(&me, "local:proj-a", Some("Project A"))
+        .await
+        .unwrap();
+    let (project_b, _) = store
+        .init_project(&me, "local:proj-b", Some("Project B"))
+        .await
+        .unwrap();
+    let rule_id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Priority rules first",
+                "summary": "Always verify disk before compiling.", "reason": "Disk quota check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let candidate_id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Candidate personal rule",
+                "summary": "Unverified rule stays out of brief.", "reason": "candidate exclusion check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&candidate_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let chat: cairn_core::capture::ChatContext = serde_json::from_value(serde_json::json!({
+        "platform": "telegram",
+        "kind": "dm",
+        "chat_id_hash": "b".repeat(64),
+    }))
+    .unwrap();
+    let chat_rule = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Private Telegram rule",
+                "summary": "Keep answers concise in Telegram DM.", "reason": "chat-only preference"
+            })),
+            &WorkContext {
+                chat: Some(chat.clone()),
+                ..WorkContext::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+
+    for pid in [&project_a.project_id, &project_b.project_id] {
+        let brief = store
+            .brief(
+                &me,
+                &WorkContext {
+                    project_id: Some(pid.clone()),
+                    ..WorkContext::default()
+                },
+                None,
+                BriefBudget::Extended,
+            )
+            .await
+            .unwrap();
+        assert!(brief.memory_ids.contains(&rule_id), "{}", brief.text);
+        assert!(
+            brief.text.contains(r#""why":"personal rule""#),
+            "{}",
+            brief.text
+        );
+        assert!(!brief.memory_ids.contains(&candidate_id));
+        assert!(!brief.memory_ids.contains(&chat_rule));
+    }
+
+    let chat_brief = store
+        .brief(
+            &me,
+            &WorkContext {
+                chat: Some(chat),
+                ..WorkContext::default()
+            },
+            None,
+            BriefBudget::Extended,
+        )
+        .await
+        .unwrap();
+    assert!(chat_brief.memory_ids.contains(&chat_rule));
+    assert!(!chat_brief.memory_ids.contains(&rule_id));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn legacy_pins_over_cap_stay_until_unpinned_and_brief_reports_pins_not_shown() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("legacy-pins").await;
+    let (project, _) = store
+        .init_project(&me, "local:legacy-pins", Some("Legacy Pins"))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'per_' || i, $1, NULL, 'personal', 'rule', 'Personal pin ' || i,
+                repeat('Summary text for personal pin ', 5), 'e', 'per_' || i,
+                to_timestamp(1000 + i)
+           FROM generate_series(1, 5) i",
+    )
+    .bind(&me)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'prj_' || i, $1, $2, 'project', 'rule', 'Project pin ' || i,
+                repeat('Summary text for project pin ', 5), 'e', 'prj_' || i,
+                to_timestamp(2000 + i)
+           FROM generate_series(1, 4) i",
+    )
+    .bind(&me)
+    .bind(&project.project_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let extra = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Sixth personal rule",
+                "summary": "Cannot be pinned while already at or over quota.", "reason": "quota check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    assert!(matches!(
+        store.set_pinned(&me, &extra, true).await,
+        Err(cairn_store::StoreError::Conflict(msg)) if msg.contains("limit of 3")
+    ));
+
+    let ctx = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let brief = store
+        .brief(&me, &ctx, Some("s-overflow"), BriefBudget::Extended)
+        .await
+        .unwrap();
+    assert!(brief.pins_not_shown > 0, "{}", brief.text);
+    assert!(brief.text.contains(&format!(
+        "\"L0_not_shown\":\"{} more pinned not shown\"",
+        brief.pins_not_shown
+    )));
+    assert!(brief.memory_ids.iter().any(|id| id.starts_with("per_")));
+    assert!(brief.memory_ids.iter().any(|id| id.starts_with("prj_")));
+    let shown_pins = brief
+        .memory_ids
+        .iter()
+        .filter(|id| id.starts_with("per_") || id.starts_with("prj_"))
+        .count();
+    assert_eq!(shown_pins + brief.pins_not_shown, 9);
+    assert!(brief.memory_ids.contains(&extra));
+
+    let summary = store
+        .pin_summary(&me, Some(&project.project_id))
+        .await
+        .unwrap();
+    assert_eq!(summary.personal_quota_used, 5);
+    assert_eq!(summary.personal_quota_limit, 3);
+    assert_eq!(summary.project_quota_used, Some(4));
+    assert_eq!(summary.project_quota_limit, 4);
+    assert_eq!(summary.total, 9);
+    assert_eq!(summary.not_shown, brief.pins_not_shown);
+
+    // Unpinning down below 3 keeps existing pins valid along the way and re-enables pinning at 2.
+    assert_eq!(store.set_pinned(&me, "per_5", false).await.unwrap(), None);
+    assert!(store.set_pinned(&me, &extra, true).await.is_err());
+    assert_eq!(store.set_pinned(&me, "per_4", false).await.unwrap(), None);
+    assert_eq!(store.set_pinned(&me, "per_3", false).await.unwrap(), None);
+    assert!(store.set_pinned(&me, &extra, true).await.unwrap().is_some());
     db.finish().await;
 }

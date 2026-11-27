@@ -5,8 +5,10 @@ use crate::memory::{
 };
 use crate::skill::prompt_skill;
 use crate::usage::{
-    Lookup, SESSION_PUSH_LIMIT, SESSION_SHOWN, already_shown, finish_push, repeat_error, unmuted,
+    Lookup, SESSION_PUSH_LIMIT, SESSION_RECALL_BUDGET, already_shown, finish_push, repeat_error,
+    unmuted,
 };
+use crate::view::PinSummary;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
@@ -15,7 +17,8 @@ use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
 use cairn_core::retrieve::brief::{
-    BriefBudget, SessionBrief, card_age, session_brief, topic_card, topic_notes,
+    BriefBudget, PERSONAL_PIN_QUOTA, PROJECT_PIN_QUOTA, SessionBrief, card_age, l0_pin_fit,
+    session_brief, topic_card, topic_notes,
 };
 use cairn_core::retrieve::command::{error_tail, first_error_line};
 use cairn_core::retrieve::filter::{Filter, matches};
@@ -712,12 +715,13 @@ impl Store {
     }
 
     pub async fn push_budget_spent(&self, person_id: &str, session_id: &str) -> Result<bool> {
-        let shown: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM ({SESSION_SHOWN}) shown"))
-                .bind(person_id)
-                .bind(session_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let shown: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM ({SESSION_RECALL_BUDGET}) shown"
+        ))
+        .bind(person_id)
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(shown >= SESSION_PUSH_LIMIT as i64)
     }
 
@@ -778,15 +782,16 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let session = Some(session_id);
         let shown = already_shown(&mut tx, person_id, session).await?;
-        let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
+        let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count);
         if remaining == 0 {
             return Ok((String::new(), true));
         }
-        let skill = if context.chat.is_none() && !shown.iter().any(|id| id.starts_with("skill_")) {
-            prompt_skill(&mut tx, prompt, PROMPT_RELEVANCE_MIN).await?
-        } else {
-            None
-        };
+        let skill =
+            if context.chat.is_none() && !shown.ids.iter().any(|id| id.starts_with("skill_")) {
+                prompt_skill(&mut tx, prompt, PROMPT_RELEVANCE_MIN).await?
+            } else {
+                None
+            };
         if skill.is_none() && ranked.is_empty() {
             return Ok((String::new(), false));
         }
@@ -864,6 +869,7 @@ impl Store {
     }
 
     /// The session brief reserves only the cards rendered in L0 and L1.
+    /// Brief cards count for deduplication and usage, not against `SESSION_PUSH_LIMIT`.
     pub async fn brief(
         &self,
         person_id: &str,
@@ -872,35 +878,20 @@ impl Store {
         budget: BriefBudget,
     ) -> Result<SessionBrief> {
         let mut tx = self.pool.begin().await?;
-        let mut shown = already_shown(&mut tx, person_id, session_id).await?;
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
-        if limit == 0 {
-            return Ok(SessionBrief::default());
-        }
+        let mut shown = already_shown(&mut tx, person_id, session_id).await?.ids;
 
         let visible = visible("m", "$1");
         let project = "(m.scope = 'project' AND m.project_id = $2 AND EXISTS (
             SELECT 1 FROM project_members pm WHERE pm.project_id = $2 AND pm.person_id = $1))";
         let personal = "(m.scope = 'personal' AND m.owner_id = $1)";
-        let pins = sqlx::query(&format!(
-            "{MEMORY_SELECT}
-              WHERE {visible} AND ({personal} OR {project})
-                AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
-                AND m.memory_id <> ALL($3){}
-              ORDER BY m.pinned_at, m.memory_id LIMIT $4",
-            chat_visibility("m", 5)
-        ))
-        .bind(person_id)
-        .bind(&context.project_id)
-        .bind(&shown)
-        .bind(limit as i64)
-        .bind(chat_key(context.chat.as_ref()))
-        .fetch_all(&mut *tx)
+        let pins = fetch_brief_pins(
+            &mut *tx,
+            person_id,
+            context.project_id.as_deref(),
+            &shown,
+            context.chat.as_ref(),
+        )
         .await?;
-        let pins = pins
-            .iter()
-            .map(memory_from_row)
-            .collect::<Result<Vec<_>>>()?;
         shown.extend(pins.iter().map(|pin| pin.id.clone()));
 
         let unmuted = unmuted("m", "$1");
@@ -935,20 +926,19 @@ impl Store {
             "{MEMORY_SELECT}
               WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.pinned_at IS NULL AND m.memory_id <> ALL($4)
                 {} AND (m.memory_id = $5 OR (m.status = 'active' AND (
-                    ({personal} AND m.kind = 'preference')
+                    ({personal} AND m.kind IN ('preference','rule'))
                     OR ({project} AND m.kind IN ('rule','decision','gotcha')
                         AND (m.repo_branch IS NULL OR m.repo_branch = $3
                              OR coalesce(m.repo_branch = (SELECT default_branch FROM projects WHERE project_id = $2),
                                          m.repo_branch IN ('main','master')))))))
-              {} LIMIT $6",
-            chat_visibility("m", 7), essential_order()
+              {} LIMIT 32",
+            chat_visibility("m", 6), essential_order()
         ))
         .bind(person_id)
         .bind(&context.project_id)
         .bind(&context.branch)
         .bind(&shown)
         .bind(handoff)
-        .bind(limit as i64)
         .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
         .await?;
@@ -960,7 +950,7 @@ impl Store {
             &pins,
             &essentials,
             cairn_core::id::now_seconds(),
-            limit,
+            usize::MAX,
             budget,
         );
         finish_push(
@@ -972,6 +962,59 @@ impl Store {
         )
         .await?;
         Ok(brief)
+    }
+
+    /// Pin quota usage and how many active/stale pins currently fit in L0 for the console.
+    pub async fn pin_summary(
+        &self,
+        person_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<PinSummary> {
+        if let Some(pid) = project_id
+            && !self.is_member(person_id, pid).await?
+        {
+            return Err(StoreError::NotFound("project".into()));
+        }
+        let mut conn = self.pool.acquire().await?;
+        let pins = fetch_brief_pins(&mut *conn, person_id, project_id, &[], None).await?;
+        let fit = l0_pin_fit(&pins, cairn_core::id::now_seconds(), BriefBudget::Extended);
+        let personal_quota_used: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memories
+              WHERE pinned_at IS NOT NULL AND scope = 'personal' AND owner_id = $1",
+        )
+        .bind(person_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let project_quota_used = if let Some(pid) = project_id {
+            Some(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM memories
+                      WHERE pinned_at IS NOT NULL AND scope = 'project' AND project_id = $1",
+                )
+                .bind(pid)
+                .fetch_one(&mut *conn)
+                .await?,
+            )
+        } else {
+            None
+        };
+        let shown = fit.shown_ids.len();
+        let not_shown = fit.omitted_ids.len();
+        Ok(PinSummary {
+            personal_quota_used,
+            personal_quota_limit: PERSONAL_PIN_QUOTA,
+            project_quota_used,
+            project_quota_limit: PROJECT_PIN_QUOTA,
+            personal_shown: fit.personal_shown,
+            personal_total: fit.personal_total,
+            project_shown: fit.project_shown,
+            project_total: fit.project_total,
+            shown,
+            total: fit.personal_total + fit.project_total,
+            not_shown,
+            shown_ids: fit.shown_ids,
+            omitted_ids: fit.omitted_ids,
+        })
     }
 
     /// One exact command warning per session, or strict phrase recall on a failed command.
@@ -1027,7 +1070,7 @@ impl Store {
         if let Some(source) = &error_source {
             repeat_error(&mut tx, person_id, session_id, source).await?;
         }
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count).min(2);
         if limit == 0 {
             tx.commit().await?;
             return Ok(String::new());
@@ -1075,7 +1118,7 @@ impl Store {
             .bind(person_id)
             .bind(project_id)
             .bind(&command)
-            .bind(&shown)
+            .bind(&shown.ids)
             .bind(limit as i64)
             .bind(chat_key(chat));
         let query = if let Some(phrase) = phrase {
@@ -1129,7 +1172,7 @@ impl Store {
         let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
         let shown = already_shown(&mut tx, person_id, session_id).await?;
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count).min(2);
         if limit == 0 {
             tx.commit().await?;
             return Ok(Topic::default());
@@ -1172,7 +1215,7 @@ impl Store {
         .bind(&context.project_id)
         .bind(module_of(path))
         .bind(&symbols)
-        .bind(&shown)
+        .bind(&shown.ids)
         .bind(limit as i64)
         .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
@@ -1265,6 +1308,34 @@ impl Store {
         let links: Vec<_> = memories.iter().flat_map(|m| m.links.clone()).collect();
         Ok(build(&memories, &links, filter, cap))
     }
+}
+
+async fn fetch_brief_pins<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: &str,
+    project_id: Option<&str>,
+    shown: &[String],
+    chat: Option<&ChatContext>,
+) -> Result<Vec<Memory>> {
+    let visible = visible("m", "$1");
+    let project = "(m.scope = 'project' AND m.project_id = $2 AND EXISTS (
+        SELECT 1 FROM project_members pm WHERE pm.project_id = $2 AND pm.person_id = $1))";
+    let personal = "(m.scope = 'personal' AND m.owner_id = $1)";
+    let rows = sqlx::query(&format!(
+        "{MEMORY_SELECT}
+          WHERE {visible} AND ({personal} OR {project})
+            AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
+            AND m.memory_id <> ALL($3){}
+          ORDER BY m.pinned_at, m.memory_id",
+        chat_visibility("m", 4)
+    ))
+    .bind(person_id)
+    .bind(project_id)
+    .bind(shown)
+    .bind(chat_key(chat))
+    .fetch_all(db)
+    .await?;
+    rows.iter().map(memory_from_row).collect()
 }
 
 fn handoff_is_thin(memory: &Memory) -> bool {

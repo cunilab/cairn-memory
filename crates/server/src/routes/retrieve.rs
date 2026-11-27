@@ -247,6 +247,9 @@ pub async fn brief(
         .await?;
     let hit = !brief.text.is_empty();
     reply["brief"] = json!(brief.text);
+    if brief.pins_not_shown > 0 {
+        reply["pins_not_shown"] = json!(brief.pins_not_shown);
+    }
     record(&state, &account.person_id, Lookup::Brief, &reply, hit).await;
     Ok(Json(reply))
 }

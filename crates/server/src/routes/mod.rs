@@ -128,6 +128,7 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/remember", post(memory::remember))
         .route("/cairn-memory/get", post(memory::get_many))
         .route("/cairn-memory/memories", get(memory::list))
+        .route("/cairn-memory/memories/pins", get(memory::pins))
         .route("/cairn-memory/memories/export", get(memory::export))
         .route(
             "/cairn-memory/memories/import",

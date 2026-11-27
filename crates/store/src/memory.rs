@@ -12,6 +12,7 @@ use cairn_core::memory::{
 use cairn_core::process::jobs::JobKind;
 use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
+use cairn_core::retrieve::brief::pin_limit;
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
 use sqlx::{Executor, PgConnection, PgExecutor, Postgres, Row};
@@ -43,14 +44,6 @@ async fn resolve_chat_project<'e>(
         _ => Err(StoreError::Validation(
             "more than one member project has that name; use the project ID".into(),
         )),
-    }
-}
-
-fn pin_limit(scope: Scope) -> Option<i64> {
-    match scope {
-        Scope::Personal => Some(5),
-        Scope::Project => Some(10),
-        Scope::Global => None,
     }
 }
 

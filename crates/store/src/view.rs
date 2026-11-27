@@ -78,6 +78,28 @@ pub struct MemoryView {
     pub trust: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PinSummary {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub personal_quota_used: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub personal_quota_limit: i64,
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub project_quota_used: Option<i64>,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub project_quota_limit: i64,
+    pub personal_shown: usize,
+    pub personal_total: usize,
+    pub project_shown: usize,
+    pub project_total: usize,
+    pub shown: usize,
+    pub total: usize,
+    pub not_shown: usize,
+    pub shown_ids: Vec<String>,
+    pub omitted_ids: Vec<String>,
+}
+
 struct Extra {
     project_name: Option<String>,
     project_archived: bool,
