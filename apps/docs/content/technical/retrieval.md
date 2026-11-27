@@ -14,7 +14,7 @@ flowchart LR
   Scope[Visibility] --> Evidence[Fusion] --> Rank[Ranking] --> Pack[Packing]
 ```
 
-Cairn merges candidate lists with weighted reciprocal-rank fusion. The [relevance gate](../glossary.md#relevance-gate) drops weak candidates before trust and status affect ranking. Matching records become compact cards within the token budget, which defaults to 1,200 tokens. The reply includes a `more` count for additional matches.
+Cairn merges candidate lists with weighted reciprocal-rank fusion. The [relevance gate](../glossary.md#relevance-gate) drops weak candidates before trust and status affect ranking. Matching records become compact cards within the token budget, which defaults to 1,200 tokens. Each card can include `why`, the channels that matched and a file, symbol, command or error label. The reply includes a `more` count for additional matches. `memory_get` can ask for one field (`field`) or a short supersedes chain (`timeline`) for a single id the caller can already read.
 
 ## Hybrid recall
 

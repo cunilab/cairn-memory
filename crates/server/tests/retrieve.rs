@@ -2124,3 +2124,72 @@ async fn web_pin_summary_reports_quotas_and_overflow_matching_brief() {
     );
     app.finish().await;
 }
+
+#[tokio::test]
+async fn get_field_and_timeline_stay_on_visible_memories() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("owner").await;
+    let owner = app.device(&admin, "owner").await;
+    let other = app
+        .device(&app.member(&admin, "other").await, "other")
+        .await;
+    let old = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "gotcha",
+            "title": "Old quartz claim panic",
+            "summary": "The old note.",
+            "reason": "It moved the guard.",
+            "fields": {"symptom": "panic on quartz_claim", "cause": "moved", "fix": "borrow"}
+        }),
+    )
+    .await;
+    let newer = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "gotcha",
+            "title": "Borrow the quartz claim",
+            "summary": "The new note.",
+            "reason": "Borrow until the update returns.",
+            "fields": {"symptom": "same panic", "cause": "moved", "fix": "borrow the guard"},
+            "supersedes": old
+        }),
+    )
+    .await;
+    let got = app
+        .post(
+            "get",
+            json!({"ids": [newer], "field": "fix", "timeline": true}),
+            &owner,
+        )
+        .await;
+    assert_eq!(got["memories"][0]["fields"]["fix"], "borrow the guard");
+    assert!(got["memories"][0]["fields"].get("symptom").is_none());
+    assert!(got["memories"][0].get("reason").is_none());
+    let chain: Vec<&str> = got["memories"][0]["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert!(chain.contains(&old.as_str()), "{got}");
+    let hidden = app
+        .post("get", json!({"ids": [newer], "timeline": true}), &other)
+        .await;
+    assert!(
+        hidden["memories"].as_array().unwrap().is_empty(),
+        "{hidden}"
+    );
+    let (status, _) = app
+        .send(
+            "POST",
+            "get",
+            json!({"ids": [newer], "field": "nope"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
+}

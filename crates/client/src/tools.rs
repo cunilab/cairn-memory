@@ -21,7 +21,7 @@ pub struct Tool {
 pub const TOOLS: [Tool; 5] = [
     Tool {
         name: "memory_search",
-        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory; label says why (replaced by, voted wrong, file deleted). kind=handoff returns the last session handoff. Fetch full records with memory_get.",
+        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}. kind=handoff returns the last session handoff.",
         cli: "search",
         route: "/search",
         schema: || {
@@ -40,7 +40,9 @@ pub const TOOLS: [Tool; 5] = [
         schema: || {
             json!({"type":"object","properties":{
                 "ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10},
-                "detail":{"type":"boolean","default":false}},
+                "detail":{"type":"boolean","default":false},
+                "field":{"type":"string","maxLength":40},
+                "timeline":{"type":"boolean","default":false}},
               "required":["ids"]})
         },
     },

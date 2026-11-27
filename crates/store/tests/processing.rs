@@ -1435,7 +1435,15 @@ async fn duplicate_saves_count_proofs() {
     assert_eq!(column_rank(store, &first.id).await, "normal");
     let memory = store.get(&person, &first.id).await.unwrap();
     assert_eq!(memory.rank, Rank::Normal);
-    let cards = pack(&[Hit { memory, score: 1.0 }], 5, 1200);
+    let cards = pack(
+        &[Hit {
+            memory,
+            score: 1.0,
+            why: String::new(),
+        }],
+        5,
+        1200,
+    );
     let json = serde_json::to_value(&cards).unwrap();
     assert_eq!(json["results"][0]["seen"], 3);
     db.finish().await;

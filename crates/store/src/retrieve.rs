@@ -575,7 +575,7 @@ impl Store {
             None => Vec::new(),
         };
         let entity_hits: HashSet<String> = entity.iter().map(|(id, _)| id.clone()).collect();
-        let channels = channel_counts([&lexical, &entity, &semantic]);
+        let channels = channel_bits([&lexical, &entity, &semantic]);
         let seeds = fuse(vec![
             lexical.clone(),
             entity.clone(),
@@ -1450,17 +1450,18 @@ fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {
 /// then id. The score is the absolute relevance (`gate::relevance`) times `1 + adjust`, so it says
 /// how good the match is, not where it ranks among the others. The fused rank only chose which
 /// candidates are loaded.
-fn channel_counts<const N: usize>(lists: [&Vec<(String, f32)>; N]) -> HashMap<String, u8> {
-    let mut counts: HashMap<String, u8> = HashMap::new();
-    for list in lists {
+/// Lexical, entity, then semantic. A bit is set when that channel listed the id.
+fn channel_bits(lists: [&Vec<(String, f32)>; 3]) -> HashMap<String, u8> {
+    let mut bits: HashMap<String, u8> = HashMap::new();
+    for (bit, list) in [1_u8, 2, 4].into_iter().zip(lists) {
         let mut seen = HashSet::new();
         for (id, score) in list {
             if *score > 0.0 && seen.insert(id.clone()) {
-                *counts.entry(id.clone()).or_default() += 1;
+                *bits.entry(id.clone()).or_default() |= bit;
             }
         }
     }
-    counts
+    bits
 }
 
 fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
@@ -1473,9 +1474,23 @@ fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
             let c = pool.by_id.get(id)?;
             let input = gate_input(pool, id, c);
             let eligible = matches(&c.memory, filter) && gate::keep(&input);
-            eligible.then(|| Hit {
-                score: gate::relevance(&input) * (1.0 + adjust(&c.memory, &ctx, now)),
-                memory: c.memory.clone(),
+            eligible.then(|| {
+                let memory = c.memory.clone();
+                let why = cairn_core::retrieve::query::match_reason(
+                    pool.channels
+                        .get(&memory.id)
+                        .is_some_and(|bits| bits & 1 != 0),
+                    pool.entity_hits.contains(&memory.id),
+                    pool.channels
+                        .get(&memory.id)
+                        .is_some_and(|bits| bits & 4 != 0),
+                    anchor_label(&memory, &anchors).as_deref(),
+                );
+                Hit {
+                    score: gate::relevance(&input) * (1.0 + adjust(&memory, &ctx, now)),
+                    memory,
+                    why,
+                }
             })
         })
         .collect();
@@ -1484,11 +1499,8 @@ fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
             .total_cmp(&a.score)
             .then_with(|| exact_hit(b, &anchors).cmp(&exact_hit(a, &anchors)))
             .then_with(|| {
-                pool.channels
-                    .get(&b.memory.id)
-                    .copied()
-                    .unwrap_or(0)
-                    .cmp(&pool.channels.get(&a.memory.id).copied().unwrap_or(0))
+                let bits = |id: &str| pool.channels.get(id).copied().unwrap_or(0).count_ones();
+                bits(&b.memory.id).cmp(&bits(&a.memory.id))
             })
             .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
             .then_with(|| a.memory.id.cmp(&b.memory.id))
@@ -1497,6 +1509,31 @@ fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert(hit.memory.id.clone()));
     hits
+}
+
+fn anchor_label(memory: &cairn_core::memory::Memory, anchors: &[String]) -> Option<String> {
+    for entity in &memory.entities {
+        let kind = match entity.kind {
+            cairn_core::memory::EntityKind::File => "file",
+            cairn_core::memory::EntityKind::Symbol => "symbol",
+            cairn_core::memory::EntityKind::Command => "command",
+            _ => continue,
+        };
+        if anchors
+            .iter()
+            .any(|anchor| anchor.eq_ignore_ascii_case(&entity.name))
+        {
+            return Some(format!("{kind} {}", entity.name));
+        }
+    }
+    let text = format!("{} {} {}", memory.title, memory.summary, memory.reason);
+    anchors.iter().find_map(|anchor| {
+        let lower = anchor.to_ascii_lowercase();
+        (lower.contains("error:") || lower.contains("error["))
+            .then(|| text.contains(anchor))
+            .filter(|found| *found)
+            .map(|_| format!("error {anchor}"))
+    })
 }
 
 fn exact_hit(hit: &Hit, anchors: &[String]) -> bool {

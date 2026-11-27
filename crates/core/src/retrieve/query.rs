@@ -53,6 +53,29 @@ pub fn exact_anchors(query: &str) -> Vec<String> {
     anchors
 }
 
+/// Channel bits: lexical 1, entity 2, semantic 4. `anchor` is a short file, symbol or error label.
+pub fn match_reason(lexical: bool, entity: bool, semantic: bool, anchor: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if entity {
+        parts.push("entity");
+    }
+    if lexical {
+        parts.push("lexical");
+    }
+    if semantic {
+        parts.push("semantic");
+    }
+    if parts.is_empty() {
+        parts.push("linked");
+    }
+    let mut text = parts.join("+");
+    if let Some(anchor) = anchor.map(str::trim).filter(|text| !text.is_empty()) {
+        text.push(' ');
+        text.push_str(&anchor.chars().take(80).collect::<String>());
+    }
+    text.chars().take(120).collect()
+}
+
 /// An anchor names one of `names`, or an error line occurs in `text`.
 pub fn anchor_matches(anchors: &[String], names: &[&str], text: &str) -> bool {
     anchors.iter().any(|anchor| {
@@ -289,5 +312,16 @@ mod tests {
             "error: the worker panicked after moving quartz claim"
         ));
         assert!(!anchor_matches(&error, &[], "unrelated note"));
+    }
+
+    #[test]
+    fn match_reason_names_the_channels_and_clips_the_anchor() {
+        assert_eq!(
+            match_reason(true, true, false, Some("file a.rs")),
+            "entity+lexical file a.rs"
+        );
+        assert_eq!(match_reason(false, false, false, None), "linked");
+        let long = "x".repeat(200);
+        assert!(match_reason(true, false, false, Some(&long)).len() <= 120);
     }
 }

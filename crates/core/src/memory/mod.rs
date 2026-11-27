@@ -15,7 +15,7 @@ pub use literal::{
 };
 pub use model::{
     Context, Entity, EntityKind, Kind, Link, Memory, Record, Relation, SaveInput, Scope, Status,
-    TrustLevel, Usage,
+    TimelineItem, TrustLevel, Usage,
 };
 
 pub use trust::{PROVEN_HELPFUL, PROVEN_SAVES};

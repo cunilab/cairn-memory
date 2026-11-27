@@ -9,6 +9,8 @@ use std::collections::HashMap;
 pub struct Hit {
     pub memory: Memory,
     pub score: f32,
+    /// Why the card matched. Empty for callers that do not search.
+    pub why: String,
 }
 
 /// What an agent sees of a hit; `memory_get` fetches the full record.
@@ -31,6 +33,9 @@ pub struct Card {
     /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
     /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
+    /// Channel and matched token. Omitted when search did not record one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
     /// How many times this knowledge was saved. Omitted the first time.
     #[serde(default, skip_serializing_if = "seen_once")]
     pub seen: u32,
@@ -124,6 +129,7 @@ impl Packer {
             stale_cause: hit.memory.stale_cause.clone(),
             label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
+            why: (!hit.why.is_empty()).then(|| hit.why.clone()),
             seen: hit.memory.proof_count,
             trust: hit.memory.trust().1,
         };
@@ -194,6 +200,7 @@ mod tests {
         Hit {
             memory: memory(id, Kind::Fact, Scope::Personal),
             score,
+            why: String::new(),
         }
     }
 

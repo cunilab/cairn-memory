@@ -6,7 +6,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
+use cairn_core::memory::{
+    Kind, Memory, Record, Relation, SaveInput, Scope, Status, TimelineItem, TrustLevel,
+};
 use cairn_store::memory::{ListFilter, PinOrder, PinSlot, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
@@ -64,6 +66,13 @@ pub struct GetMany {
     ids: Vec<String>,
     #[serde(default)]
     detail: bool,
+    /// One key of `fields`, or `reason` or `detail`. One id only. The reply keeps that text
+    /// and drops the other body fields.
+    #[serde(default)]
+    field: Option<String>,
+    /// A short supersedes chain for one id. Only memories the caller can already read.
+    #[serde(default)]
+    timeline: bool,
     session_id: Option<String>,
 }
 
@@ -336,8 +345,10 @@ pub async fn get_many(
             "ids: 1 to 10 ids of at most 128 characters",
         ));
     }
-    if body.detail && body.ids.len() != 1 {
-        return Err(ApiError::invalid("request detail for one memory at a time"));
+    if (body.detail || body.field.is_some() || body.timeline) && body.ids.len() != 1 {
+        return Err(ApiError::invalid(
+            "detail, field and timeline are for one memory at a time",
+        ));
     }
     let mut found: HashMap<String, Memory> = state
         .store
@@ -355,8 +366,17 @@ pub async fn get_many(
         match found.remove(&id) {
             Some(memory) => {
                 let mut record = Record::from(&memory);
-                if body.detail {
-                    record.detail = Some(memory.detail);
+                if body.detail || body.field.as_deref() == Some("detail") {
+                    record.detail = Some(memory.detail.clone());
+                }
+                if let Some(field) = &body.field {
+                    record
+                        .narrow_to_field(field)
+                        .map_err(|error| ApiError::invalid(error.to_string()))?;
+                }
+                if body.timeline {
+                    record.timeline =
+                        correction_timeline(&state, &account.person_id, &memory).await?;
                 }
                 memories.push(record);
             }
@@ -382,6 +402,58 @@ pub async fn get_many(
         .await
         .unwrap_or_else(|error| eprintln!("retrieval usage not recorded: {error}"));
     Ok(Json(reply))
+}
+
+/// At most six other memories on the supersedes chain, newer and older. Hidden memories are absent.
+async fn correction_timeline(
+    state: &AppState,
+    person_id: &str,
+    root: &Memory,
+) -> Result<Vec<TimelineItem>, ApiError> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::from([root.id.clone()]);
+    let mut frontier = vec![root.clone()];
+    for _ in 0..4 {
+        if frontier.is_empty() || items.len() == 6 {
+            break;
+        }
+        let mut next = Vec::new();
+        for memory in &frontier {
+            for link in &memory.links {
+                if link.relation != Relation::Supersedes {
+                    continue;
+                }
+                let other = if link.source == memory.id {
+                    link.target.as_str()
+                } else if link.target == memory.id {
+                    link.source.as_str()
+                } else {
+                    continue;
+                };
+                if seen.insert(other.to_owned()) {
+                    next.push(other.to_owned());
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        let loaded = state.store.memories_by_ids(person_id, &next).await?;
+        frontier = Vec::new();
+        for memory in loaded {
+            if items.len() == 6 {
+                break;
+            }
+            items.push(TimelineItem {
+                id: memory.id.clone(),
+                title: memory.title.clone(),
+                status: memory.status,
+                relation: Relation::Supersedes,
+            });
+            frontier.push(memory);
+        }
+    }
+    Ok(items)
 }
 
 pub async fn feedback(
