@@ -276,16 +276,19 @@ async fn synthetic(db: &TestDb, groups: &[(&str, &str, i32)]) {
     }
 }
 
-/// The plan of `sql` with its four binds `$1 person`, `$2 text`, `$3 projects`, `$4 limit`.
+/// The plan of `sql` with binds `$1 person`, `$2 text`, `$3 projects`, `$4 limit`.
+/// Lexical SQL also binds `$5` extra terms.
 async fn explain(store: &cairn_store::Store, sql: &str, person: &str, text: &str) -> String {
-    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN (FORMAT TEXT) {sql}"))
+    let statement = format!("EXPLAIN (FORMAT TEXT) {sql}");
+    let mut query = sqlx::query_scalar::<_, String>(&statement)
         .bind(person)
         .bind(text)
         .bind(Vec::<String>::new())
-        .bind(64_i64)
-        .fetch_all(store.pool())
-        .await
-        .unwrap();
+        .bind(64_i64);
+    if sql.contains("$5") {
+        query = query.bind("");
+    }
+    let plan: Vec<String> = query.fetch_all(store.pool()).await.unwrap();
     plan.join("\n")
 }
 
@@ -1618,6 +1621,7 @@ async fn lexical_or_channel_caps_the_rows_it_ranks() {
     .bind("summary filler zeta77x")
     .bind(&projects)
     .bind(64_i64)
+    .bind("")
     .fetch_all(store.pool())
     .await
     .unwrap();

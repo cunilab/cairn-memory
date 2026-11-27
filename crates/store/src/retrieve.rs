@@ -189,6 +189,8 @@ impl From<&Filter> for Narrow {
 struct Pool {
     fused: Vec<(String, f32)>,
     entity_hits: HashSet<String>,
+    /// How many of the lexical, entity and semantic channels listed the id.
+    channels: HashMap<String, u8>,
     by_id: HashMap<String, Candidate>,
 }
 
@@ -253,6 +255,26 @@ impl Store {
         limit: i64,
         narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
+        self.lexical_candidates_in(person_id, projects, query, limit, narrow, false)
+            .await
+    }
+
+    /// `expand` adds identifier parts to the any-term leg only. Explicit search uses it.
+    /// Hooks do not: prompt recall stays on the original query.
+    async fn lexical_candidates_in(
+        &self,
+        person_id: &str,
+        projects: &[String],
+        query: &str,
+        limit: i64,
+        narrow: &Narrow,
+        expand: bool,
+    ) -> Result<Vec<(String, f32)>> {
+        let extra = if expand {
+            cairn_core::retrieve::query::lexical_extras(query)
+        } else {
+            String::new()
+        };
         scored(
             narrow
                 .bind(
@@ -260,7 +282,8 @@ impl Store {
                         .bind(person_id)
                         .bind(query)
                         .bind(projects)
-                        .bind(limit),
+                        .bind(limit)
+                        .bind(&extra),
                 )
                 .fetch_all(&self.pool)
                 .await?,
@@ -343,14 +366,20 @@ impl Store {
 // upgrade by ranking per rare lexeme if a corpus has >2,000 matches for its rarest term.
 pub fn lexical_sql(narrow: &Narrow) -> String {
     let scope = searchable("m", "$1", "$3");
-    let narrowed = narrow.sql("m", "$1", 5);
+    let narrowed = narrow.sql("m", "$1", 6);
     let all = search_matches("q.all_terms");
     let any = search_matches("q.any_term");
     format!(
         "WITH q AS (
            SELECT w AS all_terms,
-                  CASE WHEN strpos(w::text, '!') > 0 THEN w
-                       ELSE replace(w::text, ' & ', ' | ')::tsquery END AS any_term
+                  CASE WHEN $5::text = '' THEN
+                         CASE WHEN strpos(w::text, '!') > 0 THEN w
+                              ELSE replace(w::text, ' & ', ' | ')::tsquery END
+                       ELSE
+                         (CASE WHEN strpos(w::text, '!') > 0 THEN w
+                               ELSE replace(w::text, ' & ', ' | ')::tsquery END
+                          || websearch_to_tsquery('english', $5))
+                  END AS any_term
              FROM websearch_to_tsquery('english', $2) AS w),
          hit AS MATERIALIZED (
            (SELECT m.memory_id FROM memories m, q
@@ -447,9 +476,9 @@ impl Store {
         filter: &Filter,
     ) -> Result<Cards> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter, None)
+            .candidate_pool(person_id, query, vector, filter, None, true)
             .await?;
-        let mut hits = rank(&pool, filter, cairn_core::id::now_seconds());
+        let mut hits = rank(&pool, filter, cairn_core::id::now_seconds(), query);
         if filter.kind == Some(Kind::Handoff) {
             hits = one_handoff_per_checkout(hits);
         }
@@ -469,7 +498,7 @@ impl Store {
         filter: &Filter,
     ) -> Result<Vec<Trace>> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter, None)
+            .candidate_pool(person_id, query, vector, filter, None, true)
             .await?;
         Ok(pool
             .fused
@@ -497,6 +526,7 @@ impl Store {
         vector: Option<&[f32]>,
         filter: &Filter,
         prompt_session: Option<&str>,
+        expand_lexical: bool,
     ) -> Result<Pool> {
         if query.trim().is_empty() {
             return Err(crate::StoreError::Validation(
@@ -508,7 +538,14 @@ impl Store {
         let mut narrow = Narrow::from(filter);
         narrow.prompt_session = prompt_session.map(str::to_owned);
         let lexical = self
-            .lexical_candidates(person_id, &projects, query, per_channel, &narrow)
+            .lexical_candidates_in(
+                person_id,
+                &projects,
+                query,
+                per_channel,
+                &narrow,
+                expand_lexical,
+            )
             .await?;
         // Only names the query itself contains can pass the gate; the open files, symbols and
         // commands of the work context are one more ranked channel (closeness), never a pass.
@@ -538,6 +575,7 @@ impl Store {
             None => Vec::new(),
         };
         let entity_hits: HashSet<String> = entity.iter().map(|(id, _)| id.clone()).collect();
+        let channels = channel_counts([&lexical, &entity, &semantic]);
         let seeds = fuse(vec![
             lexical.clone(),
             entity.clone(),
@@ -566,6 +604,7 @@ impl Store {
         Ok(Pool {
             fused,
             entity_hits,
+            channels,
             by_id,
         })
     }
@@ -739,7 +778,7 @@ impl Store {
             ..Filter::default()
         };
         let pool = self
-            .candidate_pool(person_id, prompt, vector, &filter, Some(session_id))
+            .candidate_pool(person_id, prompt, vector, &filter, Some(session_id), false)
             .await?;
         let now = cairn_core::id::now_seconds();
         let mut ranked = Vec::new();
@@ -1411,8 +1450,22 @@ fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {
 /// then id. The score is the absolute relevance (`gate::relevance`) times `1 + adjust`, so it says
 /// how good the match is, not where it ranks among the others. The fused rank only chose which
 /// candidates are loaded.
-fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
+fn channel_counts<const N: usize>(lists: [&Vec<(String, f32)>; N]) -> HashMap<String, u8> {
+    let mut counts: HashMap<String, u8> = HashMap::new();
+    for list in lists {
+        let mut seen = HashSet::new();
+        for (id, score) in list {
+            if *score > 0.0 && seen.insert(id.clone()) {
+                *counts.entry(id.clone()).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
     let ctx = filter.context.clone().unwrap_or_default();
+    let anchors = cairn_core::retrieve::query::exact_anchors(query);
     let mut hits: Vec<Hit> = pool
         .fused
         .iter()
@@ -1426,8 +1479,41 @@ fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
             })
         })
         .collect();
-    sort_best_first(&mut hits);
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| exact_hit(b, &anchors).cmp(&exact_hit(a, &anchors)))
+            .then_with(|| {
+                pool.channels
+                    .get(&b.memory.id)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&pool.channels.get(&a.memory.id).copied().unwrap_or(0))
+            })
+            .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+    // One card per memory. Channels already fuse an id once; this keeps the best if they do not.
+    let mut seen = HashSet::new();
+    hits.retain(|hit| seen.insert(hit.memory.id.clone()));
     hits
+}
+
+fn exact_hit(hit: &Hit, anchors: &[String]) -> bool {
+    if anchors.is_empty() {
+        return false;
+    }
+    let names: Vec<&str> = hit
+        .memory
+        .entities
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    let text = format!(
+        "{} {} {}",
+        hit.memory.title, hit.memory.summary, hit.memory.reason
+    );
+    cairn_core::retrieve::query::anchor_matches(anchors, &names, &text)
 }
 
 /// Entity names in `texts` (paths and code spans) and in the work context's files, symbols,

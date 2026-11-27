@@ -20,7 +20,7 @@ Cairn merges candidate lists with weighted reciprocal-rank fusion. The [relevanc
 
 Search applies visibility filters before querying candidate channels:
 
-- **Lexical channel**: PostgreSQL full-text search using English stemming.
+- **Lexical channel**: PostgreSQL full-text search using English stemming. Explicit search also ORs the parts of an unprotected snake_case, camelCase or path stem into the partial-match leg. Quoted text, versions and error lines stay whole. Hooks keep the original query. After the relevance gate, equal scores prefer an exact symbol, path or error, then a memory listed by more channels. Each memory is returned once.
 - **Vector channel**: 384-dimensional cosine similarity via pgvector and local `all-MiniLM-L6-v2`.
 - **Entity channel**: Exact matches on symbol names, file paths, and command signatures.
 - **Link channel**: Traversing `supersedes` and relationship edges.
