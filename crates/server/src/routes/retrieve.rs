@@ -38,6 +38,16 @@ pub struct Search {
     /// Calibration only: honoured when the server runs with `CAIRN_DEBUG_SCORES=1`.
     #[serde(default)]
     debug: bool,
+    /// Inclusive ISO date or timestamp. Not read from the query text.
+    #[serde(default)]
+    recorded_from: Option<String>,
+    /// Inclusive ISO date or timestamp. A bare date is the end of that UTC day.
+    #[serde(default)]
+    recorded_to: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,9 +98,46 @@ pub async fn search(
         Some(context) => Some(chat_project(&state, &account.person_id, context).await?),
         None => None,
     };
+    let recorded_from = body
+        .recorded_from
+        .as_deref()
+        .map(|value| cairn_core::retrieve::filter::parse_recorded(value, false))
+        .transpose()
+        .map_err(ApiError::invalid)?;
+    let recorded_to = body
+        .recorded_to
+        .as_deref()
+        .map(|value| cairn_core::retrieve::filter::parse_recorded(value, true))
+        .transpose()
+        .map_err(ApiError::invalid)?;
+    if recorded_from.is_some_and(|from| recorded_to.is_some_and(|to| from > to)) {
+        return Err(ApiError::invalid(
+            "recorded_from must not be after recorded_to",
+        ));
+    }
+    let branch = body
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    if branch.is_some_and(|branch| branch.len() > 200 || branch.contains('\0')) {
+        return Err(ApiError::invalid("branch must be at most 200 characters"));
+    }
+    let version = body
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if version.is_some_and(|version| version.len() > 40 || version.contains('\0')) {
+        return Err(ApiError::invalid("version must be at most 40 characters"));
+    }
     let filter = Filter {
         kind: body.kind,
         context,
+        recorded_from,
+        recorded_to,
+        branch: branch.map(str::to_owned),
+        version: version.map(str::to_owned),
         ..Filter::default()
     };
     if body.debug && state.debug_scores {

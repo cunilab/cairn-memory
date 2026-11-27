@@ -102,6 +102,10 @@ pub struct Narrow {
     pub kind: Option<String>,
     prompt_session: Option<String>,
     chat: Option<ChatContext>,
+    recorded_from: Option<i64>,
+    recorded_to: Option<i64>,
+    branch: Option<String>,
+    version: Option<String>,
 }
 
 impl Narrow {
@@ -111,6 +115,10 @@ impl Narrow {
         kind: None,
         prompt_session: None,
         chat: None,
+        recorded_from: None,
+        recorded_to: None,
+        branch: None,
+        version: None,
     };
 
     /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
@@ -149,6 +157,24 @@ impl Narrow {
             out += &format!(" AND {alias}.kind = ${next}::text");
             next += 1;
         }
+        if self.recorded_from.is_some() {
+            out += &format!(" AND EXTRACT(EPOCH FROM {alias}.created_at)::bigint >= ${next}");
+            next += 1;
+        }
+        if self.recorded_to.is_some() {
+            out += &format!(" AND EXTRACT(EPOCH FROM {alias}.created_at)::bigint <= ${next}");
+            next += 1;
+        }
+        if self.branch.is_some() {
+            out += &format!(" AND {alias}.repo_branch = ${next}");
+            next += 1;
+        }
+        if self.version.is_some() {
+            out += &format!(
+                " AND position(${next} in lower({alias}.title || ' ' || {alias}.summary || ' ' || {alias}.reason || ' ' || {alias}.fields::text)) > 0"
+            );
+            next += 1;
+        }
         out + &self.chat_sql(alias, next)
     }
 
@@ -166,6 +192,20 @@ impl Narrow {
         {
             q = q.bind(kind.as_str());
         }
+        if self.prompt_session.is_none() {
+            if let Some(from) = self.recorded_from {
+                q = q.bind(from);
+            }
+            if let Some(to) = self.recorded_to {
+                q = q.bind(to);
+            }
+            if let Some(branch) = &self.branch {
+                q = q.bind(branch);
+            }
+            if let Some(version) = &self.version {
+                q = q.bind(version.to_lowercase());
+            }
+        }
         if let Some(key) = chat_key(self.chat.as_ref()) {
             q = q.bind(key);
         }
@@ -181,6 +221,10 @@ impl From<&Filter> for Narrow {
             kind: f.kind.map(|k| k.as_str().to_owned()),
             prompt_session: None,
             chat: f.context.as_ref().and_then(|work| work.chat.clone()),
+            recorded_from: f.recorded_from,
+            recorded_to: f.recorded_to,
+            branch: f.branch.clone(),
+            version: f.version.clone(),
         }
     }
 }
@@ -1473,7 +1517,9 @@ fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
         .filter_map(|(id, _)| {
             let c = pool.by_id.get(id)?;
             let input = gate_input(pool, id, c);
-            let eligible = matches(&c.memory, filter) && gate::keep(&input);
+            let eligible = matches(&c.memory, filter)
+                && cairn_core::retrieve::filter::within_selectors(&c.memory, filter)
+                && gate::keep(&input);
             eligible.then(|| {
                 let memory = c.memory.clone();
                 let why = cairn_core::retrieve::query::match_reason(

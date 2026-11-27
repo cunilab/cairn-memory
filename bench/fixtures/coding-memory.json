@@ -240,7 +240,9 @@
     {
       "id": "c08",
       "kind": "time",
-      "query": "which decision was recorded at 2026-01-15",
+      "query": "invoice fonts",
+      "recorded_from": "2026-01-15",
+      "recorded_to": "2026-01-15",
       "gold": ["time-jan"],
       "hook": {"event": "UserPromptSubmit", "prompt": "which decision was recorded at 2026-01-15"}
     },

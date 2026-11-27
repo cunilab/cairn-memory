@@ -2193,3 +2193,89 @@ async fn get_field_and_timeline_stay_on_visible_memories() {
     assert_eq!(status, 400);
     app.finish().await;
 }
+
+#[tokio::test]
+async fn recorded_branch_and_version_selectors_do_not_cross_people() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("time").await;
+    let owner = app.device(&admin, "time").await;
+    let other = app
+        .device(&app.member(&admin, "time-other").await, "time-other")
+        .await;
+    let january = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "January fonts",
+            "summary": "Invoice fonts live in harbor-cli 1.4.2",
+            "reason": "A missing font changed the layout.",
+            "fields": {"source": "notes"},
+            "context": {"branch": "feature/amber"}
+        }),
+    )
+    .await;
+    let june = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "June fonts",
+            "summary": "Invoice fonts were copied aside.",
+            "reason": "The june copy is not the january one.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    let hidden = save(
+        &app,
+        &other,
+        json!({
+            "kind": "fact",
+            "title": "January fonts",
+            "summary": "Invoice fonts live in harbor-cli 1.4.2",
+            "reason": "Someone else's copy.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    sqlx::query("UPDATE memories SET created_at = '2026-01-15T00:00:00Z' WHERE memory_id = $1")
+        .bind(&january)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET created_at = '2026-01-15T00:00:00Z' WHERE memory_id = $1")
+        .bind(&hidden)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET created_at = '2026-06-01T00:00:00Z' WHERE memory_id = $1")
+        .bind(&june)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    let found = app
+        .post(
+            "search",
+            json!({
+                "query": "invoice fonts",
+                "recorded_from": "2026-01-15",
+                "recorded_to": "2026-01-15",
+                "branch": "feature/amber",
+                "version": "1.4.2"
+            }),
+            &owner,
+        )
+        .await;
+    assert_eq!(ids(&found), vec![january], "{found}");
+    let (status, _) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "invoice fonts", "recorded_from": "yesterday"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
+}

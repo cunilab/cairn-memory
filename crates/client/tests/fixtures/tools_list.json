@@ -1,7 +1,7 @@
 {
  "tools": [
   {
-   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}. kind=handoff returns the last session handoff.",
+   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}.",
    "inputSchema": {
     "properties": {
      "kind": {
@@ -25,6 +25,18 @@
      },
      "query": {
       "type": "string"
+     },
+     "recorded_from": {
+      "type": "string"
+     },
+     "recorded_to": {
+      "type": "string"
+     },
+     "branch": {
+      "type": "string"
+     },
+     "version": {
+      "type": "string"
      }
     },
     "required": [
@@ -35,7 +47,7 @@
    "name": "memory_search"
   },
   {
-   "description": "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
+   "description": "Fetch records by id. Detail is off by default.",
    "inputSchema": {
     "properties": {
      "detail": {

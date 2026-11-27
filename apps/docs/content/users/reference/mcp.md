@@ -30,8 +30,8 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 
 | Tool | REST endpoint | Arguments | Description |
 | --- | --- | --- | --- |
-| `memory_search` | `POST /search` | `query` (str), `kind` (str), `limit` (int 1–20, default 5) | Hybrid search across personal, project, and global memories |
-| `memory_get` | `POST /get` | `ids` (list 1–10), `detail` (bool, default false) | Retrieve full memory records, links, and detailed notes |
+| `memory_search` | `POST /search` | `query` (str), `kind` (str), `limit` (int 1–20, default 5), optional `recorded_from`, `recorded_to`, `branch`, `version` | Hybrid search. A card may include `why`. Dates are explicit arguments, not guessed from the query. |
+| `memory_get` | `POST /get` | `ids` (list 1–10), `detail` (bool, default false), optional `field`, `timeline` (one id) | Retrieve records. `field` keeps one key. `timeline` is a short supersedes chain. |
 | `memory_save` | `POST /remember` | `kind`, `title` (≤80B), `summary` (≤240B), `reason`, `detail` (≤8KB), `fields`, `evidence`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` | Save or update a memory record (validates quality) |
 | `memory_feedback` | `POST /feedback` | `id` (str), `vote` (`helpful` \| `wrong`) | Vote on memory accuracy to adjust confidence rankings |
 | `memory_forget` | `POST /forget` | `id` (str) | Hide an owned memory from normal recall |
@@ -52,7 +52,7 @@ Tool output returns compact JSON directly in `content[0].text`:
 
 - **`memory_search`**:
   ```json
-  {"results":[{"id":"mem_123","kind":"decision","title":"Use Postgres SKIP LOCKED","summary":"Background jobs run...","score":1.0,"trust":"proven · 4 helpful · used 12×"}],"more":3}
+  {"results":[{"id":"mem_123","kind":"decision","title":"Use Postgres SKIP LOCKED","summary":"Background jobs run...","score":1.0,"why":"lexical+entity","trust":"proven · 4 helpful · used 12×"}],"more":3}
   ```
 - **`memory_get`**:
   ```json

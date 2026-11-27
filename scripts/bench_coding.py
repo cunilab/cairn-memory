@@ -314,7 +314,12 @@ def _checkout(repo, git_env, branch):
 def _explicit(mcp, repo, git_env, question, ids, key_of, weak):
     _checkout(repo, git_env, question.get("branch"))
     started = time.perf_counter()
-    shaped, _wire, text_bytes = mcp.tool("memory_search", query=question["query"], limit=5)
+    selectors = {
+        key: question[key]
+        for key in ("recorded_from", "recorded_to", "branch", "version")
+        if question.get(key)
+    }
+    shaped, _wire, text_bytes = mcp.tool("memory_search", query=question["query"], limit=5, **selectors)
     elapsed = (time.perf_counter() - started) * 1000
     ranked = [key_of.get(memory_id, "?") for memory_id in bench.result_ids(shaped)]
     return _row(question, ranked, text_bytes, elapsed, weak)

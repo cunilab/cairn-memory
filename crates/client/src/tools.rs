@@ -21,20 +21,24 @@ pub struct Tool {
 pub const TOOLS: [Tool; 5] = [
     Tool {
         name: "memory_search",
-        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}. kind=handoff returns the last session handoff.",
+        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}.",
         cli: "search",
         route: "/search",
         schema: || {
             json!({"type":"object","properties":{
                 "query":{"type":"string"},
                 "kind":{"type":"string","enum":["decision","rule","gotcha","procedure","fact","preference","note","handoff"]},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"description":"default 5"}},
+                "limit":{"type":"integer","minimum":1,"maximum":20,"description":"default 5"},
+                "recorded_from":{"type":"string"},
+                "recorded_to":{"type":"string"},
+                "branch":{"type":"string"},
+                "version":{"type":"string"}},
               "required":["query"]})
         },
     },
     Tool {
         name: "memory_get",
-        description: "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
+        description: "Fetch records by id. Detail is off by default.",
         cli: "get",
         route: "/get",
         schema: || {
