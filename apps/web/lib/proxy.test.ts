@@ -13,6 +13,10 @@ test("only allowlisted first segments pass", () => {
   assert.equal(upstreamPath(["console"]), null);
   assert.equal(upstreamPath(["console", "other"]), null);
   assert.equal(upstreamPath(["console", "memories", "extra"]), null);
+  assert.equal(upstreamPath(["me", "trace"]), "me/trace");
+  assert.equal(upstreamPath(["me"]), null);
+  assert.equal(upstreamPath(["me", "other"]), null);
+  assert.equal(upstreamPath(["me", "trace", "extra"]), null);
 });
 
 test("dot and empty segments are refused after decoding", () => {

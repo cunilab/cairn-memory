@@ -20,6 +20,7 @@ pub mod skill;
 pub mod stats;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod trace;
 pub mod transfer;
 pub mod usage;
 pub mod view;
@@ -133,6 +134,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0026_session_provenance_pin_order",
         include_str!("../../../migrations/0026_session_provenance_pin_order.sql"),
+    ),
+    (
+        "0027_retrieval_trace",
+        include_str!("../../../migrations/0027_retrieval_trace.sql"),
     ),
 ];
 

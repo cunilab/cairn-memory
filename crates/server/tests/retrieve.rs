@@ -2279,3 +2279,88 @@ async fn recorded_branch_and_version_selectors_do_not_cross_people() {
     assert_eq!(status, 400);
     app.finish().await;
 }
+
+#[tokio::test]
+async fn retrieval_trace_is_private_redacted_and_off_by_default() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("trace").await;
+    let owner = app.device(&admin, "trace").await;
+    let other = app.member(&admin, "trace-other").await;
+    let saved = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "Trace target",
+            "summary": "A visible fact for the trace.",
+            "reason": "So search has something to return.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    // Off: a search writes nothing. The secret is real, but this call is not stored.
+    app.post(
+        "search",
+        json!({"query": "trace target token=supersecretvalue"}),
+        &owner,
+    )
+    .await;
+    let empty = app.get("me/trace", &admin).await;
+    assert_eq!(empty["enabled"], false);
+    assert!(empty["traces"].as_array().unwrap().is_empty(), "{empty}");
+    app.post("me/trace", json!({"enabled": true}), &admin).await;
+    // The query repeats the memory's own words so the relevance gate keeps the hit, plus one secret.
+    let found = app
+        .post(
+            "search",
+            json!({"query": "trace target visible fact token=supersecretvalue"}),
+            &owner,
+        )
+        .await;
+    assert!(ids(&found).contains(&saved), "{found}");
+    let mine = app.get("me/trace", &admin).await;
+    let query = mine["traces"][0]["query"].as_str().unwrap();
+    assert!(query.contains("trace target"), "{mine}");
+    assert!(!query.contains("supersecretvalue"), "{mine}");
+    assert!(query.contains("[REDACTED]"), "{mine}");
+    let hit = &mine["traces"][0]["results"][0];
+    assert_eq!(hit["id"], saved);
+    assert!(hit.get("title").is_none(), "{mine}");
+    assert!(hit.get("summary").is_none(), "{mine}");
+    let channel = hit["channel"].as_str().unwrap();
+    assert!(
+        !channel.contains(' ') && !channel.contains("visible"),
+        "{mine}"
+    );
+    assert_eq!(hit["opened"], false);
+    assert_eq!(hit["voted"], false);
+    app.post("get", json!({"ids": [saved]}), &owner).await;
+    let opened = app.get("me/trace", &admin).await;
+    assert_eq!(
+        opened["traces"][0]["results"][0]["opened"], true,
+        "{opened}"
+    );
+    assert_eq!(
+        opened["traces"][0]["results"][0]["voted"], false,
+        "{opened}"
+    );
+    app.post("feedback", json!({"id": &saved, "vote": "helpful"}), &owner)
+        .await;
+    let voted = app.get("me/trace", &admin).await;
+    assert_eq!(voted["traces"][0]["results"][0]["voted"], true, "{voted}");
+    sqlx::query("UPDATE retrieval_traces SET expires_at = now() - interval '1 second'")
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    let expired = app.get("me/trace", &admin).await;
+    assert_eq!(expired["enabled"], true);
+    assert!(
+        expired["traces"].as_array().unwrap().is_empty(),
+        "{expired}"
+    );
+    let theirs = app.get("me/trace", &other).await;
+    assert!(theirs["traces"].as_array().unwrap().is_empty(), "{theirs}");
+    let (status, _) = app.send("GET", "me/trace", json!(null), Some(&owner)).await;
+    assert_eq!(status, 401);
+    app.finish().await;
+}

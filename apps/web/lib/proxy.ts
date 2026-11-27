@@ -10,6 +10,9 @@ export function upstreamPath(segments: string[]): string | null {
   if (segments[0] === "console") {
     return segments.length === 2 && segments[1] === "memories" ? "console/memories" : null;
   }
+  if (segments[0] === "me") {
+    return segments.length === 2 && segments[1] === "trace" ? "me/trace" : null;
+  }
   if (segments.length === 0 || !(ALLOWED as readonly string[]).includes(segments[0])) return null;
   if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
   return segments.map(encodeURIComponent).join("/");

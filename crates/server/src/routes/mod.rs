@@ -32,6 +32,10 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/auth/login", post(account::login))
         .route("/cairn-memory/auth/logout", post(account::logout))
         .route("/cairn-memory/auth/me", get(account::me))
+        .route(
+            "/cairn-memory/me/trace",
+            get(account::trace).post(account::set_trace),
+        )
         .route("/cairn-memory/auth/audit", get(account::audit))
         .route("/cairn-memory/auth/accounts", get(account::accounts))
         .route(

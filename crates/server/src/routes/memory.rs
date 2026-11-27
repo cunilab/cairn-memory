@@ -384,6 +384,15 @@ pub async fn get_many(
         }
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
+    for id in &fetched {
+        if let Err(error) = state
+            .store
+            .mark_retrieval_trace(&account.person_id, id, false)
+            .await
+        {
+            eprintln!("retrieval trace not updated: {error}");
+        }
+    }
     state.store.mark_agent_read(&fetched, body.detail).await?;
     state
         .store
@@ -471,6 +480,13 @@ pub async fn feedback(
         .store
         .feedback(&account.person_id, &body.id, vote)
         .await?;
+    if let Err(error) = state
+        .store
+        .mark_retrieval_trace(&account.person_id, &body.id, true)
+        .await
+    {
+        eprintln!("retrieval trace not updated: {error}");
+    }
     state
         .store
         .record_push_use(

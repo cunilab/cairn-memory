@@ -16,6 +16,8 @@ flowchart LR
 
 Cairn merges candidate lists with weighted reciprocal-rank fusion. The [relevance gate](../glossary.md#relevance-gate) drops weak candidates before trust and status affect ranking. Matching records become compact cards within the token budget, which defaults to 1,200 tokens. Each card can include `why`, the channels that matched and a file, symbol, command or error label. The reply includes a `more` count for additional matches. `memory_get` can ask for one field (`field`) or a short supersedes chain (`timeline`) for a single id the caller can already read.
 
+A person can turn a search trace on in Settings. For 7 days Cairn then stores that person's redacted query, result ids, ranks and channel names, and marks a result opened or voted. The trace holds no memory text, does not change trust or usage, and is visible only to that person.
+
 ## Hybrid recall
 
 Search applies visibility filters before querying candidate channels:

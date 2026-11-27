@@ -159,6 +159,23 @@ pub async fn search(
         )
         .await?;
     let reply = json!(cards);
+    let hits: Vec<cairn_store::trace::TraceHit> = cards
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, card)| cairn_store::trace::TraceHit {
+            id: card.id.clone(),
+            rank: (index + 1) as i32,
+            channel: card.why.clone().unwrap_or_default(),
+        })
+        .collect();
+    if let Err(error) = state
+        .store
+        .record_retrieval_trace(&account.person_id, &body.query, &hits)
+        .await
+    {
+        eprintln!("retrieval trace not recorded: {error}");
+    }
     record(
         &state,
         &account.person_id,

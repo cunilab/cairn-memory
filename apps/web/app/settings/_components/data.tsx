@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { DownloadIcon, UploadIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -15,6 +15,8 @@ import { announceMemoriesChanged } from "@/lib/memory-events";
 import { loginHref, SessionRequiredError } from "@/lib/session";
 
 type Dry = { body: string; report: ImportReport };
+type TraceRow = { id: string; query: string; created_at: number; results: { id: string; rank: number; channel: string; opened: boolean; voted: boolean }[] };
+type TraceReply = { enabled: boolean; traces: TraceRow[] };
 
 /** Export what you own; import shows a dry-run summary first and writes only on confirm. */
 export function DataTab() {
@@ -22,6 +24,26 @@ export function DataTab() {
   const [busy, setBusy] = useState(false);
   const [dry, setDry] = useState<Dry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [trace, setTrace] = useState<TraceReply | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    cairn<TraceReply>("me/trace")
+      .then((reply) => {
+        if (live) setTrace(reply);
+      })
+      .catch((cause) => {
+        if (!live) return;
+        if (cause instanceof SessionRequiredError) {
+          router.replace(loginHref());
+          return;
+        }
+        setError(cause instanceof Error ? cause.message : "Could not load the search trace.");
+      });
+    return () => {
+      live = false;
+    };
+  }, [router]);
 
   function fail(cause: unknown, fallback: string) {
     if (cause instanceof SessionRequiredError) {
@@ -85,6 +107,43 @@ export function DataTab() {
 
   return (
     <div className="flex max-w-xl flex-col gap-6">
+      <section className="flex flex-col gap-2">
+        <h2 className="text-sm font-semibold">Search trace</h2>
+        <p className="text-sm text-muted-foreground">
+          When this is on, Cairn keeps your searches for 7 days: a short redacted query, result ids, ranks and
+          channels. Memory text is not stored. Only you can read this list.
+        </p>
+        <Label className="flex min-h-11 items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="size-4"
+            checked={trace?.enabled === true}
+            disabled={busy || trace === null}
+            onChange={(event) => {
+              const enabled = event.target.checked;
+              setBusy(true);
+              setError(null);
+              void cairn<TraceReply>("me/trace", { method: "POST", body: JSON.stringify({ enabled }) })
+                .then(setTrace)
+                .catch((cause) => fail(cause, "Could not update the search trace."))
+                .finally(() => setBusy(false));
+            }}
+          />
+          Keep a search trace
+        </Label>
+        {trace && trace.traces.length > 0 ? (
+          <ul className="flex flex-col gap-2 text-sm">
+            {trace.traces.map((row) => (
+              <li key={row.id} className="rounded-md border px-3 py-2">
+                <p>{row.query}</p>
+                <p className="text-muted-foreground">
+                  {row.results.map((item) => `${item.rank}. ${item.id} (${item.channel})`).join(", ") || "No results"}
+                </p>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-semibold">Export</h2>
         <p className="text-sm text-muted-foreground">Download all memories you own as JSON.</p>
