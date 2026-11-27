@@ -15,7 +15,7 @@ The [recall glossary](../../glossary.md#recall-and-context) defines the layers, 
 
 At session startup, Cairn injects the opening brief:
 - **Identity & Pins (L0)**: Active personal and project pins.
-- **Essential Context (L1)**: Last checkout handoff, personal preferences, and core project rules, decisions, and gotchas.
+- **Essential Context (L1)**: Last checkout handoff, personal preferences and rules, and core project rules, decisions, and gotchas.
 - See [Recall layers](layers.md) for size caps and ordering.
 
 ## Search explicitly

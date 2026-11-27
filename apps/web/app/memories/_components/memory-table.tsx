@@ -8,6 +8,7 @@ import { Pin, BrainIcon, FilterIcon, SearchIcon, XIcon } from "lucide-react";
 import { KindBadge, StatusBadge } from "@/components/badges";
 import { DataTable } from "@/components/data-table";
 import { FilterSelect, type FilterOption } from "@/components/filter-select";
+import { PinSummaryBar } from "@/components/pin-summary";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import { Badge } from "@/components/ui/badge";
@@ -349,6 +350,7 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
         </div>
       ) : null}
       {page?.error ? <ErrorAlert message={page.error} onRetry={() => setAttempt((n) => n + 1)} /> : null}
+      {!projectId ? <PinSummaryBar projectId={project || null} /> : null}
       {loading ? (
         <LoadingBlock label="Loading memories…" rows={8} />
       ) : (

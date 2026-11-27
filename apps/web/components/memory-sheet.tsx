@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { KindBadge, StatusBadge } from "@/components/badges";
 import { CopyButton } from "@/components/copy-button";
+import { PinSummaryBar } from "@/components/pin-summary";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import {
@@ -429,16 +430,26 @@ export function MemorySheet() {
                 <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
               </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
               {canForget ? (
-                <div className="mt-auto flex flex-wrap gap-2 px-4 pb-4">
-                  {canPin ? (
-                    <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
-                      <Pin aria-hidden="true" />
-                      {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
-                    </Button>
+                <div className="mt-auto flex flex-col gap-3 px-4 pb-4">
+                  {memory.scope !== "global" ? (
+                    <PinSummaryBar
+                      projectId={memory.project_id}
+                      memoryId={memory.id}
+                      pinnedAt={memory.pinned_at}
+                      compact
+                    />
                   ) : null}
-                  <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
-                    Forget memory…
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    {canPin ? (
+                      <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
+                        <Pin aria-hidden="true" />
+                        {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
+                      </Button>
+                    ) : null}
+                    <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
+                      Forget memory…
+                    </Button>
+                  </div>
                 </div>
               ) : null}
             </>

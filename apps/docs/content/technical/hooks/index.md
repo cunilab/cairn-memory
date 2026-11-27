@@ -35,8 +35,8 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 
 ## Injection budget
 
-- **Session brief**: Up to 1,800 bytes for modern clients (`extended_brief: true`); capped at 1,200 bytes for legacy clients.
-- **Session ledger**: Up to 8 cards shared across briefs, file topics, command warnings, error recall, and prompts per session ID.
+- **Session brief**: Up to 1,800 bytes (900 B L0 + 900 B L1) for modern clients (`extended_brief: true`); capped at 1,200 bytes for legacy clients.
+- **Session ledger**: Up to 8 L2 cards shared across file topics, command warnings, error recall, and prompts per session ID; session brief cards deduplicate without spending the L2 budget.
 - **File topics**: Evaluates up to 16 file topics; injects up to 4 topic cards of 300 bytes each.
 
 ## Redaction

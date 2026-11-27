@@ -11,6 +11,7 @@ import { ConsoleShell } from "@/components/console-shell";
 import { DataTable } from "@/components/data-table";
 import { FormDialog } from "@/components/form-dialog";
 import { PageHeader } from "@/components/page-header";
+import { PinSummaryBar } from "@/components/pin-summary";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import {
@@ -294,6 +295,7 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
         <ErrorAlert message={error} onRetry={() => { setError(null); setData(null); setAttempt((n) => n + 1); }} />
       ) : null}
       {data === null && !error ? <LoadingBlock label="Loading project…" rows={4} /> : null}
+      {data ? <PinSummaryBar projectId={projectId} /> : null}
       {data ? (
         <Tabs value={tab} onValueChange={(value) => setTab(value as (typeof TABS)[number])}>
           <TabsList className="max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto [&>[role=tab]]:h-7">
