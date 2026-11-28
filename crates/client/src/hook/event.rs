@@ -140,6 +140,23 @@ impl Payload {
             .text("tool_name")
             .or_else(|| self.text("toolName"))
             .or_else(|| call?.get("name")?.as_str())?;
+        let input = self
+            .0
+            .get("tool_input")
+            .or_else(|| self.0.get("toolInput"))
+            .or_else(|| call?.get("args"))
+            .and_then(Value::as_object);
+        // Grok calls MCP tools through `use_tool` with the catalog key and the real input inside.
+        let (name, input) = match input
+            .filter(|_| name == "use_tool")
+            .and_then(|inner| Some((inner.get("tool_name")?.as_str()?, inner)))
+        {
+            Some((inner_name, inner)) => (
+                inner_name,
+                inner.get("tool_input").and_then(Value::as_object),
+            ),
+            None => (name, input),
+        };
         let name = name
             .strip_prefix("cairn__")
             .or_else(|| name.strip_prefix("mcp_cairn_"))
@@ -150,12 +167,7 @@ impl Payload {
             );
         Some(Tool {
             name,
-            input: self
-                .0
-                .get("tool_input")
-                .or_else(|| self.0.get("toolInput"))
-                .or_else(|| call?.get("args"))
-                .and_then(Value::as_object),
+            input,
             response: self
                 .0
                 .get("tool_response")
@@ -276,6 +288,13 @@ impl Tool<'_> {
 
     fn mcp_response(&self) -> Option<Value> {
         let response = self.response?;
+        // Grok: `{"type":"MCP","output":{"OkayOutput":"<the JSON text>"}}`.
+        if let Some(text) = response
+            .pointer("/output/OkayOutput")
+            .and_then(Value::as_str)
+        {
+            return serde_json::from_str(text).ok();
+        }
         if ["isError", "is_error"]
             .iter()
             .any(|key| response.get(key).and_then(Value::as_bool) == Some(true))
@@ -416,6 +435,7 @@ impl Tool<'_> {
             "file_path",
             "filePath",
             "path",
+            "target_file",
             "TargetFile",
             "AbsolutePath",
         ]

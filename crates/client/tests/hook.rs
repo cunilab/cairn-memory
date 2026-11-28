@@ -412,6 +412,80 @@ fn grok_hooks_capture_native_payloads_and_deliver_one_deferred_brief() {
     assert!(!fake.to("end").is_empty());
 }
 
+/// Runs one native Grok hook (`--agent grok`) with Grok's own payload keys.
+fn grok_hook(env: &Env, event: &str, session: &str, extra: Value) -> Output {
+    let mut payload = json!({"sessionId": session, "cwd": env.repo});
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let out = with_stdin(
+        command(&env.home)
+            .current_dir(&env.repo)
+            .args(["hook", event, "--agent", "grok", "--config"])
+            .arg(env.config()),
+        &payload.to_string(),
+    );
+    assert!(out.status.success(), "{out:?}");
+    out
+}
+
+#[test]
+fn grok_read_file_target_file_shows_the_topic_note() {
+    let server = fake_with(|_, request| notes_reply(request));
+    let env = Env::new("grok-read-target-file", &server.url);
+    // The first tool result carries the brief; the read after it is the one under test.
+    grok_hook(
+        &env,
+        "PostToolUse",
+        "g1",
+        json!({"toolName": "list_dir", "toolUseId": "t0",
+        "toolInput": {"target_directory": env.repo}}),
+    );
+    let path = env.repo.join("src/a.rs");
+    let read = json!({"toolName": "read_file", "toolUseId": "t1",
+        "toolInput": {"variant": "ReadFile", "target_file": path}});
+    let text = injected(&grok_hook(&env, "PostToolUse", "g1", read)).expect("a topic note");
+    assert!(text.contains("Cairn notes for src/a.rs"), "{text}");
+    assert_eq!(server.to("topic")[0].body["path"], "src/a.rs");
+}
+
+#[test]
+fn grok_wrapped_mcp_save_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("grok-save-wrapped", &server.url);
+    with_project(&env);
+    // Grok's real PostToolUse result for a Cairn save, from a live 0.1.11 session.
+    let result = json!({"type": "MCP", "tool_name": "memory_save", "server_name": "cairn",
+        "output": {"OkayOutput": "{\"deduplicated\":false,\"id\":\"mem_fzboocautxi2wdwzfqog7zgcra\",\"status\":\"active\"}"}});
+    let input = json!({"kind": "fact", "title": "queue.py inits buf before push"});
+    let saves = [
+        (
+            "catalog",
+            json!({"toolName": "cairn__memory_save", "toolInput": input, "toolResult": result}),
+        ),
+        (
+            "use-tool",
+            json!({"toolName": "use_tool",
+            "toolInput": {"tool_name": "cairn__memory_save", "tool_input": input}, "toolResult": result}),
+        ),
+        (
+            "refused",
+            json!({"toolName": "cairn__memory_save", "toolInput": input,
+            "toolResult": {"type": "MCP", "tool_name": "memory_save", "server_name": "cairn",
+                           "output": {"OkayOutput": "{\"results\":[{\"status\":\"error\"}]}"}}}),
+        ),
+    ];
+    for (session, save) in saves {
+        let edit = json!({"toolName": "search_replace", "toolUseId": "e1",
+            "toolInput": {"file_path": env.repo.join("queue.py"), "old_string": "a", "new_string": "buf = []"}});
+        grok_hook(&env, "PostToolUse", session, edit);
+        grok_hook(&env, "PostToolUse", session, save);
+        let stop = grok_hook(&env, "Stop", session, json!({}));
+        assert_eq!(blocked(&stop).is_some(), session == "refused", "{session}");
+    }
+}
+
 #[test]
 fn antigravity_hooks_capture_native_payloads_and_checkpoint_on_stop() {
     let fake = fake();
