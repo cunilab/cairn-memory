@@ -362,6 +362,9 @@ impl Hook<'_> {
                         .unwrap_or_default();
                 }
                 pending.extend(recall);
+                if self.agent == "hermes" {
+                    pending.extend(self.with_state(|s| s.pending_stop_nudge.take()).flatten());
+                }
                 if pending.is_empty() {
                     capture_result?;
                     Ok(None)
@@ -419,6 +422,16 @@ impl Hook<'_> {
                 }
                 // SubagentStop captures like Stop and never asks.
                 if self.event == "SubagentStop" {
+                    Ok(None)
+                } else if self.agent == "hermes" {
+                    // Hermes discards Stop output: the next prompt's recall carries the ask instead.
+                    if let Some(text) = self.stop_nudge() {
+                        let text = text.strip_prefix("You ").map_or_else(
+                            || format!("Last turn: {text}"),
+                            |rest| format!("Last turn you {rest}"),
+                        );
+                        self.with_state(|s| s.pending_stop_nudge = Some(text));
+                    }
                     Ok(None)
                 } else {
                     Ok(self.stop_nudge())
@@ -789,7 +802,8 @@ impl Hook<'_> {
                 ))
             || (self.agent == "antigravity" && !self.payload.flag("fullyIdle"))
             || self.automated()
-            || matches!(self.agent, "opencode" | "hermes")
+            || self.agent == "opencode"
+            || self.chat.is_some()
             || !self.nudging()
         {
             return None;
@@ -1252,7 +1266,7 @@ impl Hook<'_> {
             .ok()?;
         let worked = locked.state.worked;
         let used_recall = locked.state.command_error_recalled;
-        let nudged = locked.state.nudged;
+        let nudged = locked.state.nudged && locked.state.pending_stop_nudge.is_none();
         let saved = locked.state.saved;
         let automated = locked.state.automated
             || Self::env_automated()

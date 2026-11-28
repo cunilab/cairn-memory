@@ -18,7 +18,7 @@ In Hermes Agent, Cairn operates both as the external memory provider and as a st
 | `initialize` | Registers working directory and agent context. Bypasses subagent, cron, and flush agents. |
 | `on_turn_start` | Evaluates `SessionStart` (once per session) and `UserPromptSubmit`. |
 | `prefetch` | Injects session brief and prompt recall cards into user message context. |
-| `sync_turn` | Executes `Stop` checkpoint after completed turns. |
+| `sync_turn` | Executes `Stop` checkpoint after completed turns. Hermes cannot continue a finished turn, so a coding session's Stop reminder is held and delivered once, phrased as "Last turn you changed N file(s)...", with the next prompt's recall; gateway chats get none. |
 | `on_pre_compress` | Runs `PreCompact` checkpoint before context compression. |
 | `on_session_end` | Finalizes session and queues distillation at session boundaries. |
 | `on_session_switch` | Tracks session switches (`/new`, `/reset`, `/resume`, `/branch`, and compression). |

@@ -30,7 +30,7 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 ## Reminders (agent nudges)
 
 - **Session start nudge**: Instructs agents to treat Cairn as their sole memory service.
-- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes and, if work is unfinished, to end with a `Next:` line. Suppressed if notes were already saved.
+- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes and, if work is unfinished, to end with a `Next:` line. Suppressed if notes were already saved. Hermes coding sessions get it with the next prompt's recall instead of at Stop.
 - **Nudge overrides**: Project instructions override global instructions, which override default prompts. Set Stop text to `off` to disable. Set `nudge: false` in config or `CAIRN_NO_NUDGE=1` to disable all nudges.
 
 ## Injection budget

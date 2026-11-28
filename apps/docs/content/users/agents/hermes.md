@@ -17,7 +17,7 @@ flowchart TD
   Plugin[Hooks] -->|Tool events| Server
 ```
 
-The provider prefetches at turn start and supplies native tools. The plugin captures tool activity and returns failed-command warnings. A coding checkout uses project and personal memory. A [gateway profile](hermes-gateway.md) can also keep chat-tagged personal memories.
+The provider prefetches at turn start and supplies native tools. Hermes cannot extend a finished turn, so after a turn that edited files, Cairn's one save reminder arrives with your next prompt. The plugin captures tool activity and returns failed-command warnings. A coding checkout uses project and personal memory. A [gateway profile](hermes-gateway.md) can also keep chat-tagged personal memories.
 
 ## Check the Hermes version
 

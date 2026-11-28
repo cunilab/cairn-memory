@@ -649,6 +649,106 @@ fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
     assert_eq!(fake.to("end")[0].body["nudge_saved"], true);
 }
 
+/// Hermes discards Stop output, so a coding session's Stop ask waits for the next prompt's recall:
+/// once per session, phrased for that turn, never in a gateway chat.
+#[test]
+fn hermes_stop_ask_arrives_with_the_next_prompt_once() {
+    let fake = fake();
+    let env = Env::new("hermes-stop-ask", &fake.url);
+    with_project(&env);
+    let invoke = |session: &str, event, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        out
+    };
+    let edit = json!({
+        "tool_name": "write_file", "tool_call_id": "w1",
+        "args": {"path": "src/a.rs", "content": "x"}, "result": "{}", "status": "ok",
+    });
+    let prompt = |session: &str, text: &str| {
+        injected(&invoke(
+            session,
+            "UserPromptSubmit",
+            json!({"user_message": text}),
+        ))
+        .unwrap_or_default()
+    };
+    let ask = "Last turn you changed 1 file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints. If unfinished, end with a Next: line.";
+
+    prompt("h1", "Edit the widget");
+    invoke("h1", "PostToolUse", edit.clone());
+    let stop = invoke("h1", "Stop", json!({"assistant_response": "Done."}));
+    assert!(stop.stdout.is_empty(), "{stop:?}");
+    let next = prompt("h1", "What else is left?");
+    assert_eq!(next.matches(ask).count(), 1, "{next}");
+    assert!(next.ends_with(ask), "{next}");
+    assert!(
+        !prompt("h1", "And now?").contains("Last turn"),
+        "shown once"
+    );
+    invoke("h1", "Stop", json!({"assistant_response": "Done again."}));
+    assert!(
+        !prompt("h1", "Anything more?").contains("Last turn"),
+        "asked once per session"
+    );
+
+    // A correction alone is phrased the same way.
+    prompt("h2", "No, keep the old parser for now.");
+    invoke("h2", "Stop", json!({"assistant_response": "Kept it."}));
+    assert!(
+        prompt("h2", "Thanks").ends_with(
+            "Last turn you were corrected (\"No, keep the old parser for now.\"): save it as a rule if it holds beyond this task."
+        )
+    );
+
+    // An ask the session never showed is not reported as asked.
+    prompt("h3", "Edit the widget");
+    invoke("h3", "PostToolUse", edit);
+    invoke("h3", "Stop", json!({"assistant_response": "Done."}));
+    invoke("h3", "SessionEnd", json!({}));
+    let ends = fake.to("end");
+    assert_eq!(
+        ends.last().unwrap().body["nudge_asked"],
+        false,
+        "{:?}",
+        ends.last().unwrap().body
+    );
+
+    // A gateway chat never asks.
+    let chat = json!({"platform": "matrix", "kind": "dm", "chat_id_hash": "a".repeat(64)});
+    let session = format!("hchat_{}", "c".repeat(32));
+    for (event, extra) in [
+        (
+            "UserPromptSubmit",
+            json!({"user_message": "No, call me Sam."}),
+        ),
+        ("Stop", json!({"assistant_response": "Noted."})),
+        ("UserPromptSubmit", json!({"user_message": "Hello again"})),
+    ] {
+        let mut body = json!({"session_id": session, "chat_context": chat});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Last turn"),
+            "{out:?}"
+        );
+    }
+}
+
 #[test]
 fn hermes_provider_tools_run_the_mcp_tools_in_the_session_folder() {
     let server = fake_with(|_, request| match request.path.rsplit('/').next() {

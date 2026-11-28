@@ -43,6 +43,9 @@ pub struct SessionState {
     pub pending_command_recall: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_prompt_recall: Option<String>,
+    /// Hermes's Stop ask, held for the next prompt: its Stop hook cannot continue the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_stop_nudge: Option<String>,
     /// Antigravity repeats the same user input across its model invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt_recall: Option<String>,
