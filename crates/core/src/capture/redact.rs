@@ -27,10 +27,15 @@ pub fn redact_work_context(context: &WorkContext) -> WorkContext {
     }
 }
 
-/// Rows 2-18 of apps/docs/content/technical/hooks/index.md#redaction, in application order; row 1 (PEM blocks) runs first.
+/// Rows 2-19 of apps/docs/content/technical/hooks/index.md#redaction, in application order; row 1 (PEM blocks) runs first.
 const PATTERNS: &[(&str, &str)] = &[
     (
         r#"(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+"#,
+        "${1} [REDACTED]",
+    ),
+    // A bare or quoted-header `Bearer <token>`; the digit keeps prose ("a Bearer token.") as is.
+    (
+        r"(?i)\b(bearer)\s+[A-Za-z._~+/-]*[0-9][A-Za-z0-9._~+/-]*=*",
         "${1} [REDACTED]",
     ),
     (
@@ -244,6 +249,18 @@ mod tests {
         let cases = [
             ("Authorization: Bearer abc.def-123", "abc.def-123"),
             ("authorization: basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+            (
+                "call it with Bearer fakeTOKEN0a1b2c3d4",
+                "fakeTOKEN0a1b2c3d4",
+            ),
+            (
+                r#"{"Authorization": "Bearer fakeTOKEN0a1b2c3d4"}"#,
+                "fakeTOKEN0a1b2c3d4",
+            ),
+            (
+                "headers={'Authorization': 'bearer abc.def-123'}",
+                "abc.def-123",
+            ),
             ("postgres://admin:hunter2@db:5432/x", "hunter2"),
             ("run --password hunter2 --token=abc123 now", "hunter2"),
             ("run --client-secret \"two words\" now", "two words"),
@@ -275,6 +292,14 @@ mod tests {
         let out = redact_sensitive_content("token=abc, disk-full ok sk-short");
         assert_eq!(out, "token=[REDACTED], disk-full ok sk-short");
         assert!(redact_sensitive_content("Authorization: Bearer xyz").ends_with(REDACTED));
+        // Prose about bearer tokens has no digit in the next word and stays.
+        for plain in [
+            "Send a Bearer token.",
+            "Bearer authentication is used",
+            "the bearer of news",
+        ] {
+            assert_eq!(redact_sensitive_content(plain), plain);
+        }
     }
 
     #[test]

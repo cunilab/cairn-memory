@@ -41,26 +41,27 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 
 ## Redaction
 
-The hook and server execute 18 ordered regex patterns replacing secrets with `[REDACTED]` prior to persistence:
+The hook and server execute 19 ordered regex patterns replacing secrets with `[REDACTED]` prior to persistence:
 
 1. PEM private key blocks (`-----BEGIN ... PRIVATE KEY-----`)
 2. Bearer, Basic, and Token Authorization headers
-3. Userinfo in connection URLs (`scheme://user:pass@host`)
-4. Password and token CLI arguments (`--password`, `--token`, `--api-key`)
-5. Configuration key-value assignments (`DB_PASSWORD=...`, `"token": "..."`)
-6. Database client flags (`mysql -p...`)
-7. cURL credentials (`curl -u user:pass`)
-8. GitHub tokens (`ghp_`, `gho_`, `github_pat_`)
-9. AWS access key IDs (`AKIA...`, `ASIA...`)
-10. Slack tokens (`xoxb-`, `xoxp-`)
-11. Anthropic and OpenAI keys (`sk-ant-`, `sk-proj-`)
-12. Stripe API keys (`sk_live_`, `sk_test_`)
-13. npm package tokens (`npm_`)
-14. GitLab tokens (`glpat-`)
-15. Google API keys (`AIza...`)
-16. JSON Web Tokens (`eyJ...`)
-17. Cairn device tokens (`cdt_...`)
-18. Legacy Hermes owner IDs
+3. A bare or quoted `Bearer <token>` whose token has a digit
+4. Userinfo in connection URLs (`scheme://user:pass@host`)
+5. Password and token CLI arguments (`--password`, `--token`, `--api-key`)
+6. Configuration key-value assignments (`DB_PASSWORD=...`, `"token": "..."`)
+7. Database client flags (`mysql -p...`)
+8. cURL credentials (`curl -u user:pass`)
+9. GitHub tokens (`ghp_`, `gho_`, `github_pat_`)
+10. AWS access key IDs (`AKIA...`, `ASIA...`)
+11. Slack tokens (`xoxb-`, `xoxp-`)
+12. Anthropic and OpenAI keys (`sk-ant-`, `sk-proj-`)
+13. Stripe API keys (`sk_live_`, `sk_test_`)
+14. npm package tokens (`npm_`)
+15. GitLab tokens (`glpat-`)
+16. Google API keys (`AIza...`)
+17. JSON Web Tokens (`eyJ...`)
+18. Cairn device tokens (`cdt_...`)
+19. Legacy Hermes owner IDs
 
 ## Outbox
 
