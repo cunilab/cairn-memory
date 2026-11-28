@@ -42,7 +42,7 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 
 ### Quality validation & defaults
 
-- **Reason requirement**: for every kind except `note`, an empty `reason` is rejected and one under 10 characters is refused. Under 20 characters the save succeeds with a coaching hint.
+- **Reason requirement**: for every kind except `note`, an empty `reason` is rejected. A shorter reason is not refused: under 20 characters, or one that only repeats the title or summary, the memory is still saved, as a candidate (trust `new · awaiting confirmation`), and the reply carries a coaching hint. A reason of 20 or more characters gets no reason hint. A `note` may omit the reason. Imports (`POST /memories/import`, the console import) keep the strict check, which also refuses a reason under 10 characters.
 - **Corrections**: Save with `supersedes: "<old_id>"` to replace an owned or same-project memory.
 - **Default scope**: `preference` and `note` default to `personal`. Other kinds default to `project` if the caller belongs to the active project context, otherwise `personal`.
 
