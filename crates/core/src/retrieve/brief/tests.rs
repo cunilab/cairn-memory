@@ -299,3 +299,51 @@ fn cards_show_at_most_the_suggested_title_and_summary() {
         "{notes}"
     );
 }
+
+#[test]
+fn the_handoff_leads_l1_and_keeps_files_last_run_and_next_step() {
+    // The live 0.1.12 handoff came after higher-ranked gotchas and was cut to `Task: Use the
+    // search_replace tool, not the shell, to add a f`.
+    let gotchas: Vec<_> = (0..3)
+        .map(|index| {
+            let mut m = memory(&format!("gotcha{index}"), Kind::Gotcha, Scope::Project);
+            m.title = "g".repeat(80);
+            m.summary = "s".repeat(240);
+            m
+        })
+        .collect();
+    let mut handoff = memory("handoff", Kind::Handoff, Scope::Personal);
+    handoff.title = "Handoff: main".to_owned();
+    let task = "Use the search_replace tool, not the shell, to add a final line that says done to README.md and then rerun the violet latch check and report its output word for word";
+    handoff.summary = format!(
+        "Task: {task}. Edited README.md; last run `python3 violet_latch.py --pin` failed; 1 open item; last activity 2026-11-28."
+    );
+    handoff.fields = Fields::Handoff(crate::memory::fields::Handoff {
+        next_steps: vec!["Next: rerun the violet latch check".to_owned()],
+        open_questions: vec![
+            "`python3 violet_latch.py --pin` still failing: RuntimeError".to_owned(),
+        ],
+        files: vec!["README.md".to_owned()],
+    });
+    let essentials = [gotchas, vec![handoff]].concat();
+    let brief = session_brief(&[], &essentials, 0, 20, BriefBudget::Extended);
+    let card = &decode_brief(&brief.text)["L1 Essential"][0];
+    assert_eq!(card["id"], "handoff", "{}", brief.text);
+    let summary = card["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Task: Use the search_replace tool"),
+        "{summary}"
+    );
+    assert!(
+        summary.ends_with(
+            ". Edited README.md; last run `python3 violet_latch.py --pin` failed; 1 open item; last activity 2026-11-28."
+        ),
+        "{summary}"
+    );
+    assert_eq!(card["next_steps"][0], "Next: rerun the violet latch check");
+    // A gotcha still fits after it.
+    assert_eq!(
+        decode_brief(&brief.text)["L1 Essential"][1]["id"],
+        "gotcha0"
+    );
+}

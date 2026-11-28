@@ -186,9 +186,12 @@ pub fn session_brief(
     let mut text = l0_text;
     let ceiling = (text.len() + budget.essential_max_bytes()).min(budget.max_bytes());
     text.push_str(ESSENTIAL_OPEN);
+    // The handoff is this checkout's own state: it takes L1 room before the ranked notes.
+    let mut essentials: Vec<_> = essentials.iter().collect();
+    essentials.sort_by_key(|memory| memory.kind != Kind::Handoff);
     render_layer(
         &mut text,
-        essentials,
+        &essentials,
         now,
         limit,
         ceiling - ESSENTIAL_CLOSE.len(),
@@ -369,7 +372,7 @@ fn render_l0(pins: &[Memory], now: i64, limit: usize, identity_max: usize) -> (S
 
 fn render_layer(
     text: &mut String,
-    memories: &[Memory],
+    memories: &[&Memory],
     now: i64,
     limit: usize,
     ceiling: usize,
@@ -381,7 +384,13 @@ fn render_layer(
         .enumerate()
     {
         let comma = usize::from(index > 0);
-        let room = ceiling.saturating_sub(text.len() + comma).min(400);
+        // A handoff (rendered first) fits its task, tail and one next step and still leaves a note's room.
+        let cap = if memory.kind == Kind::Handoff {
+            520
+        } else {
+            400
+        };
+        let room = ceiling.saturating_sub(text.len() + comma).min(cap);
         let Some(card) = brief_card(memory, now, room) else {
             break;
         };
@@ -424,7 +433,12 @@ fn brief_card(memory: &Memory, now: i64, room: usize) -> Option<String> {
         let mut card = card.clone();
         card["title"] = json!(bounded(&full_title, title));
         if summary > 0 {
-            card["summary"] = json!(bounded(&full_summary, summary));
+            // Every rung is within the suggested size, so a handoff cuts its own task instead.
+            card["summary"] = json!(if memory.kind == Kind::Handoff {
+                handoff_summary(&memory.summary, summary)
+            } else {
+                bounded(&full_summary, summary).to_owned()
+            });
         }
         if items > 0
             && let Fields::Handoff(handoff) = &memory.fields
@@ -444,6 +458,28 @@ fn brief_card(memory: &Memory, now: i64, room: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// A distilled handoff summary (`Task: <request>. Edited ...; last run ...; N open items; last
+/// activity <date>.`) within `bytes`: the task is cut first, so the files, last run and counts stay.
+fn handoff_summary(summary: &str, bytes: usize) -> String {
+    let split = summary.strip_prefix("Task: ").and_then(|rest| {
+        [". Edited ", ". No project files edited"]
+            .iter()
+            .find_map(|tail| rest.rfind(tail))
+            .map(|at| (&rest[..at], &rest[at + 2..]))
+    });
+    match split {
+        Some((task, tail)) if summary.len() > bytes => {
+            let room = bytes.saturating_sub(tail.len() + "Task: . ".len());
+            if room >= 12 {
+                format!("Task: {}. {tail}", bounded(task, room))
+            } else {
+                bounded(tail, bytes).to_owned()
+            }
+        }
+        _ => bounded(summary, bytes).to_owned(),
+    }
 }
 
 #[cfg(test)]
