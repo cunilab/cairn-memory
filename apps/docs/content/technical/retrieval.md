@@ -41,4 +41,6 @@ Search applies visibility filters before querying candidate channels:
 | **Failed command** | Error line in last 2 KiB output + command entity | Gotchas precede procedures. Matches error signature with ≥ 3 lexemes. |
 | **Prompt recall** | Hybrid search for prompts ≥ 4 words (relevance ≥ 0.60) | Up to 2 memory cards and 1 skill card within 300 bytes total. |
 
+Entities come from the title, summary, reason and fields, then from `evidence`. An evidence item that is a file (`queue.py`, `src/a.rs:12`) or a command starting with a known program (`python3 violet_latch.py`) adds that file or command entity, so a memory whose command or file appears only in its evidence still gets file topics, command warnings and failed-command recall. The failed-command error line may also match the evidence text of a memory the command already matched. Evidence is not part of the full-text search vector. Memories saved before 0.1.12 get their evidence entities from a one-time backfill that the server runs in batches of 200 after startup. The backfill only inserts entities, skips memories that are not active, and records its progress and completion under `backfill_evidence_entities` in `server_state`.
+
 See [Recall layers and packing limits](../users/memory/layers.md#automatic-recall) and [MCP result contracts](../users/reference/mcp.md#results).

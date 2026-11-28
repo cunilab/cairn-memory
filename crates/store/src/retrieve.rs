@@ -1210,9 +1210,14 @@ impl Store {
         let terms = "phraseto_tsquery('english', $7)";
         let exact_command = "m.memory_id IN
             (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)";
-        // Three adjacent lexemes keep generic failure lines out of automatic recall.
+        // Three adjacent lexemes keep generic failure lines out of automatic recall. Evidence is
+        // read only here, on the few rows the exact command already matched.
         let error_match = phrase.map_or_else(String::new, |_| {
-            format!("AND numnode({terms}) >= 5 AND {}", search_matches(terms))
+            format!(
+                "AND numnode({terms}) >= 5 AND ({}
+                     OR to_tsvector('english', array_to_string(m.evidence, ' ')) @@ {terms})",
+                search_matches(terms)
+            )
         });
         let sql = format!(
             "SELECT m.memory_id, m.kind, m.title, m.summary, EXTRACT(EPOCH FROM m.created_at)::bigint

@@ -121,6 +121,26 @@ pub fn spawn(state: &AppState) {
             Err(error) => eprintln!("quarantine retry after upgrade failed: {error}"),
         }
     });
+    let backfill = state.clone();
+    tokio::spawn(async move {
+        // One short batch at a time, so a large database never holds startup or hooks.
+        loop {
+            match backfill
+                .store
+                .backfill_evidence_entities(cairn_store::backfill::EVIDENCE_BATCH)
+                .await
+            {
+                Ok(0) => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+                Err(error) => {
+                    eprintln!(
+                        "evidence entity backfill failed; it resumes on the next start: {error}"
+                    );
+                    break;
+                }
+            }
+        }
+    });
     let reconcile = state.clone();
     tokio::spawn(async move {
         if reconcile.embeddings.is_none() {

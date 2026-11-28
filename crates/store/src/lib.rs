@@ -2,6 +2,7 @@
 //! (`cairn` in production, `t_<random>` per test); see `migrations/`.
 
 pub mod account;
+pub mod backfill;
 pub mod capture;
 pub mod console;
 pub mod consolidate;

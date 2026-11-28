@@ -3284,3 +3284,191 @@ async fn legacy_pins_over_cap_stay_until_unpinned_and_brief_reports_pins_not_sho
     assert!(store.set_pinned(&me, &extra, true).await.unwrap().is_some());
     db.finish().await;
 }
+
+type Row3 = (String, String, String);
+
+/// A gotcha that names its command, file and error only in `evidence` still warns, recalls and
+/// shows on the file's topic.
+async fn evidence_only_gotcha(db: &TestDb, me: &str, project: &str, title: &str) -> String {
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": title,
+        "summary": "The latch script fails until the latch is opened by hand.",
+        "reason": "Seen twice while running the latch script locally",
+        "fields": {"symptom": "script exits 1", "cause": "latch closed", "fix": "open the latch first"},
+        "evidence": ["python3 violet_latch.py", "queue.py", "VioletLatchError: the violet latch is closed"]
+    }));
+    let work = WorkContext {
+        project_id: Some(project.to_owned()),
+        ..WorkContext::default()
+    };
+    db.store.save(me, input, &work).await.unwrap().id
+}
+
+#[tokio::test]
+async fn evidence_names_the_command_file_and_error_for_recall() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("evidence-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:evidence-recall", Some("Evidence recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    evidence_only_gotcha(&db, &me, &project, "Violet latch must be opened first").await;
+    let command = "python3 violet_latch.py";
+    let warning = store
+        .command_recall(&me, "warn", Some(&project), command, None)
+        .await
+        .unwrap();
+    assert!(
+        warning.contains("Violet latch must be opened first"),
+        "{warning}"
+    );
+    let failed = store
+        .command_recall(
+            &me,
+            "fail",
+            Some(&project),
+            command,
+            Some("starting\nVioletLatchError: the violet latch is closed"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        failed.contains("Violet latch must be opened first"),
+        "{failed}"
+    );
+    let context = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    let topic = store
+        .topic(&me, "queue.py", &context, Some("read"))
+        .await
+        .unwrap();
+    let shown = format!("{:?} {:?}", topic.notes, topic.card);
+    assert!(
+        shown.contains("Violet latch must be opened first"),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn evidence_entity_backfill_is_insert_only_idempotent_and_runs_once() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let pool = store.pool();
+    let me = db.person("backfill-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:evidence-backfill", Some("Evidence backfill"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    // Rows saved before 0.1.12: evidence present, evidence entities missing.
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        let title = format!("Violet latch gotcha number {n}");
+        ids.push(evidence_only_gotcha(&db, &me, &project, &title).await);
+    }
+    let forgotten = ids.pop().unwrap();
+    sqlx::query("UPDATE memories SET status = 'forgotten' WHERE memory_id = $1")
+        .bind(&forgotten)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM entities WHERE kind IN ('file','command')")
+        .execute(pool)
+        .await
+        .unwrap();
+    let snapshot = async || -> (Vec<Row3>, Vec<Row3>) {
+        let memories =
+            sqlx::query_as("SELECT memory_id, title, status FROM memories ORDER BY memory_id")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let entities = sqlx::query_as(
+            "SELECT memory_id, kind, name FROM entities ORDER BY memory_id, kind, name",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        (memories, entities)
+    };
+    let (memories_before, entities_before) = snapshot().await;
+    assert!(
+        store
+            .command_recall(
+                &me,
+                "before",
+                Some(&project),
+                "python3 violet_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Batches of 2: the fifth call finds the cursor done and scans nothing.
+    let mut scanned = Vec::new();
+    loop {
+        let n = store.backfill_evidence_entities(2).await.unwrap();
+        scanned.push(n);
+        if n == 0 {
+            break;
+        }
+    }
+    assert_eq!(scanned, vec![2, 2, 0], "4 active rows with evidence");
+    let (memories_after, entities_after) = snapshot().await;
+    assert_eq!(
+        memories_after, memories_before,
+        "memory rows are never changed"
+    );
+    assert!(entities_before.iter().all(|e| entities_after.contains(e)));
+    for id in &ids {
+        for (kind, name) in [("command", "python3 violet_latch.py"), ("file", "queue.py")] {
+            assert!(
+                entities_after.contains(&(id.clone(), kind.to_owned(), name.to_owned())),
+                "{id} {kind}"
+            );
+        }
+    }
+    assert!(
+        !entities_after
+            .iter()
+            .any(|e| e.0 == forgotten && e.1 == "file")
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT value FROM server_state WHERE key = 'backfill_evidence_entities'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "done");
+    assert!(
+        !store
+            .command_recall(
+                &me,
+                "after",
+                Some(&project),
+                "python3 violet_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Recorded as done: a restart scans nothing; and a forced rerun inserts nothing new.
+    assert_eq!(store.backfill_evidence_entities(2).await.unwrap(), 0);
+    sqlx::query("UPDATE server_state SET value = '' WHERE key = 'backfill_evidence_entities'")
+        .execute(pool)
+        .await
+        .unwrap();
+    while store.backfill_evidence_entities(2).await.unwrap() > 0 {}
+    assert_eq!(snapshot().await, (memories_after, entities_after));
+}
