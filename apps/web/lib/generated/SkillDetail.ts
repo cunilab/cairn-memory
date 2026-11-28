@@ -2,4 +2,8 @@
 import type { SkillSource } from "./SkillSource";
 import type { SkillVotes } from "./SkillVotes";
 
-export type SkillDetail = { body: string, author_id: string, created_at: number, change_note: string, archived_at: number | null, archived_by: string | null, my_vote: string | null, my_note: string | null, source?: SkillSource, id: string, name: string, title: string, description: string, version: number, score: number, votes: SkillVotes, };
+export type SkillDetail = { body: string, author_id: string, created_at: number, change_note: string, archived_at: number | null, archived_by: string | null, my_vote: string | null, my_note: string | null, 
+/**
+ * The procedure this skill was created from, when the reader can see that memory.
+ */
+source?: SkillSource, id: string, name: string, title: string, description: string, version: number, score: number, votes: SkillVotes, };
