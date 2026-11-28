@@ -722,6 +722,30 @@ fn hermes_stop_ask_arrives_with_the_next_prompt_once() {
         ends.last().unwrap().body
     );
 
+    // Hermes ends the session at every CLI exit (hermes_cli/cli_shutdown.py:121), so the ask
+    // waits for `hermes chat --resume`, which keeps the session id. A successful `patch` reaches
+    // post_tool_call as status "ok" (model_tools.py:694-709, agent/tool_executor.py:1859).
+    let patch = json!({
+        "tool_name": "patch", "tool_call_id": "p1",
+        "args": {"mode": "replace", "path": "README.md", "old_string": "a", "new_string": "hermes-edit"},
+        "result": r#"{"success": true, "diff": "-a\n+hermes-edit\n", "files_modified": ["README.md"]}"#,
+        "status": "ok", "error_type": null, "error_message": null,
+    });
+    prompt("h4", "Patch README.md");
+    invoke("h4", "PostToolUse", patch);
+    invoke(
+        "h4",
+        "Stop",
+        json!({"assistant_response": "Next: check the hermes latch"}),
+    );
+    invoke("h4", "SessionEnd", json!({}));
+    invoke("h4", "SessionStart", json!({}));
+    assert!(prompt("h4", "Continue").ends_with(ask));
+    assert!(
+        !prompt("h4", "And now?").contains("Last turn"),
+        "shown once"
+    );
+
     // A gateway chat never asks.
     let chat = json!({"platform": "matrix", "kind": "dm", "chat_id_hash": "a".repeat(64)});
     let session = format!("hchat_{}", "c".repeat(32));

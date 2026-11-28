@@ -1277,8 +1277,20 @@ impl Hook<'_> {
         if worked {
             self.capture_changed_files();
         }
-        if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
-            locked.delete();
+        if let Ok(mut locked) = Locked::open(&self.state_dir(), &self.key) {
+            // Hermes ends the session at every CLI exit: a held Stop ask waits for `--resume`.
+            if let Some(ask) = locked.state.pending_stop_nudge.take() {
+                locked.state = SessionState {
+                    nudged: true,
+                    pending_stop_nudge: Some(ask),
+                    ..SessionState::default()
+                };
+                if let Err(message) = locked.save() {
+                    eprintln!("cairn hook: {message}");
+                }
+            } else {
+                locked.delete();
+            }
         }
         if worked || used_recall || self.chat.is_some() {
             let mut body = json!({"session_id": self.session_id});
