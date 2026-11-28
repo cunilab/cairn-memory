@@ -53,6 +53,16 @@ def background(session_id=None, task_id=None, platform=None, agent_context=None,
         return False
 
 
+def turn_cwd():
+    """The running turn's session cwd: a gateway process binds it per turn, and its own cwd is the Hermes
+    install. Empty outside a turn and on older Hermes."""
+    try:
+        from agent.runtime_cwd import scoped_session_cwd
+    except ImportError:
+        return ""
+    return scoped_session_cwd()
+
+
 def foreground(callback):
     @wraps(callback)
     def call(*args, **kwargs):
@@ -333,6 +343,7 @@ class CairnProvider(MemoryProvider):
     def __init__(self):
         self.session_id = ""
         self.cwd = None
+        self.host_cwd = None
         self.primary = True
         self.chat = None
         self.started = set()
@@ -344,7 +355,8 @@ class CairnProvider(MemoryProvider):
 
     def initialize(self, session_id, **kwargs):
         self.session_id = session_id
-        self.cwd = kwargs.get("cwd") or os.getcwd()
+        self.host_cwd = kwargs.get("cwd")
+        self.cwd = self.host_cwd or turn_cwd() or os.getcwd()
         # Older Hermes omits agent_context; the background heuristics still apply on every call.
         self.primary = (kwargs.get("agent_context") or "primary") == "primary" and not background(
             session_id=session_id, platform=kwargs.get("platform"))
@@ -376,6 +388,8 @@ class CairnProvider(MemoryProvider):
         # Every turn reaches here; prefetch skips trivial prompts, so it only delivers what this stored.
         if not self.live():
             return
+        # Kept for the turn's later calls, which may run outside its scope.
+        self.cwd = self.host_cwd or turn_cwd() or self.cwd
         if GATEWAY:
             if self.chat is not None:
                 start, self.recall = self.chat.prompt(self.session_id, message)

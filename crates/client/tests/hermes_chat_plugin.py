@@ -91,11 +91,15 @@ class Hermes(unittest.TestCase):
         delegation.is_delegated_child_process_context = lambda: self.delegated
         provider = types.ModuleType("agent.memory_provider")
         provider.MemoryProvider = MemoryProvider
+        self.turn_cwd = ""
+        runtime_cwd = types.ModuleType("agent.runtime_cwd")
+        runtime_cwd.scoped_session_cwd = lambda: self.turn_cwd
         constants = types.ModuleType("hermes_constants")
         constants.hermes_home_key = lambda path=None: str(Path(path or self.home).resolve())
         modules = patch.dict(sys.modules, {
             "gateway.session_context": gateway, "agent.delegation_context": delegation,
             "agent.memory_provider": provider, "hermes_constants": constants,
+            "agent.runtime_cwd": runtime_cwd,
         })
         modules.start()
         self.addCleanup(modules.stop)
@@ -159,6 +163,32 @@ class CommandLine(Hermes):
     def test_plugin_load_registers_provider_and_tool_hooks_only(self):
         self.assertEqual(set(self.ctx.hooks), {"post_tool_call", "transform_tool_result", "on_session_end"})
 
+
+    def test_a_gateway_turn_uses_the_session_cwd_not_the_process_cwd(self):
+        # Hermes v0.23.5 runs CLI turns in the gateway process (cwd: the Hermes install), builds the
+        # agent without a cwd and binds the session's cwd for each turn (gateway/session_policy.py).
+        self.turn_cwd = "/checkout"
+        provider = self.provider(cwd=None)
+        self.turn_cwd = ""  # initialize may run outside the turn
+        provider = self.provider(cwd=None)
+        self.assertNotEqual(provider.cwd, "/checkout")
+        self.turn_cwd = "/checkout"
+        provider.on_turn_start(1, "first prompt")
+        self.turn_cwd = ""  # sync_turn may run after the turn's scope ended
+        provider.sync_turn("first prompt", "answer", session_id="host-session")
+        provider.handle_tool_call("memory_search", {"query": "latch"})
+        self.assertEqual(self.events(), ["SessionStart", "UserPromptSubmit", "Stop", "Tool"])
+        self.assertTrue(all(body["cwd"] == "/checkout" for _, body in self.requests), self.requests)
+        # The cwd Hermes passes wins; without a bound turn cwd the process cwd stays (older Hermes).
+        self.turn_cwd = "/checkout"
+        provider = self.provider()
+        provider.on_turn_start(1, "prompt")
+        self.assertEqual(self.requests[-1][1]["cwd"], "/repo")
+        self.turn_cwd = ""
+        with patch.object(self.provider_module["os"], "getcwd", lambda: "/launch"):
+            provider = self.provider(cwd=None)
+            provider.on_turn_start(1, "prompt")
+        self.assertEqual(self.requests[-1][1]["cwd"], "/launch")
 
     def test_provider_lifecycle_maps_to_cairn_events(self):
         provider = self.provider()
