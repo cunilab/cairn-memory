@@ -271,7 +271,7 @@ mod tests {
                 "initialized",
             ),
             (
-                json!({"kind":"fact","title":"x".repeat(81),"summary":s,"reason":"because it is"}),
+                json!({"kind":"fact","title":"x".repeat(201),"summary":s,"reason":"because it is"}),
                 "title",
             ),
             (

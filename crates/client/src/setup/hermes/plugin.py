@@ -126,8 +126,8 @@ CHAT_TOOLS = [
      "Save lasting knowledge for this chat. Pass a project ID or exact name only to share a note, rule, decision, gotcha, procedure, or fact with that project. Save preferences without a project.",
      {"kind": {"type": "string", "enum": ["note", "decision", "rule", "preference",
                                          "procedure", "gotcha", "fact"]},
-      "title": {"type": "string", "maxLength": 80},
-      "summary": {"type": "string", "maxLength": 240},
+      "title": {"type": "string", "maxLength": 200, "description": "About 80 characters."},
+      "summary": {"type": "string", "maxLength": 1000, "description": "About 240 characters."},
       "reason": {"type": "string"},
       "fields": {"type": "object"}}, ["kind", "title", "summary"]),
 ]

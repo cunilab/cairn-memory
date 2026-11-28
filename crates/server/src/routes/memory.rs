@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
+use cairn_core::memory::validate::length_hints;
 use cairn_core::memory::{
     Kind, Memory, Record, Relation, SaveInput, Scope, Status, TimelineItem, TrustLevel,
 };
@@ -29,15 +30,19 @@ pub struct Receipt {
 #[derive(Serialize)]
 struct Coaching {
     hints: Vec<String>,
-    improve: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    improve: Option<String>,
 }
 
 impl Coaching {
-    fn from_saved(saved: &mut Saved) -> Option<Self> {
-        (!saved.hints.is_empty()).then(|| Self {
-            hints: std::mem::take(&mut saved.hints),
-            improve: format!("Improve it: save again with supersedes={}.", saved.id),
-        })
+    /// The store's coaching hints (they made the save a candidate) plus size notes, which change
+    /// nothing about the save and ask for no second one.
+    fn from_saved(saved: &mut Saved, title: &str, summary: &str) -> Option<Self> {
+        let improve = (!saved.hints.is_empty())
+            .then(|| format!("Improve it: save again with supersedes={}.", saved.id));
+        let mut hints = std::mem::take(&mut saved.hints);
+        hints.extend(length_hints(title, summary));
+        (!hints.is_empty()).then_some(Self { hints, improve })
     }
 }
 
@@ -165,6 +170,7 @@ pub async fn remember(
     }
     let input: SaveInput =
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let (title, summary) = (input.title.clone(), input.summary.clone());
     let mut saved = state
         .store
         .save_from_session(
@@ -176,7 +182,7 @@ pub async fn remember(
         )
         .await?;
     Ok(Json(Receipt {
-        coaching: Coaching::from_saved(&mut saved),
+        coaching: Coaching::from_saved(&mut saved, &title, &summary),
         id: saved.id,
         status: saved.status,
         deduplicated: saved.deduplicated,
@@ -240,13 +246,14 @@ async fn save_item(
             };
         }
     };
+    let (title, summary) = (input.title.clone(), input.summary.clone());
     match state
         .store
         .save_from_session(person_id, input, context, device_id, session_id)
         .await
     {
         Ok(mut saved) => ItemResult {
-            coaching: Coaching::from_saved(&mut saved),
+            coaching: Coaching::from_saved(&mut saved, &title, &summary),
             id: Some(saved.id),
             status: if saved.deduplicated {
                 "duplicate"

@@ -43,6 +43,72 @@ fn statuses(body: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// Title and summary sizes past the suggestion save as sent with a size hint and no trust change; past the
+/// hard cap they are refused. Cards cut to the suggestion; memory_get returns the full text.
+#[tokio::test]
+async fn long_titles_and_summaries_save_with_a_size_hint_up_to_the_cap() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("sizes").await;
+    let device = app.device(&admin, "sizes-laptop").await;
+    let summary = format!("Long summaries are kept as sent. {}", "x".repeat(231));
+    assert_eq!(summary.chars().count(), 264);
+    let saved = app
+        .post(
+            "remember",
+            note("fact", "Long summaries are kept with a size hint", &summary),
+            &device,
+        )
+        .await;
+    assert_eq!(saved["status"], "active", "{saved}");
+    assert_eq!(
+        saved["hints"],
+        json!(["summary is 264 characters; 240 suggested"])
+    );
+    assert!(saved.get("improve").is_none(), "{saved}");
+    let id = saved["id"].as_str().unwrap();
+    let rank: String = sqlx::query_scalar("SELECT rank FROM memories WHERE memory_id = $1")
+        .bind(id)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rank, "normal", "a size hint alone changes no trust");
+    let got = app.post("get", json!({"ids": [id]}), &device).await;
+    assert_eq!(got["memories"][0]["summary"], summary);
+    let found = app
+        .post(
+            "search",
+            json!({"query": "long summaries kept size hint"}),
+            &device,
+        )
+        .await;
+    let card = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == id)
+        .unwrap_or_else(|| panic!("{found}"));
+    assert_eq!(
+        card["summary"],
+        format!("{}\u{2026}", summary.chars().take(239).collect::<String>())
+    );
+
+    let (status, body) = app
+        .send(
+            "POST",
+            "remember",
+            note("fact", "A summary over the hard cap", &"y".repeat(1001)),
+            Some(&device),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.to_string()
+            .contains("summary is 1001 characters, limit 1000: cut 1"),
+        "{body}"
+    );
+    app.finish().await;
+}
+
 #[tokio::test]
 async fn coaches_each_save_and_clean_supersede_replaces_candidate() {
     let Some(app) = App::new().await else { return };
@@ -210,7 +276,7 @@ async fn save_items_partial_success() {
             "remember",
             json!({"items": [
                 note("fact", "Second compact note", "Another compact note is stored on its own."),
-                note("fact", "Too long summary", &"x".repeat(263)),
+                note("fact", "Too long summary", &"x".repeat(1001)),
                 {
                     "kind": "rule",
                     "title": "Second full save note",
@@ -229,7 +295,7 @@ async fn save_items_partial_success() {
     assert!(error.get("id").is_none() || error["id"].is_null());
     assert_eq!(
         error["error"],
-        "items[1]: validation error: summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail"
+        "items[1]: validation error: summary is 1001 characters, limit 1000: cut 1, or move extra context into reason or detail"
     );
     assert_eq!(rows(&device).await, 5);
 

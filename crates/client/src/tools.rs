@@ -53,14 +53,14 @@ pub const TOOLS: [Tool; 5] = [
     },
     Tool {
         name: "memory_save",
-        description: "Save verified, reusable knowledge. Per note: title <=10 words (80 chars max); summary one sentence, <=30 words (240 chars max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. Put longer background in detail. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
+        description: "Save verified, reusable knowledge. Per note: title <=10 words, about 80 chars (200 max); summary one sentence, <=30 words, about 240 chars (1000 max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
         cli: "save",
         route: "/remember",
         schema: || {
             json!({"type":"object","properties":{
                 "kind":{"type":"string","enum":["decision","rule","gotcha","procedure","fact","preference","note"]},
-                "title":{"type":"string","maxLength":80},
-                "summary":{"type":"string","maxLength":240},
+                "title":{"type":"string","maxLength":200},
+                "summary":{"type":"string","maxLength":1000},
                 "reason":{"type":"string"},
                 "detail":{"type":"string","maxLength":8000},
                 "fields":{"type":"object"},
@@ -71,8 +71,8 @@ pub const TOOLS: [Tool; 5] = [
                 "aliases":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":120}},
                 "items":{"type":"array","maxItems":3,"items":{"type":"object","properties":{
                     "kind":{"type":"string"},
-                    "title":{"type":"string","maxLength":80},
-                    "summary":{"type":"string","maxLength":240},
+                    "title":{"type":"string","maxLength":200},
+                    "summary":{"type":"string","maxLength":1000},
                     "reason":{"type":"string"},
                     "detail":{"type":"string","maxLength":8000},
                     "fields":{"type":"object"},

@@ -3,7 +3,7 @@ use crate::capture::{CaptureKind, Observation, WorkContext};
 use crate::id::sha256_hex;
 use crate::memory::validate::validate_quality;
 use crate::memory::validate::{
-    FIELD_TEXT_MAX, LIST_ITEM_MAX, LIST_MAX_ITEMS, SUMMARY_MAX, TITLE_MAX,
+    FIELD_TEXT_MAX, LIST_ITEM_MAX, LIST_MAX_ITEMS, SUMMARY_SUGGESTED, TITLE_SUGGESTED,
 };
 use crate::memory::{Fields, Kind, SaveInput, Scope};
 use serde_json::{Map, Value, json};
@@ -226,7 +226,7 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                 kind: Kind::Gotcha,
                 title: clip(
                     &format!("`{key}` failed until {} changed", names.join(", ")),
-                    TITLE_MAX,
+                    TITLE_SUGGESTED,
                 ),
                 summary: clip(
                     &error.unwrap_or_else(|| {
@@ -235,7 +235,7 @@ fn gotchas(observations: &[Observation], failures: &[Failure<'_>]) -> Vec<Note> 
                             edited.join(", ")
                         )
                     }),
-                    SUMMARY_MAX,
+                    SUMMARY_SUGGESTED,
                 ),
                 reason:
                     "Seen in one session: the command failed, files were edited, then it passed."
@@ -363,11 +363,11 @@ fn test_fact(observations: &[Observation]) -> Option<Note> {
             kind: Kind::Fact,
             title: clip(
                 &format!("Tests run with `{}`", clip(&command, 50)),
-                TITLE_MAX,
+                TITLE_SUGGESTED,
             ),
             summary: clip(
                 &format!("`{command}` is the test command that passed in this repository."),
-                SUMMARY_MAX,
+                SUMMARY_SUGGESTED,
             ),
             reason: "Observed a passing run in a session.".to_owned(),
             detail: None,
@@ -463,7 +463,7 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
         kind: Kind::Note,
         title: clip(
             &format!("Session {} on {place}", date(last.captured_at)),
-            TITLE_MAX,
+            TITLE_SUGGESTED,
         ),
         summary: clip(
             &if tests.is_empty() {
@@ -471,7 +471,7 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
             } else {
                 format!("Changed {listed}. Tests: {tests}.")
             },
-            SUMMARY_MAX,
+            SUMMARY_SUGGESTED,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
         detail: None,
@@ -616,7 +616,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         .unwrap_or_else(|| "workspace".to_owned());
     Some(SaveInput {
         kind: Kind::Handoff,
-        title: clip(&format!("Handoff: {place}"), TITLE_MAX),
+        title: clip(&format!("Handoff: {place}"), TITLE_SUGGESTED),
         summary: clip(
             &handoff_summary(
                 task.as_deref(),
@@ -626,7 +626,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
                 open.len(),
                 &date(last.captured_at),
             ),
-            SUMMARY_MAX,
+            SUMMARY_SUGGESTED,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
         detail: None,
@@ -821,11 +821,11 @@ impl Draft {
     fn into_note(self) -> (SaveInput, Vec<String>) {
         let input = SaveInput {
             kind: self.kind,
-            title: clip(&self.value, TITLE_MAX),
+            title: clip(&self.value, TITLE_SUGGESTED),
             // The summary may not repeat the title (quality rule), so it says where it came from.
             summary: clip(
                 &format!("{} noted in a session: {}", self.kind.as_str(), self.value),
-                SUMMARY_MAX,
+                SUMMARY_SUGGESTED,
             ),
             // Provenance only; no cause is invented.
             reason: if self.reason.chars().count() < 10 {
@@ -905,7 +905,7 @@ fn handoff_summary(
     parts.push(format!("last activity {when}."));
     let rest = parts.join("; ");
     // The task takes only the room the rest leaves, so the counts and date always fit.
-    let room = SUMMARY_MAX.saturating_sub(rest.chars().count() + "Task: . ".len());
+    let room = SUMMARY_SUGGESTED.saturating_sub(rest.chars().count() + "Task: . ".len());
     match task.filter(|_| room >= 12) {
         Some(task) => format!("Task: {}. {rest}", clip(task, room)),
         None => rest,
@@ -1411,7 +1411,11 @@ mod tests {
         let mut observations = vec![prompt("p1", &long)];
         observations.extend(files);
         let h = distill(&observations).handoff.expect("handoff");
-        assert!(h.summary.chars().count() <= SUMMARY_MAX, "{}", h.summary);
+        assert!(
+            h.summary.chars().count() <= SUMMARY_SUGGESTED,
+            "{}",
+            h.summary
+        );
         assert!(h.summary.starts_with("Task: word"), "{}", h.summary);
         assert!(
             h.summary

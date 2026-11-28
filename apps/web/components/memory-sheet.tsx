@@ -39,6 +39,7 @@ import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
 import { branchActivityHref, sessionHref, sessionTitle } from "@/lib/provenance";
 import { announceMemoriesChanged } from "@/lib/memory-events";
+import { TEXT_SIZES, textSizeHint } from "@/lib/memory-text";
 import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
 import type { MemoryView } from "@/lib/generated/MemoryView";
@@ -126,6 +127,22 @@ const DETAIL_MAX = 8_000;
 
 function detailChars(text: string): number {
   return Array.from(text).length;
+}
+
+function SizedField({ field, value, onChange }: { field: keyof typeof TEXT_SIZES; value: string; onChange: (value: string) => void }) {
+  const hint = textSizeHint(field, value);
+  const Control = field === "title" ? Input : Textarea;
+  return (
+    <label className="block text-sm">
+      <span className="flex items-baseline justify-between gap-2">
+        <span>{field === "title" ? "Title" : "Summary"}</span>
+        <span className={hint.long ? "text-xs font-medium tabular-nums text-foreground" : "text-xs tabular-nums text-muted-foreground"}>
+          {hint.label}
+        </span>
+      </span>
+      <Control value={value} maxLength={TEXT_SIZES[field].max} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
 }
 
 function DetailField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -522,8 +539,8 @@ export function MemorySheet() {
           ) : null}
           {current?.missing && account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
             <p className="text-sm">Enter a replacement for this memory.</p>
-            <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-            <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+            <SizedField field="title" value={title} onChange={setTitle} />
+            <SizedField field="summary" value={summary} onChange={setSummary} />
             <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
             <DetailField value={detail} onChange={setDetail} />
             <div className="flex gap-2"><Button disabled={pending || detailOver} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
@@ -542,8 +559,8 @@ export function MemorySheet() {
                 onEdit={() => beginEdit(memory)}
               />
               {account?.is_admin && !memory.project_archived && editing ? <div className="space-y-3 px-4 pb-4">
-                <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-                <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+                <SizedField field="title" value={title} onChange={setTitle} />
+                <SizedField field="summary" value={summary} onChange={setSummary} />
                 <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
                 <DetailField value={detail} onChange={setDetail} />
                 <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>

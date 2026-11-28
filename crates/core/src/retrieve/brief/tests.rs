@@ -227,13 +227,18 @@ fn topic_card_is_one_bounded_line() {
             (Kind::Fact, "second", "", "0d"),
         ],
     );
-    assert_eq!(shown, 1);
+    // The long title shows its suggested 80 characters, which leaves room for the second.
+    assert_eq!(shown, 2);
     assert!(
         long.len() <= TOPIC_MAX_BYTES && !long.contains('\n'),
         "{long}"
     );
     assert!(long.starts_with("Cairn topic p q.rs "));
-    assert!(long.ends_with("(why: file q.rs) [1y]"));
+    assert!(
+        long.contains(&format!("{}\u{2026} (why: file q.rs) [1y]", "é".repeat(79))),
+        "{long}"
+    );
+    assert!(long.ends_with("fact second [0d]"));
 }
 
 /// Sweep card sizes so a layer lands on every byte of its budget; none may pass it, and each
@@ -270,4 +275,27 @@ fn brief_budgets_are_exact_boundaries() {
     assert_eq!(legacy, LEGACY_SESSION_BRIEF_MAX_BYTES);
     assert_eq!(identity, IDENTITY_MAX_BYTES);
     assert_eq!(extended, SESSION_BRIEF_MAX_BYTES);
+}
+
+#[test]
+fn cards_show_at_most_the_suggested_title_and_summary() {
+    let mut long = memory("long", Kind::Rule, Scope::Personal);
+    long.title = "t".repeat(200);
+    long.summary = "s".repeat(1000);
+    let brief = session_brief(&[], &[long.clone()], 0, 20, BriefBudget::Extended);
+    let card = &decode_brief(&brief.text)["L1 Essential"][0];
+    assert!(
+        card["title"].as_str().unwrap().chars().count() <= 80,
+        "{card}"
+    );
+    assert!(
+        card["summary"].as_str().unwrap().chars().count() <= 240,
+        "{card}"
+    );
+    let (notes, shown) = topic_notes("src/a.rs", &[(&long.title, &long.summary, "", "")]);
+    assert_eq!(shown, 1);
+    assert!(
+        notes.contains(&format!("- {}\u{2026}", "t".repeat(79))),
+        "{notes}"
+    );
 }

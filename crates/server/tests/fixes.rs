@@ -1269,7 +1269,7 @@ async fn f9_redacts_maximum_length_title() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
     let id = fact(&app, &device, "Maximum title fixture").await;
-    sqlx::query("UPDATE memories SET title='password=x '||repeat('a',69) WHERE memory_id=$1")
+    sqlx::query("UPDATE memories SET title='password=x '||repeat('a',189) WHERE memory_id=$1")
         .bind(&id)
         .execute(app.db.store.pool())
         .await
@@ -1289,8 +1289,8 @@ async fn f9_redacts_maximum_length_title() {
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
-    assert!(title.chars().count() <= 80);
-    assert_eq!(title, format!("password=* {}", "a".repeat(69)));
+    assert!(title.chars().count() <= 200);
+    assert_eq!(title, format!("password=* {}", "a".repeat(189)));
     assert!(!title.contains("password=x"));
     app.finish().await;
 }
@@ -1301,7 +1301,7 @@ async fn f9_many_markers_fit_without_dropping_text() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
     let id = fact(&app, &device, "Many secrets fixture").await;
-    sqlx::query("UPDATE memories SET title=repeat('pwd=x ',11) WHERE memory_id=$1")
+    sqlx::query("UPDATE memories SET title=repeat('pwd=x ',33) WHERE memory_id=$1")
         .bind(&id)
         .execute(app.db.store.pool())
         .await
@@ -1321,7 +1321,7 @@ async fn f9_many_markers_fit_without_dropping_text() {
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
-    assert_eq!(title, "pwd=* ".repeat(11));
+    assert_eq!(title, "pwd=* ".repeat(33));
     app.finish().await;
 }
 

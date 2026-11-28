@@ -96,12 +96,12 @@ fn save_with_a_reason() {
     assert!(text.contains("reason") && !text.contains('\n'), "{text}");
 
     let mut body = decision();
-    body["summary"] = json!("x".repeat(263));
+    body["summary"] = json!("x".repeat(1001));
     let refused = mcp.tool("memory_save", body);
     assert_eq!(refused["isError"], true, "{refused}");
     assert_eq!(
         refused["content"][0]["text"],
-        "HTTP 400: summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail"
+        "HTTP 400: summary is 1001 characters, limit 1000: cut 1, or move extra context into reason or detail"
     );
 
     let first = mcp.ok("memory_save", decision());

@@ -140,6 +140,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0027_retrieval_trace",
         include_str!("../../../migrations/0027_retrieval_trace.sql"),
     ),
+    (
+        "0028_memory_text_caps",
+        include_str!("../../../migrations/0028_memory_text_caps.sql"),
+    ),
 ];
 
 /// Held for the whole of every migration step, so parallel starts and tests do not race on

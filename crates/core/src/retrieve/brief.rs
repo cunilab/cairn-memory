@@ -1,5 +1,6 @@
 //! Bounded session-start layers and file, command and prompt recall cards.
 
+use crate::memory::validate::{SUMMARY_SUGGESTED, TITLE_SUGGESTED, card_text};
 use crate::memory::{Fields, Kind, Memory, Scope, Status};
 use serde_json::json;
 
@@ -94,7 +95,7 @@ pub fn topic_card(path: &str, count: usize, first: &[(Kind, &str, &str, &str)]) 
             "{} {} {}",
             if index == 0 { " \u{2014}" } else { ";" },
             kind.as_str(),
-            one_line(title)
+            one_line(&card_text(title, TITLE_SUGGESTED))
         );
         let suffix = note_suffix(why, age);
         let room = TOPIC_MAX_BYTES.saturating_sub(text.len() + suffix.len());
@@ -127,14 +128,14 @@ pub fn topic_notes(path: &str, notes: &[(&str, &str, &str, &str)]) -> (String, u
     );
     let mut shown = 0;
     for (title, summary, why, age) in notes {
-        let line = format!("\n- {}", one_line(title));
+        let line = format!("\n- {}", one_line(&card_text(title, TITLE_SUGGESTED)));
         let suffix = note_suffix(why, age);
         if text.len() + line.len() + suffix.len() > TOPIC_MAX_BYTES {
             break;
         }
         text.push_str(&line);
         shown += 1;
-        let summary = one_line(summary);
+        let summary = one_line(&card_text(summary, SUMMARY_SUGGESTED));
         let room = TOPIC_MAX_BYTES - text.len() - suffix.len();
         if !summary.is_empty() && room > 2 {
             text.push_str(": ");
@@ -414,11 +415,16 @@ fn brief_card(memory: &Memory, now: i64, room: usize) -> Option<String> {
         card["status"] = json!(memory.status);
     }
     // Fit the next highest-ranked card before falling through to lower-ranked cards.
+    // Cards show at most the suggested sizes; the byte ladder then fits them into the brief.
+    let (full_title, full_summary) = (
+        card_text(&memory.title, TITLE_SUGGESTED),
+        card_text(&memory.summary, SUMMARY_SUGGESTED),
+    );
     for (title, summary, items) in [(96, 240, 2), (72, 120, 1), (48, 60, 0), (32, 0, 0)] {
         let mut card = card.clone();
-        card["title"] = json!(bounded(&memory.title, title));
+        card["title"] = json!(bounded(&full_title, title));
         if summary > 0 {
-            card["summary"] = json!(bounded(&memory.summary, summary));
+            card["summary"] = json!(bounded(&full_summary, summary));
         }
         if items > 0
             && let Fields::Handoff(handoff) = &memory.fields

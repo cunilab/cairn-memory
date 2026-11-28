@@ -43,6 +43,7 @@ async fn migrate_twice_is_a_no_op() {
             "0025_skills",
             "0026_session_provenance_pin_order",
             "0027_retrieval_trace",
+            "0028_memory_text_caps",
         ]
     );
     let tables: i64 = sqlx::query_scalar(
@@ -1038,6 +1039,7 @@ async fn fixes_migration_additive() {
     versions.push("0025_skills".into());
     versions.push("0026_session_provenance_pin_order".into());
     versions.push("0027_retrieval_trace".into());
+    versions.push("0028_memory_text_caps".into());
     versions.sort();
     let after_versions: Vec<String> =
         sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
@@ -1117,4 +1119,118 @@ async fn fixes_migration_additive() {
         .execute(store.pool())
         .await
         .unwrap();
+}
+
+/// A 0.1.11 database (0001-0027) with rows at the old 80 / 240 limits. 0028 swaps only the two CHECKs:
+/// every row stays as it was and valid, and new rows may use 200 / 1000 characters.
+#[tokio::test]
+async fn test_0028_widens_text_caps_on_populated_db() {
+    let Ok(url) = std::env::var("CAIRN_TEST_DATABASE_URL") else {
+        assert!(
+            std::env::var("CAIRN_TEST_REQUIRE_DB").as_deref() != Ok("1"),
+            "database required"
+        );
+        println!("SKIP (no CAIRN_TEST_DATABASE_URL)");
+        return;
+    };
+    let schema = format!("t_caps_{}", std::process::id());
+    let store = Store::connect(&url, &schema).await.expect("connect");
+    for sql in [
+        format!("DROP SCHEMA IF EXISTS {schema} CASCADE"),
+        format!("CREATE SCHEMA {schema}"),
+        "CREATE EXTENSION IF NOT EXISTS vector SCHEMA public".to_owned(),
+    ] {
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".sql") && name.as_str() < "0028")
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 27);
+    for file in &files {
+        let sql = std::fs::read_to_string(dir.join(file)).unwrap();
+        sqlx::raw_sql(&sql).execute(store.pool()).await.unwrap();
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(file.trim_end_matches(".sql"))
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO accounts (person_id, email, password_hash, is_admin)
+         VALUES ('per_old', 'old@example.test', 'x', true)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let insert = |id: &'static str, title: String, summary: String| {
+        sqlx::query(
+            "INSERT INTO memories (memory_id, owner_id, scope, kind, title, summary, evidence_hash, identity_hash, origin, status)
+             VALUES ($1, 'per_old', 'personal', 'fact', $2, $3, 'e', $1, 'agent', 'active')",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(summary)
+    };
+    insert("mem_full", "t".repeat(80), "s".repeat(240))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    insert("mem_short", "Short title".into(), "A short summary.".into())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let rows = "SELECT memory_id, title, summary, identity_hash, updated_at::text FROM memories ORDER BY memory_id";
+    let snapshot = || async {
+        sqlx::query_as::<_, (String, String, String, String, String)>(rows)
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+    };
+    let before = snapshot().await;
+    store.migrate().await.expect("apply 0028");
+    assert_eq!(snapshot().await, before, "no row is rewritten");
+    let checks: Vec<String> = sqlx::query_scalar(
+        "SELECT conname || ' ' || pg_get_constraintdef(oid) FROM pg_constraint
+          WHERE conrelid = to_regclass('memories') AND conname IN ('memories_title_check', 'memories_summary_check')
+          ORDER BY conname",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    assert!(checks[0].contains("<= 1000"), "{checks:?}");
+    assert!(checks[1].contains("<= 200"), "{checks:?}");
+    let invalid: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass('memories') AND NOT convalidated",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(invalid, 0);
+    insert("mem_cap", "t".repeat(200), "s".repeat(1000))
+        .execute(store.pool())
+        .await
+        .expect("200 / 1000 fit");
+    assert!(
+        insert("mem_over", "t".repeat(201), "s".into())
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        insert("mem_over", "t".into(), "s".repeat(1001))
+            .execute(store.pool())
+            .await
+            .is_err()
+    );
+    store.migrate().await.expect("idempotent");
+    sqlx::raw_sql(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    store.pool().close().await;
 }

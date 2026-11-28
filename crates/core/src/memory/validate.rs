@@ -3,8 +3,12 @@ use super::model::{Kind, SaveInput};
 use crate::error::Error;
 use serde_json::Value;
 
-pub const TITLE_MAX: usize = 80;
-pub const SUMMARY_MAX: usize = 240;
+/// Hard caps: a longer title or summary is refused. The suggested sizes below are what agent-facing cards
+/// show and what system saves aim for; a save between the two is kept as sent, with a hint.
+pub const TITLE_MAX: usize = 200;
+pub const SUMMARY_MAX: usize = 1_000;
+pub const TITLE_SUGGESTED: usize = 80;
+pub const SUMMARY_SUGGESTED: usize = 240;
 pub const REASON_MAX: usize = 1_000;
 pub const DETAIL_MAX: usize = 8_000;
 pub const FIELD_TEXT_MAX: usize = 1_000;
@@ -37,6 +41,30 @@ fn validate_length(
         ));
     }
     Ok(())
+}
+
+/// "summary is 264 characters; 240 suggested" for a title or summary over its suggested size.
+pub fn length_hints(title: &str, summary: &str) -> Vec<String> {
+    [
+        ("title", title, TITLE_SUGGESTED),
+        ("summary", summary, SUMMARY_SUGGESTED),
+    ]
+    .into_iter()
+    .filter_map(|(name, text, suggested)| {
+        let length = chars(text);
+        (length > suggested)
+            .then(|| format!("{name} is {length} characters; {suggested} suggested"))
+    })
+    .collect()
+}
+
+/// What an agent-facing card shows: at most `max` characters, cut on a character boundary with an
+/// ellipsis. `memory_get` and the web show the full text.
+pub fn card_text(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(max.saturating_sub(1)) {
+        Some((end, _)) if chars(text) > max => format!("{}\u{2026}", &text[..end]).into(),
+        _ => text.into(),
+    }
 }
 
 /// Checks everything that needs no IO. Runs after redaction, so the stored text is what is checked.
@@ -151,10 +179,10 @@ pub fn validate_quality(input: &SaveInput, fields: &Fields) -> Result<(), Error>
     let quality = |message: &str| Err(Error::Quality(message.to_owned()));
     let (title, summary) = (input.title.trim(), input.summary.trim());
     if !(8..=TITLE_MAX).contains(&chars(title)) {
-        return quality("title: use 8-80 characters that name the knowledge");
+        return quality("title: use 8-200 characters (about 80) that name the knowledge");
     }
     if !(20..=SUMMARY_MAX).contains(&chars(summary)) {
-        return quality("summary: use 20-240 characters saying what is true");
+        return quality("summary: use 20-1000 characters (about 240) saying what is true");
     }
     let bare = |text: &str| {
         text.trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
