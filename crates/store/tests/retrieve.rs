@@ -3473,3 +3473,40 @@ async fn evidence_entity_backfill_is_insert_only_idempotent_and_runs_once() {
     while store.backfill_evidence_entities(2).await.unwrap() > 0 {}
     assert_eq!(snapshot().await, (memories_after, entities_after));
 }
+
+#[tokio::test]
+async fn a_python_traceback_recalls_the_gotcha_for_its_exception() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("traceback-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:traceback-recall", Some("Traceback recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": "Install the latch module first",
+        "summary": "ModuleNotFoundError: No module named 'violet_latch' until the venv is active.",
+        "reason": "The script imports a module that only the project venv provides",
+        "fields": {"symptom": "import fails", "cause": "venv not active", "fix": "source .venv/bin/activate"}
+    }));
+    let work = WorkContext {
+        project_id: Some(project.clone()),
+        commands: vec!["python3 app.py".into()],
+        ..WorkContext::default()
+    };
+    store.save(&me, input, &work).await.unwrap();
+    // The stderr a hook sends for `python3 app.py`, frames and caret line included.
+    let stderr = "Traceback (most recent call last):\n  File \"/w/app.py\", line 9, in <module>\n    main()\n  File \"/w/app.py\", line 5, in main\n    import violet_latch\n    ^^^^^^^^^^^^^^^^^^^\nModuleNotFoundError: No module named 'violet_latch'\n";
+    let recalled = store
+        .command_recall(&me, "py", Some(&project), "python3 app.py", Some(stderr))
+        .await
+        .unwrap();
+    assert!(
+        recalled.contains("Install the latch module first"),
+        "{recalled}"
+    );
+    assert!(recalled.contains("same error seen before"), "{recalled}");
+}
