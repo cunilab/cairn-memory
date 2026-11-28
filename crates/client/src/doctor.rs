@@ -220,6 +220,12 @@ fn agent_checks(home: &Path) -> Vec<Check> {
                 "agents",
                 "hermes gateway files present; a gateway process loads them only when it starts",
             )
+        } else if managed_mcp && *agent == "hermes" {
+            check(
+                "ok",
+                "agents",
+                "hermes memory provider present; a running Hermes or Hermes gateway process loads it only when it starts",
+            )
         } else if managed_mcp {
             check("ok", "agents", format!("{agent} {tools} present"))
         } else {

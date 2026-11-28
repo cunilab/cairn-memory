@@ -469,12 +469,16 @@ fn apply(ctx: &Ctx) -> R<String> {
         done.push_str("\ncairn: warning: ");
         done.push_str(&warning);
     }
-    if ctx.agent == "hermes"
-        && !ctx.remove
-        && hermes::gateway_profile(&hermes::config_dir(&ctx.home).join("config.yaml"))
-    {
-        // Hermes binds chat memory only when the gateway process loads its plugins.
-        done.push_str("\nStart the Hermes gateway process again so it loads Cairn chat memory; a running one shows no Cairn tools until then.");
+    if ctx.agent == "hermes" && !ctx.remove {
+        // Hermes binds Cairn's hooks only when a process loads its plugins; newer Hermes runs CLI chats in
+        // the profile's shared gateway process, which outlives setup.
+        done.push_str(
+            if hermes::gateway_profile(&hermes::config_dir(&ctx.home).join("config.yaml")) {
+                "\nStart the Hermes gateway process again so it loads Cairn chat memory; a running one shows no Cairn tools until then."
+            } else {
+                "\nStart Hermes again so it loads Cairn's hooks; if this profile's Hermes gateway process is running, start it again too."
+            },
+        );
     }
     Ok(done)
 }

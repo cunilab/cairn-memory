@@ -1622,7 +1622,19 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
         yaml_serde::from_str::<Value>(&fs::read_to_string(profile.join("config.yaml")).unwrap())
             .unwrap()
     };
-    assert!(!invoke(false, false).contains(restart));
+    // A coding profile: newer Hermes runs CLI chats in a shared gateway process that outlives setup.
+    let stdout = invoke(false, false);
+    assert!(!stdout.contains(restart), "{stdout}");
+    assert!(
+        stdout.contains("Start Hermes again so it loads Cairn's hooks"),
+        "{stdout}"
+    );
+    let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        doctor.contains("hermes memory provider present; a running Hermes or Hermes gateway process loads it only when it starts"),
+        "{doctor}"
+    );
     assert_eq!(yaml()["memory"]["provider"], "cairn-memory");
 
     // #20: a gateway process running during setup never loads the chat hook.
@@ -1677,7 +1689,8 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
     assert!(settings.get("chat_projects").is_none());
     assert_eq!(settings["chat_salt"], salt);
 
-    assert!(!invoke(false, true).contains(restart));
+    let stdout = invoke(false, true);
+    assert!(!stdout.contains("again"), "{stdout}");
     let removed = yaml();
     assert!(removed["mcp_servers"]["cairn"].is_null());
     assert!(removed["memory"].is_null());

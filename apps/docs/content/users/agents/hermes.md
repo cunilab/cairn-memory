@@ -35,6 +35,8 @@ cairn setup https://cairn.example.com --agent hermes
 cairn doctor
 ```
 
+Start Hermes again after setup. Newer Hermes runs CLI and TUI chats in the profile's shared gateway process (`hermes gateway run`, started on demand). If that process was running during setup, start it again too: until then it keeps Cairn's tools but skips tool capture and failed-command recall. `cairn doctor` and `hermes memory status` read the profile's files only.
+
 Verify provider and plugin discovery after restarting Hermes:
 
 ```sh
