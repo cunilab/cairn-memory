@@ -174,7 +174,7 @@ function Body({
         </div>
       ) : null}
       {memory.detail ? (
-        <details className="flex flex-col gap-2 text-sm">
+        <details id="memory-field-detail" className="flex flex-col gap-2 text-sm">
           <summary className="cursor-pointer font-medium">Full detail</summary>
           <p className="mt-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.detail}</p>
         </details>
@@ -363,7 +363,10 @@ export function MemorySheet() {
   const field = params.get("field");
   useEffect(() => {
     if (!field || !memory) return;
-    document.getElementById(`memory-field-${field}`)?.scrollIntoView({ block: "nearest" });
+    const target = document.getElementById(`memory-field-${field}`);
+    // A detail-only match is inside the collapsed "Full detail"; open it so the match shows.
+    if (target instanceof HTMLDetailsElement) target.open = true;
+    target?.scrollIntoView({ block: "nearest" });
   }, [field, memory]);
 
   async function togglePin() {
