@@ -43,6 +43,7 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 ### Quality validation & defaults
 
 - **Reason requirement**: for every kind except `note`, an empty `reason` is rejected. A shorter reason is not refused: under 20 characters, or one that only repeats the title or summary, the memory is still saved, as a candidate (trust `new · awaiting confirmation`), and the reply carries a coaching hint. A reason of 20 or more characters gets no reason hint. A `note` may omit the reason. Imports (`POST /memories/import`, the console import) keep the strict check, which also refuses a reason under 10 characters.
+- **Other strict checks**: explicit agent saves also skip the strict check's other refusals: a summary that repeats the title, the per-kind field rules (a gotcha without `fields.fix`, a procedure with fewer than two steps), and the 8-character title and 20-character summary minimums. A summary that repeats the title or a gotcha with an empty symptom, cause or fix still gets a coaching hint and is saved as a candidate; a procedure with one step gets no hint. Imports refuse all of them.
 - **Corrections**: Save with `supersedes: "<old_id>"` to replace an owned or same-project memory.
 - **Default scope**: `preference` and `note` default to `personal`. Other kinds default to `project` if the caller belongs to the active project context, otherwise `personal`.
 
