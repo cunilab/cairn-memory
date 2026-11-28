@@ -200,14 +200,20 @@ async fn concurrent_rewrites_keep_both() {
     .await
     .unwrap();
     assert_eq!(rows.len(), 3);
+    // By id: racing transactions' created_at need not follow commit order.
+    let status = |id: &str| rows.iter().find(|r| r.0 == id).unwrap().1.as_str();
     assert_eq!(
-        rows.iter().map(|r| r.1.as_str()).collect::<Vec<_>>(),
+        [status(&original), status(&first_id), status(&second_id)],
         ["superseded", "superseded", "active"]
     );
     let titles: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
     assert!(titles.contains(&"Alice race fact") && titles.contains(&"Bob race fact"));
     assert!(rows.iter().all(|r| r.3 == rows[0].3 && r.4 == rows[0].4));
-    assert!(rows[1].5.is_some() && rows[2].5.is_some());
+    assert!(
+        rows.iter()
+            .filter(|r| r.0 != original)
+            .all(|r| r.5.is_some())
+    );
     let links: Vec<(String, String)> = sqlx::query_as(
         "SELECT source_id, target_id FROM links WHERE relation='supersedes' AND target_id = ANY($1) ORDER BY source_id",
     )
