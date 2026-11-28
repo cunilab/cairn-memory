@@ -2640,6 +2640,64 @@ fn the_next_session_brief_carries_the_task_and_the_agents_next_step() {
 }
 
 #[test]
+fn a_grok_task_naming_a_command_flag_reaches_the_handoff() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-grok-task");
+    let dir = checkout("hook-grok-task");
+    let init = team.owner.run_in(&dir, &["init", "E2E Grok Task"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+    let run = |event: &str, agent: &str, payload: Value| {
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", agent]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        output
+    };
+    // Grok 1.0.92's common hook fields plus `prompt`; the prompt is wrapped in <user_query> lines.
+    let grok = |event: &str, snake: &str, extra: Value| {
+        let mut payload = json!({"hookEventName": snake, "hook_event_name": event,
+            "sessionId": "grok-work", "cwd": dir, "workspaceRoot": dir,
+            "timestamp": "2026-11-28T09:00:00Z", "permissionMode": "default", "promptId": "p1"});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        run(event, "grok", payload)
+    };
+    grok(
+        "UserPromptSubmit",
+        "user_prompt_submit",
+        json!({"prompt": "<user_query>\nAdd a pin note to README.md, then run python3 violet_latch.py --pin once and stop.\n</user_query>"}),
+    );
+    grok(
+        "PostToolUse",
+        "post_tool_use",
+        json!({"toolName": "search_replace", "toolUseId": "e1", "toolInputTruncated": false,
+            "toolInput": {"file_path": dir.join("README.md"), "old_string": "a", "new_string": "pin"}}),
+    );
+    grok("SessionEnd", "session_end", json!({"reason": "other"}));
+    server.distill(&team.owner_id, "grok-work");
+
+    let brief = injected(&run(
+        "SessionStart",
+        "claude",
+        json!({"session_id": "next", "cwd": dir}),
+    ))
+    .unwrap();
+    assert!(
+        brief.contains(
+            "Task: Add a pin note to README.md, then run python3 violet_latch.py --pin once and stop. Edited README.md"
+        ),
+        "{brief}"
+    );
+}
+
+#[test]
 fn real_hook_switches_context_within_one_session_without_sharing_notes() {
     let Some(server) = Server::start() else {
         return;

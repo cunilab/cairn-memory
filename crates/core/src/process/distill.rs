@@ -512,15 +512,20 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
                 fenced = !fenced;
                 continue;
             }
-            if fenced || is_boilerplate(&line) {
+            if fenced {
+                continue;
+            }
+            // A request may name a command with its --flags; only the markers skip such lines.
+            if request.is_none() && !is_next_step(&line) && is_request(&line) {
+                request = Some(clip(line.trim_end_matches(['.', ':', ' ']), TASK_MAX));
+            }
+            if is_boilerplate(&line) {
                 continue;
             }
             let lower = line.to_ascii_lowercase();
             let mut used = false;
             if is_next_step(&line) {
                 used |= push_unique(&mut next_steps, &line);
-            } else if request.is_none() && is_request(&line) {
-                request = Some(clip(line.trim_end_matches(['.', ':', ' ']), TASK_MAX));
             }
             if has_marker(
                 &lower,
@@ -693,7 +698,7 @@ pub fn agent_label(line: &str) -> Option<AgentLabel> {
 /// and not a labelled line such as `Decision: ...`, whose note is saved on its own.
 fn is_request(line: &str) -> bool {
     let mut words = line.split_whitespace();
-    !line.starts_with('<')
+    !line.starts_with(['<', '#', '$', '>'])
         && !words.next().is_some_and(|first| first.ends_with(':'))
         && words.count() >= 2
 }
@@ -1269,6 +1274,20 @@ mod tests {
         assert_eq!(
             fields["open_questions"],
             serde_json::json!(["TODO: wire the worker"])
+        );
+    }
+
+    #[test]
+    fn handoff_task_keeps_a_request_that_names_a_command_flag() {
+        // Grok wraps the user's prompt in <user_query> lines (its session record).
+        let ask = "<user_query>\nRun python3 violet_latch.py --pin once and stop.\n</user_query>";
+        let d = distill(&[prompt("p1", ask), edit("e1", "README.md")]);
+        let summary = d.handoff.expect("handoff").summary;
+        assert!(
+            summary.starts_with(
+                "Task: Run python3 violet_latch.py --pin once and stop. Edited README.md"
+            ),
+            "{summary}"
         );
     }
 
