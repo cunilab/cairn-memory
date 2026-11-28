@@ -28,6 +28,9 @@ TOOL_NAMES = {tool["name"] for tool in TOOLS}
 IDLE_SECONDS = 30 * 60
 BACKGROUND = ("cron", "subagent", "flush")
 UNAVAILABLE = "Cairn memory is unavailable in this Hermes turn."
+# Hermes builds the provider per session from disk, but binds chat memory only when the process loads plugins.
+UNBOUND = ("Cairn chat memory is not loaded in this gateway process. Start the Hermes gateway process again "
+           "after cairn setup hermes --gateway, then send /new.")
 
 
 def background(session_id=None, task_id=None, platform=None, agent_context=None, **_):
@@ -353,7 +356,8 @@ class CairnProvider(MemoryProvider):
         return self.primary and not background(session_id=self.session_id)
 
     def get_tool_schemas(self):
-        if self.session_id and not self.live():
+        # Hermes reads schemas once before initialize (routing) and again after it (what the model sees).
+        if self.session_id and (not self.live() or (GATEWAY and self.chat is None)):
             return []
         return CHAT_SCHEMAS if GATEWAY else CLI_SCHEMAS
 
@@ -362,7 +366,7 @@ class CairnProvider(MemoryProvider):
             return json.dumps({"error": UNAVAILABLE})
         if GATEWAY:
             return self.chat.tool(tool_name, args, self.session_id) if self.chat else json.dumps(
-                {"error": "Cairn chat memory is unavailable."})
+                {"error": UNBOUND})
         if tool_name not in TOOL_NAMES or not isinstance(args, dict):
             return json.dumps({"error": "unknown Cairn tool"})
         reply = forward("Tool", self.session_id, self.cwd, tool_name=tool_name, arguments=args)

@@ -507,8 +507,11 @@ class Gateway(Hermes):
         sys.modules.pop("_cairn_memory_hermes", None)
         self.route()
         provider = self.provider()
+        # A gateway process that started before setup: no tools, and a stale schema gets the restart hint.
+        self.assertEqual(provider.get_tool_schemas(), [])
         self.assertEqual(self.turn(provider), "")
-        self.assertIn("error", json.loads(provider.handle_tool_call("memory_search", {"query": "x"})))
+        error = json.loads(provider.handle_tool_call("memory_search", {"query": "x"}))["error"]
+        self.assertIn("Start the Hermes gateway process again", error)
         self.assertEqual(self.requests, [])
 
 
