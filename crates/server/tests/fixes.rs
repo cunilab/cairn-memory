@@ -668,6 +668,54 @@ async fn no_private_fields() {
     app.finish().await;
 }
 
+/// U-051: a detector-made F4 for one laptop is listed and completed only by that device.
+#[tokio::test]
+async fn f4_device_fix_only_target_device() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let laptop = app.device(&admin, "laptop").await;
+    let other = app.device(&admin, "other").await;
+    let (device, _) = app.db.store.authenticate_device(&laptop).await.unwrap();
+    sqlx::query("UPDATE devices SET last_hook_at=now()-interval '8 days', last_seen_at=now(), hook_error_class='network' WHERE device_id=$1")
+        .bind(&device.device_id).execute(app.db.store.pool()).await.unwrap();
+    app.db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let (fix, fingerprint, evidence): (String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT fix_id,fingerprint,evidence FROM fixes WHERE detector='F4' AND device_id=$1",
+    )
+    .bind(&device.device_id)
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(evidence["hook_error_class"], "network");
+    app.post(
+        &format!("admin/fixes/{fix}/apply"),
+        json!({"fingerprint":fingerprint}),
+        &admin,
+    )
+    .await;
+    let status = || async {
+        sqlx::query_scalar::<_, String>("SELECT status FROM fixes WHERE fix_id=$1")
+            .bind(&fix)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap()
+    };
+    assert_eq!(status().await, "queued");
+    let listed = app.get("device/fixes", &laptop).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["fix_id"], fix);
+    assert_eq!(app.get("device/fixes", &other).await, json!([]));
+    let done = format!("device/fixes/{fix}");
+    let (code, _) = app
+        .send("POST", &done, json!({"result":"applied"}), Some(&other))
+        .await;
+    assert_eq!(code, 404);
+    assert_eq!(status().await, "queued");
+    app.post(&done, json!({"result":"applied"}), &laptop).await;
+    assert_eq!(status().await, "done");
+    app.finish().await;
+}
+
 #[tokio::test]
 async fn apply_rechecks() {
     let Some(app) = App::new().await else { return };
