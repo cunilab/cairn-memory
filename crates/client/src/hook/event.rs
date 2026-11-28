@@ -3,12 +3,15 @@
 use super::readonly::{canonical_tool, is_read_only_tool, shell_command_is_readonly};
 use cairn_core::capture::{CaptureKind, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
+use cairn_core::process::distill::agent_label;
 use serde_json::{Map, Value};
 
 const PROMPT_MAX_BYTES: usize = 8 * 1024;
 const EXCERPT_MAX_BYTES: usize = 1024;
 const COMMAND_MAX_BYTES: usize = 1024;
 const ERROR_LINE_MAX_BYTES: usize = 200;
+/// `Next:`/`Open:` lines kept from one final message.
+const AGENT_LINES_MAX: usize = 10;
 const MARKER: &str = "\n[truncated]";
 const WORK_TOOLS: [&str; 5] = ["Bash", "Edit", "Write", "MultiEdit", "apply_patch"];
 const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "apply_patch"];
@@ -189,6 +192,24 @@ impl Payload {
             CaptureKind::Prompt,
             text_of(prompt, PROMPT_MAX_BYTES),
         ))
+    }
+
+    /// `kind=assistant` with only the final message's `Next:`/`Open:` lines (redacted), which
+    /// the handoff reads; the rest of the message is not sent.
+    pub fn agent_lines(&self) -> Option<Capture> {
+        let message = self.assistant()?;
+        let lines: Vec<&str> = message
+            .content
+            .lines()
+            .filter(|line| agent_label(line).is_some())
+            .take(AGENT_LINES_MAX)
+            .collect();
+        (!lines.is_empty()).then(|| {
+            Capture::new(
+                CaptureKind::Assistant,
+                clip(&lines.join("\n"), EXCERPT_MAX_BYTES),
+            )
+        })
     }
 
     /// `kind=assistant`; the caller decides whether `CAIRN_CAPTURE_ASSISTANT` allows it.

@@ -1134,6 +1134,38 @@ fn recent_files_list_status_then_commits_without_duplicates() {
 }
 
 #[test]
+fn stop_sends_only_next_and_open_lines_of_the_final_message() {
+    let server = fake();
+    let env = Env::new("hook-agent-lines", &server.url);
+    let message = "I changed the lock order.\n- Next: rerun the soak test\nOpen: is api_key=sk-abcdefghijklmnopqrstuvwx still used?\nNext:";
+    env.run(
+        "SubagentStop",
+        &env.payload("s1", json!({"last_assistant_message": message})),
+    );
+    assert!(
+        server.observed().is_empty(),
+        "a subagent's lines are not the handoff"
+    );
+    env.run(
+        "Stop",
+        &env.payload("s1", json!({"last_assistant_message": message})),
+    );
+    let observed = server.observed();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0]["kind"], "assistant");
+    let content = observed[0]["content"].as_str().unwrap();
+    assert!(
+        content.starts_with("- Next: rerun the soak test\nOpen: is "),
+        "{content}"
+    );
+    assert!(
+        !content.contains("lock order") && !content.contains("sk-abc"),
+        "{content}"
+    );
+    assert_eq!(content.lines().count(), 2, "{content}");
+}
+
+#[test]
 fn stop_keeps_assistant_opt_in() {
     let server = fake();
     let env = Env::new("hook-assistant", &server.url);
@@ -2445,6 +2477,66 @@ fn mcp_search_finds_a_checkpoint_note_and_handoff_in_the_same_checkout() {
         json!({"query": "verify exponential backoff"}),
     );
     assert_eq!(handoff["results"][0]["kind"], "handoff", "{handoff}");
+}
+
+#[test]
+fn the_next_session_brief_carries_the_task_and_the_agents_next_step() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-handoff");
+    let dir = checkout("hook-handoff");
+    let init = team.owner.run_in(&dir, &["init", "E2E Hook Handoff"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+    let run = |event, session, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        output
+    };
+    run(
+        "UserPromptSubmit",
+        "work",
+        json!({"prompt": "Fix the queue so it prints ok"}),
+    );
+    run(
+        "PostToolUse",
+        "work",
+        edit_call("src/queue.rs", "fn run() {}", "edit"),
+    );
+    let nudge = blocked(&run("Stop", "work", json!({}))).expect("one reminder");
+    assert!(
+        nudge.ends_with("If unfinished, end with a Next: line."),
+        "{nudge}"
+    );
+    run(
+        "Stop",
+        "work",
+        json!({"stop_hook_active": true, "last_assistant_message":
+            "Fixed the loop.\nNext: add a retry test for the queue\nOpen: keep the old timeout?"}),
+    );
+    run("SessionEnd", "work", json!({}));
+    server.distill(&team.owner_id, "work");
+
+    let brief = injected(&run("SessionStart", "next", json!({}))).unwrap();
+    for part in [
+        "Task: Fix the queue so it prints ok. Edited src/queue.rs",
+        "; 1 open item; last activity ",
+        "Next: add a retry test for the queue",
+        "Open: keep the old timeout?",
+    ] {
+        assert!(brief.contains(part), "{part}: {brief}");
+    }
+    assert!(!brief.contains("Fixed the loop"), "{brief}");
 }
 
 #[test]

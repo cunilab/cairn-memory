@@ -11,6 +11,12 @@ use serde_json::{Map, Value, json};
 const MAX_TYPED_NOTES: usize = 64;
 const MAX_GOTCHAS: usize = 3;
 pub const HANDOFF_FILES_MAX: usize = 20;
+/// Edited files named in the handoff summary; the rest are counted.
+const HANDOFF_SUMMARY_FILES: usize = 3;
+/// Characters of the task line and of the last command in the handoff summary.
+const TASK_MAX: usize = 100;
+const RUN_MAX: usize = 60;
+const SUMMARY_FILE_MAX: usize = 48;
 /// Normalised commands starting with one of these are "the test command" (D3).
 const TEST_COMMANDS: [&str; 13] = [
     "cargo test",
@@ -478,12 +484,15 @@ fn digest(observations: &[Observation]) -> Option<SaveInput> {
     })
 }
 
-/// D4: what the next session needs: edited files, marker lines from prompts, failures still open.
+/// D4: what the next session needs: the task, edited files, the last run, next steps and open
+/// items. The agent's own `Next:`/`Open:` lines win over the ones derived from prompts.
 fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<SaveInput> {
     let mut next_steps = Vec::new();
     let mut open = Vec::new();
     let mut files = Vec::new();
     let mut evidence = Vec::new();
+    let mut task: Option<String> = None;
+    let mut last_request: Option<String> = None;
     for observation in observations {
         if observation.kind == CaptureKind::Edit {
             for file in &observation.context.files {
@@ -496,6 +505,7 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
             continue;
         }
         let mut fenced = false;
+        let mut request = None;
         for line in observation.content.lines() {
             let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
             if line.starts_with("```") {
@@ -509,6 +519,8 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
             let mut used = false;
             if is_next_step(&line) {
                 used |= push_unique(&mut next_steps, &line);
+            } else if request.is_none() && is_request(&line) {
+                request = Some(clip(line.trim_end_matches(['.', ':', ' ']), TASK_MAX));
             }
             if has_marker(
                 &lower,
@@ -530,7 +542,13 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
                 push_unique(&mut evidence, &observation.event_id);
             }
         }
+        if let Some(request) = request {
+            task.get_or_insert_with(|| request.clone());
+            last_request = Some(request);
+        }
     }
+    let (agent_next, agent_open, agent_event) = agent_lines(observations);
+    let mut still_failing = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for failure in failures {
         let later_pass = observations[failure.index + 1..].iter().any(|o| {
@@ -541,16 +559,30 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         }
         seen.push(&failure.key);
         let error = error_line(failure.observation).unwrap_or_default();
-        push_unique(
-            &mut open,
-            &format!("`{}` still failing: {error}", failure.key),
-        );
+        still_failing.push(format!("`{}` still failing: {error}", failure.key));
         push_unique(&mut evidence, &failure.observation.event_id);
+    }
+    if !agent_open.is_empty() {
+        open = agent_open;
+    }
+    for item in &still_failing {
+        push_unique(&mut open, item);
     }
     let last = observations.last()?;
     let edited = observations.iter().any(|o| o.kind == CaptureKind::Edit);
+    if !agent_next.is_empty() {
+        next_steps = agent_next;
+    }
     if !edited && next_steps.is_empty() && open.is_empty() {
         return None;
+    }
+    if let Some(event) = agent_event {
+        push_unique(&mut evidence, &event);
+    }
+    if next_steps.is_empty()
+        && let Some(request) = last_request.filter(|request| Some(request) != task.as_ref())
+    {
+        push_unique(&mut next_steps, &format!("Last request: {request}"));
     }
     let outside = observations
         .iter()
@@ -558,6 +590,19 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         .map(|observation| observation.context.outside_files)
         .max()
         .unwrap_or(0);
+    let last_run = observations
+        .iter()
+        .rev()
+        .find(|o| o.kind == CaptureKind::Command && o.ok.is_some())
+        .map(|o| {
+            let command = clip(&normalize_command(command_text(o)), RUN_MAX);
+            let result = if o.ok == Some(true) {
+                "passed"
+            } else {
+                "failed"
+            };
+            format!("last run `{command}` {result}")
+        });
     let place = last
         .context
         .branch
@@ -573,7 +618,14 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         kind: Kind::Handoff,
         title: clip(&format!("Handoff: {place}"), TITLE_MAX),
         summary: clip(
-            &handoff_summary(files.len(), outside, open.len(), &date(last.captured_at)),
+            &handoff_summary(
+                task.as_deref(),
+                &files,
+                outside,
+                last_run.as_deref(),
+                open.len(),
+                &date(last.captured_at),
+            ),
             SUMMARY_MAX,
         ),
         reason: "Derived from the captures of one session.".to_owned(),
@@ -585,6 +637,65 @@ fn handoff(observations: &[Observation], failures: &[Failure<'_>]) -> Option<Sav
         scope: Some(Scope::Personal),
         aliases: Vec::new(),
     })
+}
+
+/// The `Next:` and `Open:` lines of the latest assistant capture that has any, and its event.
+fn agent_lines(observations: &[Observation]) -> (Vec<String>, Vec<String>, Option<String>) {
+    for observation in observations.iter().rev() {
+        if observation.kind != CaptureKind::Assistant {
+            continue;
+        }
+        let (mut next, mut open) = (Vec::new(), Vec::new());
+        for line in observation.content.lines() {
+            let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            match agent_label(&line) {
+                Some(AgentLabel::Next) => {
+                    push_unique(&mut next, &line);
+                }
+                Some(AgentLabel::Open) => {
+                    push_unique(&mut open, &line);
+                }
+                None => {}
+            }
+        }
+        if !next.is_empty() || !open.is_empty() {
+            return (next, open, Some(observation.event_id.clone()));
+        }
+    }
+    (Vec::new(), Vec::new(), None)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentLabel {
+    Next,
+    Open,
+}
+
+/// `Next: ...` or `Open: ...` with text after it, after an optional `- ` or `* `.
+pub fn agent_label(line: &str) -> Option<AgentLabel> {
+    let line = line.trim();
+    let line = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line);
+    let (label, rest) = line.split_once(':')?;
+    if rest.trim().is_empty() {
+        return None;
+    }
+    match label.trim().to_ascii_lowercase().as_str() {
+        "next" => Some(AgentLabel::Next),
+        "open" => Some(AgentLabel::Open),
+        _ => None,
+    }
+}
+
+/// A prompt line that says what to do: three or more words, not a tag such as `<system-reminder>`
+/// and not a labelled line such as `Decision: ...`, whose note is saved on its own.
+fn is_request(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    !line.starts_with('<')
+        && !words.next().is_some_and(|first| first.ends_with(':'))
+        && words.count() >= 2
 }
 
 /// `YYYY-MM-DD` (UTC) of an epoch second, by the civil-from-days algorithm.
@@ -761,13 +872,44 @@ fn is_next_step(line: &str) -> bool {
     lower.starts_with("next:") || lower.starts_with("todo:")
 }
 
-fn handoff_summary(files: usize, outside: u32, open: usize, when: &str) -> String {
-    let edited = if outside > 0 {
-        format!("{files} files edited ({outside} outside the project)")
-    } else {
-        format!("{files} files edited")
+/// `Task: <first request>. Edited a.rs, b.rs, +2 more; last run `cargo test` passed; 1 open item;
+/// last activity <date>.` Every part but the open count and the date is left out when unknown.
+fn handoff_summary(
+    task: Option<&str>,
+    files: &[String],
+    outside: u32,
+    last_run: Option<&str>,
+    open: usize,
+    when: &str,
+) -> String {
+    let named = files
+        .iter()
+        .take(HANDOFF_SUMMARY_FILES)
+        .map(|file| clip(file, SUMMARY_FILE_MAX))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut edited = match files.len() {
+        0 => "No project files edited".to_owned(),
+        n if n > HANDOFF_SUMMARY_FILES => {
+            format!("Edited {named}, +{} more", n - HANDOFF_SUMMARY_FILES)
+        }
+        _ => format!("Edited {named}"),
     };
-    format!("{edited}; {open} open items; last activity {when}.")
+    if outside > 0 {
+        edited.push_str(&format!(" ({outside} outside the project)"));
+    }
+    let items = if open == 1 { "item" } else { "items" };
+    let mut parts = vec![edited];
+    parts.extend(last_run.map(str::to_owned));
+    parts.push(format!("{open} open {items}"));
+    parts.push(format!("last activity {when}."));
+    let rest = parts.join("; ");
+    // The task takes only the room the rest leaves, so the counts and date always fit.
+    let room = SUMMARY_MAX.saturating_sub(rest.chars().count() + "Task: . ".len());
+    match task.filter(|_| room >= 12) {
+        Some(task) => format!("Task: {}. {rest}", clip(task, room)),
+        None => rest,
+    }
 }
 
 fn push_unique(list: &mut Vec<String>, value: &str) -> bool {
@@ -1141,7 +1283,7 @@ mod tests {
         assert_eq!(h.title, "Handoff: feat/x");
         assert_eq!(
             h.summary,
-            "1 files edited; 2 open items; last activity 2026-09-21."
+            "Edited src/a.rs; last run `cargo test` failed; 2 open items; last activity 2026-09-21."
         );
         let fields = h.fields.unwrap();
         assert_eq!(fields["next_steps"][0], "TODO: wire the worker");
@@ -1167,6 +1309,116 @@ mod tests {
         );
         let d = distill(&[fail("c1", "cargo test", "x"), pass("c2", "cargo test")]);
         assert!(d.handoff.is_none());
+    }
+
+    fn assistant(id: &str, text: &str) -> Observation {
+        ob(id, CaptureKind::Assistant, text, None, &[])
+    }
+
+    #[test]
+    fn handoff_says_the_task_files_and_last_run() {
+        // The 0.1.11 real-usage session whose handoff was "1 files edited; 0 open items".
+        let d = distill(&[
+            prompt(
+                "p1",
+                "<system-reminder>\nFix queue.py so `python3 queue.py` prints ok.",
+            ),
+            edit("e1", "queue.py"),
+            pass("c1", "python3 queue.py"),
+        ]);
+        let h = d.handoff.expect("handoff");
+        assert_eq!(
+            h.summary,
+            "Task: Fix queue.py so `python3 queue.py` prints ok. Edited queue.py; last run `python3 queue.py` passed; 0 open items; last activity 2026-09-21."
+        );
+        let fields = h.fields.unwrap();
+        assert_eq!(fields["next_steps"], json!([]), "one request: no repeat");
+
+        // A later request becomes the next step when nobody wrote one.
+        let d = distill(&[
+            prompt("p1", "Fix the queue so it prints ok"),
+            edit("e1", "a.rs"),
+            edit("e2", "b.rs"),
+            edit("e3", "c.rs"),
+            edit("e4", "d.rs"),
+            prompt("p2", "now add a retry test for the queue"),
+        ]);
+        let h = d.handoff.expect("handoff");
+        assert!(
+            h.summary
+                .starts_with("Task: Fix the queue so it prints ok. Edited a.rs, b.rs, c.rs, +1 more; 0 open items;"),
+            "{}",
+            h.summary
+        );
+        assert_eq!(
+            h.fields.unwrap()["next_steps"],
+            json!(["Last request: now add a retry test for the queue"])
+        );
+    }
+
+    #[test]
+    fn agent_next_and_open_lines_win_over_derived_ones() {
+        let d = distill(&[
+            prompt("p1", "Fix the queue so it prints ok"),
+            prompt(
+                "p2",
+                "TODO: check the docs\nDecision: keep the queue\nReason: it works",
+            ),
+            edit("e1", "queue.py"),
+            fail("c1", "cargo test", "error: still broken"),
+            assistant("a1", "Next: an older step"),
+            assistant(
+                "a2",
+                "Done for now.\n- Next: run the migration on staging\nOpen: keep the old column?\nnext:",
+            ),
+        ]);
+        let h = d.handoff.expect("handoff");
+        let fields = h.fields.unwrap();
+        assert_eq!(
+            fields["next_steps"],
+            json!(["- Next: run the migration on staging"])
+        );
+        assert_eq!(
+            fields["open_questions"],
+            json!([
+                "Open: keep the old column?",
+                "`cargo test` still failing: error: still broken"
+            ])
+        );
+        assert!(h.evidence.contains(&"a2".to_owned()), "{:?}", h.evidence);
+        // Agent lines alone are worth a handoff.
+        assert!(
+            distill(&[assistant("a1", "Next: ship it")])
+                .handoff
+                .is_some()
+        );
+        assert_eq!(agent_label("Next:"), None);
+        assert_eq!(agent_label("Nextly: x"), None);
+        assert_eq!(agent_label("* open: why"), Some(AgentLabel::Open));
+    }
+
+    #[test]
+    fn a_long_task_never_hides_the_counts_or_date() {
+        let long = "word ".repeat(80);
+        let files: Vec<Observation> = (0..5)
+            .map(|n| {
+                edit(
+                    &format!("e{n}"),
+                    &format!("{}/{n}.rs", "deep/path".repeat(8)),
+                )
+            })
+            .collect();
+        let mut observations = vec![prompt("p1", &long)];
+        observations.extend(files);
+        let h = distill(&observations).handoff.expect("handoff");
+        assert!(h.summary.chars().count() <= SUMMARY_MAX, "{}", h.summary);
+        assert!(h.summary.starts_with("Task: word"), "{}", h.summary);
+        assert!(
+            h.summary
+                .ends_with("+2 more; 0 open items; last activity 2026-09-21."),
+            "{}",
+            h.summary
+        );
     }
 
     #[test]

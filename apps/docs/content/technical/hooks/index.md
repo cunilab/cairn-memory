@@ -25,12 +25,12 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 | `SessionEnd` | Concludes session and enqueues background distillation | None |
 
 - **Automation**: Automated sessions (`CAIRN_SESSION_ORIGIN=automation`) capture and distill without prompting the Stop reminder or overwriting personal handoffs.
-- **Assistant text**: Captured only when explicitly opted in via `CAIRN_CAPTURE_ASSISTANT=1`.
+- **Assistant text**: Captured only when explicitly opted in via `CAIRN_CAPTURE_ASSISTANT=1`. Without it, `Stop` sends only the `Next:` and `Open:` lines of the final message (redacted, at most 10 lines and 1 KiB) for the handoff.
 
 ## Reminders (agent nudges)
 
 - **Session start nudge**: Instructs agents to treat Cairn as their sole memory service.
-- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes. Suppressed if notes were already saved.
+- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes and, if work is unfinished, to end with a `Next:` line. Suppressed if notes were already saved.
 - **Nudge overrides**: Project instructions override global instructions, which override default prompts. Set Stop text to `off` to disable. Set `nudge: false` in config or `CAIRN_NO_NUDGE=1` to disable all nudges.
 
 ## Injection budget

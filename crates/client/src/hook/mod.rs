@@ -407,6 +407,8 @@ impl Hook<'_> {
                 }
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
+                } else if self.event == "Stop" {
+                    self.capture(self.payload.agent_lines())?;
                 }
                 if let Some(generation) = self
                     .with_state(|s| s.dirty.then_some(s.generation))
