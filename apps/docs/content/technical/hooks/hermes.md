@@ -25,8 +25,8 @@ In Hermes Agent, Cairn operates both as the external memory provider and as a st
 | `get_tool_schemas`, `handle_tool_call` | Provides native memory and skill tools (`memory_search`, `memory_save`, etc.). |
 
 Plugin hooks manage tool capture:
-- `post_tool_call` captures file edits and terminal commands.
-- `transform_tool_result` attaches command gotchas and error recall directly to terminal outputs.
+- `post_tool_call` captures file edits and Cairn tool calls.
+- `transform_tool_result` captures terminal commands and attaches command gotchas and error recall to the result the model sees. Hermes fires it before `post_tool_call` for a single tool call and after it for a parallel batch, so the terminal capture lives in this one hook. A host without it captures terminal commands in `post_tool_call`, with no recall.
 
 See [Native tool schemas](../../users/reference/mcp.md#hermes-provider-tools).
 

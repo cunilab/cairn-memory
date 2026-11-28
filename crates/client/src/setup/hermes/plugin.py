@@ -162,6 +162,8 @@ class Chat:
         # Hermes session id -> chat state: teardown (/new, /reset, shutdown) runs without a bound route.
         self.hosts = {}
         self.lock = threading.Lock()
+        # Set once transform_tool_result is registered: it delivers the terminal note.
+        self.transform = False
 
     def route(self, session_id=None, **details):
         if background(session_id=session_id, **details):
@@ -247,7 +249,7 @@ class Chat:
             first = key not in self.sessions
             if first:
                 self.sessions[key] = {"id": "hchat_" + uuid.uuid4().hex, "key": key, "hosts": set(),
-                                      "ended": False, "turns": set(), "timer": None, "recall": {}}
+                                      "ended": False, "turns": set(), "timer": None}
             state = self.sessions[key]
             if session_id:
                 state["hosts"].add(session_id)
@@ -277,7 +279,6 @@ class Chat:
             state["turns"].remove(session_id)
             if state["turns"]:
                 return
-            state["recall"].clear()
             ended = state["ended"] and self.drop(state)
             if not ended:
                 timer = threading.Timer(IDLE_SECONDS, lambda: self.idle(key, state, timer))
@@ -296,26 +297,21 @@ class Chat:
         with self.lock:
             return self.sessions.get(key), chat
 
-    def after_tool(self, tool_name, args, result, tool_call_id=None, status=None, error_message=None, **details):
+    def post(self, tool_name, args, result, tool_call_id=None, status=None, error_message=None, **details):
         if tool_name != "terminal":
-            return
+            return None
         state, chat = self.active(**details)
         if state is not None:
-            reply = self.send("PostToolUse", state, chat, tool_name=tool_name, args=args, result=result,
-                              tool_call_id=tool_call_id, status=status, error_message=error_message)
-            if tool_call_id and (text := context(reply)):
-                with self.lock:
-                    state["recall"][tool_call_id] = text
+            return context(self.send("PostToolUse", state, chat, tool_name=tool_name, args=args, result=result,
+                                     tool_call_id=tool_call_id, status=status, error_message=error_message))
 
-    def append_recall(self, tool_name, result, tool_call_id=None, **details):
-        if tool_name != "terminal":
-            return
-        state, _ = self.active(**details)
-        if state is None:
-            return
-        with self.lock:
-            text = state["recall"].pop(tool_call_id, None)
-        if text:
+    def after_tool(self, tool_name, **details):
+        # A terminal call goes through the transform, whose result reaches the model.
+        if not self.transform:
+            self.post(tool_name, **details)
+
+    def append_recall(self, tool_name, result, **details):
+        if text := self.post(tool_name, result=result, **details):
             return attach(result, text)
 
     def tool(self, name, args, session_id):
@@ -436,33 +432,30 @@ def register(ctx):
         return  # Hermes's memory loader: the plugin load registers the tool hooks.
     if GATEWAY:
         return register_gateway(ctx)
-    pending = {}
+    transform = False
 
-    def relevant(tool_name):
-        return tool_name in {"terminal", "read_file", "write_file", "patch"} or tool_name in TOOL_NAMES
-
-    @foreground
-    def after_tool(tool_name, args, result, session_id=None, tool_call_id=None, status=None, error_message=None, **_):
-        if relevant(tool_name):
-            # Cairn's own tools are read as the MCP tools they mirror (saves and lookups).
-            name = "mcp_cairn_" + tool_name if tool_name in TOOL_NAMES else tool_name
-            reply = forward("PostToolUse", session_id, ctx.session_cwd(), tool_name=name, args=args,
-                            result=result, status=status, error_message=error_message, tool_call_id=tool_call_id)
-            if text := context(reply):
-                pending.setdefault(session_id, {})[tool_call_id] = text
+    def post(tool_name, args, result, session_id=None, tool_call_id=None, status=None, error_message=None, **_):
+        # Cairn's own tools are read as the MCP tools they mirror (saves and lookups).
+        name = "mcp_cairn_" + tool_name if tool_name in TOOL_NAMES else tool_name
+        return context(forward("PostToolUse", session_id, ctx.session_cwd(), tool_name=name, args=args,
+                               result=result, status=status, error_message=error_message,
+                               tool_call_id=tool_call_id))
 
     @foreground
-    def append_recall(tool_name, result, session_id=None, tool_call_id=None, **_):
-        if tool_name != "terminal":
-            return None
-        notes = pending.get(session_id)
-        text = notes.pop(tool_call_id, None) if notes else None
-        if text:
+    def after_tool(tool_name, **details):
+        # A terminal call goes through the transform, whose result reaches the model.
+        if tool_name == "terminal" and transform:
+            return
+        if tool_name in {"terminal", "read_file", "write_file", "patch"} or tool_name in TOOL_NAMES:
+            post(tool_name, **details)
+
+    @foreground
+    def append_recall(tool_name, result, **details):
+        if tool_name == "terminal" and (text := post(tool_name, result=result, **details)):
             return attach(result, text)
 
     @foreground
     def turn_end(session_id=None, failed=False, interrupted=False, **_):
-        pending.pop(session_id, None)
         # The provider's sync_turn checkpoints completed turns; Hermes skips it for these.
         if failed or interrupted:
             forward("Stop", session_id, ctx.session_cwd())
@@ -470,7 +463,8 @@ def register(ctx):
     ctx.register_hook("post_tool_call", after_tool)
     try:
         ctx.register_hook("transform_tool_result", append_recall)
-    except ValueError:  # Older hosts have no result transform.
+        transform = True
+    except ValueError:  # Older hosts have no result transform: the note cannot reach the model.
         pass
     ctx.register_hook("on_session_end", turn_end)
 
@@ -489,6 +483,7 @@ def register_gateway(ctx):
     ctx.register_hook("post_tool_call", chat.after_tool)
     try:
         ctx.register_hook("transform_tool_result", chat.append_recall)
+        chat.transform = True
     except ValueError:
         pass
     ctx.register_hook("on_session_end", chat.turn_end)

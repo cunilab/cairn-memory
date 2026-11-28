@@ -264,11 +264,22 @@ class CommandLine(Hermes):
         self.assertEqual(self.requests[-1][1]["cwd"], "/stubbed-cwd")
         hooks["post_tool_call"](tool_name="web_search", args={}, result="{}", session_id="host-session")
         self.assertEqual(self.requests[-1][1]["tool_name"], "mcp_cairn_memory_save")
-        hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
-                                session_id="host-session", tool_call_id="call-2", status="error")
-        attached = hooks["transform_tool_result"](tool_name="terminal", result='{"exit_code":2}',
-                                                  session_id="host-session", tool_call_id="call-2")
+        # Hermes's sequential path (one tool call) fires transform_tool_result inside
+        # handle_function_call (model_tools.py:1014-1015) and post_tool_call only after it
+        # (agent/tool_executor.py:1857-1859); the concurrent path fires them the other way round.
+        terminal = dict(tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                        session_id="host-session", tool_call_id="call-2", status="error",
+                        error_type="tool_error", error_message="exit 2", duration_ms=5)
+        before = len(self.requests)
+        attached = hooks["transform_tool_result"](**terminal)
         self.assertEqual(json.loads(attached), {"exit_code": 2, "cairn_recall": "command note"})
+        self.assertEqual(self.requests[-1][1]["error_message"], "exit 2")
+        hooks["post_tool_call"](**terminal)
+        self.assertEqual(self.events()[before:], ["PostToolUse"], "one Cairn call per tool call")
+        hooks["post_tool_call"](**{**terminal, "tool_call_id": "call-3"})
+        self.assertEqual(hooks["transform_tool_result"](**{**terminal, "tool_call_id": "call-3"}), json.dumps(
+            {"exit_code": 2, "cairn_recall": "command note"}))
+        self.assertEqual(self.events()[before:], ["PostToolUse"] * 2)
 
         before = len(self.requests)
         hooks["on_session_end"](session_id="host-session", failed=False, interrupted=False)
@@ -276,6 +287,20 @@ class CommandLine(Hermes):
         for flag in ["failed", "interrupted"]:
             hooks["on_session_end"](session_id="host-session", **{flag: True})
             self.assertEqual(self.requests[-1], ("Stop", {"session_id": "host-session", "cwd": "/stubbed-cwd"}))
+
+    def test_a_host_without_result_transform_still_captures_terminal(self):
+        class Older(Context):
+            def register_hook(self, name, callback):
+                if name == "transform_tool_result":
+                    raise ValueError(name)
+                super().register_hook(name, callback)
+
+        older = Older({})
+        self.plugin["register"](older)
+        older.hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                                      session_id="host-session", tool_call_id="call-1", status="error")
+        self.assertEqual(self.requests[-1][0], "PostToolUse")
+        self.assertEqual(self.requests[-1][1]["tool_name"], "terminal")
 
     def test_background_agents_neither_write_nor_get_tools(self):
         cases = [{"agent_context": "subagent"}, {"agent_context": "cron"}, {"agent_context": "flush"},
@@ -512,12 +537,14 @@ class Gateway(Hermes):
         hooks = self.ctx.hooks
         hooks["post_tool_call"](tool_name="read_file", args={}, result="{}", session_id="host-session")
         self.assertNotEqual(self.events()[-1], "PostToolUse")
-        hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
-                                session_id="host-session", tool_call_id="call-1", status="error")
+        terminal = dict(tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                        session_id="host-session", tool_call_id="call-1", status="error")
+        before = len(self.requests)
+        attached = hooks["transform_tool_result"](**terminal)
         self.assertIn("chat_context", self.requests[-1][1])
-        attached = hooks["transform_tool_result"](tool_name="terminal", result='{"exit_code":2}',
-                                                  session_id="host-session", tool_call_id="call-1")
         self.assertEqual(json.loads(attached)["cairn_recall"], "command note")
+        hooks["post_tool_call"](**terminal)
+        self.assertEqual(self.events()[before:], ["PostToolUse"], "one Cairn call per tool call")
 
         before = len(self.requests)
         for details in [{"agent_context": "subagent"}, {"platform": "cron"}, {"agent_context": "flush"}]:
