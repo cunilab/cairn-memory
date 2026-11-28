@@ -1208,10 +1208,16 @@ impl Store {
         };
 
         let terms = "phraseto_tsquery('english', $7)";
-        let exact_command = "m.memory_id IN
-            (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)";
+        // A failure also reaches a memory about a file the command names (`python3 src/a.py`).
+        let candidates = if phrase.is_some() {
+            "m.memory_id IN (SELECT memory_id FROM entities
+                WHERE (kind = 'command' AND name = $3) OR (kind = 'file' AND name = ANY($8)))"
+        } else {
+            "m.memory_id IN
+            (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)"
+        };
         // Three adjacent lexemes keep generic failure lines out of automatic recall. Evidence is
-        // read only here, on the few rows the exact command already matched.
+        // read only here, on the few rows the command or its files already matched.
         let error_match = phrase.map_or_else(String::new, |_| {
             format!(
                 "AND numnode({terms}) >= 5 AND ({}
@@ -1225,7 +1231,7 @@ impl Store {
               WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted}
                 AND (m.scope <> 'project' OR m.project_id = $2)
                 AND m.kind IN ('gotcha', 'procedure') AND m.memory_id <> ALL($4)
-                AND {exact_command} {} {error_match}
+                AND {candidates} {} {error_match}
               ORDER BY (m.kind = 'gotcha') DESC, coalesce(u.helpful, 0) DESC,
                        m.updated_at DESC, m.memory_id
               LIMIT $5",
@@ -1239,7 +1245,7 @@ impl Store {
             .bind(limit as i64)
             .bind(chat_key(chat));
         let query = if let Some(phrase) = phrase {
-            query.bind(phrase)
+            query.bind(phrase).bind(entities::command_files(&command))
         } else {
             query
         };

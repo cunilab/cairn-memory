@@ -221,6 +221,17 @@ pub fn normalize_command(command: &str) -> String {
         .join(" ")
 }
 
+/// The files a command runs or reads, named in its first three words and normalized like file
+/// entities (`python3 ./src/a.py` -> `src/a.py`).
+pub fn command_files(command: &str) -> Vec<String> {
+    normalize_command(command)
+        .split(' ')
+        .skip(1)
+        .filter(|word| looks_like_path(word) || is_bare_file(word))
+        .map(|word| normalize_path(word, None))
+        .collect()
+}
+
 /// Strips the trailing `()`, `!` or `;` of a symbol.
 fn clean_symbol(name: &str) -> String {
     let mut name = name.trim();

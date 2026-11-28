@@ -3510,3 +3510,72 @@ async fn a_python_traceback_recalls_the_gotcha_for_its_exception() {
     );
     assert!(recalled.contains("same error seen before"), "{recalled}");
 }
+
+#[tokio::test]
+async fn a_failed_command_recalls_a_gotcha_by_the_file_it_runs_and_the_error_line() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("file-recall-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:file-recall", Some("File recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    // The live 0.1.12 seed: the gotcha names the file and the error, never the command.
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": "Fail latch needs its pin set",
+        "summary": "RuntimeError: violet latch missing pin until VIOLET_PIN is exported.",
+        "reason": "The latch script reads the pin from the environment on start",
+        "fields": {"symptom": "script exits 1", "cause": "pin unset", "fix": "export VIOLET_PIN"},
+        "evidence": ["src/fail_latch.py"]
+    }));
+    let work = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    store.save(&me, input, &work).await.unwrap();
+    let traceback = "Traceback (most recent call last):\n  File \"src/fail_latch.py\", line 3, in <module>\n    raise RuntimeError(\"violet latch missing pin\")\nRuntimeError: violet latch missing pin\n";
+    let recall = async |session: &str, command: &str, failure: &str| {
+        store
+            .command_recall(&me, session, Some(&project), command, Some(failure))
+            .await
+            .unwrap()
+    };
+    for command in ["python3 src/fail_latch.py", "python3 ./src/fail_latch.py"] {
+        let recalled = recall(command, command, traceback).await;
+        assert!(
+            recalled.contains("Fail latch needs its pin set"),
+            "{command}: {recalled}"
+        );
+    }
+    let other_error =
+        "Traceback (most recent call last):\nKeyError: missing violet config section here\n";
+    assert!(
+        recall("other-error", "python3 src/fail_latch.py", other_error)
+            .await
+            .is_empty()
+    );
+    // Same error, but the command runs another file (and a basename alone is not the file).
+    for command in ["python3 src/other_latch.py", "python3 fail_latch.py"] {
+        assert!(
+            recall(command, command, traceback).await.is_empty(),
+            "{command}"
+        );
+    }
+    // A warning (no failure) still needs the exact command.
+    assert!(
+        store
+            .command_recall(
+                &me,
+                "warn",
+                Some(&project),
+                "python3 src/fail_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
