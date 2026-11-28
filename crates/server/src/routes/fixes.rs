@@ -156,7 +156,7 @@ pub async fn rewrite(
     Path(id): Path<String>,
     Json(body): Json<Rewrite>,
 ) -> ApiResult<Value> {
-    let new = state
+    let (new, replaced) = state
         .store
         .rewrite_memory(
             &admin.person_id,
@@ -170,9 +170,10 @@ pub async fn rewrite(
             },
         )
         .await?;
-    let mut body = json!({"memory_id": new});
-    if new != id {
-        body["superseded"] = json!(id);
+    let mut body = json!({"memory_id": new, "superseded": replaced});
+    // Someone else rewrote this first; their text stays as the previous version.
+    if replaced != id {
+        body["stacked_on"] = json!(replaced);
     }
     Ok(Json(body))
 }

@@ -1486,7 +1486,14 @@ pub struct RewriteText {
 impl Store {
     /// Admin edit retains the owner and provenance, and atomically audits the successor.
     /// A detail-only edit still supersedes: the previous row keeps its detail.
-    pub async fn rewrite_memory(&self, admin: &str, id: &str, text: RewriteText) -> Result<String> {
+    /// A rewrite of a superseded version lands on top of the current one, so a concurrent
+    /// rewrite keeps both texts. Returns the new id and the current version it replaced.
+    pub async fn rewrite_memory(
+        &self,
+        admin: &str,
+        requested: &str,
+        text: RewriteText,
+    ) -> Result<(String, String)> {
         let RewriteText {
             title,
             summary,
@@ -1498,19 +1505,43 @@ impl Store {
         let row = sqlx::query(&format!(
             "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
         ))
-        .bind(id)
+        .bind(requested)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
-        let old = memory_from_row(&row)?;
+        let mut old = memory_from_row(&row)?;
         if old.status == Status::Forgotten {
             return Err(StoreError::Conflict(
                 "forgotten memories cannot be rewritten".into(),
             ));
         }
         if old.status == Status::Superseded {
-            return Err(StoreError::Conflict("rewrite the current version".into()));
+            let head: String = sqlx::query_scalar(
+                "WITH RECURSIVE chain(id) AS (
+                     SELECT $1::text
+                     UNION SELECT l.source_id FROM links l JOIN chain c ON l.target_id = c.id
+                       JOIN memories s ON s.memory_id = l.source_id
+                      WHERE l.relation = 'supersedes' AND s.status <> 'forgotten')
+                 SELECT m.memory_id FROM chain JOIN memories m ON m.memory_id = chain.id
+                  WHERE m.status IN ('active','stale') ORDER BY m.created_at DESC LIMIT 1",
+            )
+            .bind(requested)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::Conflict("rewrite the current version".into()))?;
+            let row = sqlx::query(&format!(
+                "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
+            ))
+            .bind(&head)
+            .fetch_one(&mut *tx)
+            .await?;
+            old = memory_from_row(&row)?;
+            if !matches!(old.status, Status::Active | Status::Stale) {
+                return Err(StoreError::Conflict("rewrite the current version".into()));
+            }
         }
+        let id = old.id.clone();
+        let id = id.as_str();
         let context = WorkContext {
             project_id: old.project_id.clone(),
             repository: old.context.repo.clone(),
@@ -1549,11 +1580,26 @@ impl Store {
                 "nothing to rewrite: title, summary and fields are unchanged".into(),
             ));
         }
-        if prepared.identity_hash == old.identity_hash {
-            // Detail is not part of identity. Free the slot so the successor can take it.
-            let retired = cairn_core::id::sha256_hex(&["superseded", id, &old.identity_hash]);
+        // Detail is not part of identity, and a rewrite may return to an older version's text.
+        // Free the slot held by this version or a superseded one so the successor can take it.
+        let holder: Option<(String, String)> = sqlx::query_as(
+            "SELECT memory_id, status FROM memories
+              WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '')
+                AND identity_hash = $4 FOR UPDATE",
+        )
+        .bind(&old.owner)
+        .bind(old.scope.as_str())
+        .bind(old.project_id.as_deref())
+        .bind(&prepared.identity_hash)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((holder, status)) = holder
+            && (holder == id || status == Status::Superseded.as_str())
+        {
+            let retired =
+                cairn_core::id::sha256_hex(&["superseded", &holder, &prepared.identity_hash]);
             sqlx::query("UPDATE memories SET identity_hash=$2 WHERE memory_id=$1")
-                .bind(id)
+                .bind(&holder)
                 .bind(retired)
                 .execute(&mut *tx)
                 .await?;
@@ -1584,11 +1630,15 @@ impl Store {
             None,
             "memory_rewritten_by_admin",
             Some(id),
-            serde_json::json!({"old_id":id,"new_id":saved.id}),
+            if id == requested {
+                serde_json::json!({"old_id":id,"new_id":saved.id})
+            } else {
+                serde_json::json!({"old_id":id,"new_id":saved.id,"requested_id":requested})
+            },
         )
         .await?;
         tx.commit().await?;
-        Ok(saved.id)
+        Ok((saved.id, id.to_owned()))
     }
 }
 

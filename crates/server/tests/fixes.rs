@@ -145,9 +145,135 @@ async fn admin_rewrite() {
         .await
         .unwrap();
     assert_eq!(origin, "agent");
-    let (status, earlier) = app.send("POST", &format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), Some(&admin)).await;
-    assert_eq!(status, 409);
-    assert_eq!(earlier["error"], "rewrite the current version");
+    // A rewrite of the old version lands on top of the current one.
+    let earlier = app.post(&format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), &admin).await;
+    assert_eq!(earlier["stacked_on"], new);
+    assert_eq!(earlier["superseded"], new);
+    app.finish().await;
+}
+
+/// U-125: two admin sessions rewrite the same version at once; both texts stay as versions.
+#[tokio::test]
+async fn concurrent_rewrites_keep_both() {
+    let Some(app) = App::new().await else { return };
+    let alice = app.admin("alice").await;
+    let bob = app
+        .post(
+            "auth/login",
+            json!({"email":"alice@example.test","password":common::PASSWORD}),
+            "",
+        )
+        .await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner = app.member(&alice, "owner").await;
+    let outsider = app.member(&alice, "outsider").await;
+    let device = app.device(&owner, "agent").await;
+    let project = app.project(&device, "example.test/rewrite-race").await;
+    let original = app.save(&device, json!({"kind":"fact","scope":"project","title":"Original race fact","summary":"A project fact both admins rewrite","reason":"Verified test evidence","detail":"Original detail.","context":{"project_id":project}})).await;
+    let path = format!("admin/memories/{original}/rewrite");
+    let ((alice_status, alice_body), (bob_status, bob_body)) = tokio::join!(
+        app.send("POST", &path, json!({"title":"Alice race fact","summary":"Alice rewrote the project fact","reason":"Verified correction"}), Some(&alice)),
+        app.send("POST", &path, json!({"title":"Bob race fact","summary":"Bob rewrote the project fact","reason":"Verified correction"}), Some(&bob)),
+    );
+    assert_eq!(
+        (alice_status, bob_status),
+        (200, 200),
+        "{alice_body} {bob_body}"
+    );
+    let (first, second) = if alice_body.get("stacked_on").is_some() {
+        (bob_body, alice_body)
+    } else {
+        (alice_body, bob_body)
+    };
+    let first_id = first["memory_id"].as_str().unwrap().to_owned();
+    let second_id = second["memory_id"].as_str().unwrap().to_owned();
+    assert_eq!(first["superseded"], original);
+    assert!(first.get("stacked_on").is_none());
+    assert_eq!(second["stacked_on"], first_id);
+    let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT memory_id, status, title, owner_id, scope || ':' || coalesce(project_id,''), edited_by FROM memories WHERE memory_id = ANY($1) ORDER BY created_at",
+    )
+    .bind(vec![original.clone(), first_id.clone(), second_id.clone()])
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|r| r.1.as_str()).collect::<Vec<_>>(),
+        ["superseded", "superseded", "active"]
+    );
+    let titles: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
+    assert!(titles.contains(&"Alice race fact") && titles.contains(&"Bob race fact"));
+    assert!(rows.iter().all(|r| r.3 == rows[0].3 && r.4 == rows[0].4));
+    assert!(rows[1].5.is_some() && rows[2].5.is_some());
+    let links: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id FROM links WHERE relation='supersedes' AND target_id = ANY($1) ORDER BY source_id",
+    )
+    .bind(vec![original.clone(), first_id.clone()])
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    let mut expected = vec![
+        (first_id.clone(), original.clone()),
+        (second_id.clone(), first_id.clone()),
+    ];
+    expected.sort();
+    assert_eq!(links, expected);
+    let stacked: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action='memory_rewritten_by_admin' AND metadata = $1")
+        .bind(json!({"old_id":first_id,"new_id":second_id,"requested_id":original}))
+        .fetch_one(app.db.store.pool()).await.unwrap();
+    assert_eq!(stacked, 1);
+    for id in [&original, &first_id, &second_id] {
+        app.get(&format!("memories/{id}"), &owner).await;
+        let (status, _) = app
+            .send(
+                "GET",
+                &format!("memories/{id}"),
+                json!(null),
+                Some(&outsider),
+            )
+            .await;
+        assert_eq!(status, 404);
+    }
+
+    // Bob keeps the original title and changes only the detail, while Alice's version holds a new
+    // title: his text matches the superseded original, whose identity is retired instead of a 409.
+    let third = app.post(&path, json!({"title":"Original race fact","summary":"A project fact both admins rewrite","reason":"Verified correction","detail":"Bob's detail."}), &bob).await;
+    let third_id = third["memory_id"].as_str().unwrap();
+    assert_eq!(third["stacked_on"], second_id);
+    let (status, detail): (String, String) =
+        sqlx::query_as("SELECT status, detail FROM memories WHERE memory_id=$1")
+            .bind(third_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        (status.as_str(), detail.as_str()),
+        ("active", "Bob's detail.")
+    );
+    let current: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE memory_id = ANY($1) AND status IN ('active','stale')",
+    )
+    .bind(vec![
+        original.clone(),
+        first_id,
+        second_id,
+        third_id.to_owned(),
+    ])
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(current, 1, "agents see one current version");
+    let hashes: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT identity_hash) FROM memories WHERE memory_id = ANY($1)",
+    )
+    .bind(vec![original, third_id.to_owned()])
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(hashes, 2);
     app.finish().await;
 }
 

@@ -414,12 +414,13 @@ export function MemorySheet() {
     if (!id || memory?.project_archived) return;
     setPending(true);
     try {
-      const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, detail, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
+      const result = await cairn<{memory_id: string; stacked_on?: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, detail, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
       setEditingId(null);
       setAttempt((n) => n + 1);
       announceMemoriesChanged();
       set({ memory: result.memory_id }, "push");
-      toast.success("Memory rewritten");
+      if (result.stacked_on) toast.warning("Someone rewrote this first. Your text is now current; theirs is kept as the previous version.");
+      else toast.success("Memory rewritten");
     } catch (cause) { toast.error(cause instanceof Error ? cause.message : "Could not rewrite memory."); }
     finally { setPending(false); }
   }
