@@ -11,7 +11,7 @@ A [gateway](../../glossary.md#gateway) gives Hermes a dedicated messaging profil
 
 ## Hermes gateway
 
-Prerequisites: Dedicated Hermes profile with `plugins.isolation: in_process`, Hermes v2026.4.23+, Cairn CLI 0.1.11+, and Cairn server 0.1.10+.
+Prerequisites: Dedicated Hermes profile with `plugins.isolation: in_process`, Hermes v2026.4.23+, Cairn CLI 0.1.11+, and a Cairn server no older than the CLI ([upgrade together](../upgrade.md)).
 
 ```sh
 HERMES_HOME=/path/to/gateway/profile cairn setup hermes --gateway
