@@ -33,9 +33,9 @@ const PATTERNS: &[(&str, &str)] = &[
         r#"(?i)\b(authorization\s*:\s*(?:bearer|basic|token|digest))\s+[^\s"']+"#,
         "${1} [REDACTED]",
     ),
-    // A bare or quoted-header `Bearer <token>`; the digit keeps prose ("a Bearer token.") as is.
+    // A bare or quoted-header `Bearer <token>` with a digit or 20+ characters; prose ("a Bearer token.") stays.
     (
-        r"(?i)\b(bearer)\s+[A-Za-z._~+/-]*[0-9][A-Za-z0-9._~+/-]*=*",
+        r"(?i)\b(bearer)\s+(?:[A-Za-z._~+/-]*[0-9][A-Za-z0-9._~+/-]*|[A-Za-z0-9._~+/-]{20,})=*",
         "${1} [REDACTED]",
     ),
     (
@@ -292,11 +292,17 @@ mod tests {
         let out = redact_sensitive_content("token=abc, disk-full ok sk-short");
         assert_eq!(out, "token=[REDACTED], disk-full ok sk-short");
         assert!(redact_sensitive_content("Authorization: Bearer xyz").ends_with(REDACTED));
-        // Prose about bearer tokens has no digit in the next word and stays.
+        assert_eq!(
+            redact_sensitive_content("use Bearer abcdefghijklmnopqrstuvwxyz now"),
+            "use Bearer [REDACTED] now"
+        );
+        // Prose about bearer tokens: no digit and under 20 characters in the next word, so it stays.
         for plain in [
             "Send a Bearer token.",
+            "use a Bearer token",
             "Bearer authentication is used",
             "the bearer of news",
+            "Bearer abcdefghijklmnopqrs here",
         ] {
             assert_eq!(redact_sensitive_content(plain), plain);
         }

@@ -45,7 +45,7 @@ The hook and server execute 19 ordered regex patterns replacing secrets with `[R
 
 1. PEM private key blocks (`-----BEGIN ... PRIVATE KEY-----`)
 2. Bearer, Basic, and Token Authorization headers
-3. A bare or quoted `Bearer <token>` whose token has a digit
+3. A bare or quoted `Bearer <token>` whose token has a digit or 20+ characters
 4. Userinfo in connection URLs (`scheme://user:pass@host`)
 5. Password and token CLI arguments (`--password`, `--token`, `--api-key`)
 6. Configuration key-value assignments (`DB_PASSWORD=...`, `"token": "..."`)
