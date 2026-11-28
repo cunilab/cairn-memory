@@ -11,6 +11,7 @@ Version history, breaking changes, database migrations, and upgrade instructions
 
 | Version | Key changes | Upgrade check |
 | --- | --- | --- |
+| [0.1.12](0.1.12.md) | Hermes gateway tools, improved agent handoffs and recall, larger memory text limits | Migrations 0026–0028; upgrade server and clients together. |
 | [0.1.11](0.1.11.md) | Hermes memory provider, profile cleanup on removal, Dependabot resolution | Requires Hermes ≥ v2026.4.23; refresh each active profile. |
 | [0.1.10](0.1.10.md) | Layered recall (L0–L3), memory trust, pins, global skill library, Claude import | 11 startup migrations; refresh client hooks and instructions. |
 | [0.1.9](0.1.9.md) | Project handoffs, non-Git init, Stop reminder notes, automated Fixes, aliases | 9 startup migrations; run `cairn setup <agent>` after update. |
