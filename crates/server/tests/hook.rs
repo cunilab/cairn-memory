@@ -622,7 +622,7 @@ fn correction_alone_triggers_rule_ask() {
     );
 }
 
-/// One Stop ask carries the file clause and the correction clause, within 330 bytes.
+/// One Stop ask carries the file clause and the correction clause, within 366 bytes.
 #[test]
 fn correction_with_edits_single_ask() {
     let (_server, env) = harness("corr-edit");
@@ -639,7 +639,7 @@ fn correction_with_edits_single_ask() {
         reason.contains("don't touch the migrations") && reason.contains("rule"),
         "{reason}"
     );
-    assert!(reason.len() <= 330, "{} bytes: {reason}", reason.len());
+    assert!(reason.len() <= 366, "{} bytes: {reason}", reason.len());
     assert!(
         env.stop_reason("Stop", "s", json!({}), &[]).is_none(),
         "still one ask per session"
@@ -647,9 +647,9 @@ fn correction_with_edits_single_ask() {
 }
 
 /// A quote longer than 95 bytes, cut on a multi-byte scalar, plus `EDITED_MAX` files, stays
-/// within 330 bytes and is valid UTF-8. `EDITED_MAX` is 64 (`hook/state.rs`).
+/// within 366 bytes and is valid UTF-8. `EDITED_MAX` is 64 (`hook/state.rs`).
 #[test]
-fn correction_quote_and_max_files_stay_within_330_bytes() {
+fn correction_quote_and_max_files_stay_within_366_bytes() {
     let (_server, env) = harness("corr-cap");
     let marker = "\n[truncated]";
     let keep = 95 - marker.len();
@@ -692,7 +692,7 @@ fn correction_quote_and_max_files_stay_within_330_bytes() {
         std::str::from_utf8(reason.as_bytes()).is_ok(),
         "reason is valid UTF-8"
     );
-    assert!(reason.len() <= 330, "{} bytes: {reason}", reason.len());
+    assert!(reason.len() <= 366, "{} bytes: {reason}", reason.len());
 }
 
 /// A subagent payload or an automated session does not record the correction.

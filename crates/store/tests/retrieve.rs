@@ -1789,7 +1789,8 @@ async fn digest_searchable_not_in_brief() {
         .await
         .unwrap()
         .text;
-    assert!(!brief.contains("LedControls"), "{brief}");
+    // The digest stays out of the brief; the personal handoff may name the edited files.
+    assert!(!brief.contains("Changed LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
         .search(
