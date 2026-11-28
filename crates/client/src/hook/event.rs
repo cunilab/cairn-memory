@@ -90,8 +90,12 @@ impl Payload {
                     }
                     _ => {}
                 }
-                if let Some(error) = self.text("error_message") {
-                    fields.insert("stderr".into(), Value::from(error));
+                // A non-zero exit arrives as `error_message: "exit 1"`; the output stays the evidence.
+                let reported = fields.get("error").and_then(Value::as_str);
+                if let Some(error) = self.text("error_message")
+                    && reported.is_none_or(|text| text.trim().is_empty())
+                {
+                    fields.insert("error".into(), Value::from(error));
                 }
             }
             self.0.insert("tool_response".into(), response);
@@ -582,34 +586,48 @@ impl Tool<'_> {
             return None;
         }
         Some(
-            ["stderr", "stdout", "output_for_prompt", "output", "error"]
-                .iter()
-                .filter_map(|key| self.response_field(key)?.as_str())
-                .chain(self.response.and_then(Value::as_str))
-                .chain(self.error)
-                .map(|text| {
-                    let first = text.lines().next().unwrap_or_default();
-                    if ["Exit code ", "exit status "].iter().any(|prefix| {
-                        first
-                            .strip_prefix(prefix)
-                            .is_some_and(|code| code.parse::<i64>().is_ok())
-                    }) {
-                        return text.get(first.len()..).unwrap_or_default().trim_start();
-                    }
-                    text
-                })
+            self.result_texts(self.error)
                 .find(|text| !text.trim().is_empty())
                 .unwrap_or_default(),
         )
     }
 
-    fn first_error_line(&self) -> Option<String> {
-        ["stderr", "stdout"]
+    /// The result's text fields, each without a leading `Exit code N`, `exit status N` or Grok's
+    /// `exit: N` line.
+    fn result_texts<'b>(&'b self, error: Option<&'b str>) -> impl Iterator<Item = &'b str> {
+        ["stderr", "stdout", "output_for_prompt", "output", "error"]
             .iter()
             .filter_map(|key| self.response_field(key)?.as_str())
             .chain(self.response.and_then(Value::as_str))
-            .chain(self.error.filter(|_| self.antigravity_ok.is_some()))
-            .find_map(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+            .chain(error)
+            .map(|text| {
+                let first = text.lines().next().unwrap_or_default();
+                if ["Exit code ", "exit status ", "exit: "]
+                    .iter()
+                    .any(|prefix| {
+                        first
+                            .strip_prefix(prefix)
+                            .is_some_and(|code| code.parse::<i64>().is_ok())
+                    })
+                {
+                    return text.get(first.len()..).unwrap_or_default().trim_start();
+                }
+                text
+            })
+    }
+
+    fn first_error_line(&self) -> Option<String> {
+        fn first_line(text: &str) -> Option<&str> {
+            text.lines().map(str::trim).find(|line| !line.is_empty())
+        }
+        // Antigravity's `error` (`exit status 1`) is the whole message, so it keeps its exit words.
+        self.result_texts(None)
+            .find_map(first_line)
+            .or_else(|| {
+                self.error
+                    .filter(|_| self.antigravity_ok.is_some())
+                    .and_then(first_line)
+            })
             .map(|line| truncate(&redact_sensitive_content(line), ERROR_LINE_MAX_BYTES).to_owned())
     }
 }
@@ -671,6 +689,49 @@ mod tests {
         assert_eq!(capture.content, "cargo test\nexit 101: error[E0432]: nope");
         assert_eq!(capture.ok, Some(false));
         assert_eq!(capture.commands, ["cargo test"]);
+    }
+
+    const TRACEBACK: &str = "Traceback (most recent call last):\n  File \"src/fail_latch.py\", line 3, in <module>\n    raise RuntimeError(\"violet latch missing pin\")\nRuntimeError: violet latch missing pin\n";
+
+    #[test]
+    fn grok_shell_output_gives_the_error_line_without_its_exit_line() {
+        // Grok 1.0.92's `run_terminal_command` result (session record): `output` is bytes.
+        let p = payload(json!({"toolName": "run_terminal_command",
+            "toolInput": {"command": "python3 src/fail_latch.py", "description": "Run it"},
+            "toolResult": {"type": "Bash", "output": [84, 114], "output_for_prompt": format!("exit: 1\n{TRACEBACK}"),
+                           "exit_code": 1, "command": "python3 src/fail_latch.py", "truncated": false,
+                           "signal": null, "timed_out": false, "current_dir": "/w", "total_bytes": 160}}));
+        let tool = p.tool().unwrap();
+        assert_eq!(tool.failure_text(false), Some(TRACEBACK));
+        assert_eq!(
+            tool.command().unwrap().content,
+            "python3 src/fail_latch.py\nexit 1: Traceback (most recent call last):"
+        );
+    }
+
+    #[test]
+    fn hermes_exit_message_does_not_hide_the_terminal_output() {
+        // Hermes v0.23.5: `terminal` returns output/exit_code/error, and post_tool_call reports a
+        // non-zero exit as status "error" with error_message "exit 1" (agent/display.py).
+        let mut p = payload(json!({"tool_name": "terminal", "tool_call_id": "c1",
+            "args": {"command": "python3 src/fail_latch.py"},
+            "result": json!({"output": TRACEBACK, "exit_code": 1, "error": null}).to_string(),
+            "status": "error", "error_type": "tool_error", "error_message": "exit 1"}));
+        p.normalize_hermes();
+        let tool = p.tool().unwrap();
+        assert_eq!(tool.failure_text(false), Some(TRACEBACK));
+        assert_eq!(
+            tool.command().unwrap().content,
+            "python3 src/fail_latch.py\nexit 1: Traceback (most recent call last):"
+        );
+        // A result with no output keeps the reported error.
+        let mut p = payload(
+            json!({"tool_name": "terminal", "args": {"command": "cargo test"},
+            "result": r#"{"exit_code":101,"output":"","error":null}"#, "status": "error",
+            "error_message": "first error"}),
+        );
+        p.normalize_hermes();
+        assert_eq!(p.tool().unwrap().failure_text(false), Some("first error"));
     }
 
     #[test]
