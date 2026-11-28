@@ -32,7 +32,7 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 | --- | --- | --- | --- |
 | `memory_search` | `POST /search` | `query` (str), `kind` (str), `limit` (int 1–20, default 5), optional `recorded_from`, `recorded_to`, `branch`, `version`, `projects` (up to 5 ids) | Hybrid search. A card may include `why` and, for a project memory, `project`. Dates are explicit arguments, not guessed from the query. `projects` is refused when the caller is not a member. |
 | `memory_get` | `POST /get` | `ids` (list 1–10), `detail` (bool, default false), optional `field`, `timeline` (one id) | Retrieve records. `field` keeps one key. `timeline` is a short supersedes chain. |
-| `memory_save` | `POST /remember` | `kind`, `title` (≤80B), `summary` (≤240B), `reason`, `detail` (≤8KB), `fields`, `evidence`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` | Save or update a memory record (validates quality) |
+| `memory_save` | `POST /remember` | `kind`, `title` (≤80 characters), `summary` (≤240 characters), `reason`, `detail` (≤8,000 characters), `fields`, `evidence`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` | Save or update a memory record (validates quality) |
 | `memory_feedback` | `POST /feedback` | `id` (str), `vote` (`helpful` \| `wrong`) | Vote on memory accuracy to adjust confidence rankings |
 | `memory_forget` | `POST /forget` | `id` (str) | Hide an owned memory from normal recall |
 | `skill_search` | `POST /skills/search` | `query` (str), `limit` (int 1–20), `offset` (int) | Search global shared skill library |
@@ -42,7 +42,7 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 
 ### Quality validation & defaults
 
-- **Reason requirement**: `reason` (≥ 20 chars) is mandatory for all kinds except `note`.
+- **Reason requirement**: for every kind except `note`, an empty `reason` is rejected and one under 10 characters is refused. Under 20 characters the save succeeds with a coaching hint.
 - **Corrections**: Save with `supersedes: "<old_id>"` to replace an owned or same-project memory.
 - **Default scope**: `preference` and `note` default to `personal`. Other kinds default to `project` if the caller belongs to the active project context, otherwise `personal`.
 
