@@ -387,6 +387,7 @@ impl Store {
                     &WorkContext::default(),
                     SaveSource::System,
                     None,
+                    None,
                 )
                 .await?
                 .id

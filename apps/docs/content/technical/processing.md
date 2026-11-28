@@ -13,7 +13,7 @@ description: "Follow typed captures through checkpoints, distillation, retrieval
 
 - **Session boundaries**: Triggered at checkpoints (`Stop`, `PreCompact`) and session termination (`SessionEnd`).
 - **Scope resolution**: Sessions touching multiple projects distill each attachment independently; indeterminate cohorts stay personal.
-- **Handoff generation**: Preserves explicit `next:` and `todo:` steps and records the final execution outcome of test commands. Short chats or automated sessions (`CAIRN_SESSION_ORIGIN=automation`) do not overwrite useful developer handoffs.
+- **Handoff generation**: The summary names the task (the first line of the session's first request of three or more words, up to 100 characters), the edited files (three by name, then a count), the last command and whether it passed, the open-item count and the date, for example `Task: Fix queue.py so it prints ok. Edited queue.py; last run `python3 queue.py` passed; 0 open items; last activity 2026-11-28.` The task gets only the room left after the other parts, within 240 characters. Next steps are the agent's `Next:` lines from its final message when it wrote any, else explicit `next:` and `todo:` prompt lines, else `Last request: <line>` when a later request differs from the task. Open questions are the agent's `Open:` lines when present, else prompt lines with markers such as `todo` or `blocked`, followed by commands that are still failing. Short chats or automated sessions (`CAIRN_SESSION_ORIGIN=automation`) do not overwrite useful developer handoffs.
 - **Observation privacy**: Raw observations expire after 30 days and are never exposed to memory search.
 
 ## Durable jobs

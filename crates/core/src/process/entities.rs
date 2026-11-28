@@ -15,6 +15,15 @@ const GENERIC_MODULES: [&str; 5] = ["src", "lib", "app", "crates", "packages"];
 /// bare text; the parent directory of every file last. Deduplicated, capped at 32 (first wins).
 /// The one function behind save, link jobs and the search entity channel.
 pub fn derive(texts: &[&str], context: &WorkContext) -> Vec<Entity> {
+    derive_with_evidence(texts, &[], context)
+}
+
+/// `derive`, plus the files and commands an evidence list names, after the text's own entities.
+pub fn derive_with_evidence(
+    texts: &[&str],
+    evidence: &[String],
+    context: &WorkContext,
+) -> Vec<Entity> {
     let mut out: Vec<Entity> = Vec::new();
     let worktree = context
         .worktree
@@ -51,6 +60,9 @@ pub fn derive(texts: &[&str], context: &WorkContext) -> Vec<Entity> {
                 }
             }
         }
+    }
+    for item in evidence {
+        push_evidence(&mut out, item, worktree.as_deref());
     }
     let modules: Vec<String> = out
         .iter()
@@ -120,6 +132,52 @@ fn push_code(out: &mut Vec<Entity>, code: &str, worktree: Option<&str>) {
     }
 }
 
+/// One evidence item, read as a reference: a file (`queue.py`, `src/a.rs:12`) or a command that
+/// starts with a known program. Anything else (URLs, commit ids, prose) adds nothing.
+fn push_evidence(out: &mut Vec<Entity>, item: &str, worktree: Option<&str>) {
+    let item = item.trim();
+    if item.contains("://") {
+        return;
+    }
+    // `path:line` and `path:line:column` name the file.
+    let mut file = item;
+    while let Some((head, tail)) = file.rsplit_once(':') {
+        if tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit()) {
+            break;
+        }
+        file = head;
+    }
+    if looks_like_path(file) || is_bare_file(file) {
+        push_file(out, &normalize_path(file, worktree));
+        return;
+    }
+    let command = normalize_command(item);
+    if command.contains(' ')
+        && command
+            .split(' ')
+            .next()
+            .is_some_and(|program| COMMAND_PROGRAMS.contains(&program))
+    {
+        push(out, EntityKind::Command, command);
+    }
+}
+
+/// `queue.py` or `Cargo.toml`: one file name with a short extension and a letter in its stem,
+/// so versions such as `0.1.12` are not files.
+fn is_bare_file(word: &str) -> bool {
+    let Some((stem, ext)) = word.rsplit_once('.') else {
+        return false;
+    };
+    !word.contains('/')
+        && stem.chars().any(|c| c.is_ascii_alphabetic())
+        && (1..=5).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        && ext.chars().any(|c| c.is_ascii_alphabetic())
+        && word
+            .chars()
+            .all(|c| c.is_alphanumeric() || "._-".contains(c))
+}
+
 /// Bare prose: paths and symbols only, never inside a URL and never a word of 3 characters or fewer.
 fn push_word(out: &mut Vec<Entity>, word: &str, worktree: Option<&str>) {
     // Only the end loses `.`: a leading one is part of a dot directory (`.cairn/project.json`).
@@ -161,6 +219,17 @@ pub fn normalize_command(command: &str) -> String {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The files a command runs or reads, named in its first three words and normalized like file
+/// entities (`python3 ./src/a.py` -> `src/a.py`).
+pub fn command_files(command: &str) -> Vec<String> {
+    normalize_command(command)
+        .split(' ')
+        .skip(1)
+        .filter(|word| looks_like_path(word) || is_bare_file(word))
+        .map(|word| normalize_path(word, None))
+        .collect()
 }
 
 /// Strips the trailing `()`, `!` or `;` of a symbol.
@@ -257,6 +326,37 @@ mod tests {
 
     fn names(entities: &[Entity]) -> Vec<(EntityKind, &str)> {
         entities.iter().map(|e| (e.kind, e.name.as_str())).collect()
+    }
+
+    #[test]
+    fn evidence_names_files_and_commands_after_the_text() {
+        let context = WorkContext {
+            worktree: Some("/w/repo".into()),
+            ..WorkContext::default()
+        };
+        let evidence: Vec<String> = [
+            "python3 violet_latch.py",
+            "queue.py",
+            "/w/repo/src/a.rs:12:4",
+            "https://x.io/a.py",
+            "commit 1a2b3c4",
+            "0.1.12",
+            "see the log",
+            "deadbeefcafe",
+        ]
+        .map(String::from)
+        .to_vec();
+        let got = derive_with_evidence(&["Use `Store::save`"], &evidence, &context);
+        assert_eq!(
+            names(&got),
+            vec![
+                (EntityKind::Symbol, "Store::save"),
+                (EntityKind::Command, "python3 violet_latch.py"),
+                (EntityKind::File, "queue.py"),
+                (EntityKind::File, "src/a.rs"),
+            ]
+        );
+        assert_eq!(derive(&["Use `Store::save`"], &context).len(), 1);
     }
 
     #[test]

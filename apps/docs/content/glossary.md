@@ -173,11 +173,11 @@ Opening context supplied to a supported agent. Pins lead the brief, followed by 
 
 ### L0 Identity
 
-Personal and current-project pins, oldest first, at the start of the brief.
+Personal and current-project pins, split evenly between both scopes with spillover and ordered oldest first within each, at the start of the brief.
 
 ### L1 Essential
 
-Checkout handoff, personal preferences, and eligible project rules, decisions, and gotchas. Proven records have priority.
+Checkout handoff, personal preferences and rules, and eligible project rules, decisions, and gotchas. Proven records have priority.
 
 ### L2 Contextual
 

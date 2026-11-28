@@ -3,12 +3,15 @@
 use super::readonly::{canonical_tool, is_read_only_tool, shell_command_is_readonly};
 use cairn_core::capture::{CaptureKind, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
+use cairn_core::process::distill::agent_label;
 use serde_json::{Map, Value};
 
 const PROMPT_MAX_BYTES: usize = 8 * 1024;
 const EXCERPT_MAX_BYTES: usize = 1024;
 const COMMAND_MAX_BYTES: usize = 1024;
 const ERROR_LINE_MAX_BYTES: usize = 200;
+/// `Next:`/`Open:` lines kept from one final message.
+const AGENT_LINES_MAX: usize = 10;
 const MARKER: &str = "\n[truncated]";
 const WORK_TOOLS: [&str; 5] = ["Bash", "Edit", "Write", "MultiEdit", "apply_patch"];
 const FILE_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "apply_patch"];
@@ -87,8 +90,12 @@ impl Payload {
                     }
                     _ => {}
                 }
-                if let Some(error) = self.text("error_message") {
-                    fields.insert("stderr".into(), Value::from(error));
+                // A non-zero exit arrives as `error_message: "exit 1"`; the output stays the evidence.
+                let reported = fields.get("error").and_then(Value::as_str);
+                if let Some(error) = self.text("error_message")
+                    && reported.is_none_or(|text| text.trim().is_empty())
+                {
+                    fields.insert("error".into(), Value::from(error));
                 }
             }
             self.0.insert("tool_response".into(), response);
@@ -140,6 +147,23 @@ impl Payload {
             .text("tool_name")
             .or_else(|| self.text("toolName"))
             .or_else(|| call?.get("name")?.as_str())?;
+        let input = self
+            .0
+            .get("tool_input")
+            .or_else(|| self.0.get("toolInput"))
+            .or_else(|| call?.get("args"))
+            .and_then(Value::as_object);
+        // Grok calls MCP tools through `use_tool` with the catalog key and the real input inside.
+        let (name, input) = match input
+            .filter(|_| name == "use_tool")
+            .and_then(|inner| Some((inner.get("tool_name")?.as_str()?, inner)))
+        {
+            Some((inner_name, inner)) => (
+                inner_name,
+                inner.get("tool_input").and_then(Value::as_object),
+            ),
+            None => (name, input),
+        };
         let name = name
             .strip_prefix("cairn__")
             .or_else(|| name.strip_prefix("mcp_cairn_"))
@@ -150,12 +174,7 @@ impl Payload {
             );
         Some(Tool {
             name,
-            input: self
-                .0
-                .get("tool_input")
-                .or_else(|| self.0.get("toolInput"))
-                .or_else(|| call?.get("args"))
-                .and_then(Value::as_object),
+            input,
             response: self
                 .0
                 .get("tool_response")
@@ -177,6 +196,24 @@ impl Payload {
             CaptureKind::Prompt,
             text_of(prompt, PROMPT_MAX_BYTES),
         ))
+    }
+
+    /// `kind=assistant` with only the final message's `Next:`/`Open:` lines (redacted), which
+    /// the handoff reads; the rest of the message is not sent.
+    pub fn agent_lines(&self) -> Option<Capture> {
+        let message = self.assistant()?;
+        let lines: Vec<&str> = message
+            .content
+            .lines()
+            .filter(|line| agent_label(line).is_some())
+            .take(AGENT_LINES_MAX)
+            .collect();
+        (!lines.is_empty()).then(|| {
+            Capture::new(
+                CaptureKind::Assistant,
+                clip(&lines.join("\n"), EXCERPT_MAX_BYTES),
+            )
+        })
     }
 
     /// `kind=assistant`; the caller decides whether `CAIRN_CAPTURE_ASSISTANT` allows it.
@@ -276,6 +313,13 @@ impl Tool<'_> {
 
     fn mcp_response(&self) -> Option<Value> {
         let response = self.response?;
+        // Grok: `{"type":"MCP","output":{"OkayOutput":"<the JSON text>"}}`.
+        if let Some(text) = response
+            .pointer("/output/OkayOutput")
+            .and_then(Value::as_str)
+        {
+            return serde_json::from_str(text).ok();
+        }
         if ["isError", "is_error"]
             .iter()
             .any(|key| response.get(key).and_then(Value::as_bool) == Some(true))
@@ -416,6 +460,7 @@ impl Tool<'_> {
             "file_path",
             "filePath",
             "path",
+            "target_file",
             "TargetFile",
             "AbsolutePath",
         ]
@@ -541,34 +586,48 @@ impl Tool<'_> {
             return None;
         }
         Some(
-            ["stderr", "stdout", "output_for_prompt", "output", "error"]
-                .iter()
-                .filter_map(|key| self.response_field(key)?.as_str())
-                .chain(self.response.and_then(Value::as_str))
-                .chain(self.error)
-                .map(|text| {
-                    let first = text.lines().next().unwrap_or_default();
-                    if ["Exit code ", "exit status "].iter().any(|prefix| {
-                        first
-                            .strip_prefix(prefix)
-                            .is_some_and(|code| code.parse::<i64>().is_ok())
-                    }) {
-                        return text.get(first.len()..).unwrap_or_default().trim_start();
-                    }
-                    text
-                })
+            self.result_texts(self.error)
                 .find(|text| !text.trim().is_empty())
                 .unwrap_or_default(),
         )
     }
 
-    fn first_error_line(&self) -> Option<String> {
-        ["stderr", "stdout"]
+    /// The result's text fields, each without a leading `Exit code N`, `exit status N` or Grok's
+    /// `exit: N` line.
+    fn result_texts<'b>(&'b self, error: Option<&'b str>) -> impl Iterator<Item = &'b str> {
+        ["stderr", "stdout", "output_for_prompt", "output", "error"]
             .iter()
             .filter_map(|key| self.response_field(key)?.as_str())
             .chain(self.response.and_then(Value::as_str))
-            .chain(self.error.filter(|_| self.antigravity_ok.is_some()))
-            .find_map(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+            .chain(error)
+            .map(|text| {
+                let first = text.lines().next().unwrap_or_default();
+                if ["Exit code ", "exit status ", "exit: "]
+                    .iter()
+                    .any(|prefix| {
+                        first
+                            .strip_prefix(prefix)
+                            .is_some_and(|code| code.parse::<i64>().is_ok())
+                    })
+                {
+                    return text.get(first.len()..).unwrap_or_default().trim_start();
+                }
+                text
+            })
+    }
+
+    fn first_error_line(&self) -> Option<String> {
+        fn first_line(text: &str) -> Option<&str> {
+            text.lines().map(str::trim).find(|line| !line.is_empty())
+        }
+        // Antigravity's `error` (`exit status 1`) is the whole message, so it keeps its exit words.
+        self.result_texts(None)
+            .find_map(first_line)
+            .or_else(|| {
+                self.error
+                    .filter(|_| self.antigravity_ok.is_some())
+                    .and_then(first_line)
+            })
             .map(|line| truncate(&redact_sensitive_content(line), ERROR_LINE_MAX_BYTES).to_owned())
     }
 }
@@ -630,6 +689,49 @@ mod tests {
         assert_eq!(capture.content, "cargo test\nexit 101: error[E0432]: nope");
         assert_eq!(capture.ok, Some(false));
         assert_eq!(capture.commands, ["cargo test"]);
+    }
+
+    const TRACEBACK: &str = "Traceback (most recent call last):\n  File \"src/fail_latch.py\", line 3, in <module>\n    raise RuntimeError(\"violet latch missing pin\")\nRuntimeError: violet latch missing pin\n";
+
+    #[test]
+    fn grok_shell_output_gives_the_error_line_without_its_exit_line() {
+        // Grok 1.0.92's `run_terminal_command` result (session record): `output` is bytes.
+        let p = payload(json!({"toolName": "run_terminal_command",
+            "toolInput": {"command": "python3 src/fail_latch.py", "description": "Run it"},
+            "toolResult": {"type": "Bash", "output": [84, 114], "output_for_prompt": format!("exit: 1\n{TRACEBACK}"),
+                           "exit_code": 1, "command": "python3 src/fail_latch.py", "truncated": false,
+                           "signal": null, "timed_out": false, "current_dir": "/w", "total_bytes": 160}}));
+        let tool = p.tool().unwrap();
+        assert_eq!(tool.failure_text(false), Some(TRACEBACK));
+        assert_eq!(
+            tool.command().unwrap().content,
+            "python3 src/fail_latch.py\nexit 1: Traceback (most recent call last):"
+        );
+    }
+
+    #[test]
+    fn hermes_exit_message_does_not_hide_the_terminal_output() {
+        // Hermes v0.23.5: `terminal` returns output/exit_code/error, and post_tool_call reports a
+        // non-zero exit as status "error" with error_message "exit 1" (agent/display.py).
+        let mut p = payload(json!({"tool_name": "terminal", "tool_call_id": "c1",
+            "args": {"command": "python3 src/fail_latch.py"},
+            "result": json!({"output": TRACEBACK, "exit_code": 1, "error": null}).to_string(),
+            "status": "error", "error_type": "tool_error", "error_message": "exit 1"}));
+        p.normalize_hermes();
+        let tool = p.tool().unwrap();
+        assert_eq!(tool.failure_text(false), Some(TRACEBACK));
+        assert_eq!(
+            tool.command().unwrap().content,
+            "python3 src/fail_latch.py\nexit 1: Traceback (most recent call last):"
+        );
+        // A result with no output keeps the reported error.
+        let mut p = payload(
+            json!({"tool_name": "terminal", "args": {"command": "cargo test"},
+            "result": r#"{"exit_code":101,"output":"","error":null}"#, "status": "error",
+            "error_message": "first error"}),
+        );
+        p.normalize_hermes();
+        assert_eq!(p.tool().unwrap().failure_text(false), Some("first error"));
     }
 
     #[test]

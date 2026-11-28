@@ -45,6 +45,8 @@ type DataTableProps<T> = {
   pageSize?: number;
   toolbar?: ReactNode;
   getRowId?: (row: T) => string;
+  /** Prefills the filter box. A branch link uses this; it is not a session citation. */
+  initialFilter?: string;
   /** False when the caller filters (for example from the URL) and the box would duplicate it. */
   searchable?: boolean;
 };
@@ -106,9 +108,10 @@ function DataTableReady<T>({
   toolbar,
   getRowId,
   searchable = true,
+  initialFilter = "",
 }: DataTableProps<T>) {
   const [sorting, setSorting] = useState<SortingState>(initialSort);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(initialFilter);
   // TanStack Table returns unstable function references; nothing here is memoized on them.
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({

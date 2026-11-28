@@ -4,6 +4,7 @@ import type { Entity } from "./Entity";
 import type { Fields } from "./Fields";
 import type { Kind } from "./Kind";
 import type { LinkView } from "./LinkView";
+import type { MemoryProvenance } from "./MemoryProvenance";
 import type { Origin } from "./Origin";
 import type { Rank } from "./Rank";
 import type { Scope } from "./Scope";
@@ -23,7 +24,15 @@ checked_at: number | null, status_changed_at: number, fetched: number, usage: Us
 /**
  * Files and symbols the last check found gone: the "why stale" detail.
  */
-missing_entities: Array<string>, links: Array<LinkView>, project_archived: boolean, pinned_at: number | null, detail?: string, trust_level: TrustLevel, trust: string, id: string, owner: string, project_id: string | null, scope: Scope, kind: Kind, title: string, summary: string, reason?: string, 
+missing_entities: Array<string>, links: Array<LinkView>, project_archived: boolean, pinned_at: number | null, pin_position: number | null, 
+/**
+ * The viewer may pin or unpin this memory.
+ */
+can_pin: boolean, 
+/**
+ * The viewer may reorder the whole pin bucket this memory belongs to.
+ */
+can_reorder: boolean, provenance?: MemoryProvenance, detail?: string, trust_level: TrustLevel, trust: string, id: string, owner: string, project_id: string | null, scope: Scope, kind: Kind, title: string, summary: string, reason?: string, 
 /**
  * Serialized as the bare per-kind object.
  */

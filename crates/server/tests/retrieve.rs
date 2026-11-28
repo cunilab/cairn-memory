@@ -297,7 +297,12 @@ async fn search_ranks_filters_and_never_leaks() {
         .await;
     assert_eq!(ids(&found), vec![queue.clone()]);
     let keys: Vec<_> = found["results"][0].as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["id", "kind", "score", "summary", "title", "trust"]);
+    assert_eq!(
+        keys,
+        [
+            "id", "kind", "project", "score", "summary", "title", "trust", "why"
+        ]
+    );
     let got = app.post("get", json!({"ids": [&queue]}), &bob_device).await;
     assert_eq!(got["memories"][0]["fields"]["alternatives"][0], "Redis");
     assert!(got["memories"][0].get("usage").is_none());
@@ -978,7 +983,7 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
         .iter()
         .flat_map(|reply| reply["notes"].as_array().unwrap())
         .collect();
-    assert_eq!(shown.len(), 7, "{replies:?}");
+    assert_eq!(shown.len(), 8, "{replies:?}");
     assert!(
         shown
             .iter()
@@ -989,7 +994,14 @@ async fn brief_and_concurrent_topics_share_a_trusted_eight_card_budget() {
             .fetch_one(app.db.store.pool())
             .await
             .unwrap();
-    assert_eq!(remaining, 8);
+    assert_eq!(remaining, 9);
+    let brief_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_shown WHERE session_id = 'shared' AND source = 'brief'",
+    )
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(brief_rows, 1);
     let exhausted = app
         .post(
             "session/topic",
@@ -1674,9 +1686,20 @@ async fn legacy_brief_keeps_identity_and_packs_essentials_within_1200_bytes() {
     };
     let legacy = decode(&legacy, 1200);
     let extended = decode(&extended, 1800);
-    assert_eq!(legacy["L0 Identity"], extended["L0 Identity"]);
-    assert_eq!(legacy["L0 Identity"][0]["id"], "brief_1");
-    assert_eq!(legacy["L0 Identity"][1]["id"], "brief_2");
+    let legacy_l0_ids: Vec<_> = legacy["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    let extended_l0_ids: Vec<_> = extended["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| card["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(legacy_l0_ids, vec!["brief_1", "brief_2"]);
+    assert_eq!(extended_l0_ids, vec!["brief_1", "brief_2"]);
     let legacy_essentials = legacy["L1 Essential"].as_array().unwrap();
     let extended_essentials = extended["L1 Essential"].as_array().unwrap();
     assert!(!legacy_essentials.is_empty() && legacy_essentials.len() < extended_essentials.len());
@@ -1959,4 +1982,478 @@ async fn hermes_chat_recall_keeps_personal_memories_in_their_chat() {
         );
     }
     app.db.finish().await;
+}
+
+#[tokio::test]
+async fn web_pin_summary_reports_quotas_and_overflow_matching_brief() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("pin-web-owner").await;
+    let outsider = app.member(&admin, "pin-web-outsider").await;
+    let device = app.device(&admin, "laptop").await;
+    let project = app
+        .post(
+            "projects/init",
+            json!({"repository": "local:pin-web", "name": "Pin Web Summary"}),
+            &device,
+        )
+        .await;
+    let pid = project["project_id"].as_str().unwrap();
+
+    // Web-only and membership checks on GET /memories/pins.
+    assert_eq!(
+        app.send("GET", "memories/pins", json!(null), Some(&device))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        app.send(
+            "GET",
+            &format!("memories/pins?projectId={pid}"),
+            json!(null),
+            Some(&outsider)
+        )
+        .await
+        .0,
+        404
+    );
+
+    let mut per_ids = Vec::new();
+    for i in 0..4 {
+        let id = save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "personal",
+                "title": format!("Personal rule number {i}"),
+                "summary": "Personal pin summary long enough to consume L0 bytes cleanly.".repeat(2),
+                "reason": "Testing personal pin quota and L0 fit",
+            }),
+        )
+        .await;
+        per_ids.push(id);
+    }
+    for id in &per_ids[..3] {
+        app.post(
+            &format!("memories/{id}/pin"),
+            json!({"pinned": true}),
+            &admin,
+        )
+        .await;
+    }
+    let (status, _) = app
+        .send(
+            "POST",
+            &format!("memories/{}/pin", per_ids[3]),
+            json!({"pinned": true}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    let mut prj_ids = Vec::new();
+    for i in 0..5 {
+        let id = save(
+            &app,
+            &device,
+            json!({
+                "kind": "rule", "scope": "project",
+                "title": format!("Project rule number {i}"),
+                "summary": "Project pin summary long enough to consume L0 bytes cleanly.".repeat(2),
+                "reason": "Testing project pin quota and L0 fit",
+                "context": {"project_id": pid},
+            }),
+        )
+        .await;
+        prj_ids.push(id);
+    }
+    for id in &prj_ids[..4] {
+        app.post(
+            &format!("memories/{id}/pin"),
+            json!({"pinned": true}),
+            &admin,
+        )
+        .await;
+    }
+    let (status, _) = app
+        .send(
+            "POST",
+            &format!("memories/{}/pin", prj_ids[4]),
+            json!({"pinned": true}),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    let summary = app
+        .send(
+            "GET",
+            &format!("memories/pins?projectId={pid}"),
+            json!(null),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(summary.0, 200, "{summary:?}");
+    let summary = summary.1;
+    assert_eq!(summary["personal_quota_used"], 3);
+    assert_eq!(summary["personal_quota_limit"], 3);
+    assert_eq!(summary["project_quota_used"], 4);
+    assert_eq!(summary["project_quota_limit"], 4);
+    assert_eq!(summary["total"], 7);
+    let not_shown = summary["not_shown"].as_u64().unwrap();
+    assert!(not_shown > 0, "{summary}");
+
+    // Promote the unpinned personal rule so it qualifies for L1 Essential.
+    sqlx::query("UPDATE memories SET rank = 'normal' WHERE memory_id = $1")
+        .bind(&per_ids[3])
+        .execute(app.db.store.pool())
+        .await
+        .unwrap();
+
+    let brief = app
+        .post(
+            "session/brief",
+            json!({"session_id": "pin-overflow", "extended_brief": true, "context": {"project_id": pid}}),
+            &device,
+        )
+        .await;
+    assert_eq!(brief["pins_not_shown"], not_shown, "{brief}");
+    let text = brief["brief"].as_str().unwrap();
+    assert!(text.contains(&format!(
+        "\"L0_not_shown\":\"{not_shown} more pinned not shown\""
+    )));
+    // Unpinned personal rule reaches L1 with "personal rule" why-label.
+    assert!(
+        text.contains(&per_ids[3]) && text.contains(r#""why":"personal rule""#),
+        "{text}"
+    );
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn get_field_and_timeline_stay_on_visible_memories() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("owner").await;
+    let owner = app.device(&admin, "owner").await;
+    let other = app
+        .device(&app.member(&admin, "other").await, "other")
+        .await;
+    let old = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "gotcha",
+            "title": "Old quartz claim panic",
+            "summary": "The old note.",
+            "reason": "It moved the guard.",
+            "fields": {"symptom": "panic on quartz_claim", "cause": "moved", "fix": "borrow"}
+        }),
+    )
+    .await;
+    let newer = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "gotcha",
+            "title": "Borrow the quartz claim",
+            "summary": "The new note.",
+            "reason": "Borrow until the update returns.",
+            "fields": {"symptom": "same panic", "cause": "moved", "fix": "borrow the guard"},
+            "supersedes": old
+        }),
+    )
+    .await;
+    let got = app
+        .post(
+            "get",
+            json!({"ids": [newer], "field": "fix", "timeline": true}),
+            &owner,
+        )
+        .await;
+    assert_eq!(got["memories"][0]["fields"]["fix"], "borrow the guard");
+    assert!(got["memories"][0]["fields"].get("symptom").is_none());
+    assert!(got["memories"][0].get("reason").is_none());
+    let chain: Vec<&str> = got["memories"][0]["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert!(chain.contains(&old.as_str()), "{got}");
+    let hidden = app
+        .post("get", json!({"ids": [newer], "timeline": true}), &other)
+        .await;
+    assert!(
+        hidden["memories"].as_array().unwrap().is_empty(),
+        "{hidden}"
+    );
+    let (status, _) = app
+        .send(
+            "POST",
+            "get",
+            json!({"ids": [newer], "field": "nope"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn recorded_branch_and_version_selectors_do_not_cross_people() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("time").await;
+    let owner = app.device(&admin, "time").await;
+    let other = app
+        .device(&app.member(&admin, "time-other").await, "time-other")
+        .await;
+    let january = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "January fonts",
+            "summary": "Invoice fonts live in harbor-cli 1.4.2",
+            "reason": "A missing font changed the layout.",
+            "fields": {"source": "notes"},
+            "context": {"branch": "feature/amber"}
+        }),
+    )
+    .await;
+    let june = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "June fonts",
+            "summary": "Invoice fonts were copied aside.",
+            "reason": "The june copy is not the january one.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    let hidden = save(
+        &app,
+        &other,
+        json!({
+            "kind": "fact",
+            "title": "January fonts",
+            "summary": "Invoice fonts live in harbor-cli 1.4.2",
+            "reason": "Someone else's copy.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    sqlx::query("UPDATE memories SET created_at = '2026-01-15T00:00:00Z' WHERE memory_id = $1")
+        .bind(&january)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET created_at = '2026-01-15T00:00:00Z' WHERE memory_id = $1")
+        .bind(&hidden)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE memories SET created_at = '2026-06-01T00:00:00Z' WHERE memory_id = $1")
+        .bind(&june)
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    let found = app
+        .post(
+            "search",
+            json!({
+                "query": "invoice fonts",
+                "recorded_from": "2026-01-15",
+                "recorded_to": "2026-01-15",
+                "branch": "feature/amber",
+                "version": "1.4.2"
+            }),
+            &owner,
+        )
+        .await;
+    assert_eq!(ids(&found), vec![january], "{found}");
+    let (status, _) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "invoice fonts", "recorded_from": "yesterday"}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn retrieval_trace_is_private_redacted_and_off_by_default() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("trace").await;
+    let owner = app.device(&admin, "trace").await;
+    let other = app.member(&admin, "trace-other").await;
+    let saved = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "title": "Trace target",
+            "summary": "A visible fact for the trace.",
+            "reason": "So search has something to return.",
+            "fields": {"source": "notes"}
+        }),
+    )
+    .await;
+    // Off: a search writes nothing. The secret is real, but this call is not stored.
+    app.post(
+        "search",
+        json!({"query": "trace target token=supersecretvalue"}),
+        &owner,
+    )
+    .await;
+    let empty = app.get("me/trace", &admin).await;
+    assert_eq!(empty["enabled"], false);
+    assert!(empty["traces"].as_array().unwrap().is_empty(), "{empty}");
+    app.post("me/trace", json!({"enabled": true}), &admin).await;
+    // The query repeats the memory's own words so the relevance gate keeps the hit, plus one secret.
+    let found = app
+        .post(
+            "search",
+            json!({"query": "trace target visible fact token=supersecretvalue"}),
+            &owner,
+        )
+        .await;
+    assert!(ids(&found).contains(&saved), "{found}");
+    let mine = app.get("me/trace", &admin).await;
+    let query = mine["traces"][0]["query"].as_str().unwrap();
+    assert!(query.contains("trace target"), "{mine}");
+    assert!(!query.contains("supersecretvalue"), "{mine}");
+    assert!(query.contains("[REDACTED]"), "{mine}");
+    let hit = &mine["traces"][0]["results"][0];
+    assert_eq!(hit["id"], saved);
+    assert!(hit.get("title").is_none(), "{mine}");
+    assert!(hit.get("summary").is_none(), "{mine}");
+    let channel = hit["channel"].as_str().unwrap();
+    assert!(
+        !channel.contains(' ') && !channel.contains("visible"),
+        "{mine}"
+    );
+    assert_eq!(hit["opened"], false);
+    assert_eq!(hit["voted"], false);
+    app.post("get", json!({"ids": [saved]}), &owner).await;
+    let opened = app.get("me/trace", &admin).await;
+    assert_eq!(
+        opened["traces"][0]["results"][0]["opened"], true,
+        "{opened}"
+    );
+    assert_eq!(
+        opened["traces"][0]["results"][0]["voted"], false,
+        "{opened}"
+    );
+    app.post("feedback", json!({"id": &saved, "vote": "helpful"}), &owner)
+        .await;
+    let voted = app.get("me/trace", &admin).await;
+    assert_eq!(voted["traces"][0]["results"][0]["voted"], true, "{voted}");
+    sqlx::query("UPDATE retrieval_traces SET expires_at = now() - interval '1 second'")
+        .execute(app.state.store.pool())
+        .await
+        .unwrap();
+    let expired = app.get("me/trace", &admin).await;
+    assert_eq!(expired["enabled"], true);
+    assert!(
+        expired["traces"].as_array().unwrap().is_empty(),
+        "{expired}"
+    );
+    let theirs = app.get("me/trace", &other).await;
+    assert!(theirs["traces"].as_array().unwrap().is_empty(), "{theirs}");
+    let (status, _) = app.send("GET", "me/trace", json!(null), Some(&owner)).await;
+    assert_eq!(status, 401);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn search_projects_require_membership_and_keep_the_current_project_first() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("projects").await;
+    let owner = app.device(&admin, "projects").await;
+    let other = app
+        .device(&app.member(&admin, "projects-other").await, "other")
+        .await;
+    let amber = app.project(&owner, "amber").await;
+    let wharf = app.project(&owner, "wharf").await;
+    let here = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "scope": "project",
+            "title": "Lantern policy",
+            "summary": "Amber keeps the lantern policy.",
+            "reason": "The checkout project.",
+            "fields": {"source": "notes"},
+            "context": {"project_id": amber, "repository": "amber"}
+        }),
+    )
+    .await;
+    let there = save(
+        &app,
+        &owner,
+        json!({
+            "kind": "fact",
+            "scope": "project",
+            "title": "Lantern policy for the dock",
+            "summary": "Wharf keeps the dock lantern policy.",
+            "reason": "The other project.",
+            "fields": {"source": "notes"},
+            "context": {"project_id": wharf, "repository": "wharf"}
+        }),
+    )
+    .await;
+    let context = json!({"project_id": amber, "repository": "amber"});
+    let scoped = app
+        .post(
+            "search",
+            json!({"query": "lantern policy dock", "context": context}),
+            &owner,
+        )
+        .await;
+    assert_eq!(ids(&scoped), vec![here.clone()], "{scoped}");
+    assert_eq!(scoped["results"][0]["project"], amber);
+    let widened = app
+        .post(
+            "search",
+            json!({
+                "query": "lantern policy dock",
+                "context": {"project_id": amber, "repository": "amber"},
+                "projects": [wharf]
+            }),
+            &owner,
+        )
+        .await;
+    assert_eq!(
+        ids(&widened),
+        vec![here.clone(), there.clone()],
+        "{widened}"
+    );
+    assert_eq!(widened["results"][0]["project"], amber);
+    assert_eq!(widened["results"][1]["project"], wharf);
+    let (status, body) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "lantern policy", "projects": [wharf]}),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(!body.to_string().contains(&here), "{body}");
+    let (status, _) = app
+        .send(
+            "POST",
+            "search",
+            json!({"query": "lantern", "projects": ["a", "b", "c", "d", "e", "f"]}),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 400);
+    app.finish().await;
 }

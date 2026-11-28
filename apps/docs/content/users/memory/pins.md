@@ -11,16 +11,18 @@ A [pin](../../glossary.md#pin) puts an owned personal or project memory at the f
 
 ## Pin management
 
-- **Web console**: Open any owned personal or project memory and toggle the **Pin** action.
+- **Web console**: Use the pin control on a memory row or in the memory sheet. **Pinned** lists personal and project pins with their quotas. Archived project memories are read-only. A full quota stays as it is until you unpin one.
 - **API endpoint**: `POST /cairn-memory/memories/{id}/pin` with `{"pinned": true|false}`.
 
 ## Quotas and rules
 
 | Scope | Quota limit | Shared with |
 | --- | --- | --- |
-| **Personal** | Up to 5 pins per account | Owner only |
-| **Project** | Up to 10 pins per project | All project members |
+| **Personal** | Up to 3 pins per account | Owner only |
+| **Project** | Up to 4 pins per project | All project members |
 
-- **Brief priority**: Eligible pins appear oldest first within the [L0 budget](layers.md#automatic-recall).
+- **Brief priority and layout**: L0 splits its 900-byte budget (600 bytes on legacy clients) evenly between personal and current-project pins (oldest first within each scope), with unused room spilling over to the other side.
+- **Overflow visibility**: When all eligible pins cannot fit in L0, the brief reports `"N more pinned not shown"`, and the web console displays both quota usage and how many pins fit.
+- **Existing pins over cap**: Pins saved above the quota before updating stay pinned until unpinned; new pins are blocked once a quota is reached.
 - **Bypass muting**: Pinned memories are exempt from automatic muting.
 - **Exclusions**: Archived projects, forgotten memories, and superseded records are excluded from L0. A superseded pin retains its slot until unpinned.

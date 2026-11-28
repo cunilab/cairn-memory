@@ -1,34 +1,32 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { ColumnDef } from "@tanstack/react-table";
 import { Pin, BrainIcon, FilterIcon, SearchIcon, XIcon } from "lucide-react";
 import { KindBadge, StatusBadge } from "@/components/badges";
-import { DataTable } from "@/components/data-table";
 import { FilterSelect, type FilterOption } from "@/components/filter-select";
+import { PageNav } from "@/components/page-nav";
+import { PinSummaryBar } from "@/components/pin-summary";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { useOpenMemory, useQueryParams } from "@/hooks/use-query-params";
+import { useQueryParams } from "@/hooks/use-query-params";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
-import { cairn, cairnPage } from "@/lib/cairn";
+import { ApiError, cairn } from "@/lib/cairn";
+import { canTogglePin, quotaFor, type ConsoleMatch, type ConsoleMemory, type ConsolePage, type PinQuota } from "@/lib/console";
 import { useAccount } from "@/hooks/use-account";
-import { memoryLabel } from "./memory-label";
-import { onMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { onMemoriesChanged, announceMemoriesChanged } from "@/lib/memory-events";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { BranchSummary } from "@/lib/generated/BranchSummary";
-import type { MemoryView } from "@/lib/generated/MemoryView";
 import type { ProjectView } from "@/lib/generated/ProjectView";
 import type { TrustLevel } from "@/lib/generated/TrustLevel";
+import { cn } from "@/lib/utils";
 
-const PAGE = 50;
 const KINDS = ["decision", "rule", "gotcha", "procedure", "fact", "preference", "note", "handoff"];
 const STATUSES: FilterOption[] = [
   { value: "active", label: "Active" },
@@ -41,17 +39,30 @@ const KIND_OPTIONS: FilterOption[] = KINDS.map((kind) => ({
 }));
 const TRUST_LABELS = { proven: "Proven", normal: "Normal", new: "New", doubted: "Doubted" } satisfies Record<TrustLevel, string>;
 const TRUST_OPTIONS: FilterOption[] = Object.entries(TRUST_LABELS).map(([value, label]) => ({ value, label }));
-const USAGE_COLUMNS = [
-  ["shown", "Shown"], ["fetched", "Used"], ["helpful", "Helpful"], ["wrong", "Wrong"],
-] as const;
+const PAGE_SIZES = new Set(["25", "50", "100"]);
 
-type Page = { key: string; items: MemoryView[]; next: string | null; error: string | null };
+function MatchExcerpt({ match }: { match: ConsoleMatch }) {
+  return (
+    <p className="line-clamp-2 text-sm text-muted-foreground">
+      <span className="font-medium text-foreground">{match.label}</span>{" "}
+      {match.segments.map((segment, index) =>
+        segment.hit ? (
+          <mark key={index} className="rounded-sm bg-primary/35 px-0.5 text-foreground">
+            {segment.text}
+          </mark>
+        ) : (
+          <span key={index}>{segment.text}</span>
+        ),
+      )}
+    </p>
+  );
+}
 
 export function MemoryTable({ projectId }: { projectId?: string }) {
   const router = useRouter();
   const mobile = useIsMobile();
-  const openMemory = useOpenMemory();
   const account = useAccount();
+  const searchRef = useRef<HTMLInputElement>(null);
   const statuses: FilterOption[] = account?.is_admin
     ? [...STATUSES, { value: "forgotten", label: "Forgotten" }]
     : STATUSES;
@@ -62,16 +73,28 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
   const trust = params.get("trust") ?? "";
   const branch = params.get("branch") ?? "";
   const q = params.get("q") ?? "";
+  const match = params.get("match") === "related" ? "related" : "exact";
+  const view = params.get("view") === "pinned" ? "pinned" : "all";
+  const page = Math.max(1, Number(params.get("page")) || 1);
+  const pageSize = PAGE_SIZES.has(params.get("pageSize") ?? "") ? Number(params.get("pageSize")) : 25;
+  const focusSearch = params.get("focus") === "search";
   const [search, setSearch] = useState(q);
   const [projects, setProjects] = useState<ProjectView[]>([]);
   const [branches, setBranches] = useState<{ project: string; rows: BranchSummary[] }>({ project: "", rows: [] });
-  const [page, setPage] = useState<Page | null>(null);
-  const [more, setMore] = useState(false);
+  const [data, setData] = useState<ConsolePage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [pinning, setPinning] = useState<string | null>(null);
 
   const serverQuery = useMemo(() => {
-    const query = new URLSearchParams({ limit: String(PAGE) });
+    const query = new URLSearchParams({
+      page: String(page),
+      pageSize: String(pageSize),
+      sort: "updated_desc",
+      match,
+    });
     if (project) query.set("projectId", project);
     if (projectId) query.set("scope", "project");
     if (kind) query.set("kind", kind);
@@ -79,17 +102,20 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
     if (trust) query.set("trust", trust);
     if (branch) query.set("branch", branch);
     if (q.trim()) query.set("q", q.trim());
+    if (view === "pinned") query.set("pinned", "true");
     return query.toString();
-  }, [project, projectId, kind, status, trust, branch, q]);
-  const key = `${serverQuery}#${attempt}`;
+  }, [project, projectId, kind, status, trust, branch, q, match, view, page, pageSize]);
+
+  const requireSignIn = useCallback(() => router.replace(loginHref()), [router]);
   useResetOnHide(() => {
-    setPage(null);
+    setData(null);
     setProjects([]);
     setBranches({ project: "", rows: [] });
   });
-  const loading = page?.key !== key;
 
-  const requireSignIn = useCallback(() => router.replace(LOGIN_PATH), [router]);
+  useEffect(() => {
+    if (focusSearch) searchRef.current?.focus();
+  }, [focusSearch]);
 
   useEffect(() => {
     if (projectId) return;
@@ -117,205 +143,171 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    cairnPage<MemoryView>(`memories?${serverQuery}`)
-      .then(({ items, next }) => !cancelled && setPage({ key, items, next, error: null }))
+    cairn<ConsolePage>(`console/memories?${serverQuery}`)
+      .then((page) => {
+        if (cancelled) return;
+        setData(page);
+        setError(null);
+        setLoadedKey(serverQuery);
+      })
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
           requireSignIn();
           return;
         }
-        setPage({
-          key,
-          items: [],
-          next: null,
-          error: `Memories could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`,
-        });
+        setError(`Memories could not be loaded. ${cause instanceof Error ? cause.message : "Check that the server is running, then retry."}`);
+        setLoadedKey(serverQuery);
       });
     return () => {
       cancelled = true;
     };
-  }, [key, serverQuery, requireSignIn]);
+  }, [serverQuery, attempt, requireSignIn]);
 
   useEffect(() => onMemoriesChanged(() => setAttempt((n) => n + 1)), []);
 
-  // Debounce the search box into the URL.
   useEffect(() => {
     if (search === q) return;
-    const timer = setTimeout(() => set({ q: search }), 250);
+    const timer = setTimeout(() => set({ q: search || null, page: null }, "push"), 250);
     return () => clearTimeout(timer);
   }, [search, q, set]);
 
-  async function loadMore() {
-    if (!page?.next) return;
-    setMore(true);
+  // The server clamps an out-of-range page. Put that page in the URL.
+  useEffect(() => {
+    if (data && data.page !== page) set({ page: data.page === 1 ? null : String(data.page) });
+  }, [data, page, set]);
+
+  const loading = loadedKey !== serverQuery;
+  const rows = data?.items ?? [];
+  const quotas = data?.quotas ?? [];
+  const activeFilters = [
+    !projectId && project ? { key: "project", label: projects.find((item) => item.project_id === project)?.name ?? "Project" } : null,
+    kind ? { key: "kind", label: kind } : null,
+    status ? { key: "status", label: status } : null,
+    trust ? { key: "trust", label: TRUST_LABELS[trust as TrustLevel] ?? trust } : null,
+    branch ? { key: "branch", label: branch } : null,
+  ].filter((chip): chip is { key: string; label: string } => chip !== null);
+  const projectOptions = projects.map((item) => ({ value: item.project_id, label: item.archived_at != null ? `${item.name} (archived)` : item.name }));
+  const branchOptions = (branches.project === project ? branches.rows : []).map((item) => ({ value: item.branch, label: item.branch }));
+
+  function resetPage(patch: Record<string, string | null>) {
+    set({ ...patch, page: null });
+  }
+
+  async function movePin(rows: ConsoleMemory[], index: number, direction: -1 | 1) {
+    const next = rows.slice();
+    const target = index + direction;
+    const moved = next[index];
+    if (!moved || target < 0 || target >= next.length) return;
+    next.splice(index, 1);
+    next.splice(target, 0, moved);
+    setPinning(moved.id);
     try {
-      const next = await cairnPage<MemoryView>(`memories?${serverQuery}&cursor=${encodeURIComponent(page.next)}`);
-      setPage((current) =>
-        current && current.key === key
-          ? { ...current, items: [...current.items, ...next.items], next: next.next }
-          : current,
-      );
+      await cairn("memories/pins/order", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: moved.scope,
+          project_id: moved.project_id,
+          order: next.map((row) => ({ id: row.id, position: row.pin_position })),
+        }),
+      });
+      announceMemoriesChanged();
     } catch (cause) {
       if (cause instanceof SessionRequiredError) requireSignIn();
-      else setPage((current) => (current ? { ...current, error: "More memories could not be loaded. Try again." } : current));
+      else if (cause instanceof ApiError && cause.status === 409) {
+        announceMemoriesChanged();
+        setError("Pin order changed. The list was reloaded.");
+      } else {
+        setError(cause instanceof Error ? cause.message : "Could not reorder pins.");
+      }
     } finally {
-      setMore(false);
+      setPinning(null);
     }
   }
 
-  const rows = page?.items ?? [];
-
-  const active = [projectId ? "" : project, kind, status, trust, branch, q].filter(Boolean).length;
-  const projectOptions = projects.map((p) => ({ value: p.project_id, label: p.archived_at != null ? `${p.name} (archived)` : p.name }));
-  const branchOptions = (branches.project === project ? branches.rows : []).map((b) => ({ value: b.branch, label: b.branch }));
-
-  const columns = useMemo<ColumnDef<MemoryView>[]>(
-    () => [
-      {
-        accessorKey: "kind",
-        header: "Kind",
-        cell: ({ row }) => <KindBadge kind={row.original.kind} />,
-      },
-      {
-        id: "title",
-        header: "Title",
-        accessorFn: (m) => m.title,
-        cell: ({ row }) => (
-          <div className="flex min-w-0 flex-col gap-1">
-            <button
-              type="button"
-              aria-haspopup="dialog"
-              className="flex w-fit items-start gap-1.5 rounded-sm text-left text-sm font-medium break-words underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-              onClick={() => openMemory(row.original.id)}
-            >
-              {row.original.pinned_at != null ? (
-                <><Pin aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" /><span className="sr-only">Pinned memory</span></>
-              ) : null}
-              <span className="min-w-0">{row.original.title}</span>
-            </button>
-            <p className="line-clamp-2 text-sm text-muted-foreground">{row.original.summary}</p>
-          </div>
-        ),
-      },
-      {
-        id: "project",
-        header: "Project",
-        accessorFn: (m) => m.project_name ?? m.scope,
-        cell: ({ row }) => {
-          const m = row.original;
-          if (m.project_id) return m.project_name ?? "—";
-          return m.scope === "global" ? "Global" : "Personal";
-        },
-        meta: { className: "hidden md:table-cell" },
-      },
-      {
-        accessorKey: "status",
-        header: "Status",
-        cell: ({ row }) => {
-          const label = memoryLabel({
-            id: row.original.id,
-            status: row.original.status,
-            stale_cause: row.original.stale_cause,
-            wrong: row.original.usage.wrong,
-            links: row.original.links,
-          });
-          return (
-            <div className="flex flex-col items-start gap-1">
-              <StatusBadge status={row.original.status} cause={row.original.stale_cause} />
-              {label ? (
-                label.id ? (
-                  <button
-                    type="button"
-                    className="rounded-sm text-left text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-                    onClick={() => openMemory(label.id as string)}
-                  >
-                    {label.text}
-                  </button>
-                ) : (
-                  <span className="text-xs text-muted-foreground">{label.text}</span>
-                )
-              ) : null}
-            </div>
-          );
-        },
-      },
-      {
-        accessorKey: "trust_level",
-        header: "Trust",
-        cell: ({ row }) => {
-          const { trust_level, trust } = row.original;
-          return (
-            <Badge title={trust} variant={trust_level === "proven" ? "success" : trust_level === "doubted" ? "destructive" : trust_level === "new" ? "secondary" : "outline"}>
-              {TRUST_LABELS[trust_level]}
-            </Badge>
-          );
-        },
-      },
-      ...USAGE_COLUMNS.map(([id, header]): ColumnDef<MemoryView> => ({
-        id,
-        header,
-        accessorFn: (m) => m.usage[id],
-        cell: ({ row }) => <span className="text-sm tabular-nums">{row.original.usage[id].toLocaleString()}</span>,
-        meta: { className: "hidden md:table-cell" },
-      })),
-      {
-        id: "last_used_at",
-        header: "Last used",
-        accessorFn: (m) => m.usage.last_used_at ?? undefined,
-        sortUndefined: "last",
-        cell: ({ row }) => <Time value={row.original.usage.last_used_at} className="text-xs whitespace-nowrap text-muted-foreground" />,
-        meta: { className: "hidden md:table-cell" },
-      },
-      {
-        accessorKey: "updated_at",
-        header: "Updated",
-        cell: ({ row }) => <Time value={row.original.updated_at} className="text-xs whitespace-nowrap text-muted-foreground" />,
-        meta: { className: "hidden md:table-cell" },
-      },
-    ],
-    [openMemory],
-  );
+  async function togglePin(memory: ConsoleMemory) {
+    if (!canTogglePin(memory)) return;
+    const quota = quotaFor(memory, quotas);
+    const full = quota !== undefined && memory.pinned_at == null && quota.used >= quota.limit;
+    if (full) return;
+    setPinning(memory.id);
+    try {
+      await cairn(`memories/${encodeURIComponent(memory.id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned: memory.pinned_at == null }),
+      });
+      announceMemoriesChanged();
+    } catch (cause) {
+      if (cause instanceof SessionRequiredError) requireSignIn();
+      else if (cause instanceof ApiError && cause.status === 409) {
+        setError(cause.message);
+      } else {
+        setError(cause instanceof Error ? cause.message : "Could not change the pin.");
+      }
+    } finally {
+      setPinning(null);
+    }
+  }
 
   const controls = (
     <div className={`grid gap-2 sm:grid-cols-2 ${projectId ? "lg:grid-cols-4" : "lg:grid-cols-5"}`}>
       {!projectId ? (
-        <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(v) => set({ project: v, branch: null })} />
+        <FilterSelect label="Project" value={project} allLabel="All projects" options={projectOptions} onChange={(value) => resetPage({ project: value, branch: null })} />
       ) : null}
-      <FilterSelect label="Kind" value={kind} allLabel="All kinds" options={KIND_OPTIONS} onChange={(v) => set({ kind: v })} />
-      <FilterSelect label="Status" value={status} allLabel="All statuses" options={statuses} onChange={(v) => set({ status: v })} />
-      <FilterSelect label="Trust" value={trust} allLabel="All trust levels" options={TRUST_OPTIONS} onChange={(v) => set({ trust: v })} />
-      <FilterSelect label="Branch" value={branch} allLabel={project ? "All branches" : "Choose a project first"} options={branchOptions} disabled={!project} onChange={(v) => set({ branch: v })} />
+      <FilterSelect label="Kind" value={kind} allLabel="All kinds" options={KIND_OPTIONS} onChange={(value) => resetPage({ kind: value })} />
+      <FilterSelect label="Status" value={status} allLabel="All statuses" options={statuses} onChange={(value) => resetPage({ status: value })} />
+      <FilterSelect label="Trust" value={trust} allLabel="All trust levels" options={TRUST_OPTIONS} onChange={(value) => resetPage({ trust: value })} />
+      <FilterSelect label="Branch" value={branch} allLabel={project ? "All branches" : "Choose a project first"} options={branchOptions} disabled={!project} onChange={(value) => resetPage({ branch: value })} />
     </div>
   );
+
+  const groups = view === "pinned" ? groupPins(rows, quotas) : [{ key: "all", title: "", quota: undefined, rows }];
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        <InputGroup className="w-full sm:max-w-xs">
+        <InputGroup className="min-w-0 flex-1 sm:max-w-sm">
           <InputGroupAddon>
             <SearchIcon />
           </InputGroupAddon>
           <InputGroupInput
+            ref={searchRef}
             type="search"
-            aria-label="Search title or summary"
-            placeholder="Search title or summary…"
+            aria-label="Search memories"
+            placeholder="Search memories"
             value={search}
             onChange={(event) => {
               const value = event.target.value;
               setSearch(value);
-              // Clearing applies at once; typing is debounced below.
-              if (!value) set({ q: null });
+              if (!value) set({ q: null, page: null }, "push");
             }}
           />
         </InputGroup>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="sr-only">Match</span>
+          <select
+            className="h-11 rounded-md border bg-background px-2"
+            aria-label="Match"
+            value={match}
+            onChange={(event) => resetPage({ match: event.target.value === "exact" ? null : event.target.value })}
+          >
+            <option value="exact">Exact</option>
+            <option value="related">Related</option>
+          </select>
+        </label>
         {mobile ? (
           <Button type="button" variant="outline" className="min-h-11" onClick={() => setFiltersOpen(true)}>
             <FilterIcon />
-            Filters ({active})
+            Filters{activeFilters.length > 0 ? ` ${activeFilters.length}` : ""}
           </Button>
         ) : null}
       </div>
+      <Tabs value={view} onValueChange={(value) => resetPage({ view: value === "all" ? null : value })}>
+        <TabsList>
+          <TabsTrigger value="all">All</TabsTrigger>
+          <TabsTrigger value="pinned">Pinned</TabsTrigger>
+        </TabsList>
+      </Tabs>
       {mobile ? (
         <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
           <SheetContent side="bottom">
@@ -329,79 +321,171 @@ export function MemoryTable({ projectId }: { projectId?: string }) {
       ) : (
         controls
       )}
-      {active > 0 ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span>
-            {active} {active === 1 ? "filter" : "filters"}
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setSearch("");
-              set({ project: null, kind: null, status: null, trust: null, branch: null, q: null });
-            }}
-          >
-            <XIcon />
-            Clear
-          </Button>
+      {activeFilters.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {activeFilters.map((chip) => (
+            <Button key={chip.key} type="button" variant="outline" size="sm" onClick={() => resetPage({ [chip.key]: null, ...(chip.key === "project" ? { branch: null } : {}) })}>
+              {chip.label}
+              <XIcon />
+              <span className="sr-only">Remove {chip.label}</span>
+            </Button>
+          ))}
         </div>
       ) : null}
-      {page?.error ? <ErrorAlert message={page.error} onRetry={() => setAttempt((n) => n + 1)} /> : null}
-      {loading ? (
-        <LoadingBlock label="Loading memories…" rows={8} />
-      ) : (
-        <DataTable
-          label="memories"
-          data={rows}
-          columns={columns}
-          getRowId={(m) => m.id}
-          filterPlaceholder="Filter memories"
-          searchable={false}
-          pageSize={PAGE}
-          empty={
-            <Empty className="border-0 p-6">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <BrainIcon />
-                </EmptyMedia>
-                <EmptyTitle>{active > 0 ? "No memories match these filters" : "No memories yet"}</EmptyTitle>
-                <EmptyDescription>
-                  {active > 0
-                    ? "Try fewer filters."
-                    : "Agents save memories as they work. Finish setup in Settings › Devices."}
-                </EmptyDescription>
-              </EmptyHeader>
-              <EmptyContent>
-                {active > 0 ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => {
-                      setSearch("");
-                      set({ project: null, kind: null, status: null, trust: null, branch: null, q: null });
-                    }}
-                  >
-                    Clear filters
-                  </Button>
-                ) : (
-                  <Button nativeButton={false} render={<Link href="/settings?tab=devices" />}>
-                    Set up a device
-                  </Button>
-                )}
-              </EmptyContent>
-            </Empty>
-          }
+      {error ? <ErrorAlert message={error} onRetry={() => setAttempt((n) => n + 1)} /> : null}
+      {!projectId || view === "pinned" ? <PinSummaryBar projectId={project || null} /> : null}
+      <p className="sr-only" aria-live="polite">
+        {loading ? "Loading memories" : data ? `Showing ${data.page_size === 0 ? 0 : Math.min(data.total, (data.page - 1) * data.page_size + 1)} to ${Math.min(data.page * data.page_size, data.total)} of ${data.total}` : ""}
+      </p>
+      {loading && !data ? <LoadingBlock label="Loading memories…" rows={8} /> : null}
+      {data && rows.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <BrainIcon />
+            </EmptyMedia>
+            <EmptyTitle>{q || activeFilters.length > 0 || view === "pinned" ? "No memories match" : "No memories yet"}</EmptyTitle>
+            <EmptyDescription>
+              {q && match === "exact" ? "No exact phrase. Related search uses the usual word matches." : view === "pinned" ? "Pin a memory from All." : "Agents save memories as they work."}
+            </EmptyDescription>
+          </EmptyHeader>
+          {q && match === "exact" ? (
+            <EmptyContent>
+              <Button type="button" onClick={() => resetPage({ match: "related" })}>
+                Search related terms
+              </Button>
+            </EmptyContent>
+          ) : null}
+        </Empty>
+      ) : null}
+      <div aria-busy={loading || undefined} className={cn("flex flex-col gap-4", loading && data ? "opacity-70" : "")}>
+        {groups.map((group) => (
+          <section key={group.key} className="flex flex-col gap-1">
+            {group.title ? (
+              <h2 className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                <span className="font-medium">{group.title}</span>
+                {group.quota ? (
+                  <span className="tabular-nums text-muted-foreground">
+                    {group.quota.used} / {group.quota.limit}
+                    {group.quota.scope === "project" ? " shared" : ""}
+                  </span>
+                ) : null}
+              </h2>
+            ) : null}
+            <ul className="divide-y rounded-lg border bg-card">
+              {group.rows.map((memory, index) => {
+                const quota = quotaFor(memory, quotas);
+                const full = quota !== undefined && memory.pinned_at == null && quota.used >= quota.limit;
+                const toggle = canTogglePin(memory);
+                const reorder = view === "pinned"
+                  && !q
+                  && activeFilters.length === 0
+                  && group.quota !== undefined
+                  && group.rows.length === group.quota.used
+                  && group.rows.every((row) => row.can_reorder && row.pin_position != null);
+                return (
+                  <li key={memory.id} className="flex items-start gap-2 px-3 py-2">
+                    {toggle ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="mt-0.5 min-h-11 min-w-11 shrink-0"
+                        aria-pressed={memory.pinned_at != null}
+                        aria-label={memory.pinned_at != null ? `Unpin ${memory.title}` : `Pin ${memory.title}`}
+                        disabled={pinning === memory.id || full}
+                        onClick={() => void togglePin(memory)}
+                      >
+                        <Pin className={memory.pinned_at != null ? "fill-brand text-brand" : "text-muted-foreground"} />
+                      </Button>
+                    ) : memory.pinned_at != null ? (
+                      <span className="mt-3 inline-flex min-h-11 min-w-11 items-center justify-center" title="Pinned">
+                        <Pin aria-hidden className="fill-brand text-brand" />
+                        <span className="sr-only">Pinned</span>
+                      </span>
+                    ) : (
+                      <span className="w-11 shrink-0" />
+                    )}
+                    <div className="min-w-0 flex-1 py-1">
+                      <button
+                        type="button"
+                        className="rounded-sm text-left text-sm font-medium break-words underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onClick={() => set({ memory: memory.id, field: memory.matched?.field ?? null }, "push")}
+                      >
+                        {memory.title}
+                      </button>
+                      {memory.matched ? <MatchExcerpt match={memory.matched} /> : <p className="line-clamp-2 text-sm text-muted-foreground">{memory.summary}</p>}
+                      <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                        <KindBadge kind={memory.kind} />
+                        <span>{memory.project_name ?? (memory.scope === "global" ? "Global" : "Personal")}</span>
+                        {memory.context.branch ? <span className="font-mono">{memory.context.branch}</span> : null}
+                        <StatusBadge status={memory.status} cause={memory.stale_cause} />
+                        {memory.status === "superseded" ? <span>Superseded</span> : null}
+                        <Time value={view === "pinned" ? memory.pinned_at : memory.updated_at} />
+                      </p>
+                      {full && quota ? (
+                        <Button
+                          type="button"
+                          variant="link"
+                          className="h-auto px-0"
+                          onClick={() => resetPage({ view: "pinned", ...(quota.project_id && !projectId ? { project: quota.project_id } : {}) })}
+                        >
+                          Manage pins ({quota.used}/{quota.limit})
+                        </Button>
+                      ) : null}
+                    </div>
+                    {reorder ? (
+                      <div className="flex shrink-0 flex-col gap-1 py-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={index === 0 || pinning === memory.id}
+                          aria-label={`Move ${memory.title} up`}
+                          onClick={() => void movePin(group.rows, index, -1)}
+                        >
+                          Up
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={index === group.rows.length - 1 || pinning === memory.id}
+                          aria-label={`Move ${memory.title} down`}
+                          onClick={() => void movePin(group.rows, index, 1)}
+                        >
+                          Down
+                        </Button>
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
+      </div>
+      {data && data.total > 0 ? (
+        <PageNav
+          page={data.page}
+          pageSize={data.page_size}
+          total={data.total}
+          onPage={(next) => set({ page: next === 1 ? null : String(next) }, "push")}
+          onPageSize={(size) => resetPage({ pageSize: size === 25 ? null : String(size) })}
         />
-      )}
-      {!loading && page?.next ? (
-        <div className="flex justify-center">
-          <Button type="button" variant="outline" disabled={more} onClick={() => void loadMore()}>
-            {more ? "Loading…" : "Load more"}
-          </Button>
-        </div>
       ) : null}
     </div>
   );
+}
+
+function groupPins(rows: ConsoleMemory[], quotas: PinQuota[]) {
+  const groups: { key: string; title: string; quota?: PinQuota; rows: ConsoleMemory[] }[] = [];
+  for (const memory of rows) {
+    const key = memory.scope === "project" ? `project:${memory.project_id}` : memory.scope;
+    const title = memory.scope === "project" ? (memory.project_name ?? "Project") : memory.scope === "personal" ? "Personal" : "Global";
+    const current = groups.at(-1);
+    if (current && current.key === key) current.rows.push(memory);
+    else groups.push({ key, title, quota: quotaFor(memory, quotas), rows: [memory] });
+  }
+  return groups;
 }

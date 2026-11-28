@@ -1,6 +1,7 @@
 //! The shapes search returns, and the diversity cap, token budget and limit that keep a response small.
 
-use crate::memory::{EntityKind, Kind, Memory, Relation, Status};
+use crate::memory::validate::{SUMMARY_SUGGESTED, TITLE_SUGGESTED, card_text};
+use crate::memory::{EntityKind, Kind, Memory, Relation, Scope, Status};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -9,6 +10,8 @@ use std::collections::HashMap;
 pub struct Hit {
     pub memory: Memory,
     pub score: f32,
+    /// Why the card matched. Empty for callers that do not search.
+    pub why: String,
 }
 
 /// What an agent sees of a hit; `memory_get` fetches the full record.
@@ -31,6 +34,12 @@ pub struct Card {
     /// Absolute match quality, 0 to 1, rounded to 3 decimals: the same memory scores the same
     /// whatever else matched. The order of cards can still tell apart two that both show 1.0.
     pub score: f32,
+    /// Channel and matched token. Omitted when search did not record one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// Project id of a project memory. Omitted for personal and global cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     /// How many times this knowledge was saved. Omitted the first time.
     #[serde(default, skip_serializing_if = "seen_once")]
     pub seen: u32,
@@ -118,12 +127,16 @@ impl Packer {
         let card = Card {
             id: hit.memory.id.clone(),
             kind: hit.memory.kind,
-            title: hit.memory.title.clone(),
-            summary: hit.memory.summary.clone(),
+            title: card_text(&hit.memory.title, TITLE_SUGGESTED).into_owned(),
+            summary: card_text(&hit.memory.summary, SUMMARY_SUGGESTED).into_owned(),
             status: hit.memory.status,
             stale_cause: hit.memory.stale_cause.clone(),
             label: card_label(&hit.memory),
             score: (hit.score.min(1.0) * 1000.0).round() / 1000.0,
+            why: (!hit.why.is_empty()).then(|| hit.why.clone()),
+            project: (hit.memory.scope == Scope::Project)
+                .then(|| hit.memory.project_id.clone())
+                .flatten(),
             seen: hit.memory.proof_count,
             trust: hit.memory.trust().1,
         };
@@ -194,6 +207,7 @@ mod tests {
         Hit {
             memory: memory(id, Kind::Fact, Scope::Personal),
             score,
+            why: String::new(),
         }
     }
 
@@ -304,10 +318,21 @@ mod tests {
     #[test]
     fn pack_keeps_one_card_over_budget() {
         let mut big = hit("a", 1.0);
-        big.memory.summary = "s".repeat(2000);
+        // Cards cut the summary to its suggested size; a long `why` still makes one over budget.
+        big.why = "w".repeat(2000);
         let c = pack(&[big, hit("b", 0.5)], 5, 200);
         assert_eq!(ids(&c), ["a"]);
         assert_eq!(c.more, 1);
+    }
+
+    #[test]
+    fn cards_show_at_most_the_suggested_title_and_summary() {
+        let mut long = hit("a", 1.0);
+        long.memory.title = "t".repeat(200);
+        long.memory.summary = "s".repeat(1000);
+        let card = &pack(&[long], 5, 4000).results[0];
+        assert_eq!(card.title, format!("{}\u{2026}", "t".repeat(79)));
+        assert_eq!(card.summary, format!("{}\u{2026}", "s".repeat(239)));
     }
 
     #[test]

@@ -2,7 +2,9 @@
 //! (`cairn` in production, `t_<random>` per test); see `migrations/`.
 
 pub mod account;
+pub mod backfill;
 pub mod capture;
+pub mod console;
 pub mod consolidate;
 pub mod device;
 pub mod embed;
@@ -12,12 +14,14 @@ pub mod jobs;
 pub mod link;
 pub mod memory;
 pub mod project;
+pub mod provenance;
 pub mod repo;
 pub mod retrieve;
 pub mod skill;
 pub mod stats;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod trace;
 pub mod transfer;
 pub mod usage;
 pub mod view;
@@ -127,6 +131,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0025_skills",
         include_str!("../../../migrations/0025_skills.sql"),
+    ),
+    (
+        "0026_session_provenance_pin_order",
+        include_str!("../../../migrations/0026_session_provenance_pin_order.sql"),
+    ),
+    (
+        "0027_retrieval_trace",
+        include_str!("../../../migrations/0027_retrieval_trace.sql"),
+    ),
+    (
+        "0028_memory_text_caps",
+        include_str!("../../../migrations/0028_memory_text_caps.sql"),
     ),
 ];
 

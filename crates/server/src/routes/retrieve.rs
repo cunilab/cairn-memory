@@ -38,6 +38,19 @@ pub struct Search {
     /// Calibration only: honoured when the server runs with `CAIRN_DEBUG_SCORES=1`.
     #[serde(default)]
     debug: bool,
+    /// Inclusive ISO date or timestamp. Not read from the query text.
+    #[serde(default)]
+    recorded_from: Option<String>,
+    /// Inclusive ISO date or timestamp. A bare date is the end of that UTC day.
+    #[serde(default)]
+    recorded_to: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    /// Extra projects to search. The caller must be a member of each. At most 5.
+    #[serde(default)]
+    projects: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,9 +101,60 @@ pub async fn search(
         Some(context) => Some(chat_project(&state, &account.person_id, context).await?),
         None => None,
     };
+    let recorded_from = body
+        .recorded_from
+        .as_deref()
+        .map(|value| cairn_core::retrieve::filter::parse_recorded(value, false))
+        .transpose()
+        .map_err(ApiError::invalid)?;
+    let recorded_to = body
+        .recorded_to
+        .as_deref()
+        .map(|value| cairn_core::retrieve::filter::parse_recorded(value, true))
+        .transpose()
+        .map_err(ApiError::invalid)?;
+    if recorded_from.is_some_and(|from| recorded_to.is_some_and(|to| from > to)) {
+        return Err(ApiError::invalid(
+            "recorded_from must not be after recorded_to",
+        ));
+    }
+    let branch = body
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty());
+    if branch.is_some_and(|branch| branch.len() > 200 || branch.contains('\0')) {
+        return Err(ApiError::invalid("branch must be at most 200 characters"));
+    }
+    let version = body
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if version.is_some_and(|version| version.len() > 40 || version.contains('\0')) {
+        return Err(ApiError::invalid("version must be at most 40 characters"));
+    }
+    if body.projects.len() > 5 {
+        return Err(ApiError::invalid("projects accepts at most 5"));
+    }
+    let mut projects = Vec::new();
+    for id in &body.projects {
+        let id = id.trim();
+        if id.is_empty() || id.len() > 128 || id.contains('\0') {
+            return Err(ApiError::invalid("a project id is empty or too long"));
+        }
+        if !projects.iter().any(|have| have == id) {
+            projects.push(id.to_owned());
+        }
+    }
     let filter = Filter {
         kind: body.kind,
         context,
+        recorded_from,
+        recorded_to,
+        branch: branch.map(str::to_owned),
+        version: version.map(str::to_owned),
+        projects,
         ..Filter::default()
     };
     if body.debug && state.debug_scores {
@@ -112,6 +176,23 @@ pub async fn search(
         )
         .await?;
     let reply = json!(cards);
+    let hits: Vec<cairn_store::trace::TraceHit> = cards
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, card)| cairn_store::trace::TraceHit {
+            id: card.id.clone(),
+            rank: (index + 1) as i32,
+            channel: card.why.clone().unwrap_or_default(),
+        })
+        .collect();
+    if let Err(error) = state
+        .store
+        .record_retrieval_trace(&account.person_id, &body.query, &hits)
+        .await
+    {
+        eprintln!("retrieval trace not recorded: {error}");
+    }
     record(
         &state,
         &account.person_id,
@@ -247,6 +328,9 @@ pub async fn brief(
         .await?;
     let hit = !brief.text.is_empty();
     reply["brief"] = json!(brief.text);
+    if brief.pins_not_shown > 0 {
+        reply["pins_not_shown"] = json!(brief.pins_not_shown);
+    }
     record(&state, &account.person_id, Lookup::Brief, &reply, hit).await;
     Ok(Json(reply))
 }

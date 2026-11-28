@@ -1,5 +1,6 @@
 mod common;
 
+use cairn_core::memory::validate::DETAIL_MAX;
 use cairn_core::memory::{Fields, Kind, validate::validate_fields};
 use common::App;
 use serde_json::json;
@@ -144,9 +145,339 @@ async fn admin_rewrite() {
         .await
         .unwrap();
     assert_eq!(origin, "agent");
-    let (status, earlier) = app.send("POST", &format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), Some(&admin)).await;
-    assert_eq!(status, 409);
-    assert_eq!(earlier["error"], "rewrite the current version");
+    // A rewrite of the old version lands on top of the current one.
+    let earlier = app.post(&format!("admin/memories/{old}/rewrite"), json!({"title":"Another corrected fact", "summary":"Another correction for the same fact", "reason":"Verified correction"}), &admin).await;
+    assert_eq!(earlier["stacked_on"], new);
+    assert_eq!(earlier["superseded"], new);
+    app.finish().await;
+}
+
+/// U-125: two admin sessions rewrite the same version at once; both texts stay as versions.
+#[tokio::test]
+async fn concurrent_rewrites_keep_both() {
+    let Some(app) = App::new().await else { return };
+    let alice = app.admin("alice").await;
+    let bob = app
+        .post(
+            "auth/login",
+            json!({"email":"alice@example.test","password":common::PASSWORD}),
+            "",
+        )
+        .await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner = app.member(&alice, "owner").await;
+    let outsider = app.member(&alice, "outsider").await;
+    let device = app.device(&owner, "agent").await;
+    let project = app.project(&device, "example.test/rewrite-race").await;
+    let original = app.save(&device, json!({"kind":"fact","scope":"project","title":"Original race fact","summary":"A project fact both admins rewrite","reason":"Verified test evidence","detail":"Original detail.","context":{"project_id":project}})).await;
+    let path = format!("admin/memories/{original}/rewrite");
+    let ((alice_status, alice_body), (bob_status, bob_body)) = tokio::join!(
+        app.send("POST", &path, json!({"title":"Alice race fact","summary":"Alice rewrote the project fact","reason":"Verified correction"}), Some(&alice)),
+        app.send("POST", &path, json!({"title":"Bob race fact","summary":"Bob rewrote the project fact","reason":"Verified correction"}), Some(&bob)),
+    );
+    assert_eq!(
+        (alice_status, bob_status),
+        (200, 200),
+        "{alice_body} {bob_body}"
+    );
+    let (first, second) = if alice_body.get("stacked_on").is_some() {
+        (bob_body, alice_body)
+    } else {
+        (alice_body, bob_body)
+    };
+    let first_id = first["memory_id"].as_str().unwrap().to_owned();
+    let second_id = second["memory_id"].as_str().unwrap().to_owned();
+    assert_eq!(first["superseded"], original);
+    assert!(first.get("stacked_on").is_none());
+    assert_eq!(second["stacked_on"], first_id);
+    let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT memory_id, status, title, owner_id, scope || ':' || coalesce(project_id,''), edited_by FROM memories WHERE memory_id = ANY($1) ORDER BY created_at",
+    )
+    .bind(vec![original.clone(), first_id.clone(), second_id.clone()])
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    // By id: racing transactions' created_at need not follow commit order.
+    let status = |id: &str| rows.iter().find(|r| r.0 == id).unwrap().1.as_str();
+    assert_eq!(
+        [status(&original), status(&first_id), status(&second_id)],
+        ["superseded", "superseded", "active"]
+    );
+    let titles: Vec<&str> = rows.iter().map(|r| r.2.as_str()).collect();
+    assert!(titles.contains(&"Alice race fact") && titles.contains(&"Bob race fact"));
+    assert!(rows.iter().all(|r| r.3 == rows[0].3 && r.4 == rows[0].4));
+    assert!(
+        rows.iter()
+            .filter(|r| r.0 != original)
+            .all(|r| r.5.is_some())
+    );
+    let links: Vec<(String, String)> = sqlx::query_as(
+        "SELECT source_id, target_id FROM links WHERE relation='supersedes' AND target_id = ANY($1) ORDER BY source_id",
+    )
+    .bind(vec![original.clone(), first_id.clone()])
+    .fetch_all(app.db.store.pool())
+    .await
+    .unwrap();
+    let mut expected = vec![
+        (first_id.clone(), original.clone()),
+        (second_id.clone(), first_id.clone()),
+    ];
+    expected.sort();
+    assert_eq!(links, expected);
+    let stacked: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action='memory_rewritten_by_admin' AND metadata = $1")
+        .bind(json!({"old_id":first_id,"new_id":second_id,"requested_id":original}))
+        .fetch_one(app.db.store.pool()).await.unwrap();
+    assert_eq!(stacked, 1);
+    for id in [&original, &first_id, &second_id] {
+        app.get(&format!("memories/{id}"), &owner).await;
+        let (status, _) = app
+            .send(
+                "GET",
+                &format!("memories/{id}"),
+                json!(null),
+                Some(&outsider),
+            )
+            .await;
+        assert_eq!(status, 404);
+    }
+
+    // Bob keeps the original title and changes only the detail, while Alice's version holds a new
+    // title: his text matches the superseded original, whose identity is retired instead of a 409.
+    let third = app.post(&path, json!({"title":"Original race fact","summary":"A project fact both admins rewrite","reason":"Verified correction","detail":"Bob's detail."}), &bob).await;
+    let third_id = third["memory_id"].as_str().unwrap();
+    assert_eq!(third["stacked_on"], second_id);
+    let (status, detail): (String, String) =
+        sqlx::query_as("SELECT status, detail FROM memories WHERE memory_id=$1")
+            .bind(third_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        (status.as_str(), detail.as_str()),
+        ("active", "Bob's detail.")
+    );
+    let current: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM memories WHERE memory_id = ANY($1) AND status IN ('active','stale')",
+    )
+    .bind(vec![
+        original.clone(),
+        first_id,
+        second_id,
+        third_id.to_owned(),
+    ])
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(current, 1, "agents see one current version");
+    let hashes: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT identity_hash) FROM memories WHERE memory_id = ANY($1)",
+    )
+    .bind(vec![original, third_id.to_owned()])
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(hashes, 2);
+    app.finish().await;
+}
+
+#[tokio::test]
+async fn admin_rewrite_detail() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let device = app.device(&admin, "agent").await;
+    let summary = "A useful fact for this test";
+    let reason = "Verified test evidence";
+    let old = app
+        .save(
+            &device,
+            json!({
+                "kind": "fact",
+                "scope": "personal",
+                "title": "Original detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Seed detail for the rewrite."
+            }),
+        )
+        .await;
+
+    let boundary = "d".repeat(DETAIL_MAX);
+    let kept = app
+        .post(
+            &format!("admin/memories/{old}/rewrite"),
+            json!({
+                "title": "Boundary detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": boundary
+            }),
+            &admin,
+        )
+        .await;
+    let kept_id = kept["memory_id"].as_str().unwrap();
+    assert_ne!(kept_id, old);
+    assert_eq!(kept["superseded"], old);
+    let stored: i32 =
+        sqlx::query_scalar("SELECT char_length(detail) FROM memories WHERE memory_id=$1")
+            .bind(kept_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, DETAIL_MAX as i32);
+    let view = app.get(&format!("memories/{kept_id}"), &admin).await;
+    assert_eq!(view["detail"], boundary);
+
+    let preserved = app
+        .post(
+            &format!("admin/memories/{kept_id}/rewrite"),
+            json!({
+                "title": "Preserved detail fact",
+                "summary": summary,
+                "reason": reason
+            }),
+            &admin,
+        )
+        .await;
+    let preserved_id = preserved["memory_id"].as_str().unwrap();
+    let preserved_view = app.get(&format!("memories/{preserved_id}"), &admin).await;
+    assert_eq!(preserved_view["detail"], boundary);
+
+    let memories_before: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    let (status, too_long) = app
+        .send(
+            "POST",
+            &format!("admin/memories/{preserved_id}/rewrite"),
+            json!({
+                "title": "Too long detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "d".repeat(DETAIL_MAX + 1)
+            }),
+            Some(&admin),
+        )
+        .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        too_long["error"],
+        format!(
+            "detail is {} characters, limit {DETAIL_MAX}: cut 1",
+            DETAIL_MAX + 1
+        )
+    );
+    let memories_after: i64 = sqlx::query_scalar("SELECT count(*) FROM memories")
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(memories_before, memories_after);
+
+    let redacted = app
+        .post(
+            &format!("admin/memories/{preserved_id}/rewrite"),
+            json!({
+                "title": "Redacted detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Operator note password=fake_secret_value stays in detail."
+            }),
+            &admin,
+        )
+        .await;
+    let redacted_id = redacted["memory_id"].as_str().unwrap();
+    let redacted_view = app.get(&format!("memories/{redacted_id}"), &admin).await;
+    assert_eq!(
+        redacted_view["detail"],
+        "Operator note password=[REDACTED] stays in detail."
+    );
+    let agent = app
+        .post("get", json!({"ids": [redacted_id]}), &device)
+        .await;
+    assert!(agent["memories"][0].get("detail").is_none());
+    assert!(!agent.to_string().contains("fake_secret_value"));
+    assert!(!agent.to_string().contains("Operator note"));
+
+    let cleared = app
+        .post(
+            &format!("admin/memories/{redacted_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": ""
+            }),
+            &admin,
+        )
+        .await;
+    let cleared_id = cleared["memory_id"].as_str().unwrap();
+    assert_ne!(cleared_id, redacted_id);
+    let cleared_view = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    assert!(cleared_view.get("detail").is_none());
+    let cleared_detail: String =
+        sqlx::query_scalar("SELECT detail FROM memories WHERE memory_id=$1")
+            .bind(cleared_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(cleared_detail, "");
+
+    let only = app
+        .post(
+            &format!("admin/memories/{cleared_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": "Added from the web console."
+            }),
+            &admin,
+        )
+        .await;
+    let added_id = only["memory_id"].as_str().unwrap();
+    assert_ne!(added_id, cleared_id);
+    assert_eq!(only["superseded"], cleared_id);
+    let (old_status, old_detail): (String, String) =
+        sqlx::query_as("SELECT status, detail FROM memories WHERE memory_id=$1")
+            .bind(cleared_id)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap();
+    assert_eq!(old_status, "superseded");
+    assert_eq!(old_detail, "");
+    let kept = app.get(&format!("memories/{cleared_id}"), &admin).await;
+    assert!(kept.get("detail").is_none());
+    let added = app.get(&format!("memories/{added_id}"), &admin).await;
+    assert_eq!(added["detail"], "Added from the web console.");
+    assert!(added.get("edited_by").is_some());
+
+    let emptied_body = app
+        .post(
+            &format!("admin/memories/{added_id}/rewrite"),
+            json!({
+                "title": "Cleared detail fact",
+                "summary": summary,
+                "reason": reason,
+                "detail": ""
+            }),
+            &admin,
+        )
+        .await;
+    let emptied_id = emptied_body["memory_id"].as_str().unwrap();
+    assert_ne!(emptied_id, added_id);
+    assert_eq!(emptied_body["superseded"], added_id);
+    let emptied: String = sqlx::query_scalar("SELECT detail FROM memories WHERE memory_id=$1")
+        .bind(emptied_id)
+        .fetch_one(app.db.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(emptied, "");
+    let history = app.get(&format!("memories/{added_id}"), &admin).await;
+    assert_eq!(history["status"], "superseded");
+    assert_eq!(history["detail"], "Added from the web console.");
     app.finish().await;
 }
 
@@ -340,6 +671,54 @@ async fn no_private_fields() {
     let searches = app.get("admin/searches", &admin).await.to_string();
     assert!(searches.contains("[REDACTED]"));
     assert!(!searches.contains("bad-secret-value"));
+    app.finish().await;
+}
+
+/// U-051: a detector-made F4 for one laptop is listed and completed only by that device.
+#[tokio::test]
+async fn f4_device_fix_only_target_device() {
+    let Some(app) = App::new().await else { return };
+    let admin = app.admin("admin").await;
+    let laptop = app.device(&admin, "laptop").await;
+    let other = app.device(&admin, "other").await;
+    let (device, _) = app.db.store.authenticate_device(&laptop).await.unwrap();
+    sqlx::query("UPDATE devices SET last_hook_at=now()-interval '8 days', last_seen_at=now(), hook_error_class='network' WHERE device_id=$1")
+        .bind(&device.device_id).execute(app.db.store.pool()).await.unwrap();
+    app.db.store.fixes_nightly(true, "0.1.9").await.unwrap();
+    let (fix, fingerprint, evidence): (String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT fix_id,fingerprint,evidence FROM fixes WHERE detector='F4' AND device_id=$1",
+    )
+    .bind(&device.device_id)
+    .fetch_one(app.db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(evidence["hook_error_class"], "network");
+    app.post(
+        &format!("admin/fixes/{fix}/apply"),
+        json!({"fingerprint":fingerprint}),
+        &admin,
+    )
+    .await;
+    let status = || async {
+        sqlx::query_scalar::<_, String>("SELECT status FROM fixes WHERE fix_id=$1")
+            .bind(&fix)
+            .fetch_one(app.db.store.pool())
+            .await
+            .unwrap()
+    };
+    assert_eq!(status().await, "queued");
+    let listed = app.get("device/fixes", &laptop).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["fix_id"], fix);
+    assert_eq!(app.get("device/fixes", &other).await, json!([]));
+    let done = format!("device/fixes/{fix}");
+    let (code, _) = app
+        .send("POST", &done, json!({"result":"applied"}), Some(&other))
+        .await;
+    assert_eq!(code, 404);
+    assert_eq!(status().await, "queued");
+    app.post(&done, json!({"result":"applied"}), &laptop).await;
+    assert_eq!(status().await, "done");
     app.finish().await;
 }
 
@@ -890,7 +1269,7 @@ async fn f9_redacts_maximum_length_title() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
     let id = fact(&app, &device, "Maximum title fixture").await;
-    sqlx::query("UPDATE memories SET title='password=x '||repeat('a',69) WHERE memory_id=$1")
+    sqlx::query("UPDATE memories SET title='password=x '||repeat('a',189) WHERE memory_id=$1")
         .bind(&id)
         .execute(app.db.store.pool())
         .await
@@ -910,8 +1289,8 @@ async fn f9_redacts_maximum_length_title() {
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
-    assert!(title.chars().count() <= 80);
-    assert_eq!(title, format!("password=* {}", "a".repeat(69)));
+    assert!(title.chars().count() <= 200);
+    assert_eq!(title, format!("password=* {}", "a".repeat(189)));
     assert!(!title.contains("password=x"));
     app.finish().await;
 }
@@ -922,7 +1301,7 @@ async fn f9_many_markers_fit_without_dropping_text() {
     let admin = app.admin("admin").await;
     let device = app.device(&admin, "agent").await;
     let id = fact(&app, &device, "Many secrets fixture").await;
-    sqlx::query("UPDATE memories SET title=repeat('pwd=x ',11) WHERE memory_id=$1")
+    sqlx::query("UPDATE memories SET title=repeat('pwd=x ',33) WHERE memory_id=$1")
         .bind(&id)
         .execute(app.db.store.pool())
         .await
@@ -942,7 +1321,7 @@ async fn f9_many_markers_fit_without_dropping_text() {
         .fetch_one(app.db.store.pool())
         .await
         .unwrap();
-    assert_eq!(title, "pwd=* ".repeat(11));
+    assert_eq!(title, "pwd=* ".repeat(33));
     app.finish().await;
 }
 

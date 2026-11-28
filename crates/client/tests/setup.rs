@@ -1615,15 +1615,31 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout).unwrap()
     };
+    let restart = "Start the Hermes gateway process again";
     let yaml = || {
         yaml_serde::from_str::<Value>(&fs::read_to_string(profile.join("config.yaml")).unwrap())
             .unwrap()
     };
-    invoke(false, false);
+    // A coding profile: newer Hermes runs CLI chats in a shared gateway process that outlives setup.
+    let stdout = invoke(false, false);
+    assert!(!stdout.contains(restart), "{stdout}");
+    assert!(
+        stdout.contains("Start Hermes again so it loads Cairn's hooks"),
+        "{stdout}"
+    );
+    let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        doctor.contains("hermes memory provider present; a running Hermes or Hermes gateway process loads it only when it starts"),
+        "{doctor}"
+    );
     assert_eq!(yaml()["memory"]["provider"], "cairn-memory");
 
-    invoke(true, false);
+    // #20: a gateway process running during setup never loads the chat hook.
+    let stdout = invoke(true, false);
+    assert!(stdout.contains(restart), "{stdout}");
     let converted = yaml();
     assert!(converted["mcp_servers"]["cairn"].is_null());
     let settings = &converted["plugins"]["entries"]["cairn-memory"]["settings"];
@@ -1638,6 +1654,16 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
     let doctor = home.doctor().env("HERMES_HOME", &profile).output().unwrap();
     let doctor = String::from_utf8(doctor.stdout).unwrap();
     assert!(!doctor.contains("warn  instructions"), "{doctor}");
+    assert!(
+        doctor.contains(
+            "hermes gateway files present; a gateway process loads them only when it starts"
+        ),
+        "{doctor}"
+    );
+    assert!(
+        !doctor.contains("hermes memory provider present"),
+        "{doctor}"
+    );
     let before = home.snapshot("gateway-profile");
     invoke(true, false);
     assert_eq!(before, home.snapshot("gateway-profile"));
@@ -1663,7 +1689,8 @@ fn hermes_gateway_setup_converts_managed_mcp_and_preserves_its_salt() {
     assert!(settings.get("chat_projects").is_none());
     assert_eq!(settings["chat_salt"], salt);
 
-    invoke(false, true);
+    let stdout = invoke(false, true);
+    assert!(!stdout.contains("again"), "{stdout}");
     let removed = yaml();
     assert!(removed["mcp_servers"]["cairn"].is_null());
     assert!(removed["memory"].is_null());

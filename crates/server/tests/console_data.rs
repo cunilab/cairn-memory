@@ -742,7 +742,7 @@ async fn export_owned_memories_and_import_with_dry_run() {
     assert_eq!(invalid.len(), 4, "{dry}");
     assert_eq!(
         invalid[3]["error"],
-        "summary: use 20-240 characters saying what is true"
+        "summary: use 20-1000 characters (about 240) saying what is true"
     );
     assert!(
         invalid

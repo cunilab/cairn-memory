@@ -17,7 +17,7 @@ flowchart TD
   Plugin[Hooks] -->|Tool events| Server
 ```
 
-The provider prefetches at turn start and supplies native tools. The plugin captures tool activity and returns failed-command warnings. A coding checkout uses project and personal memory. A [gateway profile](hermes-gateway.md) can also keep chat-tagged personal memories.
+The provider prefetches at turn start and supplies native tools. Hermes cannot extend a finished turn, so after a turn that edited files, Cairn's one save reminder arrives with your next prompt, also when you resume that session later. The plugin captures tool activity and returns failed-command warnings. A coding checkout uses project and personal memory. A [gateway profile](hermes-gateway.md) can also keep chat-tagged personal memories.
 
 ## Check the Hermes version
 
@@ -34,6 +34,8 @@ Target the default profile (or specify `HERMES_HOME=/path/to/profile`):
 cairn setup https://cairn.example.com --agent hermes
 cairn doctor
 ```
+
+Start Hermes again after setup. Newer Hermes runs CLI and TUI chats in the profile's shared gateway process (`hermes gateway run`, started on demand). If that process was running during setup, start it again too: until then it keeps Cairn's tools but skips tool capture and failed-command recall. `cairn doctor` and `hermes memory status` read the profile's files only.
 
 Verify provider and plugin discovery after restarting Hermes:
 

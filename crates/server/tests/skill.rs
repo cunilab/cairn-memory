@@ -214,7 +214,7 @@ async fn skill_card_is_bounded_and_shares_the_session_budget_outside_chats() {
         };
         sqlx::query(
             "INSERT INTO session_shown (person_id, session_id, memory_id, source)
-                      SELECT $1, $2, id, 'brief' FROM unnest($3::text[]) id",
+                      SELECT $1, $2, id, 'topic' FROM unnest($3::text[]) id",
         )
         .bind(person_id)
         .bind(session)
@@ -223,6 +223,23 @@ async fn skill_card_is_bounded_and_shares_the_session_budget_outside_chats() {
         .await
         .unwrap();
     }
+    // Brief cards never spend the 8-card L2 recall budget.
+    sqlx::query(
+        "INSERT INTO session_shown (person_id, session_id, memory_id, source)
+                  SELECT $1, 'e2e-brief-free', id, 'brief' FROM unnest($2::text[]) id",
+    )
+    .bind(person_id)
+    .bind(&memories)
+    .execute(app.db.store.pool())
+    .await
+    .unwrap();
+    assert!(
+        !app.db
+            .store
+            .push_budget_spent(person_id, "e2e-brief-free")
+            .await
+            .unwrap()
+    );
     let final_card = prompt(&app, &device, "e2e-budget", query, json!({})).await;
     assert!(final_card["text"].as_str().unwrap().contains("Skill:"));
     assert_eq!(final_card["budget_spent"], true);

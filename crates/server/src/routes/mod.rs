@@ -3,6 +3,7 @@
 mod account;
 mod admin;
 mod capture;
+mod console;
 mod device;
 mod fixes;
 mod health;
@@ -31,6 +32,10 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/auth/login", post(account::login))
         .route("/cairn-memory/auth/logout", post(account::logout))
         .route("/cairn-memory/auth/me", get(account::me))
+        .route(
+            "/cairn-memory/me/trace",
+            get(account::trace).post(account::set_trace),
+        )
         .route("/cairn-memory/auth/audit", get(account::audit))
         .route("/cairn-memory/auth/accounts", get(account::accounts))
         .route(
@@ -128,6 +133,13 @@ pub fn router() -> Router<AppState> {
         .route("/cairn-memory/remember", post(memory::remember))
         .route("/cairn-memory/get", post(memory::get_many))
         .route("/cairn-memory/memories", get(memory::list))
+        .route("/cairn-memory/console/memories", get(console::memories))
+        .route("/cairn-memory/memories/pins", get(memory::pins))
+        .route(
+            "/cairn-memory/memories/pins/order",
+            post(memory::reorder_pins),
+        )
+        .route("/cairn-memory/memories/session", get(memory::session))
         .route("/cairn-memory/memories/export", get(memory::export))
         .route(
             "/cairn-memory/memories/import",

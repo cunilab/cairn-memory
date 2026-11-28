@@ -24,6 +24,14 @@ label?: string | null,
  */
 score: number, 
 /**
+ * Channel and matched token. Omitted when search did not record one.
+ */
+why?: string | null, 
+/**
+ * Project id of a project memory. Omitted for personal and global cards.
+ */
+project?: string | null, 
+/**
  * How many times this knowledge was saved. Omitted the first time.
  */
 seen?: number, trust: string, };

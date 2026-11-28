@@ -7,6 +7,7 @@ synthetic corpus in bench/fixtures, then measures the agent-facing surface throu
 
     python3 scripts/bench.py --out bench/result.json [--label NAME] [--lexical-only]
         [--questions questions-v2.json --distractors 2000]
+        [--coding --out bench/fixtures/before-0.1.12-search.json]
 
 Question sets (bench/fixtures): `questions.json` (v1, frozen history), `questions-v2.json` (the main
 set from step 5c on: stemmed self-check, single-gold paraphrases, partial-overlap weak queries) and
@@ -282,15 +283,26 @@ def main():
                         help="load the corpus and distractors with no aliases (A/B against the alias run)")
     parser.add_argument("--budget", type=int, help="pass this token budget to memory_search (default: the server default)")
     parser.add_argument("--dump-injected", help="also write the text each hook event injected to this file (contains random memory ids)")
+    parser.add_argument("--coding", action="store_true",
+                        help="run the coding-memory suite (bench/fixtures/coding-memory.json) instead of the frozen question sets")
     args = parser.parse_args()
 
-    corpus = json.loads((FIXTURES / "corpus.json").read_text())["memories"]
-    spec = json.loads((FIXTURES / args.questions).read_text())
-    questions, weak = spec["questions"], spec["weak_queries"]
-    strict = bool(spec.get("strict_coverage"))
-    holdout = json.loads((FIXTURES / "questions-holdout.json").read_text())
-    by_key = {m["key"]: m for m in corpus}
-    distractors = bench_distractors.make(args.distractors) if args.distractors else []
+    if args.coding:
+        import bench_coding
+        bench_coding.self_check()
+        corpus, questions, weak = [], [], []
+        strict = False
+        holdout = {"questions": [], "weak_queries": []}
+        by_key = {}
+        distractors = []
+    else:
+        corpus = json.loads((FIXTURES / "corpus.json").read_text())["memories"]
+        spec = json.loads((FIXTURES / args.questions).read_text())
+        questions, weak = spec["questions"], spec["weak_queries"]
+        strict = bool(spec.get("strict_coverage"))
+        holdout = json.loads((FIXTURES / "questions-holdout.json").read_text())
+        by_key = {m["key"]: m for m in corpus}
+        distractors = bench_distractors.make(args.distractors) if args.distractors else []
 
     # Fixture self-check, unstemmed: paraphrase questions share no content word with any gold memory.
     # The stemmed check (what Postgres actually matches) runs after the load, below.
@@ -441,6 +453,11 @@ def main():
             raise RuntimeError("embeddings and consolidation did not settle")
 
         settle()
+        if args.coding:
+            import bench_coding
+            bench_coding.run(http, session, device, repo, env, git_env, cairn_exe, config_file,
+                             sql, bool(model_dir), semantic, args.label, args.out)
+            return
         if args.check_recall_latency:
             check_recall_latency(http, device, context, repo, env, cairn_exe, config_file,
                                  args.out, semantic, len(ids), settle)

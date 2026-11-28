@@ -2,10 +2,12 @@
 
 import { Pin } from "lucide-react";
 import { Fragment, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { KindBadge, StatusBadge } from "@/components/badges";
 import { CopyButton } from "@/components/copy-button";
+import { PinSummaryBar } from "@/components/pin-summary";
 import { ErrorAlert, LoadingBlock } from "@/components/states";
 import { Time } from "@/components/time";
 import {
@@ -35,8 +37,10 @@ import { useAccount } from "@/hooks/use-account";
 import { useResetOnHide } from "@/hooks/use-reset-on-hide";
 import { forgetMemoryImpact } from "@/lib/action-copy";
 import { ApiError, cairn } from "@/lib/cairn";
+import { branchActivityHref, sessionHref, sessionTitle } from "@/lib/provenance";
 import { announceMemoriesChanged } from "@/lib/memory-events";
-import { LOGIN_PATH, SessionRequiredError } from "@/lib/session";
+import { TEXT_SIZES, textSizeHint } from "@/lib/memory-text";
+import { loginHref, SessionRequiredError } from "@/lib/session";
 import type { LinkView } from "@/lib/generated/LinkView";
 import type { MemoryView } from "@/lib/generated/MemoryView";
 import { memoryLabel } from "@/app/memories/_components/memory-label";
@@ -119,29 +123,99 @@ function Lineage({
   );
 }
 
-function Body({ memory, open }: { memory: MemoryView; open: (id: string) => void }) {
+const DETAIL_MAX = 8_000;
+
+function detailChars(text: string): number {
+  return Array.from(text).length;
+}
+
+function SizedField({ field, value, onChange }: { field: keyof typeof TEXT_SIZES; value: string; onChange: (value: string) => void }) {
+  const hint = textSizeHint(field, value);
+  const Control = field === "title" ? Input : Textarea;
+  return (
+    <label className="block text-sm">
+      <span className="flex items-baseline justify-between gap-2">
+        <span>{field === "title" ? "Title" : "Summary"}</span>
+        <span className={hint.long ? "text-xs font-medium tabular-nums text-foreground" : "text-xs tabular-nums text-muted-foreground"}>
+          {hint.label}
+        </span>
+      </span>
+      <Control value={value} maxLength={TEXT_SIZES[field].max} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function DetailField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const count = detailChars(value);
+  const over = count > DETAIL_MAX;
+  return (
+    <label className="block text-sm">
+      <span className="flex items-baseline justify-between gap-2">
+        <span>Detail</span>
+        <span className={over ? "text-xs tabular-nums text-destructive" : "text-xs tabular-nums text-muted-foreground"}>
+          {count}/{DETAIL_MAX}
+        </span>
+      </span>
+      <Textarea
+        value={value}
+        rows={5}
+        className="max-h-48"
+        aria-invalid={over || undefined}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function Body({
+  memory,
+  open,
+  canEdit,
+  onEdit,
+}: {
+  memory: MemoryView;
+  open: (id: string) => void;
+  canEdit: boolean;
+  onEdit: () => void;
+}) {
   const fields = Object.entries(memory.fields ?? {});
   const evidence = memory.evidence ?? [];
   return (
     <div className="flex flex-col gap-4 px-4 pb-6">
-      <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.summary}</p>
+      <p id="memory-field-summary" className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.summary}</p>
       {memory.edited_by ? <p className="text-sm text-muted-foreground">Changed by admin</p> : null}
       {memory.reason ? (
-        <div>
-          <h3 className="text-xs font-medium text-muted-foreground">Why it was saved</h3>
+        <div id="memory-field-reason">
+          <h3 className="text-xs font-medium text-muted-foreground">Why saved</h3>
           <p className="text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.reason}</p>
         </div>
       ) : null}
       {memory.detail ? (
-        <details className="flex flex-col gap-2 text-sm">
+        <details id="memory-field-detail" className="flex flex-col gap-2 text-sm">
           <summary className="cursor-pointer font-medium">Full detail</summary>
           <p className="mt-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{memory.detail}</p>
         </details>
-      ) : null}
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          No detail
+          {canEdit ? (
+            <>
+              {" · "}
+              <button
+                type="button"
+                className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+                onClick={onEdit}
+              >
+                Edit
+              </button>
+            </>
+          ) : null}
+        </p>
+      )}
       {fields.length > 0 ? (
         <dl className="flex flex-col gap-2 text-sm">
           {fields.map(([key, value]) => (
-            <div key={key}>
+            <div key={key} id={`memory-field-${key}`}>
               <dt className="text-xs font-medium text-muted-foreground">{words(key)}</dt>
               <dd className="whitespace-pre-wrap [overflow-wrap:anywhere]">
                 {Array.isArray(value) ? (
@@ -253,8 +327,18 @@ export function MemorySheet() {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [reason, setReason] = useState("");
+  const [detail, setDetail] = useState("");
   const [fields, setFields] = useState("");
-  const close = useCallback(() => { setEditingId(null); set({ memory: null }); }, [set]);
+  const detailOver = detailChars(detail) > DETAIL_MAX;
+  function beginEdit(source: MemoryView | null) {
+    setTitle(source?.title ?? "");
+    setSummary(source?.summary ?? "");
+    setReason(source?.reason ?? "");
+    setDetail(source?.detail ?? "");
+    setFields(source ? JSON.stringify(source.fields, null, 2) : "");
+    setEditingId(id);
+  }
+  const close = useCallback(() => { setEditingId(null); set({ memory: null, field: null }); }, [set]);
   useResetOnHide(() => {
     setLoaded(null);
     setConfirming(false);
@@ -271,7 +355,7 @@ export function MemorySheet() {
       .catch((cause: unknown) => {
         if (cancelled) return;
         if (cause instanceof SessionRequiredError) {
-          router.replace(LOGIN_PATH);
+          router.replace(loginHref());
           return;
         }
         const missing = cause instanceof ApiError && cause.status === 404;
@@ -292,8 +376,15 @@ export function MemorySheet() {
   const memory = current?.memory ?? null;
   const canForget = memory?.owner_is_me === true && !memory.project_archived;
 
-  const canPin = canForget && memory !== null && memory.scope !== "global"
-    && (memory.status !== "superseded" || memory.pinned_at != null);
+  const canPin = memory?.can_pin === true;
+  const field = params.get("field");
+  useEffect(() => {
+    if (!field || !memory) return;
+    const target = document.getElementById(`memory-field-${field}`);
+    // A detail-only match is inside the collapsed "Full detail"; open it so the match shows.
+    if (target instanceof HTMLDetailsElement) target.open = true;
+    target?.scrollIntoView({ block: "nearest" });
+  }, [field, memory]);
 
   async function togglePin() {
     if (!canPin || !memory) return;
@@ -310,7 +401,7 @@ export function MemorySheet() {
       toast.success(result.pinned_at == null ? "Memory unpinned" : "Memory pinned");
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return;
       }
       toast.error(cause instanceof Error ? cause.message : "Could not change the pin.");
@@ -330,7 +421,7 @@ export function MemorySheet() {
       close();
     } catch (cause) {
       if (cause instanceof SessionRequiredError) {
-        router.replace(LOGIN_PATH);
+        router.replace(loginHref());
         return;
       }
       toast.error(cause instanceof Error ? cause.message : "Could not forget this memory.");
@@ -343,11 +434,13 @@ export function MemorySheet() {
     if (!id || memory?.project_archived) return;
     setPending(true);
     try {
-      const result = await cairn<{memory_id: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
+      const result = await cairn<{memory_id: string; stacked_on?: string}>(`admin/memories/${encodeURIComponent(id)}/rewrite`, { method: "POST", body: JSON.stringify({title, summary, reason, detail, ...(fields.trim() ? {fields: JSON.parse(fields)} : {})}) });
       setEditingId(null);
+      setAttempt((n) => n + 1);
       announceMemoriesChanged();
       set({ memory: result.memory_id }, "push");
-      toast.success("Memory rewritten");
+      if (result.stacked_on) toast.warning("Someone rewrote this first. Your text is now current; theirs is kept as the previous version.");
+      else toast.success("Memory rewritten");
     } catch (cause) { toast.error(cause instanceof Error ? cause.message : "Could not rewrite memory."); }
     finally { setPending(false); }
   }
@@ -355,8 +448,8 @@ export function MemorySheet() {
   return (
     <>
       <Sheet open={id !== null} onOpenChange={(open) => !open && close()}>
-        <SheetContent className="overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-lg">
-          <SheetHeader>
+        <SheetContent className="w-full overflow-hidden data-[side=right]:w-full data-[side=right]:sm:max-w-lg">
+          <SheetHeader className="shrink-0 border-b bg-background pr-12">
             <div className="flex flex-wrap items-center gap-2 pr-8">
               {memory ? (
                 <>
@@ -394,13 +487,51 @@ export function MemorySheet() {
             <SheetTitle className="[overflow-wrap:anywhere]">
               {memory?.title ?? (current?.missing ? "Memory not found" : "Memory")}
             </SheetTitle>
+            {memory?.provenance ? (
+              <p className="text-sm">
+                Saved in →{" "}
+                <Link className="underline-offset-4 hover:underline" href={sessionHref(memory.provenance)}>
+                  {sessionTitle(memory.provenance.branch)}, <Time value={memory.provenance.started_at} />
+                </Link>
+              </p>
+            ) : memory ? (
+              <p className="text-sm">
+                {memory.project_id ? (
+                  <Link className="underline-offset-4 hover:underline" href={branchActivityHref(memory.project_id, memory.context.branch)}>
+                    View branch activity
+                  </Link>
+                ) : (
+                  "View branch activity"
+                )}
+              </p>
+            ) : null}
             <SheetDescription className="sr-only">Memory details</SheetDescription>
+            {memory ? (
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                {canPin ? (
+                  <Button type="button" variant={memory.pinned_at == null ? "outline" : "default"} size="sm" disabled={pending} onClick={() => void togglePin()}>
+                    <Pin aria-hidden="true" className={memory.pinned_at != null ? "fill-current" : ""} />
+                    {memory.pinned_at == null ? "Pin" : "Unpin"}
+                  </Button>
+                ) : null}
+                <CopyButton text={typeof window === "undefined" ? memory.id : window.location.href} label="Copy link" onCopied={() => toast.success("Link copied")} />
+                {memory.project_id ? (
+                  <Button type="button" variant="outline" size="sm" nativeButton={false} render={<Link href={`/projects/${encodeURIComponent(memory.project_id)}`} />}>
+                    {memory.project_name ?? "Project"}
+                  </Button>
+                ) : null}
+                <Button type="button" variant="outline" size="sm" nativeButton={false} render={<Link href={`/graph?focus=${encodeURIComponent(memory.id)}${memory.project_id ? `&project=${encodeURIComponent(memory.project_id)}` : ""}`} />}>
+                  Relationships
+                </Button>
+              </div>
+            ) : null}
           </SheetHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto">
           {current === null ? <div className="px-4"><LoadingBlock label="Loading memory…" rows={5} /></div> : null}
           {current?.missing ? (
             <div className="flex flex-col items-start gap-3 px-4">
               <p className="text-sm text-muted-foreground">This memory was forgotten.</p>
-              {account?.is_admin && !editing ? <Button variant="outline" onClick={() => { setTitle(""); setSummary(""); setReason(""); setFields(""); setEditingId(id); }}>Rewrite by ID…</Button> : null}
+              {account?.is_admin && !editing ? <Button variant="outline" onClick={() => beginEdit(null)}>Rewrite by ID…</Button> : null}
               <Button type="button" variant="outline" onClick={close}>
                 Close
               </Button>
@@ -408,10 +539,11 @@ export function MemorySheet() {
           ) : null}
           {current?.missing && account?.is_admin && editing ? <div className="space-y-3 px-4 pb-4">
             <p className="text-sm">Enter a replacement for this memory.</p>
-            <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-            <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+            <SizedField field="title" value={title} onChange={setTitle} />
+            <SizedField field="summary" value={summary} onChange={setSummary} />
             <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-            <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+            <DetailField value={detail} onChange={setDetail} />
+            <div className="flex gap-2"><Button disabled={pending || detailOver} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
           </div> : null}
           {current?.error ? (
             <div className="px-4">
@@ -420,29 +552,40 @@ export function MemorySheet() {
           ) : null}
           {memory ? (
             <>
-              <Body memory={memory} open={(next) => set({ memory: next }, "push")} />
+              <Body
+                memory={memory}
+                open={(next) => set({ memory: next }, "push")}
+                canEdit={account?.is_admin === true && !memory.project_archived && !editing}
+                onEdit={() => beginEdit(memory)}
+              />
               {account?.is_admin && !memory.project_archived && editing ? <div className="space-y-3 px-4 pb-4">
-                <label className="block text-sm">Title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-                <label className="block text-sm">Summary<Textarea value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+                <SizedField field="title" value={title} onChange={setTitle} />
+                <SizedField field="summary" value={summary} onChange={setSummary} />
                 <label className="block text-sm">Reason<Textarea value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+                <DetailField value={detail} onChange={setDetail} />
                 <label className="block text-sm">Fields (JSON)<Textarea value={fields} onChange={(event) => setFields(event.target.value)} /></label>
-                <div className="flex gap-2"><Button disabled={pending} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
-              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => { setTitle(memory.title); setSummary(memory.summary); setReason(memory.reason ?? ""); setFields(JSON.stringify(memory.fields, null, 2)); setEditingId(id); }}>Rewrite memory…</Button></div> : null}
+                <div className="flex gap-2"><Button disabled={pending || detailOver} onClick={() => void rewrite()}>Save rewrite</Button><Button variant="outline" onClick={() => setEditingId(null)}>Cancel</Button></div>
+              </div> : account?.is_admin && !memory.project_archived ? <div className="px-4 pb-4"><Button variant="outline" onClick={() => beginEdit(memory)}>Rewrite memory…</Button></div> : null}
               {canForget ? (
-                <div className="mt-auto flex flex-wrap gap-2 px-4 pb-4">
-                  {canPin ? (
-                    <Button type="button" variant="outline" disabled={pending} onClick={() => void togglePin()}>
-                      <Pin aria-hidden="true" />
-                      {memory.pinned_at == null ? "Pin memory" : "Unpin memory"}
-                    </Button>
+                <div className="mt-auto flex flex-col gap-3 px-4 pb-4">
+                  {memory.scope !== "global" ? (
+                    <PinSummaryBar
+                      projectId={memory.project_id}
+                      memoryId={memory.id}
+                      pinnedAt={memory.pinned_at}
+                      compact
+                    />
                   ) : null}
-                  <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
-                    Forget memory…
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
+                      Forget memory…
+                    </Button>
+                  </div>
                 </div>
               ) : null}
             </>
           ) : null}
+          </div>
         </SheetContent>
       </Sheet>
       <AlertDialog open={confirming} onOpenChange={(open) => !pending && setConfirming(open)}>

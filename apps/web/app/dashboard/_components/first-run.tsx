@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { CheckIcon, CircleDashedIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { SetupCommand } from "@/components/setup-command";
 import { Spinner } from "@/components/ui/spinner";
 import { useServerUrl } from "@/hooks/use-server-url";
+import { cairn } from "@/lib/cairn";
+import type { DeviceView } from "@/lib/generated/DeviceView";
 import type { Agent } from "@/lib/setup-command";
 
 type Props = {
@@ -31,7 +33,21 @@ function Status({ done, children }: { done: boolean; children: React.ReactNode }
 
 /** First run: a checklist of real controls. It disappears once the first capture arrives. */
 export function FirstRun({ checkedIn, captured, total, gaveUp }: Props) {
-  const done = 1 + (checkedIn ? 1 : 0) + (captured ? 1 : 0);
+  const [hasToken, setHasToken] = useState(checkedIn);
+  useEffect(() => {
+    let cancelled = false;
+    cairn<DeviceView[]>("devices")
+      .then((devices) => {
+        if (!cancelled) setHasToken(devices.length > 0 || checkedIn);
+      })
+      .catch(() => {
+        if (!cancelled) setHasToken(checkedIn);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [checkedIn]);
+  const done = (hasToken ? 1 : 0) + (checkedIn ? 1 : 0) + (captured ? 1 : 0);
   const serverUrl = useServerUrl();
   const [agent, setAgent] = useState<Agent>("claude");
   return (
@@ -44,24 +60,23 @@ export function FirstRun({ checkedIn, captured, total, gaveUp }: Props) {
       </CardHeader>
       <CardContent>
         <ol aria-live="polite" className="flex flex-col gap-4">
-          <li>
-            <Status done>Signed in</Status>
+          <li className="flex flex-col gap-2">
+            <Status done={hasToken}>Create a device token</Status>
+            {!hasToken ? (
+              <div className="pl-6">
+                <Button nativeButton={false} render={<Link href="/settings?tab=devices&create=1" />}>
+                  Create device token
+                </Button>
+              </div>
+            ) : null}
           </li>
           <li className="flex flex-col gap-2">
-            <Status done={checkedIn}>Create a device token and run the setup command</Status>
-            {!checkedIn && (
-              <>
-                <div className="flex flex-wrap items-center gap-2 pl-6">
-                  <Button nativeButton={false} render={<Link href="/settings?tab=devices&create=1" />}>
-                    Create device token
-                  </Button>
-                  <span className="text-sm text-muted-foreground">Then run this on the machine where your agent runs.</span>
-                </div>
-                <div className="pl-6">
-                  <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
-                </div>
-              </>
-            )}
+            <Status done={checkedIn}>Connect an agent</Status>
+            {hasToken && !checkedIn ? (
+              <div className="pl-6">
+                <SetupCommand serverUrl={serverUrl} agent={agent} onAgent={setAgent} />
+              </div>
+            ) : null}
           </li>
           <li className="flex flex-col gap-2">
             <Status done={captured}>Start an agent session</Status>

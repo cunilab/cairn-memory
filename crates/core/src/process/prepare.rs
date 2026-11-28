@@ -137,13 +137,14 @@ fn prepare(
         resolve_scope(input.kind, input.scope, has_project)?
     };
     let evidence = normalize_evidence(&input.evidence);
-    let entities = entities::derive(
+    let entities = entities::derive_with_evidence(
         &[
             input.title.as_str(),
             input.summary.as_str(),
             input.reason.as_str(),
             fields.text().as_str(),
         ],
+        &evidence,
         work,
     );
     let mut new = NewMemory {
@@ -270,7 +271,7 @@ mod tests {
                 "initialized",
             ),
             (
-                json!({"kind":"fact","title":"x".repeat(81),"summary":s,"reason":"because it is"}),
+                json!({"kind":"fact","title":"x".repeat(201),"summary":s,"reason":"because it is"}),
                 "title",
             ),
             (

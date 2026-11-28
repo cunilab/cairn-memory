@@ -33,6 +33,17 @@ fn is_empty<T: Blank>(value: &T) -> bool {
     value.blank()
 }
 
+fn label(
+    out: &mut Vec<(&'static str, &'static str, String)>,
+    key: &'static str,
+    name: &'static str,
+    text: &str,
+) {
+    if !text.is_empty() {
+        out.push((key, name, text.to_owned()));
+    }
+}
+
 fields_struct!(Decision { context: String, alternatives: Vec<String>, consequences: String });
 fields_struct!(Rule { exceptions: String });
 fields_struct!(Gotcha {
@@ -106,6 +117,52 @@ impl Fields {
     /// The bare per-kind object; empty strings and arrays are omitted.
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Default::default()))
+    }
+
+    /// Each stored string on its own, with a stable key and a short label. Array items stay separate.
+    pub fn labeled(&self) -> Vec<(&'static str, &'static str, String)> {
+        let mut out = Vec::new();
+        match self {
+            Self::Decision(value) => {
+                label(&mut out, "context", "Context", &value.context);
+                for item in &value.alternatives {
+                    label(&mut out, "alternatives", "Alternatives", item);
+                }
+                label(
+                    &mut out,
+                    "consequences",
+                    "Consequences",
+                    &value.consequences,
+                );
+            }
+            Self::Rule(value) => label(&mut out, "exceptions", "Exceptions", &value.exceptions),
+            Self::Gotcha(value) => {
+                label(&mut out, "symptom", "Symptom", &value.symptom);
+                label(&mut out, "cause", "Cause", &value.cause);
+                label(&mut out, "fix", "Fix", &value.fix);
+            }
+            Self::Procedure(value) => {
+                for item in &value.steps {
+                    label(&mut out, "steps", "Steps", item);
+                }
+                label(&mut out, "when", "When", &value.when);
+            }
+            Self::Fact(value) => label(&mut out, "source", "Source", &value.source),
+            Self::Preference(value) => label(&mut out, "example", "Example", &value.example),
+            Self::Note(_) => {}
+            Self::Handoff(value) => {
+                for item in &value.next_steps {
+                    label(&mut out, "next_steps", "Next steps", item);
+                }
+                for item in &value.open_questions {
+                    label(&mut out, "open_questions", "Open questions", item);
+                }
+                for item in &value.files {
+                    label(&mut out, "files", "Files", item);
+                }
+            }
+        }
+        out
     }
 
     /// All text values in key order, one per line. Used for embedding text and search.

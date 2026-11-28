@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAccount } from "@/hooks/use-account";
 import { cairn } from "@/lib/cairn";
+import { useOpenMemory } from "@/hooks/use-query-params";
 import type { SkillCard } from "@/lib/generated/SkillCard";
 import type { SkillDetail } from "@/lib/generated/SkillDetail";
 import type { SkillVersion } from "@/lib/generated/SkillVersion";
@@ -25,6 +26,7 @@ export function SkillSheet({ id, onClose, onChange }: {
   onChange: (id: string) => void;
 }) {
   const account = useAccount();
+  const openMemory = useOpenMemory();
   const isNew = id === "new";
   const [skill, setSkill] = useState<SkillDetail>();
   const [history, setHistory] = useState<SkillVersion[]>([]);
@@ -102,6 +104,15 @@ export function SkillSheet({ id, onClose, onChange }: {
           ) : hasLoadedVersion ? (
             <>
               <p className="text-sm text-muted-foreground">{skill.description}</p>
+              {!historical && skill.source ? (
+                <p className="text-sm">
+                  Source memory →{" "}
+                  <Button type="button" variant="link" className="h-auto p-0" onClick={() => openMemory(skill.source?.memory_id ?? null)}>
+                    {skill.source.title}
+                  </Button>
+                  {skill.source.project_name ? <span className="text-muted-foreground"> · {skill.source.project_name}</span> : null}
+                </p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 {!archived && !historical && <Button onClick={() => setEditing(true)} disabled={busy}>Edit</Button>}
                 {!archived && historical && <Button onClick={() => setRollback(true)} disabled={busy}>Roll back to this version</Button>}

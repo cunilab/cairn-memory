@@ -16,6 +16,7 @@ Safely upgrade the Cairn server, console, and client devices across release vers
    - The updater verifies binary checksums and refreshes detected agent configurations.
    - When updating from 0.1.9, run `cairn setup <agent>` once.
    - Non-default Hermes profiles must be refreshed with their specific `HERMES_HOME`.
+   - A 0.1.12 client needs a 0.1.12 server. Against an older server, agent saves, searches with the new filters, and titles over 80 or summaries over 240 characters are refused, so upgrade the server together with its clients.
 5. **Verify with doctor**: Run `cairn doctor` on each machine. Confirm that project memories appear in the console and resolve in agent search queries.
 
 See [How the client updater works](../technical/release-process.md#how-clients-update).

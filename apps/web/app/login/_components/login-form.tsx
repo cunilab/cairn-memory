@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { ApiError, cairn } from "@/lib/cairn";
 import type { Health } from "@/lib/generated/Health";
-import { signInFailureMessage } from "@/lib/session";
+import { safeNext, signInFailureMessage } from "@/lib/session";
 
 export function LoginForm({
   className,
@@ -23,30 +23,29 @@ export function LoginForm({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [bootstrap, setBootstrap] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [connection, setConnection] = useState<"checking" | "ready" | "down">("checking");
+  const [probe, setProbe] = useState(0);
 
   // An empty server has no account to sign in to: offer first-account setup instead.
   useEffect(() => {
     let cancelled = false;
     cairn<Health>("health")
       .then((health) => {
-        if (!cancelled) {
-          setBootstrap(health.bootstrap_required);
-        }
+        if (cancelled) return;
+        setBootstrap(health.bootstrap_required);
+        setConnection("ready");
       })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) {
-          setReady(true);
-        }
+      .catch(() => {
+        if (!cancelled) setConnection("down");
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [probe]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (connection !== "ready") return;
     setPending(true);
     setError(null);
     try {
@@ -56,7 +55,8 @@ export function LoginForm({
       });
       setEmail("");
       setPassword("");
-      router.push("/dashboard");
+      const next = safeNext(new URLSearchParams(window.location.search).get("next"));
+      router.push(next ?? "/dashboard");
     } catch (cause) {
       const message =
         cause instanceof Error
@@ -87,12 +87,20 @@ export function LoginForm({
         <FieldGroup>
           <div className="flex flex-col gap-1.5">
             <h1 className="text-2xl font-semibold">
-              {bootstrap ? "Create the first account" : "Sign in"}
+              {connection === "checking"
+                ? "Checking server"
+                : bootstrap
+                  ? "Create the first account"
+                  : "Sign in"}
             </h1>
             <p className="text-sm text-muted-foreground">
-              {bootstrap
-                ? "This server has no account yet. The account you create here owns it. Use a password of at least 12 characters."
-                : "Use your Cairn account email and password."}
+              {connection === "down"
+                ? "Can't reach the server."
+                : connection === "checking"
+                  ? "Checking the server connection."
+                  : bootstrap
+                    ? "This server has no account yet. The account you create here owns it."
+                    : "Server connection ready."}
             </p>
           </div>
           <Field>
@@ -105,6 +113,7 @@ export function LoginForm({
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
+              disabled={connection !== "ready"}
             />
           </Field>
           <Field>
@@ -117,6 +126,7 @@ export function LoginForm({
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               required
+              disabled={connection !== "ready"}
             />
           </Field>
           {error ? (
@@ -125,16 +135,24 @@ export function LoginForm({
             </Alert>
           ) : null}
           <Field>
-            <Button type="submit" size="lg" disabled={pending || !ready}>
-              {pending ? <Spinner aria-hidden /> : null}
-              {bootstrap
-                ? pending
-                  ? "Creating account…"
-                  : "Create account"
-                : pending
-                  ? "Signing in…"
-                  : "Sign in"}
-            </Button>
+            {connection === "down" ? (
+              <Button type="button" size="lg" onClick={() => { setConnection("checking"); setProbe((n) => n + 1); }}>
+                Retry
+              </Button>
+            ) : (
+              <Button type="submit" size="lg" disabled={pending || connection !== "ready"}>
+                {pending || connection === "checking" ? <Spinner aria-hidden /> : null}
+                {connection === "checking"
+                  ? "Checking server"
+                  : bootstrap
+                    ? pending
+                      ? "Creating account…"
+                      : "Create account"
+                    : pending
+                      ? "Signing in…"
+                      : "Sign in"}
+              </Button>
+            )}
           </Field>
         </FieldGroup>
       </form>

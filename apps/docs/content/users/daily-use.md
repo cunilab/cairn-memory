@@ -47,5 +47,5 @@ Control how Cairn records development activity:
 
 - **[Automatic capture](../glossary.md#capture)**: Hooks capture prompts, code edits, and non-read-only terminal commands.
 - **Opt out**: Add a `.cairnignore` file in a checkout root to disable capture entirely for that directory.
-- **Assistant text**: Disabled by default; enable with `CAIRN_CAPTURE_ASSISTANT=1`.
+- **Assistant text**: Disabled by default; enable with `CAIRN_CAPTURE_ASSISTANT=1`. Without it, only the `Next:` and `Open:` lines of the agent's final message are kept, for the handoff.
 - **Automated sessions**: Set `CAIRN_SESSION_ORIGIN=automation` in CI or batch scripts to capture and distill without overriding personal handoffs or triggering Stop reminders ([Hook protocol](../technical/hooks/index.md)).

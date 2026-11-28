@@ -21,12 +21,12 @@ fn with(kind: &str, key: &str, value: serde_json::Value) -> serde_json::Value {
 fn save_length_errors_give_the_actual_size_and_cut() {
     let cases = [
         (
-            with("rule", "title", json!("é".repeat(81))),
-            "title is 81 characters, limit 80: cut 1",
+            with("rule", "title", json!("é".repeat(201))),
+            "title is 201 characters, limit 200: cut 1",
         ),
         (
-            with("rule", "summary", json!("x".repeat(263))),
-            "summary is 263 characters, limit 240: cut 23, or move extra context into reason or detail",
+            with("rule", "summary", json!("x".repeat(1001))),
+            "summary is 1001 characters, limit 1000: cut 1, or move extra context into reason or detail",
         ),
         (
             with("rule", "reason", json!("x".repeat(1002))),
@@ -69,6 +69,33 @@ fn save_length_errors_give_the_actual_size_and_cut() {
 }
 
 #[test]
+fn sizes_over_the_suggestion_save_as_sent_with_a_hint() {
+    let value = json!({"kind": "rule", "title": "t".repeat(200), "summary": "s".repeat(1000), "reason": "Providers retry deliveries."});
+    let input: SaveInput = serde_json::from_value(value).expect("shape");
+    let fields = Fields::parse(input.kind, input.fields.clone()).expect("fields");
+    assert_eq!(validate_save(&input, &fields, false), Ok(()));
+    assert_eq!(validate_quality(&input, &fields), Ok(()));
+    assert_eq!(
+        length_hints("t".repeat(81).as_str(), "s".repeat(264).as_str()),
+        [
+            "title is 81 characters; 80 suggested",
+            "summary is 264 characters; 240 suggested"
+        ]
+    );
+    assert!(length_hints(&"t".repeat(80), &"é".repeat(240)).is_empty());
+}
+
+#[test]
+fn cards_cut_to_the_suggested_size_on_a_character_boundary() {
+    assert_eq!(card_text("short", 80), "short");
+    assert_eq!(card_text(&"é".repeat(80), 80), "é".repeat(80));
+    let long = "é".repeat(81);
+    let cut = card_text(&long, 80);
+    assert_eq!(cut.chars().count(), 80);
+    assert_eq!(cut, format!("{}\u{2026}", "é".repeat(79)));
+}
+
+#[test]
 fn quality_messages() {
     let mut gotcha = base("gotcha");
     gotcha["fields"] = json!({"fix": "dedupe by event id"});
@@ -85,19 +112,19 @@ fn quality_messages() {
     let cases = [
         (
             with("rule", "title", json!("short")),
-            "title: use 8-80 characters that name the knowledge",
+            "title: use 8-200 characters (about 80) that name the knowledge",
         ),
         (
-            with("rule", "title", json!("x".repeat(81))),
-            "title: use 8-80 characters that name the knowledge",
+            with("rule", "title", json!("x".repeat(201))),
+            "title: use 8-200 characters (about 80) that name the knowledge",
         ),
         (
             with("rule", "summary", json!("short summary")),
-            "summary: use 20-240 characters saying what is true",
+            "summary: use 20-1000 characters (about 240) saying what is true",
         ),
         (
-            with("rule", "summary", json!("x".repeat(241))),
-            "summary: use 20-240 characters saying what is true",
+            with("rule", "summary", json!("x".repeat(1001))),
+            "summary: use 20-1000 characters (about 240) saying what is true",
         ),
         (
             {

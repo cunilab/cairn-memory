@@ -9,6 +9,7 @@ use cairn_store::StoreError;
 use cairn_store::account::AuthSession;
 use cairn_store::account::{AuditActor, AuditQuery};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Deserialize)]
 pub struct Credentials {
@@ -239,4 +240,30 @@ pub async fn change_password(
         Err(StoreError::Forbidden(_)) => Err(ApiError::invalid_credentials()),
         Err(error) => Err(error.into()),
     }
+}
+
+#[derive(Deserialize)]
+pub struct TraceSetting {
+    enabled: bool,
+}
+
+/// The signed-in person's own search trace. A device token cannot read it.
+pub async fn trace(State(state): State<AppState>, Web(account): Web) -> ApiResult<Value> {
+    Ok(Json(
+        state.store.list_retrieval_trace(&account.person_id).await?,
+    ))
+}
+
+pub async fn set_trace(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Json(body): Json<TraceSetting>,
+) -> ApiResult<Value> {
+    state
+        .store
+        .set_retrieval_trace(&account.person_id, body.enabled)
+        .await?;
+    Ok(Json(
+        state.store.list_retrieval_trace(&account.person_id).await?,
+    ))
 }

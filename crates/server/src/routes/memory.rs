@@ -3,14 +3,17 @@ use crate::auth::{Agent, Caller, Web};
 use crate::error::{ApiError, ApiResult};
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cairn_core::capture::WorkContext;
-use cairn_core::memory::{Kind, Memory, Record, SaveInput, Scope, Status, TrustLevel};
-use cairn_store::memory::{ListFilter, Saved, Vote};
+use cairn_core::memory::validate::length_hints;
+use cairn_core::memory::{
+    Kind, Memory, Record, Relation, SaveInput, Scope, Status, TimelineItem, TrustLevel,
+};
+use cairn_store::memory::{ListFilter, PinOrder, PinSlot, Saved, Vote};
 use cairn_store::transfer::ImportReport;
 use cairn_store::usage::Lookup;
-use cairn_store::view::MemoryView;
+use cairn_store::view::{MemoryView, PinSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -27,15 +30,19 @@ pub struct Receipt {
 #[derive(Serialize)]
 struct Coaching {
     hints: Vec<String>,
-    improve: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    improve: Option<String>,
 }
 
 impl Coaching {
-    fn from_saved(saved: &mut Saved) -> Option<Self> {
-        (!saved.hints.is_empty()).then(|| Self {
-            hints: std::mem::take(&mut saved.hints),
-            improve: format!("Improve it: save again with supersedes={}.", saved.id),
-        })
+    /// The store's coaching hints (they made the save a candidate) plus size notes, which change
+    /// nothing about the save and ask for no second one.
+    fn from_saved(saved: &mut Saved, title: &str, summary: &str) -> Option<Self> {
+        let improve = (!saved.hints.is_empty())
+            .then(|| format!("Improve it: save again with supersedes={}.", saved.id));
+        let mut hints = std::mem::take(&mut saved.hints);
+        hints.extend(length_hints(title, summary));
+        (!hints.is_empty()).then_some(Self { hints, improve })
     }
 }
 
@@ -64,6 +71,13 @@ pub struct GetMany {
     ids: Vec<String>,
     #[serde(default)]
     detail: bool,
+    /// One key of `fields`, or `reason` or `detail`. One id only. The reply keeps that text
+    /// and drops the other body fields.
+    #[serde(default)]
+    field: Option<String>,
+    /// A short supersedes chain for one id. Only memories the caller can already read.
+    #[serde(default)]
+    timeline: bool,
     session_id: Option<String>,
 }
 
@@ -123,6 +137,17 @@ pub async fn remember(
     Json(mut body): Json<Value>,
 ) -> Result<Response, ApiError> {
     let account = caller.account;
+    let session_id = match body.get("session_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return Err(ApiError::invalid("session_id must be a string")),
+    };
+    if let Some(id) = session_id.as_deref() {
+        super::retrieve::push_session_id(Some(id))?;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("session_id");
+    }
     let context = match body
         .as_object_mut()
         .and_then(|object| object.remove("context"))
@@ -138,23 +163,26 @@ pub async fn remember(
             &account.person_id,
             caller.device_id.as_deref(),
             &context,
+            session_id.as_deref(),
             body,
         )
         .await;
     }
     let input: SaveInput =
         serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let (title, summary) = (input.title.clone(), input.summary.clone());
     let mut saved = state
         .store
-        .save_from(
+        .save_from_session(
             &account.person_id,
             input,
             &context,
             caller.device_id.as_deref(),
+            session_id.as_deref(),
         )
         .await?;
     Ok(Json(Receipt {
-        coaching: Coaching::from_saved(&mut saved),
+        coaching: Coaching::from_saved(&mut saved, &title, &summary),
         id: saved.id,
         status: saved.status,
         deduplicated: saved.deduplicated,
@@ -168,6 +196,7 @@ async fn save_items(
     person_id: &str,
     device_id: Option<&str>,
     context: &WorkContext,
+    session_id: Option<&str>,
     body: Value,
 ) -> Result<Response, ApiError> {
     let mut object = match body {
@@ -191,7 +220,7 @@ async fn save_items(
     }
     let mut results = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        let mut result = save_item(state, person_id, device_id, context, item).await;
+        let mut result = save_item(state, person_id, device_id, context, session_id, item).await;
         result.error = result.error.map(|error| format!("items[{index}]: {error}"));
         results.push(result);
     }
@@ -203,6 +232,7 @@ async fn save_item(
     person_id: &str,
     device_id: Option<&str>,
     context: &WorkContext,
+    session_id: Option<&str>,
     item: &Value,
 ) -> ItemResult {
     let input = match serde_json::from_value::<SaveInput>(item.clone()) {
@@ -216,13 +246,14 @@ async fn save_item(
             };
         }
     };
+    let (title, summary) = (input.title.clone(), input.summary.clone());
     match state
         .store
-        .save_from(person_id, input, context, device_id)
+        .save_from_session(person_id, input, context, device_id, session_id)
         .await
     {
         Ok(mut saved) => ItemResult {
-            coaching: Coaching::from_saved(&mut saved),
+            coaching: Coaching::from_saved(&mut saved, &title, &summary),
             id: Some(saved.id),
             status: if saved.deduplicated {
                 "duplicate"
@@ -321,8 +352,10 @@ pub async fn get_many(
             "ids: 1 to 10 ids of at most 128 characters",
         ));
     }
-    if body.detail && body.ids.len() != 1 {
-        return Err(ApiError::invalid("request detail for one memory at a time"));
+    if (body.detail || body.field.is_some() || body.timeline) && body.ids.len() != 1 {
+        return Err(ApiError::invalid(
+            "detail, field and timeline are for one memory at a time",
+        ));
     }
     let mut found: HashMap<String, Memory> = state
         .store
@@ -340,8 +373,17 @@ pub async fn get_many(
         match found.remove(&id) {
             Some(memory) => {
                 let mut record = Record::from(&memory);
-                if body.detail {
-                    record.detail = Some(memory.detail);
+                if body.detail || body.field.as_deref() == Some("detail") {
+                    record.detail = Some(memory.detail.clone());
+                }
+                if let Some(field) = &body.field {
+                    record
+                        .narrow_to_field(field)
+                        .map_err(|error| ApiError::invalid(error.to_string()))?;
+                }
+                if body.timeline {
+                    record.timeline =
+                        correction_timeline(&state, &account.person_id, &memory).await?;
                 }
                 memories.push(record);
             }
@@ -349,6 +391,15 @@ pub async fn get_many(
         }
     }
     let fetched: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
+    for id in &fetched {
+        if let Err(error) = state
+            .store
+            .mark_retrieval_trace(&account.person_id, id, false)
+            .await
+        {
+            eprintln!("retrieval trace not updated: {error}");
+        }
+    }
     state.store.mark_agent_read(&fetched, body.detail).await?;
     state
         .store
@@ -369,6 +420,58 @@ pub async fn get_many(
     Ok(Json(reply))
 }
 
+/// At most six other memories on the supersedes chain, newer and older. Hidden memories are absent.
+async fn correction_timeline(
+    state: &AppState,
+    person_id: &str,
+    root: &Memory,
+) -> Result<Vec<TimelineItem>, ApiError> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::from([root.id.clone()]);
+    let mut frontier = vec![root.clone()];
+    for _ in 0..4 {
+        if frontier.is_empty() || items.len() == 6 {
+            break;
+        }
+        let mut next = Vec::new();
+        for memory in &frontier {
+            for link in &memory.links {
+                if link.relation != Relation::Supersedes {
+                    continue;
+                }
+                let other = if link.source == memory.id {
+                    link.target.as_str()
+                } else if link.target == memory.id {
+                    link.source.as_str()
+                } else {
+                    continue;
+                };
+                if seen.insert(other.to_owned()) {
+                    next.push(other.to_owned());
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        let loaded = state.store.memories_by_ids(person_id, &next).await?;
+        frontier = Vec::new();
+        for memory in loaded {
+            if items.len() == 6 {
+                break;
+            }
+            items.push(TimelineItem {
+                id: memory.id.clone(),
+                title: memory.title.clone(),
+                status: memory.status,
+                relation: Relation::Supersedes,
+            });
+            frontier.push(memory);
+        }
+    }
+    Ok(items)
+}
+
 pub async fn feedback(
     State(state): State<AppState>,
     Agent(account): Agent,
@@ -384,6 +487,13 @@ pub async fn feedback(
         .store
         .feedback(&account.person_id, &body.id, vote)
         .await?;
+    if let Err(error) = state
+        .store
+        .mark_retrieval_trace(&account.person_id, &body.id, true)
+        .await
+    {
+        eprintln!("retrieval trace not updated: {error}");
+    }
     state
         .store
         .record_push_use(
@@ -410,7 +520,28 @@ pub struct Pin {
     pinned: bool,
 }
 
-/// Pinning is a console action, restricted to the memory's owner.
+#[derive(Deserialize)]
+pub struct PinQuery {
+    #[serde(rename = "projectId", alias = "project_id")]
+    project_id: Option<String>,
+}
+
+/// Pin quota usage and L0 brief fit summary for the console.
+pub async fn pins(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Query(query): Query<PinQuery>,
+) -> ApiResult<PinSummary> {
+    let project_id = query.project_id.as_deref().filter(|id| !id.is_empty());
+    Ok(Json(
+        state
+            .store
+            .pin_summary(&account.person_id, project_id)
+            .await?,
+    ))
+}
+
+/// Pin or unpin. Personal pins are owner-only. Project pins also allow the project owner and the server admin.
 pub async fn pin(
     State(state): State<AppState>,
     Web(account): Web,
@@ -422,6 +553,75 @@ pub async fn pin(
         .set_pinned(&account.person_id, &id, body.pinned)
         .await?;
     Ok(Json(json!({ "pinned_at": pinned_at })))
+}
+
+#[derive(Deserialize)]
+pub struct PinOrderBody {
+    scope: Scope,
+    #[serde(rename = "projectId", alias = "project_id")]
+    project_id: Option<String>,
+    order: Vec<PinSlot>,
+}
+
+/// Replace one pin bucket. A stale screen gets 409 and the current order.
+pub async fn reorder_pins(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Json(body): Json<PinOrderBody>,
+) -> Result<Response, ApiError> {
+    let order: Vec<(String, i32)> = body
+        .order
+        .into_iter()
+        .map(|slot| (slot.id, slot.position))
+        .collect();
+    match state
+        .store
+        .reorder_pins(
+            &account.person_id,
+            body.scope,
+            body.project_id.as_deref(),
+            &order,
+        )
+        .await?
+    {
+        PinOrder::Applied(order) => Ok(Json(json!({ "order": order })).into_response()),
+        PinOrder::Stale(order) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "pin order changed",
+                "code": "conflict",
+                "order": order,
+            })),
+        )
+            .into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SessionQuery {
+    #[serde(rename = "sessionId", alias = "session_id")]
+    session_id: String,
+    #[serde(rename = "personId", alias = "person_id")]
+    person_id: Option<String>,
+}
+
+/// One session the viewer may open, with the memories it created.
+pub async fn session(
+    State(state): State<AppState>,
+    Web(account): Web,
+    Query(query): Query<SessionQuery>,
+) -> ApiResult<cairn_store::provenance::SessionInspection> {
+    super::retrieve::push_session_id(Some(&query.session_id))?;
+    let owner = query
+        .person_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| account.person_id.clone());
+    Ok(Json(
+        state
+            .store
+            .inspect_session(&account.person_id, &owner, &query.session_id)
+            .await?,
+    ))
 }
 
 /// Forget: the owner's memory stays, hidden from search, with its text kept.

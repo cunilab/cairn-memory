@@ -3,6 +3,16 @@ use crate::memory::Scope;
 use crate::testing::memory;
 use serde_json::Value;
 
+fn decode_brief(text: &str) -> Value {
+    let json = text
+        .split("```")
+        .nth(1)
+        .unwrap()
+        .strip_prefix("json\n")
+        .unwrap();
+    serde_json::from_str(json).unwrap()
+}
+
 #[test]
 fn renders_independent_byte_budgets_and_only_records_shown_ids() {
     let make = |prefix, pinned| {
@@ -18,20 +28,21 @@ fn renders_independent_byte_budgets_and_only_records_shown_ids() {
     };
     let pins = make("pin", Some(1));
     let essentials = make("essential", None);
-    let brief = session_brief(&pins, &essentials, 3 * 86_400, 8, BriefBudget::Extended);
+    let brief = session_brief(&pins, &essentials, 3 * 86_400, 20, BriefBudget::Extended);
     let (identity, essential) = brief.text.split_once("\"L1 Essential\"").unwrap();
-    assert!(identity.len() <= IDENTITY_MAX_BYTES);
-    assert!(essential.len() + "\"L1 Essential\"".len() <= ESSENTIAL_MAX_BYTES);
-    assert!(brief.text.len() <= SESSION_BRIEF_MAX_BYTES);
+    assert!(identity.len() <= IDENTITY_MAX_BYTES, "{}", identity.len());
+    assert!(
+        essential.len() + "\"L1 Essential\"".len() <= ESSENTIAL_MAX_BYTES,
+        "{}",
+        essential.len()
+    );
+    assert!(
+        brief.text.len() <= SESSION_BRIEF_MAX_BYTES,
+        "{}",
+        brief.text.len()
+    );
     assert!(identity.contains("\"L0 Identity\"") && !identity.contains("essential0"));
-    let json = brief
-        .text
-        .split("```")
-        .nth(1)
-        .unwrap()
-        .strip_prefix("json\n")
-        .unwrap();
-    let data: Value = serde_json::from_str(json).unwrap();
+    let data = decode_brief(&brief.text);
     let layer_ids = |name| {
         data[name]
             .as_array()
@@ -46,6 +57,11 @@ fn renders_independent_byte_budgets_and_only_records_shown_ids() {
     let shown_pins = layer_ids("L0 Identity");
     let shown_essentials = layer_ids("L1 Essential");
     assert!(shown_pins.len() < pins.len());
+    assert_eq!(brief.pins_not_shown, pins.len() - shown_pins.len());
+    assert_eq!(
+        data["L0_not_shown"],
+        format!("{} more pinned not shown", brief.pins_not_shown)
+    );
     assert_eq!(
         shown_pins,
         pins.iter()
@@ -63,6 +79,114 @@ fn renders_independent_byte_budgets_and_only_records_shown_ids() {
             .text
             .is_empty()
     );
+    assert!(
+        session_brief(&pins, &essentials, 0, 0, BriefBudget::Extended)
+            .text
+            .is_empty()
+    );
+    // Unused L0 room in Extended does not allow L1 to grow past ESSENTIAL_MAX_BYTES.
+    let no_pins = session_brief(&[], &essentials, 3 * 86_400, 20, BriefBudget::Extended);
+    let (_, no_pins_l1) = no_pins.text.split_once("\"L1 Essential\"").unwrap();
+    assert!(
+        no_pins_l1.len() + "\"L1 Essential\"".len() <= ESSENTIAL_MAX_BYTES,
+        "{}",
+        no_pins_l1.len()
+    );
+    assert_eq!(no_pins.pins_not_shown, 0);
+}
+
+#[test]
+fn l0_splits_personal_and_project_equally_with_spillover() {
+    let make = |prefix, scope, count| {
+        (0..count)
+            .map(|index| {
+                let mut m = memory(&format!("{prefix}{index}"), Kind::Rule, scope);
+                m.pinned_at = Some(index as i64 + 1);
+                m.pin_position = Some(index + 1);
+                m.title = format!("{prefix} rule {index}");
+                m.summary = "Summary text long enough to make each card substantial.".repeat(3);
+                m
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Older personal pins cannot crowd out project pins.
+    let mut mixed = make("per", Scope::Personal, 3);
+    mixed.extend(make("prj", Scope::Project, 4));
+    let brief = session_brief(&mixed, &[], 0, usize::MAX, BriefBudget::Extended);
+    assert!(brief.text.len() <= SESSION_BRIEF_MAX_BYTES);
+    let data = decode_brief(&brief.text);
+    let l0: Vec<&str> = data["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert!(l0.iter().any(|id| id.starts_with("per")), "{l0:?}");
+    assert!(l0.iter().any(|id| id.starts_with("prj")), "{l0:?}");
+    assert_eq!(brief.pins_not_shown, mixed.len() - l0.len());
+    if brief.pins_not_shown > 0 {
+        assert_eq!(
+            data["L0_not_shown"],
+            format!("{} more pinned not shown", brief.pins_not_shown)
+        );
+    }
+
+    // When only one scope has pins, unused half spills over so all compact pins fit.
+    let personal_only = make("onlyp", Scope::Personal, 3);
+    let fit = l0_pin_fit(&personal_only, 0, BriefBudget::Extended);
+    assert_eq!(fit.personal_shown, 3);
+    assert_eq!(fit.personal_total, 3);
+    assert!(fit.omitted_ids.is_empty());
+    let single_scope = session_brief(&personal_only, &[], 0, usize::MAX, BriefBudget::Extended);
+    let single_data = decode_brief(&single_scope.text);
+    assert!(single_data.get("L0_not_shown").is_none());
+
+    // Legacy 600B still guarantees room for both scopes when both exist.
+    let legacy = session_brief(&mixed, &[], 0, usize::MAX, BriefBudget::Legacy);
+    assert!(legacy.text.len() <= LEGACY_SESSION_BRIEF_MAX_BYTES);
+    let legacy_data = decode_brief(&legacy.text);
+    let legacy_l0: Vec<&str> = legacy_data["L0 Identity"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        legacy_l0.iter().any(|id| id.starts_with("per")),
+        "{legacy_l0:?}"
+    );
+    assert!(
+        legacy_l0.iter().any(|id| id.starts_with("prj")),
+        "{legacy_l0:?}"
+    );
+    assert_eq!(legacy.pins_not_shown, mixed.len() - legacy_l0.len());
+}
+
+#[test]
+fn l1_labels_personal_rule_distinct_from_project_rule() {
+    let mut personal_rule = memory("prule", Kind::Rule, Scope::Personal);
+    personal_rule.title = "Priority rule".into();
+    let mut project_rule = memory("jrule", Kind::Rule, Scope::Project);
+    project_rule.title = "Project rule".into();
+    let brief = session_brief(
+        &[],
+        &[personal_rule, project_rule],
+        0,
+        usize::MAX,
+        BriefBudget::Extended,
+    );
+    let data = decode_brief(&brief.text);
+    let l1 = data["L1 Essential"].as_array().unwrap();
+    assert_eq!(l1[0]["why"], "personal rule");
+    assert_eq!(l1[1]["why"], "project rule");
+}
+
+#[test]
+fn pin_limits_match_quotas() {
+    assert_eq!(pin_limit(Scope::Personal), Some(3));
+    assert_eq!(pin_limit(Scope::Project), Some(4));
+    assert_eq!(pin_limit(Scope::Global), None);
 }
 
 #[test]
@@ -103,13 +227,18 @@ fn topic_card_is_one_bounded_line() {
             (Kind::Fact, "second", "", "0d"),
         ],
     );
-    assert_eq!(shown, 1);
+    // The long title shows its suggested 80 characters, which leaves room for the second.
+    assert_eq!(shown, 2);
     assert!(
         long.len() <= TOPIC_MAX_BYTES && !long.contains('\n'),
         "{long}"
     );
     assert!(long.starts_with("Cairn topic p q.rs "));
-    assert!(long.ends_with("(why: file q.rs) [1y]"));
+    assert!(
+        long.contains(&format!("{}\u{2026} (why: file q.rs) [1y]", "é".repeat(79))),
+        "{long}"
+    );
+    assert!(long.ends_with("fact second [0d]"));
 }
 
 /// Sweep card sizes so a layer lands on every byte of its budget; none may pass it, and each
@@ -146,4 +275,75 @@ fn brief_budgets_are_exact_boundaries() {
     assert_eq!(legacy, LEGACY_SESSION_BRIEF_MAX_BYTES);
     assert_eq!(identity, IDENTITY_MAX_BYTES);
     assert_eq!(extended, SESSION_BRIEF_MAX_BYTES);
+}
+
+#[test]
+fn cards_show_at_most_the_suggested_title_and_summary() {
+    let mut long = memory("long", Kind::Rule, Scope::Personal);
+    long.title = "t".repeat(200);
+    long.summary = "s".repeat(1000);
+    let brief = session_brief(&[], &[long.clone()], 0, 20, BriefBudget::Extended);
+    let card = &decode_brief(&brief.text)["L1 Essential"][0];
+    assert!(
+        card["title"].as_str().unwrap().chars().count() <= 80,
+        "{card}"
+    );
+    assert!(
+        card["summary"].as_str().unwrap().chars().count() <= 240,
+        "{card}"
+    );
+    let (notes, shown) = topic_notes("src/a.rs", &[(&long.title, &long.summary, "", "")]);
+    assert_eq!(shown, 1);
+    assert!(
+        notes.contains(&format!("- {}\u{2026}", "t".repeat(79))),
+        "{notes}"
+    );
+}
+
+#[test]
+fn the_handoff_leads_l1_and_keeps_files_last_run_and_next_step() {
+    // The live 0.1.12 handoff came after higher-ranked gotchas and was cut to `Task: Use the
+    // search_replace tool, not the shell, to add a f`.
+    let gotchas: Vec<_> = (0..3)
+        .map(|index| {
+            let mut m = memory(&format!("gotcha{index}"), Kind::Gotcha, Scope::Project);
+            m.title = "g".repeat(80);
+            m.summary = "s".repeat(240);
+            m
+        })
+        .collect();
+    let mut handoff = memory("handoff", Kind::Handoff, Scope::Personal);
+    handoff.title = "Handoff: main".to_owned();
+    let task = "Use the search_replace tool, not the shell, to add a final line that says done to README.md and then rerun the violet latch check and report its output word for word";
+    handoff.summary = format!(
+        "Task: {task}. Edited README.md; last run `python3 violet_latch.py --pin` failed; 1 open item; last activity 2026-11-28."
+    );
+    handoff.fields = Fields::Handoff(crate::memory::fields::Handoff {
+        next_steps: vec!["Next: rerun the violet latch check".to_owned()],
+        open_questions: vec![
+            "`python3 violet_latch.py --pin` still failing: RuntimeError".to_owned(),
+        ],
+        files: vec!["README.md".to_owned()],
+    });
+    let essentials = [gotchas, vec![handoff]].concat();
+    let brief = session_brief(&[], &essentials, 0, 20, BriefBudget::Extended);
+    let card = &decode_brief(&brief.text)["L1 Essential"][0];
+    assert_eq!(card["id"], "handoff", "{}", brief.text);
+    let summary = card["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with("Task: Use the search_replace tool"),
+        "{summary}"
+    );
+    assert!(
+        summary.ends_with(
+            ". Edited README.md; last run `python3 violet_latch.py --pin` failed; 1 open item; last activity 2026-11-28."
+        ),
+        "{summary}"
+    );
+    assert_eq!(card["next_steps"][0], "Next: rerun the violet latch check");
+    // A gotcha still fits after it.
+    assert_eq!(
+        decode_brief(&brief.text)["L1 Essential"][1]["id"],
+        "gotcha0"
+    );
 }

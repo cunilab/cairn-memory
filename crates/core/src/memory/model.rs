@@ -1,6 +1,8 @@
 use super::fields::Fields;
+use crate::error::Error;
 use crate::process::Origin;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 macro_rules! text_enum {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
@@ -122,6 +124,9 @@ pub struct Memory {
     pub faded_at: Option<i64>,
     #[serde(skip)]
     pub pinned_at: Option<i64>,
+    /// Custom pin order within the personal or project bucket. Lower comes first in L0.
+    #[serde(skip)]
+    pub pin_position: Option<i32>,
     /// Whether an administrator edited this memory; the editor's identity stays private.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
@@ -193,6 +198,19 @@ pub struct Record {
     pub branch: Option<String>,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub updated_at: i64,
+    /// Short correction or handoff chain. Empty unless `memory_get` asked for `timeline`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<TimelineItem>,
+}
+
+/// One earlier or later memory on a correction or handoff chain.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TimelineItem {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub relation: Relation,
 }
 
 impl From<&Memory> for Record {
@@ -214,7 +232,45 @@ impl From<&Memory> for Record {
             links: m.links.clone(),
             branch: m.context.branch.clone(),
             updated_at: m.updated_at,
+            timeline: Vec::new(),
         }
+    }
+}
+
+impl Record {
+    /// Keep one field (`reason`, `detail`, or one key of `fields`) and drop the rest of the body.
+    pub fn narrow_to_field(&mut self, name: &str) -> Result<(), Error> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 40 {
+            return Err(Error::validation("field must be 1–40 characters"));
+        }
+        if name == "reason" {
+            self.detail = None;
+            self.fields = Fields::parse(self.kind, None)?;
+        } else if name == "detail" {
+            self.reason.clear();
+            self.fields = Fields::parse(self.kind, None)?;
+        } else {
+            let current = self.fields.to_json();
+            let value = current.get(name).cloned().filter(|value| !value.is_null());
+            self.fields = match value {
+                Some(value) => Fields::parse(self.kind, Some(json!({ name: value })))?,
+                None => {
+                    let text = Fields::parse(self.kind, Some(json!({ name: "" })));
+                    let list = Fields::parse(self.kind, Some(json!({ name: [] })));
+                    if text.is_err() && list.is_err() {
+                        text?;
+                    }
+                    Fields::parse(self.kind, None)?
+                }
+            };
+            self.reason.clear();
+            self.detail = None;
+        }
+        self.evidence.clear();
+        self.links.clear();
+        self.timeline.clear();
+        Ok(())
     }
 }
 

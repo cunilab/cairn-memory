@@ -412,6 +412,80 @@ fn grok_hooks_capture_native_payloads_and_deliver_one_deferred_brief() {
     assert!(!fake.to("end").is_empty());
 }
 
+/// Runs one native Grok hook (`--agent grok`) with Grok's own payload keys.
+fn grok_hook(env: &Env, event: &str, session: &str, extra: Value) -> Output {
+    let mut payload = json!({"sessionId": session, "cwd": env.repo});
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let out = with_stdin(
+        command(&env.home)
+            .current_dir(&env.repo)
+            .args(["hook", event, "--agent", "grok", "--config"])
+            .arg(env.config()),
+        &payload.to_string(),
+    );
+    assert!(out.status.success(), "{out:?}");
+    out
+}
+
+#[test]
+fn grok_read_file_target_file_shows_the_topic_note() {
+    let server = fake_with(|_, request| notes_reply(request));
+    let env = Env::new("grok-read-target-file", &server.url);
+    // The first tool result carries the brief; the read after it is the one under test.
+    grok_hook(
+        &env,
+        "PostToolUse",
+        "g1",
+        json!({"toolName": "list_dir", "toolUseId": "t0",
+        "toolInput": {"target_directory": env.repo}}),
+    );
+    let path = env.repo.join("src/a.rs");
+    let read = json!({"toolName": "read_file", "toolUseId": "t1",
+        "toolInput": {"variant": "ReadFile", "target_file": path}});
+    let text = injected(&grok_hook(&env, "PostToolUse", "g1", read)).expect("a topic note");
+    assert!(text.contains("Cairn notes for src/a.rs"), "{text}");
+    assert_eq!(server.to("topic")[0].body["path"], "src/a.rs");
+}
+
+#[test]
+fn grok_wrapped_mcp_save_means_no_reminder() {
+    let server = fake();
+    let env = Env::new("grok-save-wrapped", &server.url);
+    with_project(&env);
+    // Grok's real PostToolUse result for a Cairn save, from a live 0.1.11 session.
+    let result = json!({"type": "MCP", "tool_name": "memory_save", "server_name": "cairn",
+        "output": {"OkayOutput": "{\"deduplicated\":false,\"id\":\"mem_fzboocautxi2wdwzfqog7zgcra\",\"status\":\"active\"}"}});
+    let input = json!({"kind": "fact", "title": "queue.py inits buf before push"});
+    let saves = [
+        (
+            "catalog",
+            json!({"toolName": "cairn__memory_save", "toolInput": input, "toolResult": result}),
+        ),
+        (
+            "use-tool",
+            json!({"toolName": "use_tool",
+            "toolInput": {"tool_name": "cairn__memory_save", "tool_input": input}, "toolResult": result}),
+        ),
+        (
+            "refused",
+            json!({"toolName": "cairn__memory_save", "toolInput": input,
+            "toolResult": {"type": "MCP", "tool_name": "memory_save", "server_name": "cairn",
+                           "output": {"OkayOutput": "{\"results\":[{\"status\":\"error\"}]}"}}}),
+        ),
+    ];
+    for (session, save) in saves {
+        let edit = json!({"toolName": "search_replace", "toolUseId": "e1",
+            "toolInput": {"file_path": env.repo.join("queue.py"), "old_string": "a", "new_string": "buf = []"}});
+        grok_hook(&env, "PostToolUse", session, edit);
+        grok_hook(&env, "PostToolUse", session, save);
+        let stop = grok_hook(&env, "Stop", session, json!({}));
+        assert_eq!(blocked(&stop).is_some(), session == "refused", "{session}");
+    }
+}
+
 #[test]
 fn antigravity_hooks_capture_native_payloads_and_checkpoint_on_stop() {
     let fake = fake();
@@ -573,6 +647,130 @@ fn hermes_hooks_capture_native_prompts_edits_commands_and_lookups() {
     invoke("SessionEnd", json!({}));
     assert_eq!(fake.to("end").len(), 1);
     assert_eq!(fake.to("end")[0].body["nudge_saved"], true);
+}
+
+/// Hermes discards Stop output, so a coding session's Stop ask waits for the next prompt's recall:
+/// once per session, phrased for that turn, never in a gateway chat.
+#[test]
+fn hermes_stop_ask_arrives_with_the_next_prompt_once() {
+    let fake = fake();
+    let env = Env::new("hermes-stop-ask", &fake.url);
+    with_project(&env);
+    let invoke = |session: &str, event, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": env.repo});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &payload.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        out
+    };
+    let edit = json!({
+        "tool_name": "write_file", "tool_call_id": "w1",
+        "args": {"path": "src/a.rs", "content": "x"}, "result": "{}", "status": "ok",
+    });
+    let prompt = |session: &str, text: &str| {
+        injected(&invoke(
+            session,
+            "UserPromptSubmit",
+            json!({"user_message": text}),
+        ))
+        .unwrap_or_default()
+    };
+    let ask = "Last turn you changed 1 file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints. If unfinished, end with a Next: line.";
+
+    prompt("h1", "Edit the widget");
+    invoke("h1", "PostToolUse", edit.clone());
+    let stop = invoke("h1", "Stop", json!({"assistant_response": "Done."}));
+    assert!(stop.stdout.is_empty(), "{stop:?}");
+    let next = prompt("h1", "What else is left?");
+    assert_eq!(next.matches(ask).count(), 1, "{next}");
+    assert!(next.ends_with(ask), "{next}");
+    assert!(
+        !prompt("h1", "And now?").contains("Last turn"),
+        "shown once"
+    );
+    invoke("h1", "Stop", json!({"assistant_response": "Done again."}));
+    assert!(
+        !prompt("h1", "Anything more?").contains("Last turn"),
+        "asked once per session"
+    );
+
+    // A correction alone is phrased the same way.
+    prompt("h2", "No, keep the old parser for now.");
+    invoke("h2", "Stop", json!({"assistant_response": "Kept it."}));
+    assert!(
+        prompt("h2", "Thanks").ends_with(
+            "Last turn you were corrected (\"No, keep the old parser for now.\"): save it as a rule if it holds beyond this task."
+        )
+    );
+
+    // An ask the session never showed is not reported as asked.
+    prompt("h3", "Edit the widget");
+    invoke("h3", "PostToolUse", edit);
+    invoke("h3", "Stop", json!({"assistant_response": "Done."}));
+    invoke("h3", "SessionEnd", json!({}));
+    let ends = fake.to("end");
+    assert_eq!(
+        ends.last().unwrap().body["nudge_asked"],
+        false,
+        "{:?}",
+        ends.last().unwrap().body
+    );
+
+    // Hermes ends the session at every CLI exit (hermes_cli/cli_shutdown.py:121), so the ask
+    // waits for `hermes chat --resume`, which keeps the session id. A successful `patch` reaches
+    // post_tool_call as status "ok" (model_tools.py:694-709, agent/tool_executor.py:1859).
+    let patch = json!({
+        "tool_name": "patch", "tool_call_id": "p1",
+        "args": {"mode": "replace", "path": "README.md", "old_string": "a", "new_string": "hermes-edit"},
+        "result": r#"{"success": true, "diff": "-a\n+hermes-edit\n", "files_modified": ["README.md"]}"#,
+        "status": "ok", "error_type": null, "error_message": null,
+    });
+    prompt("h4", "Patch README.md");
+    invoke("h4", "PostToolUse", patch);
+    invoke(
+        "h4",
+        "Stop",
+        json!({"assistant_response": "Next: check the hermes latch"}),
+    );
+    invoke("h4", "SessionEnd", json!({}));
+    invoke("h4", "SessionStart", json!({}));
+    assert!(prompt("h4", "Continue").ends_with(ask));
+    assert!(
+        !prompt("h4", "And now?").contains("Last turn"),
+        "shown once"
+    );
+
+    // A gateway chat never asks.
+    let chat = json!({"platform": "matrix", "kind": "dm", "chat_id_hash": "a".repeat(64)});
+    let session = format!("hchat_{}", "c".repeat(32));
+    for (event, extra) in [
+        (
+            "UserPromptSubmit",
+            json!({"user_message": "No, call me Sam."}),
+        ),
+        ("Stop", json!({"assistant_response": "Noted."})),
+        ("UserPromptSubmit", json!({"user_message": "Hello again"})),
+    ] {
+        let mut body = json!({"session_id": session, "chat_context": chat});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = with_stdin(
+            command(&env.home).args(["hook", event, "--agent", "hermes"]),
+            &body.to_string(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("Last turn"),
+            "{out:?}"
+        );
+    }
 }
 
 #[test]
@@ -1057,6 +1255,38 @@ fn recent_files_list_status_then_commits_without_duplicates() {
         server.to("brief")[0].body["recent_files"],
         json!(["new.rs"])
     );
+}
+
+#[test]
+fn stop_sends_only_next_and_open_lines_of_the_final_message() {
+    let server = fake();
+    let env = Env::new("hook-agent-lines", &server.url);
+    let message = "I changed the lock order.\n- Next: rerun the soak test\nOpen: is api_key=sk-abcdefghijklmnopqrstuvwx still used?\nNext:";
+    env.run(
+        "SubagentStop",
+        &env.payload("s1", json!({"last_assistant_message": message})),
+    );
+    assert!(
+        server.observed().is_empty(),
+        "a subagent's lines are not the handoff"
+    );
+    env.run(
+        "Stop",
+        &env.payload("s1", json!({"last_assistant_message": message})),
+    );
+    let observed = server.observed();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0]["kind"], "assistant");
+    let content = observed[0]["content"].as_str().unwrap();
+    assert!(
+        content.starts_with("- Next: rerun the soak test\nOpen: is "),
+        "{content}"
+    );
+    assert!(
+        !content.contains("lock order") && !content.contains("sk-abc"),
+        "{content}"
+    );
+    assert_eq!(content.lines().count(), 2, "{content}");
 }
 
 #[test]
@@ -2371,6 +2601,124 @@ fn mcp_search_finds_a_checkpoint_note_and_handoff_in_the_same_checkout() {
         json!({"query": "verify exponential backoff"}),
     );
     assert_eq!(handoff["results"][0]["kind"], "handoff", "{handoff}");
+}
+
+#[test]
+fn the_next_session_brief_carries_the_task_and_the_agents_next_step() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-handoff");
+    let dir = checkout("hook-handoff");
+    let init = team.owner.run_in(&dir, &["init", "E2E Hook Handoff"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+    let run = |event, session, extra: Value| {
+        let mut payload = json!({"session_id": session, "cwd": dir});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", "claude"]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        output
+    };
+    run(
+        "UserPromptSubmit",
+        "work",
+        json!({"prompt": "Fix the queue so it prints ok"}),
+    );
+    run(
+        "PostToolUse",
+        "work",
+        edit_call("src/queue.rs", "fn run() {}", "edit"),
+    );
+    let nudge = blocked(&run("Stop", "work", json!({}))).expect("one reminder");
+    assert!(
+        nudge.ends_with("If unfinished, end with a Next: line."),
+        "{nudge}"
+    );
+    run(
+        "Stop",
+        "work",
+        json!({"stop_hook_active": true, "last_assistant_message":
+            "Fixed the loop.\nNext: add a retry test for the queue\nOpen: keep the old timeout?"}),
+    );
+    run("SessionEnd", "work", json!({}));
+    server.distill(&team.owner_id, "work");
+
+    let brief = injected(&run("SessionStart", "next", json!({}))).unwrap();
+    for part in [
+        "Task: Fix the queue so it prints ok. Edited src/queue.rs",
+        "; 1 open item; last activity ",
+        "Next: add a retry test for the queue",
+        "Open: keep the old timeout?",
+    ] {
+        assert!(brief.contains(part), "{part}: {brief}");
+    }
+    assert!(!brief.contains("Fixed the loop"), "{brief}");
+}
+
+#[test]
+fn a_grok_task_naming_a_command_flag_reaches_the_handoff() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    let team = team(&server.url, "hook-grok-task");
+    let dir = checkout("hook-grok-task");
+    let init = team.owner.run_in(&dir, &["init", "E2E Grok Task"]);
+    assert!(init.status.success(), "{}", stderr(&init));
+    let run = |event: &str, agent: &str, payload: Value| {
+        let output = with_stdin(
+            command(&team.owner.home)
+                .current_dir(&dir)
+                .args(["hook", event, "--agent", agent]),
+            &payload.to_string(),
+        );
+        assert!(output.status.success(), "{event}: {}", stderr(&output));
+        output
+    };
+    // Grok 1.0.92's common hook fields plus `prompt`; the prompt is wrapped in <user_query> lines.
+    let grok = |event: &str, snake: &str, extra: Value| {
+        let mut payload = json!({"hookEventName": snake, "hook_event_name": event,
+            "sessionId": "grok-work", "cwd": dir, "workspaceRoot": dir,
+            "timestamp": "2026-11-28T09:00:00Z", "permissionMode": "default", "promptId": "p1"});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        run(event, "grok", payload)
+    };
+    grok(
+        "UserPromptSubmit",
+        "user_prompt_submit",
+        json!({"prompt": "<user_query>\nAdd a pin note to README.md, then run python3 violet_latch.py --pin once and stop.\n</user_query>"}),
+    );
+    grok(
+        "PostToolUse",
+        "post_tool_use",
+        json!({"toolName": "search_replace", "toolUseId": "e1", "toolInputTruncated": false,
+            "toolInput": {"file_path": dir.join("README.md"), "old_string": "a", "new_string": "pin"}}),
+    );
+    grok("SessionEnd", "session_end", json!({"reason": "other"}));
+    server.distill(&team.owner_id, "grok-work");
+
+    let brief = injected(&run(
+        "SessionStart",
+        "claude",
+        json!({"session_id": "next", "cwd": dir}),
+    ))
+    .unwrap();
+    assert!(
+        brief.contains(
+            "Task: Add a pin note to README.md, then run python3 violet_latch.py --pin once and stop. Edited README.md"
+        ),
+        "{brief}"
+    );
 }
 
 #[test]

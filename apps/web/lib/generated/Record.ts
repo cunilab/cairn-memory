@@ -4,6 +4,7 @@ import type { Kind } from "./Kind";
 import type { Link } from "./Link";
 import type { Scope } from "./Scope";
 import type { Status } from "./Status";
+import type { TimelineItem } from "./TimelineItem";
 
 /**
  * What an agent sees of a stored memory (`memory_get`), including its trust reason.
@@ -12,4 +13,8 @@ export type Record = { id: string, kind: Kind, scope: Scope, status: Status,
 /**
  * Why a stale record is stale: `feedback` (wrong votes) or `missing` (cited code is gone).
  */
-stale_cause?: string | null, title: string, summary: string, trust: string, reason?: string, detail_chars?: number, detail?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, };
+stale_cause?: string | null, title: string, summary: string, trust: string, reason?: string, detail_chars?: number, detail?: string, fields?: Fields, evidence?: Array<string>, links?: Array<Link>, branch?: string | null, updated_at: number, 
+/**
+ * Short correction or handoff chain. Empty unless `memory_get` asked for `timeline`.
+ */
+timeline?: Array<TimelineItem>, };

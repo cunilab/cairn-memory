@@ -1,0 +1,278 @@
+{
+  "_comment": "Memory-only cases for scripts/bench.py --coding. Gold keys are memories in this file. A paraphrase shares no content word with its gold text. forbid_win must not rank above gold (the old decision must not win). never must not appear in the delivered results. Hook events are what automatic recall sees. No document sections and no code outlines.",
+  "memories": [
+    {
+      "key": "file-quartz",
+      "place": "harbor",
+      "kind": "gotcha",
+      "title": "quartz_queue.rs drops claims",
+      "summary": "src/jobs/quartz_queue.rs loses a claimed row when the worker panics mid-update.",
+      "reason": "The claim update and the panic share one transaction.",
+      "fields": {
+        "symptom": "A claimed row in src/jobs/quartz_queue.rs disappears after a panic.",
+        "cause": "The claim update and the panic share one transaction.",
+        "fix": "Commit the claim before the worker continues."
+      },
+      "files": ["src/jobs/quartz_queue.rs"]
+    },
+    {
+      "key": "symbol-claim",
+      "place": "harbor",
+      "kind": "decision",
+      "title": "Reserve work with quartz_claim",
+      "summary": "Workers call quartz_claim before editing a job row.",
+      "reason": "Two workers were taking the same row.",
+      "fields": {
+        "context": "The job table allowed two updates at once.",
+        "alternatives": ["A table lock"],
+        "consequences": "Every worker calls quartz_claim first."
+      },
+      "symbols": ["quartz_claim"]
+    },
+    {
+      "key": "error-borrow",
+      "place": "harbor",
+      "kind": "gotcha",
+      "title": "Moved quartz claim in the worker",
+      "summary": "error: the worker panicked after moving quartz claim before the row update finished",
+      "reason": "The row guard is moved into the assertion.",
+      "fields": {
+        "symptom": "error: the worker panicked after moving quartz claim before the row update finished",
+        "cause": "The row guard is moved into the assertion.",
+        "fix": "Borrow the guard until the update returns."
+      },
+      "commands": ["cargo test -p quartz"]
+    },
+    {
+      "key": "para-reserve",
+      "place": "harbor",
+      "kind": "decision",
+      "title": "One worker takes the next job",
+      "summary": "A solitary process locks the pending unit so a second process cannot grab it.",
+      "reason": "Overlap caused double handling.",
+      "fields": {
+        "context": "Several processes handled one unit.",
+        "alternatives": ["No lock"],
+        "consequences": "A second process waits."
+      }
+    },
+    {
+      "key": "branch-amber",
+      "place": "harbor",
+      "branch": "feature/amber",
+      "kind": "decision",
+      "title": "Amber claims rows in batches",
+      "summary": "On feature/amber the worker claims ten rows at once from the job table.",
+      "reason": "The amber experiment reduces round trips.",
+      "fields": {
+        "context": "Round trips dominated the amber branch.",
+        "alternatives": ["One row at a time"],
+        "consequences": "Each amber claim covers ten rows."
+      },
+      "files": ["src/jobs/claim_batch.rs"]
+    },
+    {
+      "key": "branch-birch",
+      "place": "harbor",
+      "branch": "feature/birch",
+      "kind": "decision",
+      "title": "Birch claims rows one by one",
+      "summary": "On feature/birch the worker claims one row at a time from the job table.",
+      "reason": "The birch experiment keeps locks short.",
+      "fields": {
+        "context": "Long locks stalled the birch branch.",
+        "alternatives": ["Ten rows at once"],
+        "consequences": "Each birch claim covers one row."
+      },
+      "files": ["src/jobs/claim_batch.rs"]
+    },
+    {
+      "key": "old-lock",
+      "place": "harbor",
+      "kind": "decision",
+      "title": "Use a table lock for jobs",
+      "summary": "Jobs are claimed with a table lock so two workers cannot run one job.",
+      "reason": "The first design used one lock for the whole table.",
+      "fields": {
+        "context": "Two workers ran one job.",
+        "alternatives": ["No lock"],
+        "consequences": "The table lock blocks every worker."
+      },
+      "files": ["src/jobs/lock.rs"]
+    },
+    {
+      "key": "new-lock",
+      "place": "harbor",
+      "supersedes": "old-lock",
+      "kind": "decision",
+      "title": "Use a row skip lock for jobs",
+      "summary": "Jobs are claimed with a row skip lock so two workers cannot run one job.",
+      "reason": "The table lock blocked every worker.",
+      "fields": {
+        "context": "The table lock blocked every worker.",
+        "alternatives": ["A table lock"],
+        "consequences": "A worker locks only its own row."
+      },
+      "files": ["src/jobs/lock.rs"]
+    },
+    {
+      "key": "wharf-jitter",
+      "place": "wharf",
+      "kind": "decision",
+      "title": "Wharf retries use jitter",
+      "summary": "The wharf service retries with full jitter after a connection reset.",
+      "reason": "A fixed delay synchronized every client.",
+      "fields": {
+        "context": "Clients retried together.",
+        "alternatives": ["A fixed delay"],
+        "consequences": "Each wharf retry waits a random time."
+      }
+    },
+    {
+      "key": "time-jan",
+      "place": "harbor",
+      "recorded_at": "2026-01-15T00:00:00Z",
+      "kind": "decision",
+      "title": "Keep invoice fonts embedded",
+      "summary": "Invoice templates embed font files so a render does not fetch them.",
+      "reason": "A missing font changed the layout.",
+      "fields": {
+        "context": "A render fetched fonts from the network.",
+        "alternatives": ["Download fonts on demand"],
+        "consequences": "The template carries its fonts."
+      }
+    },
+    {
+      "key": "time-jun",
+      "place": "harbor",
+      "recorded_at": "2026-06-01T00:00:00Z",
+      "kind": "rule",
+      "title": "Cap preview pages at twenty",
+      "summary": "A preview renders at most twenty pages.",
+      "reason": "Long previews stalled the printer.",
+      "fields": {"exceptions": "A full export has no page cap."}
+    },
+    {
+      "key": "time-version",
+      "place": "harbor",
+      "kind": "fact",
+      "title": "Pin harbor-cli at 1.4.2",
+      "summary": "Scripts call harbor-cli 1.4.2 for the config flag.",
+      "reason": "1.4.1 ignored the flag.",
+      "fields": {"source": "release notes"}
+    },
+    {
+      "key": "outsider-secret",
+      "place": "outsider",
+      "kind": "procedure",
+      "title": "Zephyr vault passphrase rotation",
+      "summary": "Rotate the zephyr vault passphrase every monday using the quarry checklist.",
+      "reason": "The quarry team owns that vault.",
+      "fields": {
+        "steps": ["Open the quarry checklist", "Rotate the zephyr vault passphrase", "Record the new date"],
+        "when": "Every monday."
+      }
+    }
+  ],
+  "questions": [
+    {
+      "id": "c01",
+      "kind": "exact_file",
+      "query": "src/jobs/quartz_queue.rs",
+      "gold": ["file-quartz"],
+      "hook": {"event": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "src/jobs/quartz_queue.rs"}}
+    },
+    {
+      "id": "c02",
+      "kind": "exact_symbol",
+      "query": "quartz_claim",
+      "gold": ["symbol-claim"],
+      "hook": {
+        "event": "PostToolUse",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": "src/unrelated.rs", "old_string": "a", "new_string": "let row = quartz_claim();"},
+        "tool_response": {"success": true}
+      }
+    },
+    {
+      "id": "c03",
+      "kind": "exact_error",
+      "query": "error: the worker panicked after moving quartz claim before the row update finished",
+      "gold": ["error-borrow"],
+      "hook": {
+        "event": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cargo test -p quartz"},
+        "error": "error: the worker panicked after moving quartz claim before the row update finished"
+      }
+    },
+    {
+      "id": "c04",
+      "kind": "paraphrase",
+      "query": "how should background chores be reserved so two executors avoid the same item",
+      "gold": ["para-reserve"],
+      "hook": {"event": "UserPromptSubmit", "prompt": "how should background chores be reserved so two executors avoid the same item"}
+    },
+    {
+      "id": "c05",
+      "kind": "sibling_branch",
+      "branch": "feature/amber",
+      "query": "how does the worker claim rows",
+      "gold": ["branch-amber"],
+      "sibling": ["branch-birch"],
+      "hook": {"event": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "src/jobs/claim_batch.rs"}}
+    },
+    {
+      "id": "c06",
+      "kind": "superseded",
+      "query": "how are jobs claimed so two workers cannot run one job",
+      "gold": ["new-lock"],
+      "forbid_win": ["old-lock"],
+      "hook": {"event": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "src/jobs/lock.rs"}}
+    },
+    {
+      "id": "c07",
+      "kind": "cross_project",
+      "query": "wharf retries use jitter after a connection reset",
+      "gold": ["wharf-jitter"],
+      "hook": {"event": "UserPromptSubmit", "prompt": "wharf retries use jitter after a connection reset"}
+    },
+    {
+      "id": "c08",
+      "kind": "time",
+      "query": "invoice fonts",
+      "recorded_from": "2026-01-15",
+      "recorded_to": "2026-01-15",
+      "gold": ["time-jan"],
+      "hook": {"event": "UserPromptSubmit", "prompt": "which decision was recorded at 2026-01-15"}
+    },
+    {
+      "id": "c09",
+      "kind": "time",
+      "query": "harbor-cli 1.4.2",
+      "gold": ["time-version"],
+      "hook": {"event": "UserPromptSubmit", "prompt": "where is harbor-cli 1.4.2 used"}
+    },
+    {
+      "id": "c10",
+      "kind": "exact_both",
+      "query": "quartz_claim inside src/jobs/quartz_queue.rs",
+      "gold": ["file-quartz", "symbol-claim"],
+      "hook": {"event": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "src/jobs/quartz_queue.rs"}}
+    },
+    {
+      "id": "c11",
+      "kind": "unauthorized",
+      "query": "zephyr vault passphrase rotation",
+      "gold": [],
+      "never": ["outsider-secret"],
+      "hook": {"event": "UserPromptSubmit", "prompt": "zephyr vault passphrase rotation steps"}
+    }
+  ],
+  "weak_queries": [
+    {"id": "cw1", "query": "quantum chromodynamics lattice simulation", "hook": {"event": "UserPromptSubmit", "prompt": "quantum chromodynamics lattice simulation"}},
+    {"id": "cw2", "query": "sourdough starter hydration ratio", "hook": {"event": "UserPromptSubmit", "prompt": "sourdough starter hydration ratio please"}},
+    {"id": "cw3", "query": "xyzzy plugh frobnicate widget", "hook": {"event": "UserPromptSubmit", "prompt": "xyzzy plugh frobnicate widget"}},
+    {"id": "cw4", "query": "Premier League fixtures this weekend", "hook": {"event": "UserPromptSubmit", "prompt": "Premier League fixtures this weekend"}}
+  ]
+}

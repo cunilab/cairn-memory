@@ -302,7 +302,7 @@ fn provider_tool(config: Config, payload: &Payload, agent: &str) -> Value {
         .cloned()
         .unwrap_or_default();
     if let Some(session) = payload.session_id()
-        && matches!(tool.name, "memory_get" | "memory_feedback")
+        && matches!(tool.name, "memory_get" | "memory_feedback" | "memory_save")
     {
         arguments.insert("session_id".to_owned(), json!(session));
     }
@@ -362,6 +362,9 @@ impl Hook<'_> {
                         .unwrap_or_default();
                 }
                 pending.extend(recall);
+                if self.agent == "hermes" {
+                    pending.extend(self.with_state(|s| s.pending_stop_nudge.take()).flatten());
+                }
                 if pending.is_empty() {
                     capture_result?;
                     Ok(None)
@@ -407,6 +410,8 @@ impl Hook<'_> {
                 }
                 if std::env::var("CAIRN_CAPTURE_ASSISTANT").as_deref() == Ok("1") {
                     self.capture(self.payload.assistant())?;
+                } else if self.event == "Stop" {
+                    self.capture(self.payload.agent_lines())?;
                 }
                 if let Some(generation) = self
                     .with_state(|s| s.dirty.then_some(s.generation))
@@ -417,6 +422,16 @@ impl Hook<'_> {
                 }
                 // SubagentStop captures like Stop and never asks.
                 if self.event == "SubagentStop" {
+                    Ok(None)
+                } else if self.agent == "hermes" {
+                    // Hermes discards Stop output: the next prompt's recall carries the ask instead.
+                    if let Some(text) = self.stop_nudge() {
+                        let text = text.strip_prefix("You ").map_or_else(
+                            || format!("Last turn: {text}"),
+                            |rest| format!("Last turn you {rest}"),
+                        );
+                        self.with_state(|s| s.pending_stop_nudge = Some(text));
+                    }
                     Ok(None)
                 } else {
                     Ok(self.stop_nudge())
@@ -787,7 +802,8 @@ impl Hook<'_> {
                 ))
             || (self.agent == "antigravity" && !self.payload.flag("fullyIdle"))
             || self.automated()
-            || matches!(self.agent, "opencode" | "hermes")
+            || self.agent == "opencode"
+            || self.chat.is_some()
             || !self.nudging()
         {
             return None;
@@ -1250,7 +1266,7 @@ impl Hook<'_> {
             .ok()?;
         let worked = locked.state.worked;
         let used_recall = locked.state.command_error_recalled;
-        let nudged = locked.state.nudged;
+        let nudged = locked.state.nudged && locked.state.pending_stop_nudge.is_none();
         let saved = locked.state.saved;
         let automated = locked.state.automated
             || Self::env_automated()
@@ -1261,8 +1277,20 @@ impl Hook<'_> {
         if worked {
             self.capture_changed_files();
         }
-        if let Ok(locked) = Locked::open(&self.state_dir(), &self.key) {
-            locked.delete();
+        if let Ok(mut locked) = Locked::open(&self.state_dir(), &self.key) {
+            // Hermes ends the session at every CLI exit: a held Stop ask waits for `--resume`.
+            if let Some(ask) = locked.state.pending_stop_nudge.take() {
+                locked.state = SessionState {
+                    nudged: true,
+                    pending_stop_nudge: Some(ask),
+                    ..SessionState::default()
+                };
+                if let Err(message) = locked.save() {
+                    eprintln!("cairn hook: {message}");
+                }
+            } else {
+                locked.delete();
+            }
         }
         if worked || used_recall || self.chat.is_some() {
             let mut body = json!({"session_id": self.session_id});

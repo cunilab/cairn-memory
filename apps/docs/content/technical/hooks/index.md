@@ -25,42 +25,43 @@ description: "Shared capture events, injection budgets, redaction and retry beha
 | `SessionEnd` | Concludes session and enqueues background distillation | None |
 
 - **Automation**: Automated sessions (`CAIRN_SESSION_ORIGIN=automation`) capture and distill without prompting the Stop reminder or overwriting personal handoffs.
-- **Assistant text**: Captured only when explicitly opted in via `CAIRN_CAPTURE_ASSISTANT=1`.
+- **Assistant text**: Captured only when explicitly opted in via `CAIRN_CAPTURE_ASSISTANT=1`. Without it, `Stop` sends only the `Next:` and `Open:` lines of the final message (redacted, at most 10 lines and 1 KiB) for the handoff.
 
 ## Reminders (agent nudges)
 
 - **Session start nudge**: Instructs agents to treat Cairn as their sole memory service.
-- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes. Suppressed if notes were already saved.
+- **Stop reminder**: Runs once per eligible session after file edits or corrections, asking to save up to 3 reusable notes and, if work is unfinished, to end with a `Next:` line. Suppressed if notes were already saved. Hermes coding sessions get it with the next prompt's recall instead of at Stop.
 - **Nudge overrides**: Project instructions override global instructions, which override default prompts. Set Stop text to `off` to disable. Set `nudge: false` in config or `CAIRN_NO_NUDGE=1` to disable all nudges.
 
 ## Injection budget
 
-- **Session brief**: Up to 1,800 bytes for modern clients (`extended_brief: true`); capped at 1,200 bytes for legacy clients.
-- **Session ledger**: Up to 8 cards shared across briefs, file topics, command warnings, error recall, and prompts per session ID.
+- **Session brief**: Up to 1,800 bytes (900 B L0 + 900 B L1) for modern clients (`extended_brief: true`); capped at 1,200 bytes for legacy clients.
+- **Session ledger**: Up to 8 L2 cards shared across file topics, command warnings, error recall, and prompts per session ID; session brief cards deduplicate without spending the L2 budget.
 - **File topics**: Evaluates up to 16 file topics; injects up to 4 topic cards of 300 bytes each.
 
 ## Redaction
 
-The hook and server execute 18 ordered regex patterns replacing secrets with `[REDACTED]` prior to persistence:
+The hook and server execute 19 ordered regex patterns replacing secrets with `[REDACTED]` prior to persistence:
 
 1. PEM private key blocks (`-----BEGIN ... PRIVATE KEY-----`)
 2. Bearer, Basic, and Token Authorization headers
-3. Userinfo in connection URLs (`scheme://user:pass@host`)
-4. Password and token CLI arguments (`--password`, `--token`, `--api-key`)
-5. Configuration key-value assignments (`DB_PASSWORD=...`, `"token": "..."`)
-6. Database client flags (`mysql -p...`)
-7. cURL credentials (`curl -u user:pass`)
-8. GitHub tokens (`ghp_`, `gho_`, `github_pat_`)
-9. AWS access key IDs (`AKIA...`, `ASIA...`)
-10. Slack tokens (`xoxb-`, `xoxp-`)
-11. Anthropic and OpenAI keys (`sk-ant-`, `sk-proj-`)
-12. Stripe API keys (`sk_live_`, `sk_test_`)
-13. npm package tokens (`npm_`)
-14. GitLab tokens (`glpat-`)
-15. Google API keys (`AIza...`)
-16. JSON Web Tokens (`eyJ...`)
-17. Cairn device tokens (`cdt_...`)
-18. Legacy Hermes owner IDs
+3. A bare or quoted `Bearer <token>` whose token has a digit or 20+ characters
+4. Userinfo in connection URLs (`scheme://user:pass@host`)
+5. Password and token CLI arguments (`--password`, `--token`, `--api-key`)
+6. Configuration key-value assignments (`DB_PASSWORD=...`, `"token": "..."`)
+7. Database client flags (`mysql -p...`)
+8. cURL credentials (`curl -u user:pass`)
+9. GitHub tokens (`ghp_`, `gho_`, `github_pat_`)
+10. AWS access key IDs (`AKIA...`, `ASIA...`)
+11. Slack tokens (`xoxb-`, `xoxp-`)
+12. Anthropic and OpenAI keys (`sk-ant-`, `sk-proj-`)
+13. Stripe API keys (`sk_live_`, `sk_test_`)
+14. npm package tokens (`npm_`)
+15. GitLab tokens (`glpat-`)
+16. Google API keys (`AIza...`)
+17. JSON Web Tokens (`eyJ...`)
+18. Cairn device tokens (`cdt_...`)
+19. Legacy Hermes owner IDs
 
 ## Outbox
 

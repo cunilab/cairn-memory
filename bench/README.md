@@ -25,3 +25,14 @@ python3 scripts/bench.py --questions questions-v2.json --distractors 2000 \
 The check seeds a disposable PostgreSQL database, waits for embedding and linking, and runs the brief, file topic, command warning, failed-command and prompt paths through loopback HTTP and the real hook binary. Each path has three warm-up requests and 20 measured requests in distinct sessions. The JSON includes p50, p95 and maximum latency. The command fails if a path misses recall, if any HTTP p95 reaches 100 ms, or if any hook p95 reaches 500 ms. The gate is opt-in because process scheduling, Docker and embedding performance vary across CI runners.
 
 A local ARM64 macOS run with MiniLM and 2,072 memories measured HTTP p95 at 12.1–63.9 ms and hook p95 at 128.0–462.2 ms. Prompt recall measured 54.3 ms over HTTP and 442.8 ms end to end. Every sample met its budget in this run.
+
+## Coding-memory suite
+
+`questions.json` and `questions-v2.json` stay the frozen recall sets. The coding suite is a separate small gold set of memories: exact file, symbol and error text, a paraphrase, sibling branches, a superseded decision, an unauthorized memory, a second project, a recorded date, a version string, and weak queries. It does not index documents or code outlines.
+
+```sh
+python3 scripts/bench.py --coding --label before-0.1.12 \
+  --out bench/fixtures/before-0.1.12-search.json
+```
+
+The run uses a disposable database and the same server binary as the other benches. It reports hit@5, MRR@5, strict recall-all@5, weak-query empty rate, bytes delivered and p95 separately for explicit `memory_search` and for `cairn hook`. Postgres full text and an in-process grep score the same explicit queries on the memories the caller can see in the current project. A `forbid_win` id above the gold memory scores 0. A `never` id in the delivered list scores 0 and increments `unauthorized_shown`. FTS p95 includes `docker exec psql` and is not a server latency. This suite is not the v2 CI gate.

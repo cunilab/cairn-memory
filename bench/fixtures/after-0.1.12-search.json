@@ -1,0 +1,1385 @@
+{
+  "baseline_fts": {
+    "by_kind": {
+      "cross_project": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_both": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_error": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_file": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_symbol": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "paraphrase": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "sibling_branch": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "superseded": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "time": {
+        "hit_at_5": 1.0,
+        "n": 2
+      }
+    },
+    "bytes_delivered": 1313,
+    "hit_at_5": 0.6,
+    "mrr_at_5": 0.55,
+    "old_wins": 1,
+    "p95_ms": 81.9,
+    "questions": 10,
+    "recall_all_at_5": 0.6,
+    "unauthorized_shown": 0,
+    "weak_empty": 4,
+    "weak_empty_rate": 1.0,
+    "weak_queries": 4
+  },
+  "baseline_grep": {
+    "by_kind": {
+      "cross_project": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_both": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_error": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_file": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_symbol": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "paraphrase": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "sibling_branch": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "superseded": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "time": {
+        "hit_at_5": 1.0,
+        "n": 2
+      }
+    },
+    "bytes_delivered": 3572,
+    "hit_at_5": 0.7,
+    "mrr_at_5": 0.65,
+    "old_wins": 1,
+    "p95_ms": 0.3,
+    "questions": 10,
+    "recall_all_at_5": 0.7,
+    "unauthorized_shown": 0,
+    "weak_empty": 4,
+    "weak_empty_rate": 1.0,
+    "weak_queries": 4
+  },
+  "corpus": {
+    "coding_memories": 13,
+    "distractors": 15,
+    "questions": 11,
+    "weak_queries": 4
+  },
+  "definitions": {
+    "bytes_delivered": "explicit and hook: text the agent received; FTS and grep: title and summary bytes of the top 5",
+    "hit_at_5": "gold in the delivered top 5, and no never-id, and no forbid_win id above gold",
+    "mrr_at_5": "1/rank of the first gold inside that acceptable top 5, else 0",
+    "old_wins": "delivered lists where a forbid_win id ranked above gold",
+    "p95_ms": "explicit: MCP call; hook: cairn hook process; FTS: docker exec psql, not server latency; grep: in-process",
+    "recall_all_at_5": "every gold id is in that acceptable top 5",
+    "sibling_outranks": "the other branch's memory ranked above the checkout branch; not part of hit@5",
+    "unauthorized_shown": "delivered lists that contained a never-id",
+    "weak_empty_rate": "share of weak queries that delivered no card"
+  },
+  "explicit_questions": [
+    {
+      "bytes": 1603,
+      "gold": [
+        "file-quartz"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c01",
+      "kind": "exact_file",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 87.8,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz",
+        "new-lock",
+        "branch-birch",
+        "branch-amber",
+        "old-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 936,
+      "gold": [
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 3,
+      "id": "c02",
+      "kind": "exact_symbol",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 75.6,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "symbol-claim",
+        "error-borrow",
+        "file-quartz"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 999,
+      "gold": [
+        "error-borrow"
+      ],
+      "hit": 1.0,
+      "hits": 3,
+      "id": "c03",
+      "kind": "exact_error",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 78.7,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "error-borrow",
+        "symbol-claim",
+        "file-quartz"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 14,
+      "gold": [
+        "para-reserve"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c04",
+      "kind": "paraphrase",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 70.1,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 318,
+      "gold": [
+        "branch-amber"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c05",
+      "kind": "sibling_branch",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 72.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "sibling_outranks": false,
+      "top5": [
+        "branch-amber"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 1602,
+      "gold": [
+        "new-lock"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c06",
+      "kind": "superseded",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 75.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "new-lock",
+        "para-reserve",
+        "old-lock",
+        "symbol-claim",
+        "branch-birch"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 14,
+      "gold": [
+        "wharf-jitter"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c07",
+      "kind": "cross_project",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 69.0,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 302,
+      "gold": [
+        "time-jan"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c08",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 69.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-jan"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 277,
+      "gold": [
+        "time-version"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c09",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 71.2,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-version"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 1627,
+      "gold": [
+        "file-quartz",
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c10",
+      "kind": "exact_both",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 75.9,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "symbol-claim",
+        "new-lock",
+        "branch-birch",
+        "branch-amber",
+        "file-quartz"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 14,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "c11",
+      "kind": "unauthorized",
+      "leaked": [],
+      "mrr": null,
+      "ms": 65.2,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 14,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw1",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 63.9,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 14,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw2",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 65.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 14,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw3",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 65.1,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 14,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw4",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 73.3,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    }
+  ],
+  "explicit_search": {
+    "by_kind": {
+      "cross_project": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_both": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_error": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_file": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_symbol": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "paraphrase": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "sibling_branch": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "superseded": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "time": {
+        "hit_at_5": 1.0,
+        "n": 2
+      }
+    },
+    "bytes_delivered": 7762,
+    "hit_at_5": 0.8,
+    "mrr_at_5": 0.8,
+    "old_wins": 0,
+    "p95_ms": 87.8,
+    "questions": 10,
+    "recall_all_at_5": 0.8,
+    "unauthorized_shown": 0,
+    "weak_empty": 4,
+    "weak_empty_rate": 1.0,
+    "weak_queries": 4
+  },
+  "fts_questions": [
+    {
+      "bytes": 109,
+      "gold": [
+        "file-quartz"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c01",
+      "kind": "exact_file",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 81.9,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 201,
+      "gold": [
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 2,
+      "id": "c02",
+      "kind": "exact_symbol",
+      "leaked": [],
+      "mrr": 0.5,
+      "ms": 53.7,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "error-borrow",
+        "symbol-claim"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 117,
+      "gold": [
+        "error-borrow"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c03",
+      "kind": "exact_error",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 58.8,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "error-borrow"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "para-reserve"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c04",
+      "kind": "paraphrase",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 57.2,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 516,
+      "gold": [
+        "branch-amber"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c05",
+      "kind": "sibling_branch",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 56.8,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "sibling_outranks": false,
+      "top5": [
+        "branch-amber",
+        "branch-birch",
+        "file-quartz",
+        "symbol-claim",
+        "error-borrow"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 199,
+      "gold": [
+        "new-lock"
+      ],
+      "hit": 0.0,
+      "hits": 2,
+      "id": "c06",
+      "kind": "superseded",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 54.1,
+      "old_wins": true,
+      "recall_all": 0.0,
+      "top5": [
+        "old-lock",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "wharf-jitter"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c07",
+      "kind": "cross_project",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 57.4,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 96,
+      "gold": [
+        "time-jan"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c08",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 55.1,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-jan"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 75,
+      "gold": [
+        "time-version"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c09",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 64.5,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-version"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "file-quartz",
+        "symbol-claim"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c10",
+      "kind": "exact_both",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 67.0,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "c11",
+      "kind": "unauthorized",
+      "leaked": [],
+      "mrr": null,
+      "ms": 53.4,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw1",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 49.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw2",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 49.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw3",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 54.5,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw4",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 56.1,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    }
+  ],
+  "grep_questions": [
+    {
+      "bytes": 309,
+      "gold": [
+        "file-quartz"
+      ],
+      "hit": 1.0,
+      "hits": 3,
+      "id": "c01",
+      "kind": "exact_file",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz",
+        "old-lock",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 83,
+      "gold": [
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c02",
+      "kind": "exact_symbol",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "symbol-claim"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 517,
+      "gold": [
+        "error-borrow"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c03",
+      "kind": "exact_error",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.1,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "error-borrow",
+        "file-quartz",
+        "symbol-claim",
+        "branch-birch",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 467,
+      "gold": [
+        "para-reserve"
+      ],
+      "hit": 0.0,
+      "hits": 5,
+      "id": "c04",
+      "kind": "paraphrase",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 0.1,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [
+        "symbol-claim",
+        "old-lock",
+        "time-jan",
+        "new-lock",
+        "dis-0012"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 488,
+      "gold": [
+        "branch-amber"
+      ],
+      "hit": 1.0,
+      "hits": 5,
+      "id": "c05",
+      "kind": "sibling_branch",
+      "leaked": [],
+      "mrr": 0.5,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "sibling_outranks": true,
+      "top5": [
+        "branch-birch",
+        "branch-amber",
+        "symbol-claim",
+        "old-lock",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 502,
+      "gold": [
+        "new-lock"
+      ],
+      "hit": 0.0,
+      "hits": 5,
+      "id": "c06",
+      "kind": "superseded",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 0.1,
+      "old_wins": true,
+      "recall_all": 0.0,
+      "top5": [
+        "old-lock",
+        "new-lock",
+        "file-quartz",
+        "symbol-claim",
+        "para-reserve"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 642,
+      "gold": [
+        "wharf-jitter"
+      ],
+      "hit": 0.0,
+      "hits": 5,
+      "id": "c07",
+      "kind": "cross_project",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 0.1,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [
+        "dis-0009",
+        "file-quartz",
+        "error-borrow",
+        "old-lock",
+        "dis-0011"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 96,
+      "gold": [
+        "time-jan"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c08",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-jan"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 75,
+      "gold": [
+        "time-version"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c09",
+      "kind": "time",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "time-version"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 393,
+      "gold": [
+        "file-quartz",
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 4,
+      "id": "c10",
+      "kind": "exact_both",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz",
+        "symbol-claim",
+        "old-lock",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "c11",
+      "kind": "unauthorized",
+      "leaked": [],
+      "mrr": null,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw1",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw2",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw3",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw4",
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 0.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    }
+  ],
+  "hook_questions": [
+    {
+      "bytes": 222,
+      "gold": [
+        "file-quartz"
+      ],
+      "hit": 1.0,
+      "hits": 2,
+      "id": "c01",
+      "injected_titles": [
+        "quartz_queue.rs drops claims",
+        "Use a row skip lock for jobs"
+      ],
+      "kind": "exact_file",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 70.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 176,
+      "gold": [
+        "symbol-claim"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c02",
+      "injected_titles": [
+        "Reserve work with quartz_claim"
+      ],
+      "kind": "exact_symbol",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 117.7,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "symbol-claim"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 211,
+      "gold": [
+        "error-borrow"
+      ],
+      "hit": 1.0,
+      "hits": 1,
+      "id": "c03",
+      "injected_titles": [
+        "Moved quartz claim in the worker"
+      ],
+      "kind": "exact_error",
+      "leaked": [],
+      "mrr": 1.0,
+      "ms": 54.3,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "error-borrow"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "para-reserve"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c04",
+      "injected_titles": [],
+      "kind": "paraphrase",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 122.3,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 207,
+      "gold": [
+        "branch-amber"
+      ],
+      "hit": 0.0,
+      "hits": 2,
+      "id": "c05",
+      "injected_titles": [
+        "quartz_queue.rs drops claims",
+        "Use a row skip lock for jobs"
+      ],
+      "kind": "sibling_branch",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 67.6,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "sibling_outranks": false,
+      "top5": [
+        "file-quartz",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 206,
+      "gold": [
+        "new-lock"
+      ],
+      "hit": 1.0,
+      "hits": 2,
+      "id": "c06",
+      "injected_titles": [
+        "quartz_queue.rs drops claims",
+        "Use a row skip lock for jobs"
+      ],
+      "kind": "superseded",
+      "leaked": [],
+      "mrr": 0.5,
+      "ms": 72.8,
+      "old_wins": false,
+      "recall_all": 1.0,
+      "top5": [
+        "file-quartz",
+        "new-lock"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "wharf-jitter"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c07",
+      "injected_titles": [],
+      "kind": "cross_project",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 111.0,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "time-jan"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c08",
+      "injected_titles": [],
+      "kind": "time",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 111.5,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [
+        "time-version"
+      ],
+      "hit": 0.0,
+      "hits": 0,
+      "id": "c09",
+      "injected_titles": [],
+      "kind": "time",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 115.6,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 300,
+      "gold": [
+        "file-quartz",
+        "symbol-claim"
+      ],
+      "hit": 0.0,
+      "hits": 2,
+      "id": "c10",
+      "injected_titles": [
+        "Birch claims rows one by one",
+        "Amber claims rows in batches"
+      ],
+      "kind": "exact_both",
+      "leaked": [],
+      "mrr": 0.0,
+      "ms": 72.1,
+      "old_wins": false,
+      "recall_all": 0.0,
+      "top5": [
+        "branch-birch",
+        "branch-amber"
+      ],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "c11",
+      "injected_titles": [],
+      "kind": "unauthorized",
+      "leaked": [],
+      "mrr": null,
+      "ms": 118.8,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": false
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw1",
+      "injected_titles": [],
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 113.0,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw2",
+      "injected_titles": [],
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 110.9,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw3",
+      "injected_titles": [],
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 109.2,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    },
+    {
+      "bytes": 0,
+      "gold": [],
+      "hit": null,
+      "hits": 0,
+      "id": "cw4",
+      "injected_titles": [],
+      "kind": "weak",
+      "leaked": [],
+      "mrr": null,
+      "ms": 101.7,
+      "old_wins": false,
+      "recall_all": null,
+      "top5": [],
+      "weak": true
+    }
+  ],
+  "hook_recall": {
+    "by_kind": {
+      "cross_project": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_both": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "exact_error": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_file": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "exact_symbol": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "paraphrase": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "sibling_branch": {
+        "hit_at_5": 0.0,
+        "n": 1
+      },
+      "superseded": {
+        "hit_at_5": 1.0,
+        "n": 1
+      },
+      "time": {
+        "hit_at_5": 0.0,
+        "n": 2
+      }
+    },
+    "bytes_delivered": 1322,
+    "hit_at_5": 0.4,
+    "mrr_at_5": 0.35,
+    "old_wins": 0,
+    "p95_ms": 122.3,
+    "questions": 10,
+    "recall_all_at_5": 0.4,
+    "unauthorized_shown": 0,
+    "weak_empty": 4,
+    "weak_empty_rate": 1.0,
+    "weak_queries": 4
+  },
+  "label": "after-0.1.12",
+  "memory_status": {
+    "branch-amber": "active",
+    "branch-birch": "active",
+    "error-borrow": "active",
+    "file-quartz": "active",
+    "new-lock": "active",
+    "old-lock": "superseded",
+    "outsider-secret": "active",
+    "para-reserve": "active",
+    "symbol-claim": "active",
+    "time-jan": "active",
+    "time-jun": "active",
+    "time-version": "active",
+    "wharf-jitter": "active"
+  },
+  "revision": "7f2a25a329ab5e4e5e3894304cbbaa11b0a3646b",
+  "semantic_channel": {
+    "embedding_model": "pinned all-MiniLM-L6-v2",
+    "server_health": "enabled"
+  },
+  "suite": "coding-memory"
+}

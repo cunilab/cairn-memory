@@ -276,16 +276,19 @@ async fn synthetic(db: &TestDb, groups: &[(&str, &str, i32)]) {
     }
 }
 
-/// The plan of `sql` with its four binds `$1 person`, `$2 text`, `$3 projects`, `$4 limit`.
+/// The plan of `sql` with binds `$1 person`, `$2 text`, `$3 projects`, `$4 limit`.
+/// Lexical SQL also binds `$5` extra terms.
 async fn explain(store: &cairn_store::Store, sql: &str, person: &str, text: &str) -> String {
-    let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN (FORMAT TEXT) {sql}"))
+    let statement = format!("EXPLAIN (FORMAT TEXT) {sql}");
+    let mut query = sqlx::query_scalar::<_, String>(&statement)
         .bind(person)
         .bind(text)
         .bind(Vec::<String>::new())
-        .bind(64_i64)
-        .fetch_all(store.pool())
-        .await
-        .unwrap();
+        .bind(64_i64);
+    if sql.contains("$5") {
+        query = query.bind("");
+    }
+    let plan: Vec<String> = query.fetch_all(store.pool()).await.unwrap();
     plan.join("\n")
 }
 
@@ -1618,6 +1621,7 @@ async fn lexical_or_channel_caps_the_rows_it_ranks() {
     .bind("summary filler zeta77x")
     .bind(&projects)
     .bind(64_i64)
+    .bind("")
     .fetch_all(store.pool())
     .await
     .unwrap();
@@ -1785,7 +1789,8 @@ async fn digest_searchable_not_in_brief() {
         .await
         .unwrap()
         .text;
-    assert!(!brief.contains("LedControls"), "{brief}");
+    // The digest stays out of the brief; the personal handoff may name the edited files.
+    assert!(!brief.contains("Changed LedControls"), "{brief}");
     assert!(!brief.contains("cargo test pass"), "{brief}");
     let cards = store
         .search(
@@ -3016,7 +3021,7 @@ async fn pin_quotas_are_atomic_and_scoped() {
     .await
     .unwrap();
 
-    for (scope, limit) in [("personal", 5), ("project", 10)] {
+    for (scope, limit) in [("personal", 3), ("project", 4)] {
         let person = |i| {
             if scope == "project" && i % 2 == 0 {
                 &other
@@ -3076,4 +3081,501 @@ async fn pin_quotas_are_atomic_and_scoped() {
         );
     }
     db.finish().await;
+}
+
+#[tokio::test]
+async fn brief_includes_personal_rules_in_l1_cross_project_and_respects_chat_scope() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("rule-owner").await;
+    let (project_a, _) = store
+        .init_project(&me, "local:proj-a", Some("Project A"))
+        .await
+        .unwrap();
+    let (project_b, _) = store
+        .init_project(&me, "local:proj-b", Some("Project B"))
+        .await
+        .unwrap();
+    let rule_id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Priority rules first",
+                "summary": "Always verify disk before compiling.", "reason": "Disk quota check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    let candidate_id = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Candidate personal rule",
+                "summary": "Unverified rule stays out of brief.", "reason": "candidate exclusion check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("UPDATE memories SET rank = 'candidate' WHERE memory_id = $1")
+        .bind(&candidate_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let chat: cairn_core::capture::ChatContext = serde_json::from_value(serde_json::json!({
+        "platform": "telegram",
+        "kind": "dm",
+        "chat_id_hash": "b".repeat(64),
+    }))
+    .unwrap();
+    let chat_rule = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Private Telegram rule",
+                "summary": "Keep answers concise in Telegram DM.", "reason": "chat-only preference"
+            })),
+            &WorkContext {
+                chat: Some(chat.clone()),
+                ..WorkContext::default()
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+
+    for pid in [&project_a.project_id, &project_b.project_id] {
+        let brief = store
+            .brief(
+                &me,
+                &WorkContext {
+                    project_id: Some(pid.clone()),
+                    ..WorkContext::default()
+                },
+                None,
+                BriefBudget::Extended,
+            )
+            .await
+            .unwrap();
+        assert!(brief.memory_ids.contains(&rule_id), "{}", brief.text);
+        assert!(
+            brief.text.contains(r#""why":"personal rule""#),
+            "{}",
+            brief.text
+        );
+        assert!(!brief.memory_ids.contains(&candidate_id));
+        assert!(!brief.memory_ids.contains(&chat_rule));
+    }
+
+    let chat_brief = store
+        .brief(
+            &me,
+            &WorkContext {
+                chat: Some(chat),
+                ..WorkContext::default()
+            },
+            None,
+            BriefBudget::Extended,
+        )
+        .await
+        .unwrap();
+    assert!(chat_brief.memory_ids.contains(&chat_rule));
+    assert!(!chat_brief.memory_ids.contains(&rule_id));
+    db.finish().await;
+}
+
+#[tokio::test]
+async fn legacy_pins_over_cap_stay_until_unpinned_and_brief_reports_pins_not_shown() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("legacy-pins").await;
+    let (project, _) = store
+        .init_project(&me, "local:legacy-pins", Some("Legacy Pins"))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'per_' || i, $1, NULL, 'personal', 'rule', 'Personal pin ' || i,
+                repeat('Summary text for personal pin ', 5), 'e', 'per_' || i,
+                to_timestamp(1000 + i)
+           FROM generate_series(1, 5) i",
+    )
+    .bind(&me)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO memories (memory_id, owner_id, project_id, scope, kind, title, summary,
+                               evidence_hash, identity_hash, pinned_at)
+         SELECT 'prj_' || i, $1, $2, 'project', 'rule', 'Project pin ' || i,
+                repeat('Summary text for project pin ', 5), 'e', 'prj_' || i,
+                to_timestamp(2000 + i)
+           FROM generate_series(1, 4) i",
+    )
+    .bind(&me)
+    .bind(&project.project_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let extra = store
+        .save(
+            &me,
+            save_input(serde_json::json!({
+                "kind": "rule", "scope": "personal", "title": "Sixth personal rule",
+                "summary": "Cannot be pinned while already at or over quota.", "reason": "quota check"
+            })),
+            &WorkContext::default(),
+        )
+        .await
+        .unwrap()
+        .id;
+    assert!(matches!(
+        store.set_pinned(&me, &extra, true).await,
+        Err(cairn_store::StoreError::Conflict(msg)) if msg.contains("limit of 3")
+    ));
+
+    let ctx = WorkContext {
+        project_id: Some(project.project_id.clone()),
+        ..WorkContext::default()
+    };
+    let brief = store
+        .brief(&me, &ctx, Some("s-overflow"), BriefBudget::Extended)
+        .await
+        .unwrap();
+    assert!(brief.pins_not_shown > 0, "{}", brief.text);
+    assert!(brief.text.contains(&format!(
+        "\"L0_not_shown\":\"{} more pinned not shown\"",
+        brief.pins_not_shown
+    )));
+    assert!(brief.memory_ids.iter().any(|id| id.starts_with("per_")));
+    assert!(brief.memory_ids.iter().any(|id| id.starts_with("prj_")));
+    let shown_pins = brief
+        .memory_ids
+        .iter()
+        .filter(|id| id.starts_with("per_") || id.starts_with("prj_"))
+        .count();
+    assert_eq!(shown_pins + brief.pins_not_shown, 9);
+    assert!(brief.memory_ids.contains(&extra));
+
+    let summary = store
+        .pin_summary(&me, Some(&project.project_id))
+        .await
+        .unwrap();
+    assert_eq!(summary.personal_quota_used, 5);
+    assert_eq!(summary.personal_quota_limit, 3);
+    assert_eq!(summary.project_quota_used, Some(4));
+    assert_eq!(summary.project_quota_limit, 4);
+    assert_eq!(summary.total, 9);
+    assert_eq!(summary.not_shown, brief.pins_not_shown);
+
+    // Unpinning down below 3 keeps existing pins valid along the way and re-enables pinning at 2.
+    assert_eq!(store.set_pinned(&me, "per_5", false).await.unwrap(), None);
+    assert!(store.set_pinned(&me, &extra, true).await.is_err());
+    assert_eq!(store.set_pinned(&me, "per_4", false).await.unwrap(), None);
+    assert_eq!(store.set_pinned(&me, "per_3", false).await.unwrap(), None);
+    assert!(store.set_pinned(&me, &extra, true).await.unwrap().is_some());
+    db.finish().await;
+}
+
+type Row3 = (String, String, String);
+
+/// A gotcha that names its command, file and error only in `evidence` still warns, recalls and
+/// shows on the file's topic.
+async fn evidence_only_gotcha(db: &TestDb, me: &str, project: &str, title: &str) -> String {
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": title,
+        "summary": "The latch script fails until the latch is opened by hand.",
+        "reason": "Seen twice while running the latch script locally",
+        "fields": {"symptom": "script exits 1", "cause": "latch closed", "fix": "open the latch first"},
+        "evidence": ["python3 violet_latch.py", "queue.py", "VioletLatchError: the violet latch is closed"]
+    }));
+    let work = WorkContext {
+        project_id: Some(project.to_owned()),
+        ..WorkContext::default()
+    };
+    db.store.save(me, input, &work).await.unwrap().id
+}
+
+#[tokio::test]
+async fn evidence_names_the_command_file_and_error_for_recall() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("evidence-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:evidence-recall", Some("Evidence recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    evidence_only_gotcha(&db, &me, &project, "Violet latch must be opened first").await;
+    let command = "python3 violet_latch.py";
+    let warning = store
+        .command_recall(&me, "warn", Some(&project), command, None)
+        .await
+        .unwrap();
+    assert!(
+        warning.contains("Violet latch must be opened first"),
+        "{warning}"
+    );
+    let failed = store
+        .command_recall(
+            &me,
+            "fail",
+            Some(&project),
+            command,
+            Some("starting\nVioletLatchError: the violet latch is closed"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        failed.contains("Violet latch must be opened first"),
+        "{failed}"
+    );
+    let context = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    let topic = store
+        .topic(&me, "queue.py", &context, Some("read"))
+        .await
+        .unwrap();
+    let shown = format!("{:?} {:?}", topic.notes, topic.card);
+    assert!(
+        shown.contains("Violet latch must be opened first"),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn evidence_entity_backfill_is_insert_only_idempotent_and_runs_once() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let pool = store.pool();
+    let me = db.person("backfill-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:evidence-backfill", Some("Evidence backfill"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    // Rows saved before 0.1.12: evidence present, evidence entities missing.
+    let mut ids = Vec::new();
+    for n in 0..5 {
+        let title = format!("Violet latch gotcha number {n}");
+        ids.push(evidence_only_gotcha(&db, &me, &project, &title).await);
+    }
+    let forgotten = ids.pop().unwrap();
+    sqlx::query("UPDATE memories SET status = 'forgotten' WHERE memory_id = $1")
+        .bind(&forgotten)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM entities WHERE kind IN ('file','command')")
+        .execute(pool)
+        .await
+        .unwrap();
+    let snapshot = async || -> (Vec<Row3>, Vec<Row3>) {
+        let memories =
+            sqlx::query_as("SELECT memory_id, title, status FROM memories ORDER BY memory_id")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let entities = sqlx::query_as(
+            "SELECT memory_id, kind, name FROM entities ORDER BY memory_id, kind, name",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        (memories, entities)
+    };
+    let (memories_before, entities_before) = snapshot().await;
+    assert!(
+        store
+            .command_recall(
+                &me,
+                "before",
+                Some(&project),
+                "python3 violet_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Batches of 2: the fifth call finds the cursor done and scans nothing.
+    let mut scanned = Vec::new();
+    loop {
+        let n = store.backfill_evidence_entities(2).await.unwrap();
+        scanned.push(n);
+        if n == 0 {
+            break;
+        }
+    }
+    assert_eq!(scanned, vec![2, 2, 0], "4 active rows with evidence");
+    let (memories_after, entities_after) = snapshot().await;
+    assert_eq!(
+        memories_after, memories_before,
+        "memory rows are never changed"
+    );
+    assert!(entities_before.iter().all(|e| entities_after.contains(e)));
+    for id in &ids {
+        for (kind, name) in [("command", "python3 violet_latch.py"), ("file", "queue.py")] {
+            assert!(
+                entities_after.contains(&(id.clone(), kind.to_owned(), name.to_owned())),
+                "{id} {kind}"
+            );
+        }
+    }
+    assert!(
+        !entities_after
+            .iter()
+            .any(|e| e.0 == forgotten && e.1 == "file")
+    );
+    let state: String = sqlx::query_scalar(
+        "SELECT value FROM server_state WHERE key = 'backfill_evidence_entities'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "done");
+    assert!(
+        !store
+            .command_recall(
+                &me,
+                "after",
+                Some(&project),
+                "python3 violet_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Recorded as done: a restart scans nothing; and a forced rerun inserts nothing new.
+    assert_eq!(store.backfill_evidence_entities(2).await.unwrap(), 0);
+    sqlx::query("UPDATE server_state SET value = '' WHERE key = 'backfill_evidence_entities'")
+        .execute(pool)
+        .await
+        .unwrap();
+    while store.backfill_evidence_entities(2).await.unwrap() > 0 {}
+    assert_eq!(snapshot().await, (memories_after, entities_after));
+}
+
+#[tokio::test]
+async fn a_python_traceback_recalls_the_gotcha_for_its_exception() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("traceback-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:traceback-recall", Some("Traceback recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": "Install the latch module first",
+        "summary": "ModuleNotFoundError: No module named 'violet_latch' until the venv is active.",
+        "reason": "The script imports a module that only the project venv provides",
+        "fields": {"symptom": "import fails", "cause": "venv not active", "fix": "source .venv/bin/activate"}
+    }));
+    let work = WorkContext {
+        project_id: Some(project.clone()),
+        commands: vec!["python3 app.py".into()],
+        ..WorkContext::default()
+    };
+    store.save(&me, input, &work).await.unwrap();
+    // The stderr a hook sends for `python3 app.py`, frames and caret line included.
+    let stderr = "Traceback (most recent call last):\n  File \"/w/app.py\", line 9, in <module>\n    main()\n  File \"/w/app.py\", line 5, in main\n    import violet_latch\n    ^^^^^^^^^^^^^^^^^^^\nModuleNotFoundError: No module named 'violet_latch'\n";
+    let recalled = store
+        .command_recall(&me, "py", Some(&project), "python3 app.py", Some(stderr))
+        .await
+        .unwrap();
+    assert!(
+        recalled.contains("Install the latch module first"),
+        "{recalled}"
+    );
+    assert!(recalled.contains("same error seen before"), "{recalled}");
+}
+
+#[tokio::test]
+async fn a_failed_command_recalls_a_gotcha_by_the_file_it_runs_and_the_error_line() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let me = db.person("file-recall-owner").await;
+    let (project, _) = store
+        .init_project(&me, "local:file-recall", Some("File recall"))
+        .await
+        .unwrap();
+    let project = project.project_id;
+    // The live 0.1.12 seed: the gotcha names the file and the error, never the command.
+    let input = save_input(serde_json::json!({
+        "kind": "gotcha", "scope": "project", "title": "Fail latch needs its pin set",
+        "summary": "RuntimeError: violet latch missing pin until VIOLET_PIN is exported.",
+        "reason": "The latch script reads the pin from the environment on start",
+        "fields": {"symptom": "script exits 1", "cause": "pin unset", "fix": "export VIOLET_PIN"},
+        "evidence": ["src/fail_latch.py"]
+    }));
+    let work = WorkContext {
+        project_id: Some(project.clone()),
+        ..WorkContext::default()
+    };
+    store.save(&me, input, &work).await.unwrap();
+    let traceback = "Traceback (most recent call last):\n  File \"src/fail_latch.py\", line 3, in <module>\n    raise RuntimeError(\"violet latch missing pin\")\nRuntimeError: violet latch missing pin\n";
+    let recall = async |session: &str, command: &str, failure: &str| {
+        store
+            .command_recall(&me, session, Some(&project), command, Some(failure))
+            .await
+            .unwrap()
+    };
+    for command in ["python3 src/fail_latch.py", "python3 ./src/fail_latch.py"] {
+        let recalled = recall(command, command, traceback).await;
+        assert!(
+            recalled.contains("Fail latch needs its pin set"),
+            "{command}: {recalled}"
+        );
+    }
+    let other_error =
+        "Traceback (most recent call last):\nKeyError: missing violet config section here\n";
+    assert!(
+        recall("other-error", "python3 src/fail_latch.py", other_error)
+            .await
+            .is_empty()
+    );
+    // Same error, but the command runs another file (and a basename alone is not the file).
+    for command in ["python3 src/other_latch.py", "python3 fail_latch.py"] {
+        assert!(
+            recall(command, command, traceback).await.is_empty(),
+            "{command}"
+        );
+    }
+    // A warning (no failure) still needs the exact command.
+    assert!(
+        store
+            .command_recall(
+                &me,
+                "warn",
+                Some(&project),
+                "python3 src/fail_latch.py",
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

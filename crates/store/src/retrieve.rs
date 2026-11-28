@@ -5,17 +5,22 @@ use crate::memory::{
 };
 use crate::skill::prompt_skill;
 use crate::usage::{
-    Lookup, SESSION_PUSH_LIMIT, SESSION_SHOWN, already_shown, finish_push, repeat_error, unmuted,
+    Lookup, SESSION_PUSH_LIMIT, SESSION_RECALL_BUDGET, already_shown, finish_push, repeat_error,
+    unmuted,
 };
+use crate::view::PinSummary;
 use crate::{Result, Store, StoreError};
 use cairn_core::capture::{ChatContext, WorkContext, redact_sensitive_content};
 use cairn_core::id::sha256_hex;
-use cairn_core::memory::{Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Status, TrustLevel};
+use cairn_core::memory::{
+    Fields, Kind, Memory, PROVEN_HELPFUL, PROVEN_SAVES, Scope, Status, TrustLevel,
+};
 use cairn_core::process::embed::validate_vector;
 use cairn_core::process::entities;
 use cairn_core::process::entities::module_of;
 use cairn_core::retrieve::brief::{
-    BriefBudget, SessionBrief, card_age, session_brief, topic_card, topic_notes,
+    BriefBudget, PERSONAL_PIN_QUOTA, PROJECT_PIN_QUOTA, SessionBrief, card_age, l0_pin_fit,
+    session_brief, topic_card, topic_notes,
 };
 use cairn_core::retrieve::command::{error_tail, first_error_line};
 use cairn_core::retrieve::filter::{Filter, matches};
@@ -99,6 +104,11 @@ pub struct Narrow {
     pub kind: Option<String>,
     prompt_session: Option<String>,
     chat: Option<ChatContext>,
+    recorded_from: Option<i64>,
+    recorded_to: Option<i64>,
+    branch: Option<String>,
+    version: Option<String>,
+    projects: Vec<String>,
 }
 
 impl Narrow {
@@ -108,6 +118,11 @@ impl Narrow {
         kind: None,
         prompt_session: None,
         chat: None,
+        recorded_from: None,
+        recorded_to: None,
+        branch: None,
+        version: None,
+        projects: Vec::new(),
     };
 
     /// ` AND ...` over `alias`, numbering its binds from `$first`; empty when nothing narrows.
@@ -138,12 +153,43 @@ impl Narrow {
         let mut next = first;
         let mut out = String::new();
         if self.scoped {
+            if self.projects.is_empty() {
+                out += &format!(
+                    " AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text)"
+                );
+                next += 1;
+            } else {
+                let extras = next + 1;
+                out += &format!(
+                    " AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text OR {alias}.project_id = ANY(${extras}))"
+                );
+                next += 2;
+            }
+        } else if !self.projects.is_empty() {
             out +=
-                &format!(" AND ({alias}.scope <> 'project' OR {alias}.project_id = ${next}::text)");
+                &format!(" AND ({alias}.scope <> 'project' OR {alias}.project_id = ANY(${next}))");
             next += 1;
         }
         if self.kind.is_some() {
             out += &format!(" AND {alias}.kind = ${next}::text");
+            next += 1;
+        }
+        if self.recorded_from.is_some() {
+            out += &format!(" AND EXTRACT(EPOCH FROM {alias}.created_at)::bigint >= ${next}");
+            next += 1;
+        }
+        if self.recorded_to.is_some() {
+            out += &format!(" AND EXTRACT(EPOCH FROM {alias}.created_at)::bigint <= ${next}");
+            next += 1;
+        }
+        if self.branch.is_some() {
+            out += &format!(" AND {alias}.repo_branch = ${next}");
+            next += 1;
+        }
+        if self.version.is_some() {
+            out += &format!(
+                " AND position(${next} in lower({alias}.title || ' ' || {alias}.summary || ' ' || {alias}.reason || ' ' || {alias}.fields::text)) > 0"
+            );
             next += 1;
         }
         out + &self.chat_sql(alias, next)
@@ -157,11 +203,30 @@ impl Narrow {
             q = q.bind(self.project.as_deref()).bind(session);
         } else if self.scoped {
             q = q.bind(self.project.as_deref());
+            if !self.projects.is_empty() {
+                q = q.bind(&self.projects);
+            }
+        } else if !self.projects.is_empty() {
+            q = q.bind(&self.projects);
         }
         if self.prompt_session.is_none()
             && let Some(kind) = &self.kind
         {
             q = q.bind(kind.as_str());
+        }
+        if self.prompt_session.is_none() {
+            if let Some(from) = self.recorded_from {
+                q = q.bind(from);
+            }
+            if let Some(to) = self.recorded_to {
+                q = q.bind(to);
+            }
+            if let Some(branch) = &self.branch {
+                q = q.bind(branch);
+            }
+            if let Some(version) = &self.version {
+                q = q.bind(version.to_lowercase());
+            }
         }
         if let Some(key) = chat_key(self.chat.as_ref()) {
             q = q.bind(key);
@@ -178,6 +243,11 @@ impl From<&Filter> for Narrow {
             kind: f.kind.map(|k| k.as_str().to_owned()),
             prompt_session: None,
             chat: f.context.as_ref().and_then(|work| work.chat.clone()),
+            recorded_from: f.recorded_from,
+            recorded_to: f.recorded_to,
+            branch: f.branch.clone(),
+            version: f.version.clone(),
+            projects: f.projects.clone(),
         }
     }
 }
@@ -186,6 +256,8 @@ impl From<&Filter> for Narrow {
 struct Pool {
     fused: Vec<(String, f32)>,
     entity_hits: HashSet<String>,
+    /// How many of the lexical, entity and semantic channels listed the id.
+    channels: HashMap<String, u8>,
     by_id: HashMap<String, Candidate>,
 }
 
@@ -250,6 +322,26 @@ impl Store {
         limit: i64,
         narrow: &Narrow,
     ) -> Result<Vec<(String, f32)>> {
+        self.lexical_candidates_in(person_id, projects, query, limit, narrow, false)
+            .await
+    }
+
+    /// `expand` adds identifier parts to the any-term leg only. Explicit search uses it.
+    /// Hooks do not: prompt recall stays on the original query.
+    async fn lexical_candidates_in(
+        &self,
+        person_id: &str,
+        projects: &[String],
+        query: &str,
+        limit: i64,
+        narrow: &Narrow,
+        expand: bool,
+    ) -> Result<Vec<(String, f32)>> {
+        let extra = if expand {
+            cairn_core::retrieve::query::lexical_extras(query)
+        } else {
+            String::new()
+        };
         scored(
             narrow
                 .bind(
@@ -257,7 +349,8 @@ impl Store {
                         .bind(person_id)
                         .bind(query)
                         .bind(projects)
-                        .bind(limit),
+                        .bind(limit)
+                        .bind(&extra),
                 )
                 .fetch_all(&self.pool)
                 .await?,
@@ -340,14 +433,20 @@ impl Store {
 // upgrade by ranking per rare lexeme if a corpus has >2,000 matches for its rarest term.
 pub fn lexical_sql(narrow: &Narrow) -> String {
     let scope = searchable("m", "$1", "$3");
-    let narrowed = narrow.sql("m", "$1", 5);
+    let narrowed = narrow.sql("m", "$1", 6);
     let all = search_matches("q.all_terms");
     let any = search_matches("q.any_term");
     format!(
         "WITH q AS (
            SELECT w AS all_terms,
-                  CASE WHEN strpos(w::text, '!') > 0 THEN w
-                       ELSE replace(w::text, ' & ', ' | ')::tsquery END AS any_term
+                  CASE WHEN $5::text = '' THEN
+                         CASE WHEN strpos(w::text, '!') > 0 THEN w
+                              ELSE replace(w::text, ' & ', ' | ')::tsquery END
+                       ELSE
+                         (CASE WHEN strpos(w::text, '!') > 0 THEN w
+                               ELSE replace(w::text, ' & ', ' | ')::tsquery END
+                          || websearch_to_tsquery('english', $5))
+                  END AS any_term
              FROM websearch_to_tsquery('english', $2) AS w),
          hit AS MATERIALIZED (
            (SELECT m.memory_id FROM memories m, q
@@ -444,9 +543,10 @@ impl Store {
         filter: &Filter,
     ) -> Result<Cards> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter, None)
+            .candidate_pool(person_id, query, vector, filter, None, true)
             .await?;
-        let mut hits = rank(&pool, filter, cairn_core::id::now_seconds());
+        let mut hits = rank(&pool, filter, cairn_core::id::now_seconds(), query);
+        hits = current_project_first(hits, filter);
         if filter.kind == Some(Kind::Handoff) {
             hits = one_handoff_per_checkout(hits);
         }
@@ -466,7 +566,7 @@ impl Store {
         filter: &Filter,
     ) -> Result<Vec<Trace>> {
         let pool = self
-            .candidate_pool(person_id, query, vector, filter, None)
+            .candidate_pool(person_id, query, vector, filter, None, true)
             .await?;
         Ok(pool
             .fused
@@ -494,6 +594,7 @@ impl Store {
         vector: Option<&[f32]>,
         filter: &Filter,
         prompt_session: Option<&str>,
+        expand_lexical: bool,
     ) -> Result<Pool> {
         if query.trim().is_empty() {
             return Err(crate::StoreError::Validation(
@@ -501,11 +602,23 @@ impl Store {
             ));
         }
         let projects = self.member_projects(person_id).await?;
+        for id in &filter.projects {
+            if !projects.iter().any(|have| have == id) {
+                return Err(StoreError::Forbidden(format!("not a member of {id}")));
+            }
+        }
         let per_channel = CANDIDATES_PER_CHANNEL as i64;
         let mut narrow = Narrow::from(filter);
         narrow.prompt_session = prompt_session.map(str::to_owned);
         let lexical = self
-            .lexical_candidates(person_id, &projects, query, per_channel, &narrow)
+            .lexical_candidates_in(
+                person_id,
+                &projects,
+                query,
+                per_channel,
+                &narrow,
+                expand_lexical,
+            )
             .await?;
         // Only names the query itself contains can pass the gate; the open files, symbols and
         // commands of the work context are one more ranked channel (closeness), never a pass.
@@ -535,6 +648,7 @@ impl Store {
             None => Vec::new(),
         };
         let entity_hits: HashSet<String> = entity.iter().map(|(id, _)| id.clone()).collect();
+        let channels = channel_bits([&lexical, &entity, &semantic]);
         let seeds = fuse(vec![
             lexical.clone(),
             entity.clone(),
@@ -563,6 +677,7 @@ impl Store {
         Ok(Pool {
             fused,
             entity_hits,
+            channels,
             by_id,
         })
     }
@@ -712,12 +827,13 @@ impl Store {
     }
 
     pub async fn push_budget_spent(&self, person_id: &str, session_id: &str) -> Result<bool> {
-        let shown: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM ({SESSION_SHOWN}) shown"))
-                .bind(person_id)
-                .bind(session_id)
-                .fetch_one(&self.pool)
-                .await?;
+        let shown: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM ({SESSION_RECALL_BUDGET}) shown"
+        ))
+        .bind(person_id)
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(shown >= SESSION_PUSH_LIMIT as i64)
     }
 
@@ -735,7 +851,7 @@ impl Store {
             ..Filter::default()
         };
         let pool = self
-            .candidate_pool(person_id, prompt, vector, &filter, Some(session_id))
+            .candidate_pool(person_id, prompt, vector, &filter, Some(session_id), false)
             .await?;
         let now = cairn_core::id::now_seconds();
         let mut ranked = Vec::new();
@@ -778,15 +894,16 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let session = Some(session_id);
         let shown = already_shown(&mut tx, person_id, session).await?;
-        let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
+        let remaining = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count);
         if remaining == 0 {
             return Ok((String::new(), true));
         }
-        let skill = if context.chat.is_none() && !shown.iter().any(|id| id.starts_with("skill_")) {
-            prompt_skill(&mut tx, prompt, PROMPT_RELEVANCE_MIN).await?
-        } else {
-            None
-        };
+        let skill =
+            if context.chat.is_none() && !shown.ids.iter().any(|id| id.starts_with("skill_")) {
+                prompt_skill(&mut tx, prompt, PROMPT_RELEVANCE_MIN).await?
+            } else {
+                None
+            };
         if skill.is_none() && ranked.is_empty() {
             return Ok((String::new(), false));
         }
@@ -864,6 +981,7 @@ impl Store {
     }
 
     /// The session brief reserves only the cards rendered in L0 and L1.
+    /// Brief cards count for deduplication and usage, not against `SESSION_PUSH_LIMIT`.
     pub async fn brief(
         &self,
         person_id: &str,
@@ -872,35 +990,20 @@ impl Store {
         budget: BriefBudget,
     ) -> Result<SessionBrief> {
         let mut tx = self.pool.begin().await?;
-        let mut shown = already_shown(&mut tx, person_id, session_id).await?;
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len());
-        if limit == 0 {
-            return Ok(SessionBrief::default());
-        }
+        let mut shown = already_shown(&mut tx, person_id, session_id).await?.ids;
 
         let visible = visible("m", "$1");
         let project = "(m.scope = 'project' AND m.project_id = $2 AND EXISTS (
             SELECT 1 FROM project_members pm WHERE pm.project_id = $2 AND pm.person_id = $1))";
         let personal = "(m.scope = 'personal' AND m.owner_id = $1)";
-        let pins = sqlx::query(&format!(
-            "{MEMORY_SELECT}
-              WHERE {visible} AND ({personal} OR {project})
-                AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
-                AND m.memory_id <> ALL($3){}
-              ORDER BY m.pinned_at, m.memory_id LIMIT $4",
-            chat_visibility("m", 5)
-        ))
-        .bind(person_id)
-        .bind(&context.project_id)
-        .bind(&shown)
-        .bind(limit as i64)
-        .bind(chat_key(context.chat.as_ref()))
-        .fetch_all(&mut *tx)
+        let pins = fetch_brief_pins(
+            &mut *tx,
+            person_id,
+            context.project_id.as_deref(),
+            &shown,
+            context.chat.as_ref(),
+        )
         .await?;
-        let pins = pins
-            .iter()
-            .map(memory_from_row)
-            .collect::<Result<Vec<_>>>()?;
         shown.extend(pins.iter().map(|pin| pin.id.clone()));
 
         let unmuted = unmuted("m", "$1");
@@ -935,20 +1038,19 @@ impl Store {
             "{MEMORY_SELECT}
               WHERE {visible} AND {PUSH_TRUST} AND {unmuted} AND m.pinned_at IS NULL AND m.memory_id <> ALL($4)
                 {} AND (m.memory_id = $5 OR (m.status = 'active' AND (
-                    ({personal} AND m.kind = 'preference')
+                    ({personal} AND m.kind IN ('preference','rule'))
                     OR ({project} AND m.kind IN ('rule','decision','gotcha')
                         AND (m.repo_branch IS NULL OR m.repo_branch = $3
                              OR coalesce(m.repo_branch = (SELECT default_branch FROM projects WHERE project_id = $2),
                                          m.repo_branch IN ('main','master')))))))
-              {} LIMIT $6",
-            chat_visibility("m", 7), essential_order()
+              {} LIMIT 32",
+            chat_visibility("m", 6), essential_order()
         ))
         .bind(person_id)
         .bind(&context.project_id)
         .bind(&context.branch)
         .bind(&shown)
         .bind(handoff)
-        .bind(limit as i64)
         .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
         .await?;
@@ -960,7 +1062,7 @@ impl Store {
             &pins,
             &essentials,
             cairn_core::id::now_seconds(),
-            limit,
+            usize::MAX,
             budget,
         );
         finish_push(
@@ -972,6 +1074,59 @@ impl Store {
         )
         .await?;
         Ok(brief)
+    }
+
+    /// Pin quota usage and how many active/stale pins currently fit in L0 for the console.
+    pub async fn pin_summary(
+        &self,
+        person_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<PinSummary> {
+        if let Some(pid) = project_id
+            && !self.is_member(person_id, pid).await?
+        {
+            return Err(StoreError::NotFound("project".into()));
+        }
+        let mut conn = self.pool.acquire().await?;
+        let pins = fetch_brief_pins(&mut *conn, person_id, project_id, &[], None).await?;
+        let fit = l0_pin_fit(&pins, cairn_core::id::now_seconds(), BriefBudget::Extended);
+        let personal_quota_used: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memories
+              WHERE pinned_at IS NOT NULL AND scope = 'personal' AND owner_id = $1",
+        )
+        .bind(person_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let project_quota_used = if let Some(pid) = project_id {
+            Some(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM memories
+                      WHERE pinned_at IS NOT NULL AND scope = 'project' AND project_id = $1",
+                )
+                .bind(pid)
+                .fetch_one(&mut *conn)
+                .await?,
+            )
+        } else {
+            None
+        };
+        let shown = fit.shown_ids.len();
+        let not_shown = fit.omitted_ids.len();
+        Ok(PinSummary {
+            personal_quota_used,
+            personal_quota_limit: PERSONAL_PIN_QUOTA,
+            project_quota_used,
+            project_quota_limit: PROJECT_PIN_QUOTA,
+            personal_shown: fit.personal_shown,
+            personal_total: fit.personal_total,
+            project_shown: fit.project_shown,
+            project_total: fit.project_total,
+            shown,
+            total: fit.personal_total + fit.project_total,
+            not_shown,
+            shown_ids: fit.shown_ids,
+            omitted_ids: fit.omitted_ids,
+        })
     }
 
     /// One exact command warning per session, or strict phrase recall on a failed command.
@@ -1027,7 +1182,7 @@ impl Store {
         if let Some(source) = &error_source {
             repeat_error(&mut tx, person_id, session_id, source).await?;
         }
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count).min(2);
         if limit == 0 {
             tx.commit().await?;
             return Ok(String::new());
@@ -1053,11 +1208,22 @@ impl Store {
         };
 
         let terms = "phraseto_tsquery('english', $7)";
-        let exact_command = "m.memory_id IN
-            (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)";
-        // Three adjacent lexemes keep generic failure lines out of automatic recall.
+        // A failure also reaches a memory about a file the command names (`python3 src/a.py`).
+        let candidates = if phrase.is_some() {
+            "m.memory_id IN (SELECT memory_id FROM entities
+                WHERE (kind = 'command' AND name = $3) OR (kind = 'file' AND name = ANY($8)))"
+        } else {
+            "m.memory_id IN
+            (SELECT memory_id FROM entities WHERE kind = 'command' AND name = $3)"
+        };
+        // Three adjacent lexemes keep generic failure lines out of automatic recall. Evidence is
+        // read only here, on the few rows the command or its files already matched.
         let error_match = phrase.map_or_else(String::new, |_| {
-            format!("AND numnode({terms}) >= 5 AND {}", search_matches(terms))
+            format!(
+                "AND numnode({terms}) >= 5 AND ({}
+                     OR to_tsvector('english', array_to_string(m.evidence, ' ')) @@ {terms})",
+                search_matches(terms)
+            )
         });
         let sql = format!(
             "SELECT m.memory_id, m.kind, m.title, m.summary, EXTRACT(EPOCH FROM m.created_at)::bigint
@@ -1065,7 +1231,7 @@ impl Store {
               WHERE {} AND m.status = 'active' AND {PUSH_TRUST} AND {unmuted}
                 AND (m.scope <> 'project' OR m.project_id = $2)
                 AND m.kind IN ('gotcha', 'procedure') AND m.memory_id <> ALL($4)
-                AND {exact_command} {} {error_match}
+                AND {candidates} {} {error_match}
               ORDER BY (m.kind = 'gotcha') DESC, coalesce(u.helpful, 0) DESC,
                        m.updated_at DESC, m.memory_id
               LIMIT $5",
@@ -1075,11 +1241,11 @@ impl Store {
             .bind(person_id)
             .bind(project_id)
             .bind(&command)
-            .bind(&shown)
+            .bind(&shown.ids)
             .bind(limit as i64)
             .bind(chat_key(chat));
         let query = if let Some(phrase) = phrase {
-            query.bind(phrase)
+            query.bind(phrase).bind(entities::command_files(&command))
         } else {
             query
         };
@@ -1129,7 +1295,7 @@ impl Store {
         let unmuted = unmuted("m", "$1");
         let mut tx = self.pool.begin().await?;
         let shown = already_shown(&mut tx, person_id, session_id).await?;
-        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.len()).min(2);
+        let limit = SESSION_PUSH_LIMIT.saturating_sub(shown.recall_count).min(2);
         if limit == 0 {
             tx.commit().await?;
             return Ok(Topic::default());
@@ -1172,7 +1338,7 @@ impl Store {
         .bind(&context.project_id)
         .bind(module_of(path))
         .bind(&symbols)
-        .bind(&shown)
+        .bind(&shown.ids)
         .bind(limit as i64)
         .bind(chat_key(context.chat.as_ref()))
         .fetch_all(&mut *tx)
@@ -1267,6 +1433,34 @@ impl Store {
     }
 }
 
+async fn fetch_brief_pins<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: &str,
+    project_id: Option<&str>,
+    shown: &[String],
+    chat: Option<&ChatContext>,
+) -> Result<Vec<Memory>> {
+    let visible = visible("m", "$1");
+    let project = "(m.scope = 'project' AND m.project_id = $2 AND EXISTS (
+        SELECT 1 FROM project_members pm WHERE pm.project_id = $2 AND pm.person_id = $1))";
+    let personal = "(m.scope = 'personal' AND m.owner_id = $1)";
+    let rows = sqlx::query(&format!(
+        "{MEMORY_SELECT}
+          WHERE {visible} AND ({personal} OR {project})
+            AND m.status IN ('active','stale') AND m.pinned_at IS NOT NULL
+            AND m.memory_id <> ALL($3){}
+          ORDER BY m.pin_position, m.memory_id",
+        chat_visibility("m", 4)
+    ))
+    .bind(person_id)
+    .bind(project_id)
+    .bind(shown)
+    .bind(chat_key(chat))
+    .fetch_all(db)
+    .await?;
+    rows.iter().map(memory_from_row).collect()
+}
+
 fn handoff_is_thin(memory: &Memory) -> bool {
     match &memory.fields {
         Fields::Handoff(handoff) => handoff.files.is_empty() && handoff.open_questions.is_empty(),
@@ -1340,23 +1534,134 @@ fn gate_input(pool: &Pool, id: &str, c: &Candidate) -> GateInput {
 /// then id. The score is the absolute relevance (`gate::relevance`) times `1 + adjust`, so it says
 /// how good the match is, not where it ranks among the others. The fused rank only chose which
 /// candidates are loaded.
-fn rank(pool: &Pool, filter: &Filter, now: i64) -> Vec<Hit> {
+/// Lexical, entity, then semantic. A bit is set when that channel listed the id.
+fn channel_bits(lists: [&Vec<(String, f32)>; 3]) -> HashMap<String, u8> {
+    let mut bits: HashMap<String, u8> = HashMap::new();
+    for (bit, list) in [1_u8, 2, 4].into_iter().zip(lists) {
+        let mut seen = HashSet::new();
+        for (id, score) in list {
+            if *score > 0.0 && seen.insert(id.clone()) {
+                *bits.entry(id.clone()).or_default() |= bit;
+            }
+        }
+    }
+    bits
+}
+
+/// When extra projects were requested, the checkout's memories stay ahead of the others.
+/// Score order is kept inside each group. The default search does not reorder.
+fn current_project_first(hits: Vec<Hit>, filter: &Filter) -> Vec<Hit> {
+    if filter.projects.is_empty() {
+        return hits;
+    }
+    let Some(current) = filter
+        .context
+        .as_ref()
+        .and_then(|c| c.project_id.as_deref())
+    else {
+        return hits;
+    };
+    let (mut here, mut there) = (Vec::new(), Vec::new());
+    for hit in hits {
+        if hit.memory.scope != Scope::Project || hit.memory.project_id.as_deref() == Some(current) {
+            here.push(hit);
+        } else {
+            there.push(hit);
+        }
+    }
+    here.append(&mut there);
+    here
+}
+
+fn rank(pool: &Pool, filter: &Filter, now: i64, query: &str) -> Vec<Hit> {
     let ctx = filter.context.clone().unwrap_or_default();
+    let anchors = cairn_core::retrieve::query::exact_anchors(query);
     let mut hits: Vec<Hit> = pool
         .fused
         .iter()
         .filter_map(|(id, _)| {
             let c = pool.by_id.get(id)?;
             let input = gate_input(pool, id, c);
-            let eligible = matches(&c.memory, filter) && gate::keep(&input);
-            eligible.then(|| Hit {
-                score: gate::relevance(&input) * (1.0 + adjust(&c.memory, &ctx, now)),
-                memory: c.memory.clone(),
+            let eligible = matches(&c.memory, filter)
+                && cairn_core::retrieve::filter::within_selectors(&c.memory, filter)
+                && gate::keep(&input);
+            eligible.then(|| {
+                let memory = c.memory.clone();
+                let why = cairn_core::retrieve::query::match_reason(
+                    pool.channels
+                        .get(&memory.id)
+                        .is_some_and(|bits| bits & 1 != 0),
+                    pool.entity_hits.contains(&memory.id),
+                    pool.channels
+                        .get(&memory.id)
+                        .is_some_and(|bits| bits & 4 != 0),
+                    anchor_label(&memory, &anchors).as_deref(),
+                );
+                Hit {
+                    score: gate::relevance(&input) * (1.0 + adjust(&memory, &ctx, now)),
+                    memory,
+                    why,
+                }
             })
         })
         .collect();
-    sort_best_first(&mut hits);
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| exact_hit(b, &anchors).cmp(&exact_hit(a, &anchors)))
+            .then_with(|| {
+                let bits = |id: &str| pool.channels.get(id).copied().unwrap_or(0).count_ones();
+                bits(&b.memory.id).cmp(&bits(&a.memory.id))
+            })
+            .then_with(|| b.memory.created_us.cmp(&a.memory.created_us))
+            .then_with(|| a.memory.id.cmp(&b.memory.id))
+    });
+    // One card per memory. Channels already fuse an id once; this keeps the best if they do not.
+    let mut seen = HashSet::new();
+    hits.retain(|hit| seen.insert(hit.memory.id.clone()));
     hits
+}
+
+fn anchor_label(memory: &cairn_core::memory::Memory, anchors: &[String]) -> Option<String> {
+    for entity in &memory.entities {
+        let kind = match entity.kind {
+            cairn_core::memory::EntityKind::File => "file",
+            cairn_core::memory::EntityKind::Symbol => "symbol",
+            cairn_core::memory::EntityKind::Command => "command",
+            _ => continue,
+        };
+        if anchors
+            .iter()
+            .any(|anchor| anchor.eq_ignore_ascii_case(&entity.name))
+        {
+            return Some(format!("{kind} {}", entity.name));
+        }
+    }
+    let text = format!("{} {} {}", memory.title, memory.summary, memory.reason);
+    anchors.iter().find_map(|anchor| {
+        let lower = anchor.to_ascii_lowercase();
+        (lower.contains("error:") || lower.contains("error["))
+            .then(|| text.contains(anchor))
+            .filter(|found| *found)
+            .map(|_| format!("error {anchor}"))
+    })
+}
+
+fn exact_hit(hit: &Hit, anchors: &[String]) -> bool {
+    if anchors.is_empty() {
+        return false;
+    }
+    let names: Vec<&str> = hit
+        .memory
+        .entities
+        .iter()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    let text = format!(
+        "{} {} {}",
+        hit.memory.title, hit.memory.summary, hit.memory.reason
+    );
+    cairn_core::retrieve::query::anchor_matches(anchors, &names, &text)
 }
 
 /// Entity names in `texts` (paths and code spans) and in the work context's files, symbols,

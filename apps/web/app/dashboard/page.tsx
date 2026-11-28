@@ -7,8 +7,8 @@ import { Dashboard } from "./_components/dashboard";
 
 export default function DashboardPage() {
   return (
-    <ConsoleShell crumbs={[{ label: "Dashboard" }]}>
-      <PageHeader title="Dashboard" description="Is Cairn working, and is it worth it?" />
+    <ConsoleShell crumbs={[{ label: "Overview" }]}>
+      <PageHeader title="Overview" actions={null} description="" />
       <Suspense fallback={<LoadingBlock label="Loading dashboard…" rows={5} />}>
         <Dashboard />
       </Suspense>
@@ -16,4 +16,4 @@ export default function DashboardPage() {
   );
 }
 
-export const metadata: Metadata = { title: "Dashboard" };
+export const metadata: Metadata = { title: "Overview" };

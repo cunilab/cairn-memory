@@ -30,9 +30,9 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 
 | Tool | REST endpoint | Arguments | Description |
 | --- | --- | --- | --- |
-| `memory_search` | `POST /search` | `query` (str), `kind` (str), `limit` (int 1–20, default 5) | Hybrid search across personal, project, and global memories |
-| `memory_get` | `POST /get` | `ids` (list 1–10), `detail` (bool, default false) | Retrieve full memory records, links, and detailed notes |
-| `memory_save` | `POST /remember` | `kind`, `title` (≤80B), `summary` (≤240B), `reason`, `detail` (≤8KB), `fields`, `evidence`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` | Save or update a memory record (validates quality) |
+| `memory_search` | `POST /search` | `query` (str), `kind` (str), `limit` (int 1–20, default 5), optional `recorded_from`, `recorded_to`, `branch`, `version`, `projects` (up to 5 ids) | Hybrid search. A card may include `why` and, for a project memory, `project`. Dates are explicit arguments, not guessed from the query. `projects` is refused when the caller is not a member. |
+| `memory_get` | `POST /get` | `ids` (list 1–10), `detail` (bool, default false), optional `field`, `timeline` (one id) | Retrieve records. `field` keeps one key. `timeline` is a short supersedes chain. |
+| `memory_save` | `POST /remember` | `kind`, `title` (80 characters suggested, 200 maximum), `summary` (240 suggested, 1,000 maximum), `reason`, `detail` (≤8,000 characters), `fields`, `evidence`, `supersedes`, `contradicts`, `scope`, `aliases`, `items` | Save or update a memory record (validates quality) |
 | `memory_feedback` | `POST /feedback` | `id` (str), `vote` (`helpful` \| `wrong`) | Vote on memory accuracy to adjust confidence rankings |
 | `memory_forget` | `POST /forget` | `id` (str) | Hide an owned memory from normal recall |
 | `skill_search` | `POST /skills/search` | `query` (str), `limit` (int 1–20), `offset` (int) | Search global shared skill library |
@@ -42,7 +42,9 @@ See the [glossary](../../glossary.md#mcp) for MCP, memory, and skill terminology
 
 ### Quality validation & defaults
 
-- **Reason requirement**: `reason` (≥ 20 chars) is mandatory for all kinds except `note`.
+- **Title and summary sizes**: a title up to 200 characters and a summary up to 1,000 are saved as sent; longer ones are refused. Past the suggested 80 and 240, the reply adds a size hint such as `summary is 264 characters; 240 suggested`, which does not change the memory's trust. Agent-facing cards (session brief, recall notes, `memory_search`) show at most 80 and 240 characters, cut with an ellipsis; `memory_get` and the web console show the full text. The same limits apply to web rewrites and imports.
+- **Reason requirement**: for every kind except `note`, an empty `reason` is rejected. A shorter reason is not refused: under 20 characters, or one that only repeats the title or summary, the memory is still saved, as a candidate (trust `new · awaiting confirmation`), and the reply carries a coaching hint. A reason of 20 or more characters gets no reason hint. A `note` may omit the reason. Imports (`POST /memories/import`, the console import) keep the strict check, which also refuses a reason under 10 characters.
+- **Other strict checks**: explicit agent saves also skip the strict check's other refusals: a summary that repeats the title, the per-kind field rules (a gotcha without `fields.fix`, a procedure with fewer than two steps), and the 8-character title and 20-character summary minimums. A summary that repeats the title or a gotcha with an empty symptom, cause or fix still gets a coaching hint and is saved as a candidate; a procedure with one step gets no hint. Imports refuse all of them.
 - **Corrections**: Save with `supersedes: "<old_id>"` to replace an owned or same-project memory.
 - **Default scope**: `preference` and `note` default to `personal`. Other kinds default to `project` if the caller belongs to the active project context, otherwise `personal`.
 
@@ -52,7 +54,7 @@ Tool output returns compact JSON directly in `content[0].text`:
 
 - **`memory_search`**:
   ```json
-  {"results":[{"id":"mem_123","kind":"decision","title":"Use Postgres SKIP LOCKED","summary":"Background jobs run...","score":1.0,"trust":"proven · 4 helpful · used 12×"}],"more":3}
+  {"results":[{"id":"mem_123","kind":"decision","title":"Use Postgres SKIP LOCKED","summary":"Background jobs run...","score":1.0,"why":"lexical+entity","project":"proj_123","trust":"proven · 4 helpful · used 12×"}],"more":3}
   ```
 - **`memory_get`**:
   ```json
@@ -62,7 +64,7 @@ Tool output returns compact JSON directly in `content[0].text`:
   ```json
   {"id":"mem_123","status":"saved","deduplicated":false}
   ```
-  *When coaching hints trigger on candidate saves, up to four `hints` and an `improve` prompt are included.*
+  *When coaching hints trigger on candidate saves, up to four `hints` and an `improve` prompt are included. Size hints are added to `hints` without an `improve` prompt.*
 - **`memory_feedback`**: Returns `{"id":"mem_123","status":"normal"}` (or `"stale"` if downvoted by owner or two users).
 - **`memory_forget`**: Returns `{"id":"mem_123","status":"forgotten"}`.
 - **Skill tools**: Return version cards with author, timestamp, vote totals, and markdown content.

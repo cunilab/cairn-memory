@@ -12,6 +12,7 @@ use cairn_core::memory::{
 use cairn_core::process::jobs::JobKind;
 use cairn_core::process::prepare::prepare_coached_save;
 use cairn_core::process::{NewMemory, Origin, prepare_save};
+use cairn_core::retrieve::brief::pin_limit;
 use cairn_core::retrieve::rank::status_after_votes;
 use sqlx::postgres::PgRow;
 use sqlx::{Executor, PgConnection, PgExecutor, Postgres, Row};
@@ -46,15 +47,7 @@ async fn resolve_chat_project<'e>(
     }
 }
 
-fn pin_limit(scope: Scope) -> Option<i64> {
-    match scope {
-        Scope::Personal => Some(5),
-        Scope::Project => Some(10),
-        Scope::Global => None,
-    }
-}
-
-fn owned(alias: &str, me: &str) -> String {
+pub(crate) fn owned(alias: &str, me: &str) -> String {
     format!(
         "({a}.owner_id = {me} OR {a}.scope = 'global'
           OR ({a}.scope = 'project' AND {a}.project_id IN
@@ -110,7 +103,7 @@ macro_rules! memory_columns {
     m.identity_hash, m.chat_id_hash, m.repo, m.repo_branch, m.repo_worktree, m.repo_commit, m.status, m.rank,
     m.proof_count, EXTRACT(EPOCH FROM m.faded_at)::bigint AS faded_at, (m.edited_by IS NOT NULL) AS edited_by,
     m.origin, m.stale_cause,
-    EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at,
+    EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at, m.pin_position,
     EXTRACT(EPOCH FROM m.expires_at)::bigint AS expires_at,
     EXTRACT(EPOCH FROM m.created_at)::bigint AS created_at,
     (EXTRACT(EPOCH FROM m.created_at) * 1000000)::bigint AS created_us,
@@ -203,6 +196,7 @@ pub(crate) fn memory_from_row(row: &PgRow) -> Result<Memory> {
         rank: parse(row, "rank")?,
         faded_at: row.try_get("faded_at")?,
         pinned_at: row.try_get("pinned_at")?,
+        pin_position: row.try_get("pin_position")?,
         edited_by: row.try_get("edited_by")?,
         proof_count: row.try_get::<i32, _>("proof_count")?.max(0) as u32,
         stale_cause: row.try_get("stale_cause")?,
@@ -268,6 +262,52 @@ pub struct Saved {
     pub hints: Vec<String>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PinSlot {
+    pub id: String,
+    pub position: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinOrder {
+    Applied(Vec<PinSlot>),
+    Stale(Vec<PinSlot>),
+}
+
+/// Personal pins are the owner's. Project pins are the memory owner (while a member), the project
+/// owner, or the server admin. Archived projects are read-only for everyone.
+pub(crate) fn may_edit_pin(
+    person_id: &str,
+    is_admin: bool,
+    scope: Scope,
+    owner_id: &str,
+    project_owner: Option<&str>,
+    archived: bool,
+    is_member: bool,
+) -> bool {
+    if archived {
+        return false;
+    }
+    match scope {
+        Scope::Personal => owner_id == person_id,
+        Scope::Project => {
+            is_admin || project_owner == Some(person_id) || (owner_id == person_id && is_member)
+        }
+        Scope::Global => false,
+    }
+}
+
+pub(crate) async fn account_is_admin<'e>(db: impl PgExecutor<'e>, person_id: &str) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT is_admin FROM accounts WHERE person_id = $1")
+            .bind(person_id)
+            .fetch_optional(db)
+            .await?
+            .unwrap_or(false),
+    )
+}
+
 #[derive(Clone)]
 pub(crate) enum SaveSource {
     Agent,
@@ -319,7 +359,7 @@ impl Store {
         input: SaveInput,
         work: &WorkContext,
     ) -> Result<Saved> {
-        self.save_as(person_id, input, work, SaveSource::StrictAgent, None)
+        self.save_as(person_id, input, work, SaveSource::StrictAgent, None, None)
             .await
     }
 
@@ -331,8 +371,29 @@ impl Store {
         work: &WorkContext,
         device_id: Option<&str>,
     ) -> Result<Saved> {
-        self.save_as(person_id, input, work, SaveSource::Agent, device_id)
+        self.save_as(person_id, input, work, SaveSource::Agent, device_id, None)
             .await
+    }
+
+    /// An agent save that records provenance when `session_id` is an existing session.
+    /// A missing session still saves the memory and stores no link.
+    pub async fn save_from_session(
+        &self,
+        person_id: &str,
+        input: SaveInput,
+        work: &WorkContext,
+        device_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Saved> {
+        self.save_as(
+            person_id,
+            input,
+            work,
+            SaveSource::Agent,
+            device_id,
+            session_id,
+        )
+        .await
     }
 
     pub(crate) async fn save_as(
@@ -342,6 +403,7 @@ impl Store {
         work: &WorkContext,
         source: SaveSource,
         device_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<Saved> {
         let mut project_id = if work.chat.is_none() {
             self.context_project(person_id, work, device_id).await?
@@ -363,6 +425,12 @@ impl Store {
             project_id.as_deref(),
         )
         .await?;
+        if !saved.deduplicated
+            && let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty())
+        {
+            crate::provenance::record_output(&mut tx, person_id, session_id, &saved.id, "saved")
+                .await?;
+        }
         tx.commit().await?;
         Ok(saved)
     }
@@ -750,7 +818,8 @@ impl Store {
     /// Owner only. The row stays as `forgotten` with its text, fields, embedding, entities and
     /// links kept, so saving the same thing again is a 409. Pending jobs are cancelled. A memory
     /// this one superseded comes back unless another non-forgotten memory also supersedes it.
-    /// Toggle the owner's pin. All writers in a quota bucket share a transaction lock.
+    /// Pin or unpin. Personal pins are owner-only. A project pin may be changed by the memory
+    /// owner, the project owner, or the server admin. The bucket advisory lock covers quota and order.
     pub async fn set_pinned(
         &self,
         person_id: &str,
@@ -759,20 +828,57 @@ impl Store {
     ) -> Result<Option<i64>> {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
-            "SELECT m.scope, m.project_id, m.status, EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at
-               FROM memories m WHERE m.memory_id = $1 AND m.owner_id = $2 AND m.status <> 'forgotten'
-                 AND (m.scope <> 'project' OR EXISTS (
-                     SELECT 1 FROM project_members pm
-                     WHERE pm.project_id = m.project_id AND pm.person_id = $2))
-               FOR UPDATE OF m",
+            "SELECT m.owner_id, m.scope, m.project_id, m.status,
+                    EXTRACT(EPOCH FROM m.pinned_at)::bigint AS pinned_at,
+                    p.owner_id AS project_owner, (p.archived_at IS NOT NULL) AS archived
+               FROM memories m
+               LEFT JOIN projects p ON p.project_id = m.project_id
+              WHERE m.memory_id = $1 AND m.status <> 'forgotten'
+              FOR UPDATE OF m",
         )
         .bind(memory_id)
-        .bind(person_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
+        let owner_id: String = row.try_get("owner_id")?;
         let project_id: Option<String> = row.try_get("project_id")?;
         let scope = parse(&row, "scope")?;
+        let project_owner: Option<String> = row.try_get("project_owner")?;
+        let archived: Option<bool> = row.try_get("archived")?;
+        let is_admin = account_is_admin(&mut *tx, person_id).await?;
+        let is_member = match project_id.as_deref() {
+            Some(project) if scope == Scope::Project => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND person_id = $2)",
+                )
+                .bind(project)
+                .bind(person_id)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+            _ => false,
+        };
+        if scope == Scope::Global && owner_id == person_id {
+            return Err(StoreError::Validation(
+                "only personal and project memories can be pinned".into(),
+            ));
+        }
+        if !may_edit_pin(
+            person_id,
+            is_admin,
+            scope,
+            &owner_id,
+            project_owner.as_deref(),
+            false,
+            is_member,
+        ) {
+            return Err(StoreError::NotFound("memory".into()));
+        }
+        if archived == Some(true) {
+            return Err(StoreError::Validation(
+                "archived project memories are read-only".into(),
+            ));
+        }
         let limit = pin_limit(scope).ok_or_else(|| {
             StoreError::Validation("only personal and project memories can be pinned".into())
         })?;
@@ -818,15 +924,159 @@ impl Store {
             }
         }
         let timestamp = sqlx::query_scalar(
-            "UPDATE memories SET pinned_at = CASE WHEN $2 THEN now() END
+            "UPDATE memories SET pinned_at = CASE WHEN $2 THEN now() END,
+                    pin_position = CASE WHEN $2 THEN (
+                        SELECT COALESCE(MAX(pin_position), 0) + 1 FROM memories
+                         WHERE pin_position IS NOT NULL AND scope = $3
+                           AND CASE WHEN $3 = 'project' THEN project_id = $4 ELSE owner_id = $4 END
+                    ) END
                WHERE memory_id = $1 RETURNING EXTRACT(EPOCH FROM pinned_at)::bigint",
         )
         .bind(memory_id)
         .bind(pinned)
+        .bind(scope.as_str())
+        .bind(bucket)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(timestamp)
+    }
+
+    /// Replace the bucket order. `order` is the full set the caller last saw, in the new sequence.
+    /// A mismatched set or position returns the current order and writes nothing.
+    pub async fn reorder_pins(
+        &self,
+        person_id: &str,
+        scope: Scope,
+        project_id: Option<&str>,
+        order: &[(String, i32)],
+    ) -> Result<PinOrder> {
+        if order.is_empty() || order.len() > 32 {
+            return Err(StoreError::Validation(
+                "pin order must list the bucket".into(),
+            ));
+        }
+        if order
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            != order.len()
+        {
+            return Err(StoreError::Validation("pin order repeats a memory".into()));
+        }
+        let bucket = match scope {
+            Scope::Personal => person_id.to_owned(),
+            Scope::Project => project_id
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| StoreError::Validation("project pin order needs a project".into()))?
+                .to_owned(),
+            Scope::Global => {
+                return Err(StoreError::Validation(
+                    "only personal and project memories can be pinned".into(),
+                ));
+            }
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtext(current_schema() || ':pins:' || $1), hashtext($2))",
+        )
+        .bind(scope.as_str())
+        .bind(&bucket)
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query(
+            "SELECT m.memory_id, m.owner_id, m.pin_position, p.owner_id AS project_owner,
+                    (p.archived_at IS NOT NULL) AS archived
+               FROM memories m
+               LEFT JOIN projects p ON p.project_id = m.project_id
+              WHERE m.pinned_at IS NOT NULL AND m.pin_position IS NOT NULL AND m.scope = $1
+                AND CASE WHEN $1 = 'project' THEN m.project_id = $2 ELSE m.owner_id = $2 END
+              ORDER BY m.pin_position, m.memory_id
+              FOR UPDATE OF m",
+        )
+        .bind(scope.as_str())
+        .bind(&bucket)
+        .fetch_all(&mut *tx)
+        .await?;
+        let current: Vec<PinSlot> = rows
+            .iter()
+            .map(|row| {
+                Ok(PinSlot {
+                    id: row.try_get("memory_id")?,
+                    position: row.try_get("pin_position")?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let is_admin = account_is_admin(&mut *tx, person_id).await?;
+        let is_member = scope != Scope::Project
+            || sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND person_id = $2)",
+            )
+            .bind(&bucket)
+            .bind(person_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let allowed = !rows.is_empty()
+            && rows.iter().all(|row| {
+                let owner: String = row.get("owner_id");
+                let project_owner: Option<String> = row.get("project_owner");
+                may_edit_pin(
+                    person_id,
+                    is_admin,
+                    scope,
+                    &owner,
+                    project_owner.as_deref(),
+                    false,
+                    is_member,
+                )
+            });
+        if !allowed {
+            return Err(StoreError::NotFound("pin order".into()));
+        }
+        if rows
+            .iter()
+            .any(|row| row.get::<Option<bool>, _>("archived") == Some(true))
+        {
+            return Err(StoreError::Validation(
+                "archived project memories are read-only".into(),
+            ));
+        }
+        let seen: HashSet<(&str, i32)> =
+            order.iter().map(|(id, pos)| (id.as_str(), *pos)).collect();
+        let have: HashSet<(&str, i32)> = current
+            .iter()
+            .map(|slot| (slot.id.as_str(), slot.position))
+            .collect();
+        if seen != have {
+            return Ok(PinOrder::Stale(current));
+        }
+        let ids: Vec<&str> = order.iter().map(|(id, _)| id.as_str()).collect();
+        let positions: Vec<i32> = (1..=ids.len() as i32).collect();
+        // Clear first so two rows can trade positions without tripping the unique index.
+        sqlx::query("UPDATE memories SET pin_position = NULL WHERE memory_id = ANY($1)")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE memories AS m SET pin_position = u.pos
+               FROM unnest($1::text[], $2::int[]) AS u(id, pos)
+              WHERE m.memory_id = u.id",
+        )
+        .bind(&ids)
+        .bind(&positions)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(PinOrder::Applied(
+            ids.into_iter()
+                .zip(positions)
+                .map(|(id, position)| PinSlot {
+                    id: id.to_owned(),
+                    position,
+                })
+                .collect(),
+        ))
     }
 
     /// True when this call forgot it, false when it already was forgotten.
@@ -851,7 +1101,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE memories SET status = 'forgotten', pinned_at = NULL, status_changed_at = now(), updated_at = now()
+            "UPDATE memories SET status = 'forgotten', pinned_at = NULL, pin_position = NULL, status_changed_at = now(), updated_at = now()
               WHERE memory_id = $1",
         )
         .bind(memory_id)
@@ -1223,34 +1473,75 @@ async fn save_links(
     Ok(())
 }
 
+/// Text submitted with an administrator rewrite.
+/// `detail: None` keeps the stored detail. An empty string clears it.
+pub struct RewriteText {
+    pub title: String,
+    pub summary: String,
+    pub reason: String,
+    pub fields: Option<serde_json::Value>,
+    pub detail: Option<String>,
+}
+
 impl Store {
     /// Admin edit retains the owner and provenance, and atomically audits the successor.
+    /// A detail-only edit still supersedes: the previous row keeps its detail.
+    /// A rewrite of a superseded version lands on top of the current one, so a concurrent
+    /// rewrite keeps both texts. Returns the new id and the current version it replaced.
     pub async fn rewrite_memory(
         &self,
         admin: &str,
-        id: &str,
-        title: String,
-        summary: String,
-        reason: String,
-        fields: Option<serde_json::Value>,
-    ) -> Result<String> {
+        requested: &str,
+        text: RewriteText,
+    ) -> Result<(String, String)> {
+        let RewriteText {
+            title,
+            summary,
+            reason,
+            fields,
+            detail,
+        } = text;
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(&format!(
             "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
         ))
-        .bind(id)
+        .bind(requested)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| StoreError::NotFound("memory".into()))?;
-        let old = memory_from_row(&row)?;
+        let mut old = memory_from_row(&row)?;
         if old.status == Status::Forgotten {
             return Err(StoreError::Conflict(
                 "forgotten memories cannot be rewritten".into(),
             ));
         }
         if old.status == Status::Superseded {
-            return Err(StoreError::Conflict("rewrite the current version".into()));
+            let head: String = sqlx::query_scalar(
+                "WITH RECURSIVE chain(id) AS (
+                     SELECT $1::text
+                     UNION SELECT l.source_id FROM links l JOIN chain c ON l.target_id = c.id
+                       JOIN memories s ON s.memory_id = l.source_id
+                      WHERE l.relation = 'supersedes' AND s.status <> 'forgotten')
+                 SELECT m.memory_id FROM chain JOIN memories m ON m.memory_id = chain.id
+                  WHERE m.status IN ('active','stale') ORDER BY m.created_at DESC LIMIT 1",
+            )
+            .bind(requested)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::Conflict("rewrite the current version".into()))?;
+            let row = sqlx::query(&format!(
+                "{MEMORY_SELECT_WITH_DETAIL} WHERE m.memory_id=$1 FOR UPDATE OF m"
+            ))
+            .bind(&head)
+            .fetch_one(&mut *tx)
+            .await?;
+            old = memory_from_row(&row)?;
+            if !matches!(old.status, Status::Active | Status::Stale) {
+                return Err(StoreError::Conflict("rewrite the current version".into()));
+            }
         }
+        let id = old.id.clone();
+        let id = id.as_str();
         let context = WorkContext {
             project_id: old.project_id.clone(),
             repository: old.context.repo.clone(),
@@ -1264,7 +1555,7 @@ impl Store {
             title,
             summary,
             reason,
-            detail: Some(old.detail),
+            detail: Some(detail.unwrap_or_else(|| old.detail.clone())),
             fields: Some(fields.unwrap_or_else(|| old.fields.to_json())),
             evidence: old.evidence.clone(),
             supersedes: Some(id.to_owned()),
@@ -1282,10 +1573,36 @@ impl Store {
         if let Some(hash) = old.chat_id_hash {
             prepared.tag_chat(hash, old.rank == Rank::Candidate);
         }
-        if prepared.identity_hash == old.identity_hash {
+        if prepared.identity_hash == old.identity_hash
+            && prepared.detail.as_deref().unwrap_or_default() == old.detail
+        {
             return Err(StoreError::Conflict(
                 "nothing to rewrite: title, summary and fields are unchanged".into(),
             ));
+        }
+        // Detail is not part of identity, and a rewrite may return to an older version's text.
+        // Free the slot held by this version or a superseded one so the successor can take it.
+        let holder: Option<(String, String)> = sqlx::query_as(
+            "SELECT memory_id, status FROM memories
+              WHERE owner_id = $1 AND scope = $2 AND coalesce(project_id, '') = coalesce($3, '')
+                AND identity_hash = $4 FOR UPDATE",
+        )
+        .bind(&old.owner)
+        .bind(old.scope.as_str())
+        .bind(old.project_id.as_deref())
+        .bind(&prepared.identity_hash)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((holder, status)) = holder
+            && (holder == id || status == Status::Superseded.as_str())
+        {
+            let retired =
+                cairn_core::id::sha256_hex(&["superseded", &holder, &prepared.identity_hash]);
+            sqlx::query("UPDATE memories SET identity_hash=$2 WHERE memory_id=$1")
+                .bind(&holder)
+                .bind(retired)
+                .execute(&mut *tx)
+                .await?;
         }
         let saved = insert_memory(
             &mut tx,
@@ -1313,11 +1630,15 @@ impl Store {
             None,
             "memory_rewritten_by_admin",
             Some(id),
-            serde_json::json!({"old_id":id,"new_id":saved.id}),
+            if id == requested {
+                serde_json::json!({"old_id":id,"new_id":saved.id})
+            } else {
+                serde_json::json!({"old_id":id,"new_id":saved.id,"requested_id":requested})
+            },
         )
         .await?;
         tx.commit().await?;
-        Ok(saved.id)
+        Ok((saved.id, id.to_owned()))
     }
 }
 

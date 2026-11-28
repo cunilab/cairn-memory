@@ -11,14 +11,15 @@ A [gateway](../../glossary.md#gateway) gives Hermes a dedicated messaging profil
 
 ## Hermes gateway
 
-Prerequisites: Dedicated Hermes profile with `plugins.isolation: in_process`, Hermes v2026.4.23+, Cairn CLI 0.1.11+, and Cairn server 0.1.10+.
+Prerequisites: Dedicated Hermes profile with `plugins.isolation: in_process`, Hermes v2026.4.23+, Cairn CLI 0.1.11+, and a Cairn server no older than the CLI ([upgrade together](../upgrade.md)).
 
 ```sh
 HERMES_HOME=/path/to/gateway/profile cairn setup hermes --gateway
 ```
 
 - **Tools exposed**: Exposes native `memory_search`, `memory_save`, and the four [global skill tools](../reference/mcp.md#tools) (excluding terminal/code-editing tools).
-- **Restart**: Restart the gateway and execute `/new` to reload schemas.
+- **Restart**: Start the gateway process again after setup, then send `/new`. A gateway that was running during setup shows no Cairn tools until it starts again; a tool call it still makes returns an error saying so.
+- **Status checks**: `cairn doctor` and `hermes memory status` read the profile's files only. They cannot tell whether the running gateway process has loaded Cairn.
 - **Chat salt**: Preserves the profile's chat salt to retain access to existing chat memories.
 - **Removal**: Run `HERMES_HOME=/path/to/gateway/profile cairn setup hermes --remove`.
 

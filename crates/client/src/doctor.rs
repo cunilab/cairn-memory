@@ -213,7 +213,20 @@ fn agent_checks(home: &Path) -> Vec<Check> {
         let managed_hook = hook_text
             .as_ref()
             .is_ok_and(|text| text.contains(setup::MANAGED_FLAG));
-        checks.push(if managed_mcp {
+        checks.push(if managed_mcp && *agent == "hermes" && setup::hermes::gateway_profile(&mcp[0]) {
+            // Doctor reads files: a gateway process that was running during setup still lacks the chat hook.
+            check(
+                "ok",
+                "agents",
+                "hermes gateway files present; a gateway process loads them only when it starts",
+            )
+        } else if managed_mcp && *agent == "hermes" {
+            check(
+                "ok",
+                "agents",
+                "hermes memory provider present; a running Hermes or Hermes gateway process loads it only when it starts",
+            )
+        } else if managed_mcp {
             check("ok", "agents", format!("{agent} {tools} present"))
         } else {
             check(

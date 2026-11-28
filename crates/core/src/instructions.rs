@@ -12,7 +12,7 @@ pub const DEFAULT_SESSION_INSTRUCTION: &str = "Cairn is the only memory. Do not 
 pub const DEFAULT_CHAT_INSTRUCTION: &str = "Cairn memory here covers only this conversation. In groups, never reveal private information. If unsure which project applies or whether to share something outside this chat, don't guess or act. Say you need your owner's confirmation without private details. Wait for your owner to confirm in this conversation. Save lasting preferences, decisions and corrections right away. Skip chit-chat. Use only memories directly useful here. Never save message, chat or sender IDs in memory text. Pass a project ID or exact name only for project knowledge. Omit the project for preferences.";
 
 /// The Stop reminder; `{files}` becomes the number of files the session edited.
-pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints.";
+pub const DEFAULT_STOP_NUDGE: &str = "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints. If unfinished, end with a Next: line.";
 
 /// Appended to the Stop reminder, or sent alone, when the user corrected the agent.
 /// `{correction}` is the quoted line. The text around that quote is at most 90 bytes.
@@ -81,16 +81,16 @@ mod tests {
     fn stop_text_fits_budget() {
         assert_eq!(
             DEFAULT_STOP_NUDGE,
-            "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints."
+            "You changed {files} file(s). If you learned something reusable, call memory_save once with items: 0-3 decision/gotcha/rule/fact notes with reasons. Act on save hints. If unfinished, end with a Next: line."
         );
         assert!(
-            DEFAULT_STOP_NUDGE.len() <= 170,
+            DEFAULT_STOP_NUDGE.len() <= 204,
             "{}",
             DEFAULT_STOP_NUDGE.len()
         );
         let wrapped =
             serde_json::json!({"decision": "block", "reason": DEFAULT_STOP_NUDGE}).to_string();
-        assert!(wrapped.len() <= 230, "{}", wrapped.len());
+        assert!(wrapped.len() <= 236, "{}", wrapped.len());
         assert_eq!(
             validate_instruction("stop_nudge", "off"),
             Ok("off".to_owned())

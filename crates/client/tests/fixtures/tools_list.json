@@ -1,7 +1,7 @@
 {
  "tools": [
   {
-   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory; label says why (replaced by, voted wrong, file deleted). kind=handoff returns the last session handoff. Fetch full records with memory_get.",
+   "description": "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}.",
    "inputSchema": {
     "properties": {
      "kind": {
@@ -25,6 +25,25 @@
      },
      "query": {
       "type": "string"
+     },
+     "recorded_from": {
+      "type": "string"
+     },
+     "recorded_to": {
+      "type": "string"
+     },
+     "branch": {
+      "type": "string"
+     },
+     "version": {
+      "type": "string"
+     },
+     "projects": {
+      "items": {
+       "type": "string"
+      },
+      "maxItems": 5,
+      "type": "array"
      }
     },
     "required": [
@@ -35,12 +54,16 @@
    "name": "memory_search"
   },
   {
-   "description": "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
+   "description": "Fetch records by id. Detail is off by default.",
    "inputSchema": {
     "properties": {
      "detail": {
       "default": false,
       "type": "boolean"
+     },
+     "field": {
+      "maxLength": 40,
+      "type": "string"
      },
      "ids": {
       "items": {
@@ -49,6 +72,10 @@
       "maxItems": 10,
       "minItems": 1,
       "type": "array"
+     },
+     "timeline": {
+      "default": false,
+      "type": "boolean"
      }
     },
     "required": [
@@ -59,7 +86,7 @@
    "name": "memory_get"
   },
   {
-   "description": "Save verified, reusable knowledge. Per note: title <=10 words (80 chars max); summary one sentence, <=30 words (240 chars max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. Put longer background in detail. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
+   "description": "Save verified, reusable knowledge. Per note: title <=10 words, about 80 chars (200 max); summary one sentence, <=30 words, about 240 chars (1000 max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
    "inputSchema": {
     "properties": {
      "aliases": {
@@ -124,14 +151,14 @@
          "type": "string"
         },
         "summary": {
-         "maxLength": 240,
+         "maxLength": 1000,
          "type": "string"
         },
         "supersedes": {
          "type": "string"
         },
         "title": {
-         "maxLength": 80,
+         "maxLength": 200,
          "type": "string"
         }
        },
@@ -169,14 +196,14 @@
       "type": "string"
      },
      "summary": {
-      "maxLength": 240,
+      "maxLength": 1000,
       "type": "string"
      },
      "supersedes": {
       "type": "string"
      },
      "title": {
-      "maxLength": 80,
+      "maxLength": 200,
       "type": "string"
      }
     },

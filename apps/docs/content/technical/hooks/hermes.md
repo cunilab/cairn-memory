@@ -15,18 +15,18 @@ In Hermes Agent, Cairn operates both as the external memory provider and as a st
 
 | Provider callback | Cairn implementation |
 | --- | --- |
-| `initialize` | Registers working directory and agent context. Bypasses subagent, cron, and flush agents. |
-| `on_turn_start` | Evaluates `SessionStart` (once per session) and `UserPromptSubmit`. |
+| `initialize` | Registers working directory and agent context. The working directory is the `cwd` Hermes passes, else the session's directory that Hermes binds for the turn (a gateway process runs CLI turns from its own install folder), else the process's. Bypasses subagent, cron, and flush agents. |
+| `on_turn_start` | Reads the turn's session directory again, then evaluates `SessionStart` (once per session) and `UserPromptSubmit`. |
 | `prefetch` | Injects session brief and prompt recall cards into user message context. |
-| `sync_turn` | Executes `Stop` checkpoint after completed turns. |
+| `sync_turn` | Executes `Stop` checkpoint after completed turns. Hermes cannot continue a finished turn, so a coding session's Stop reminder is held and delivered once, phrased as "Last turn you changed N file(s)...", with the next prompt's recall, also after `hermes chat --resume` of the same session; gateway chats get none. |
 | `on_pre_compress` | Runs `PreCompact` checkpoint before context compression. |
 | `on_session_end` | Finalizes session and queues distillation at session boundaries. |
 | `on_session_switch` | Tracks session switches (`/new`, `/reset`, `/resume`, `/branch`, and compression). |
 | `get_tool_schemas`, `handle_tool_call` | Provides native memory and skill tools (`memory_search`, `memory_save`, etc.). |
 
 Plugin hooks manage tool capture:
-- `post_tool_call` captures file edits and terminal commands.
-- `transform_tool_result` attaches command gotchas and error recall directly to terminal outputs.
+- `post_tool_call` captures file edits and Cairn tool calls.
+- `transform_tool_result` captures terminal commands and attaches command gotchas and error recall to the result the model sees. Hermes fires it before `post_tool_call` for a single tool call and after it for a parallel batch, so the terminal capture lives in this one hook. A host without it captures terminal commands in `post_tool_call`, with no recall.
 
 See [Native tool schemas](../../users/reference/mcp.md#hermes-provider-tools).
 

@@ -91,11 +91,15 @@ class Hermes(unittest.TestCase):
         delegation.is_delegated_child_process_context = lambda: self.delegated
         provider = types.ModuleType("agent.memory_provider")
         provider.MemoryProvider = MemoryProvider
+        self.turn_cwd = ""
+        runtime_cwd = types.ModuleType("agent.runtime_cwd")
+        runtime_cwd.scoped_session_cwd = lambda: self.turn_cwd
         constants = types.ModuleType("hermes_constants")
         constants.hermes_home_key = lambda path=None: str(Path(path or self.home).resolve())
         modules = patch.dict(sys.modules, {
             "gateway.session_context": gateway, "agent.delegation_context": delegation,
             "agent.memory_provider": provider, "hermes_constants": constants,
+            "agent.runtime_cwd": runtime_cwd,
         })
         modules.start()
         self.addCleanup(modules.stop)
@@ -159,6 +163,32 @@ class CommandLine(Hermes):
     def test_plugin_load_registers_provider_and_tool_hooks_only(self):
         self.assertEqual(set(self.ctx.hooks), {"post_tool_call", "transform_tool_result", "on_session_end"})
 
+
+    def test_a_gateway_turn_uses_the_session_cwd_not_the_process_cwd(self):
+        # Hermes v0.23.5 runs CLI turns in the gateway process (cwd: the Hermes install), builds the
+        # agent without a cwd and binds the session's cwd for each turn (gateway/session_policy.py).
+        self.turn_cwd = "/checkout"
+        provider = self.provider(cwd=None)
+        self.turn_cwd = ""  # initialize may run outside the turn
+        provider = self.provider(cwd=None)
+        self.assertNotEqual(provider.cwd, "/checkout")
+        self.turn_cwd = "/checkout"
+        provider.on_turn_start(1, "first prompt")
+        self.turn_cwd = ""  # sync_turn may run after the turn's scope ended
+        provider.sync_turn("first prompt", "answer", session_id="host-session")
+        provider.handle_tool_call("memory_search", {"query": "latch"})
+        self.assertEqual(self.events(), ["SessionStart", "UserPromptSubmit", "Stop", "Tool"])
+        self.assertTrue(all(body["cwd"] == "/checkout" for _, body in self.requests), self.requests)
+        # The cwd Hermes passes wins; without a bound turn cwd the process cwd stays (older Hermes).
+        self.turn_cwd = "/checkout"
+        provider = self.provider()
+        provider.on_turn_start(1, "prompt")
+        self.assertEqual(self.requests[-1][1]["cwd"], "/repo")
+        self.turn_cwd = ""
+        with patch.object(self.provider_module["os"], "getcwd", lambda: "/launch"):
+            provider = self.provider(cwd=None)
+            provider.on_turn_start(1, "prompt")
+        self.assertEqual(self.requests[-1][1]["cwd"], "/launch")
 
     def test_provider_lifecycle_maps_to_cairn_events(self):
         provider = self.provider()
@@ -234,11 +264,22 @@ class CommandLine(Hermes):
         self.assertEqual(self.requests[-1][1]["cwd"], "/stubbed-cwd")
         hooks["post_tool_call"](tool_name="web_search", args={}, result="{}", session_id="host-session")
         self.assertEqual(self.requests[-1][1]["tool_name"], "mcp_cairn_memory_save")
-        hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
-                                session_id="host-session", tool_call_id="call-2", status="error")
-        attached = hooks["transform_tool_result"](tool_name="terminal", result='{"exit_code":2}',
-                                                  session_id="host-session", tool_call_id="call-2")
+        # Hermes's sequential path (one tool call) fires transform_tool_result inside
+        # handle_function_call (model_tools.py:1014-1015) and post_tool_call only after it
+        # (agent/tool_executor.py:1857-1859); the concurrent path fires them the other way round.
+        terminal = dict(tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                        session_id="host-session", tool_call_id="call-2", status="error",
+                        error_type="tool_error", error_message="exit 2", duration_ms=5)
+        before = len(self.requests)
+        attached = hooks["transform_tool_result"](**terminal)
         self.assertEqual(json.loads(attached), {"exit_code": 2, "cairn_recall": "command note"})
+        self.assertEqual(self.requests[-1][1]["error_message"], "exit 2")
+        hooks["post_tool_call"](**terminal)
+        self.assertEqual(self.events()[before:], ["PostToolUse"], "one Cairn call per tool call")
+        hooks["post_tool_call"](**{**terminal, "tool_call_id": "call-3"})
+        self.assertEqual(hooks["transform_tool_result"](**{**terminal, "tool_call_id": "call-3"}), json.dumps(
+            {"exit_code": 2, "cairn_recall": "command note"}))
+        self.assertEqual(self.events()[before:], ["PostToolUse"] * 2)
 
         before = len(self.requests)
         hooks["on_session_end"](session_id="host-session", failed=False, interrupted=False)
@@ -246,6 +287,20 @@ class CommandLine(Hermes):
         for flag in ["failed", "interrupted"]:
             hooks["on_session_end"](session_id="host-session", **{flag: True})
             self.assertEqual(self.requests[-1], ("Stop", {"session_id": "host-session", "cwd": "/stubbed-cwd"}))
+
+    def test_a_host_without_result_transform_still_captures_terminal(self):
+        class Older(Context):
+            def register_hook(self, name, callback):
+                if name == "transform_tool_result":
+                    raise ValueError(name)
+                super().register_hook(name, callback)
+
+        older = Older({})
+        self.plugin["register"](older)
+        older.hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                                      session_id="host-session", tool_call_id="call-1", status="error")
+        self.assertEqual(self.requests[-1][0], "PostToolUse")
+        self.assertEqual(self.requests[-1][1]["tool_name"], "terminal")
 
     def test_background_agents_neither_write_nor_get_tools(self):
         cases = [{"agent_context": "subagent"}, {"agent_context": "cron"}, {"agent_context": "flush"},
@@ -482,12 +537,14 @@ class Gateway(Hermes):
         hooks = self.ctx.hooks
         hooks["post_tool_call"](tool_name="read_file", args={}, result="{}", session_id="host-session")
         self.assertNotEqual(self.events()[-1], "PostToolUse")
-        hooks["post_tool_call"](tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
-                                session_id="host-session", tool_call_id="call-1", status="error")
+        terminal = dict(tool_name="terminal", args={"command": "make"}, result='{"exit_code":2}',
+                        session_id="host-session", tool_call_id="call-1", status="error")
+        before = len(self.requests)
+        attached = hooks["transform_tool_result"](**terminal)
         self.assertIn("chat_context", self.requests[-1][1])
-        attached = hooks["transform_tool_result"](tool_name="terminal", result='{"exit_code":2}',
-                                                  session_id="host-session", tool_call_id="call-1")
         self.assertEqual(json.loads(attached)["cairn_recall"], "command note")
+        hooks["post_tool_call"](**terminal)
+        self.assertEqual(self.events()[before:], ["PostToolUse"], "one Cairn call per tool call")
 
         before = len(self.requests)
         for details in [{"agent_context": "subagent"}, {"platform": "cron"}, {"agent_context": "flush"}]:
@@ -507,8 +564,11 @@ class Gateway(Hermes):
         sys.modules.pop("_cairn_memory_hermes", None)
         self.route()
         provider = self.provider()
+        # A gateway process that started before setup: no tools, and a stale schema gets the restart hint.
+        self.assertEqual(provider.get_tool_schemas(), [])
         self.assertEqual(self.turn(provider), "")
-        self.assertIn("error", json.loads(provider.handle_tool_call("memory_search", {"query": "x"})))
+        error = json.loads(provider.handle_tool_call("memory_search", {"query": "x"}))["error"]
+        self.assertIn("Start the Hermes gateway process again", error)
         self.assertEqual(self.requests, [])
 
 

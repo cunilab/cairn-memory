@@ -21,39 +21,46 @@ pub struct Tool {
 pub const TOOLS: [Tool; 5] = [
     Tool {
         name: "memory_search",
-        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score}; more:n counts cut results; status:stale marks a doubted memory; label says why (replaced by, voted wrong, file deleted). kind=handoff returns the last session handoff. Fetch full records with memory_get.",
+        description: "Search Cairn memory for past decisions, rules, gotchas and procedures. Returns cards {id,kind,title,summary,score,why}.",
         cli: "search",
         route: "/search",
         schema: || {
             json!({"type":"object","properties":{
                 "query":{"type":"string"},
                 "kind":{"type":"string","enum":["decision","rule","gotcha","procedure","fact","preference","note","handoff"]},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"description":"default 5"}},
+                "limit":{"type":"integer","minimum":1,"maximum":20,"description":"default 5"},
+                "recorded_from":{"type":"string"},
+                "recorded_to":{"type":"string"},
+                "branch":{"type":"string"},
+                "version":{"type":"string"},
+                "projects":{"type":"array","maxItems":5,"items":{"type":"string"}}},
               "required":["query"]})
         },
     },
     Tool {
         name: "memory_get",
-        description: "Fetch records by id. Detail is off by default. Set detail=true for one id only if the summary and reason are insufficient.",
+        description: "Fetch records by id. Detail is off by default.",
         cli: "get",
         route: "/get",
         schema: || {
             json!({"type":"object","properties":{
                 "ids":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":10},
-                "detail":{"type":"boolean","default":false}},
+                "detail":{"type":"boolean","default":false},
+                "field":{"type":"string","maxLength":40},
+                "timeline":{"type":"boolean","default":false}},
               "required":["ids"]})
         },
     },
     Tool {
         name: "memory_save",
-        description: "Save verified, reusable knowledge. Per note: title <=10 words (80 chars max); summary one sentence, <=30 words (240 chars max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. Put longer background in detail. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
+        description: "Save verified, reusable knowledge. Per note: title <=10 words, about 80 chars (200 max); summary one sentence, <=30 words, about 240 chars (1000 max). Move extra context to reason or detail. reason: why true or chosen (required except note), <=1,000 chars. fields by kind: decision {context, alternatives[], consequences}; rule {exceptions}; gotcha {symptom, cause, fix}; procedure {steps[], when}; fact {source}; preference {example}. supersedes=<id> replaces your memory or a memory scoped to the same project. contradicts=<id> for a conflict you cannot replace. Default scope: project in initialized repos, personal otherwise or for preference/note. No secrets, logs or guesses. items: up to 3 notes in one call. aliases: up to 5 short questions this answers.",
         cli: "save",
         route: "/remember",
         schema: || {
             json!({"type":"object","properties":{
                 "kind":{"type":"string","enum":["decision","rule","gotcha","procedure","fact","preference","note"]},
-                "title":{"type":"string","maxLength":80},
-                "summary":{"type":"string","maxLength":240},
+                "title":{"type":"string","maxLength":200},
+                "summary":{"type":"string","maxLength":1000},
                 "reason":{"type":"string"},
                 "detail":{"type":"string","maxLength":8000},
                 "fields":{"type":"object"},
@@ -64,8 +71,8 @@ pub const TOOLS: [Tool; 5] = [
                 "aliases":{"type":"array","maxItems":5,"items":{"type":"string","maxLength":120}},
                 "items":{"type":"array","maxItems":3,"items":{"type":"object","properties":{
                     "kind":{"type":"string"},
-                    "title":{"type":"string","maxLength":80},
-                    "summary":{"type":"string","maxLength":240},
+                    "title":{"type":"string","maxLength":200},
+                    "summary":{"type":"string","maxLength":1000},
                     "reason":{"type":"string"},
                     "detail":{"type":"string","maxLength":8000},
                     "fields":{"type":"object"},
